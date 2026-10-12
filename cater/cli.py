@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from .runtime import Runtime
+from .web import serve
 
 DEFAULT_DB = Path.cwd() / ".cater" / "cater.db"
 
@@ -129,6 +130,13 @@ def cmd_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_web(args: argparse.Namespace) -> int:
+    db = Path(args.db or DEFAULT_DB)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    serve(db, host=args.host, port=args.port, drivers_path=args.drivers, roles_path=args.roles)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cater")
     parser.add_argument("--db", help="SQLite database path")
@@ -170,6 +178,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_probe.set_defaults(func=cmd_probe_driver)
 
     sub.add_parser("demo", help="run a deterministic demo").set_defaults(func=cmd_demo)
+
+    p_web = sub.add_parser("web", help="run local replay web UI")
+    p_web.add_argument("--host", default="127.0.0.1")
+    p_web.add_argument("--port", type=int, default=8765)
+    p_web.set_defaults(func=cmd_web)
     return parser
 
 

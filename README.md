@@ -44,6 +44,7 @@ python -m cater.cli show
 python -m cater.cli inbox
 python -m cater.cli events <task_id>
 python -m cater.cli decide <task_id> --resolution done --reason "Ship the smallest loop first"
+python -m cater.cli web
 ```
 
 By default Cater writes to `./.cater/cater.db`.
@@ -62,6 +63,7 @@ python -m cater.cli decide <task_id> --resolution done --reason "Accepted"
 python -m cater.cli chain
 python -m cater.cli drivers
 python -m cater.cli --drivers drivers.json probe-driver product
+python -m cater.cli web --host 127.0.0.1 --port 8765
 ```
 
 ## Current Scope / 当前范围
@@ -76,6 +78,7 @@ Implemented now:
 - configurable roles and drivers from JSON
 - long-lived NDJSON CLI drivers with probe and crash recovery
 - cabinet vote tally with threshold, recommendation, and open concerns
+- local Web replay UI for task summary, timeline, messages, cabinet tally, and human decision
 - pure fold from events to task snapshots
 - CLI commands for process inspection
 - zero third-party runtime dependencies
@@ -85,6 +88,7 @@ Implemented now:
 - JSON 配置角色与 driver
 - 长驻 NDJSON CLI driver，支持存活探针与崩溃自愈
 - 内阁投票 tally，包含阈值、推荐项与开放疑虑
+- 本地 Web 回放界面，展示任务摘要、时间线、消息、内阁 tally 和人类拍板
 - 从事件流纯函数折叠任务快照
 - 面向人的 CLI 过程视图
 - 运行时零第三方依赖
@@ -139,13 +143,13 @@ Next iterations:
 
 1. Product entry: make `cater demo`, `cater new`, `cater inbox`, and `cater drivers` feel like a coherent first-run workflow.
 2. Cabinet layer: add configurable voting policy, quorum, veto roles, and auto-proposed decisions.
-3. Web replay: add a minimal local web view for task summary, event timeline, messages, cabinet tally, brief, and human decision.
+3. Web replay: improve the local web view with task creation, live refresh, filters, and clearer decision ergonomics.
 4. Reliability: add retry containment, circuit breaker, and driver failure events.
 5. Audit: add optional HMAC signatures on top of the hash chain.
 6. Distribution: add examples for wrapping popular third-party CLIs while keeping the core dependency-free.
 1. 产品入口：让 `cater demo`、`cater new`、`cater inbox`、`cater drivers` 形成连贯的新手首次体验。
 2. 内阁层：加入可配置投票策略、quorum、否决角色与自动建议决策。
-3. Web 回放：增加本地极简 Web 视图，展示任务摘要、事件时间线、消息、内阁 tally、简报和人类裁决。
+3. Web 回放：继续增强本地 Web 视图，加入任务创建、实时刷新、过滤器和更清晰的拍板体验。
 4. 可靠性：加入 retry containment、circuit breaker 和 driver 失败事件。
 5. 审计：在哈希链之上增加可选 HMAC 签名。
 6. 分发：补充主流第三方 CLI wrapper 示例，同时保持核心零依赖。

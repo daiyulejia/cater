@@ -3,13 +3,18 @@ from __future__ import annotations
 import io
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from http.server import ThreadingHTTPServer
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from cater.cabinet import majority_threshold, tally_votes
 from cater.cli import main
 from cater.drivers import CliDriver
 from cater.runtime import Runtime
+from cater.web import make_handler, render_task
 
 
 class RuntimeTests(unittest.TestCase):
@@ -179,6 +184,53 @@ class CliTests(unittest.TestCase):
         code = main(["--db", self.db, "--drivers", str(config), "probe-driver", "product"])
         self.assertEqual(code, 0)
         self.assertIn("alive", self.out.getvalue())
+
+
+class WebTests(unittest.TestCase):
+    def test_render_task_includes_cabinet_timeline_and_decision_form(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("Render me")
+            rt.battle(task_id)
+            html = render_task(rt.task(task_id), rt.log.read(task_id=task_id))
+
+        self.assertIn("Cabinet", html)
+        self.assertIn("Timeline", html)
+        self.assertIn("Record decision", html)
+        self.assertIn("cabinet.voted", html)
+
+    def test_web_api_and_decision_post(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web.db")
+            with Runtime(db) as rt:
+                task_id = rt.create_task("Serve me")
+                rt.battle(task_id)
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join, 1)
+            self.addCleanup(server.shutdown)
+
+            with urlopen(f"{base}/api/tasks/{task_id}", timeout=5) as response:
+                data = response.read().decode("utf-8")
+            self.assertIn('"cabinet"', data)
+            self.assertIn("cabinet.voted", data)
+
+            body = urlencode({"resolution": "done", "reason": "Looks good"}).encode("utf-8")
+            request = Request(
+                f"{base}/tasks/{task_id}/decide",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            with urlopen(request, timeout=5) as response:
+                page = response.read().decode("utf-8")
+            self.assertIn("Looks good", page)
+
+            with Runtime(db) as rt:
+                self.assertEqual(rt.task(task_id).status, "done")
 
 
 if __name__ == "__main__":
