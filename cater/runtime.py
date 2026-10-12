@@ -33,8 +33,10 @@ class Runtime:
         roles_path: str | Path | None = None,
         driver_attempts: int = 2,
         circuit_breaker_threshold: int = 2,
+        audit_key: str | bytes | None = None,
+        audit_key_id: str = "local",
     ):
-        self.log = EventLog(db_path)
+        self.log = EventLog(db_path, audit_key=audit_key, key_id=audit_key_id)
         self.driver_attempts = max(1, driver_attempts)
         self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
         self._driver_failures: dict[str, int] = {}

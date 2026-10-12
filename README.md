@@ -64,6 +64,8 @@ python -m cater.cli chain
 python -m cater.cli drivers
 python -m cater.cli --drivers drivers.json probe-driver product
 python -m cater.cli web --host 127.0.0.1 --port 8765
+python -m cater.cli --audit-key "dev-secret" demo
+python -m cater.cli --audit-key "dev-secret" chain
 ```
 
 ## Current Scope / 当前范围
@@ -80,6 +82,7 @@ Implemented now:
 - cabinet vote tally with threshold, recommendation, and open concerns
 - local Web replay UI for task summary, timeline, messages, cabinet tally, and human decision
 - driver failure containment with retry attempts, failure events, and an in-process circuit breaker
+- optional HMAC audit signatures on top of the event hash chain
 - pure fold from events to task snapshots
 - CLI commands for process inspection
 - zero third-party runtime dependencies
@@ -91,6 +94,7 @@ Implemented now:
 - 内阁投票 tally，包含阈值、推荐项与开放疑虑
 - 本地 Web 回放界面，展示任务摘要、时间线、消息、内阁 tally 和人类拍板
 - driver 失败 containment，包含重试、失败事件和进程内 circuit breaker
+- 在事件哈希链之上的可选 HMAC 审计签名
 - 从事件流纯函数折叠任务快照
 - 面向人的 CLI 过程视图
 - 运行时零第三方依赖
@@ -137,6 +141,21 @@ This is intentionally small. LangChain, LangGraph, Codex CLI, Claude Code, Gemin
 
 这个边界刻意很小。LangChain、LangGraph、Codex CLI、Claude Code、Gemini CLI 或自定义 API wrapper 都可以藏在这个进程后面，而不污染 Cater 的核心运行时。
 
+## Audit / 审计
+
+The event log always has a hash chain. If you provide an audit key, new events also receive an HMAC signature:
+
+事件流始终有哈希链。如果提供 audit key，新事件还会带上 HMAC 签名：
+
+```bash
+python -m cater.cli --audit-key "dev-secret" demo
+python -m cater.cli --audit-key "dev-secret" chain
+```
+
+You can also use `--audit-key-file` or the `CATER_AUDIT_KEY` environment variable.
+
+也可以使用 `--audit-key-file` 或 `CATER_AUDIT_KEY` 环境变量。
+
 ## Roadmap / 路线图
 
 Next iterations:
@@ -147,13 +166,13 @@ Next iterations:
 2. Cabinet layer: add configurable voting policy, quorum, veto roles, and auto-proposed decisions.
 3. Web replay: improve the local web view with task creation, live refresh, filters, and clearer decision ergonomics.
 4. Reliability: make circuit breaker policy configurable and expose recovery controls in CLI/Web.
-5. Audit: add optional HMAC signatures on top of the hash chain.
+5. Audit: add key rotation metadata, unsigned-history policy, and exportable audit reports.
 6. Distribution: add examples for wrapping popular third-party CLIs while keeping the core dependency-free.
 1. 产品入口：让 `cater demo`、`cater new`、`cater inbox`、`cater drivers` 形成连贯的新手首次体验。
 2. 内阁层：加入可配置投票策略、quorum、否决角色与自动建议决策。
 3. Web 回放：继续增强本地 Web 视图，加入任务创建、实时刷新、过滤器和更清晰的拍板体验。
 4. 可靠性：让 circuit breaker 策略可配置，并在 CLI/Web 暴露恢复控制。
-5. 审计：在哈希链之上增加可选 HMAC 签名。
+5. 审计：加入 key rotation 元数据、未签名历史策略和可导出的审计报告。
 6. 分发：补充主流第三方 CLI wrapper 示例，同时保持核心零依赖。
 
 ## Iteration Lens / 迭代视角

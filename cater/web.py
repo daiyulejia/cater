@@ -22,8 +22,16 @@ def serve(
     port: int = 8765,
     drivers_path: str | Path | None = None,
     roles_path: str | Path | None = None,
+    audit_key: str | bytes | None = None,
+    audit_key_id: str = "local",
 ) -> None:
-    handler = make_handler(db_path, drivers_path=drivers_path, roles_path=roles_path)
+    handler = make_handler(
+        db_path,
+        drivers_path=drivers_path,
+        roles_path=roles_path,
+        audit_key=audit_key,
+        audit_key_id=audit_key_id,
+    )
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Cater web listening on http://{host}:{port}")
     try:
@@ -39,6 +47,8 @@ def make_handler(
     *,
     drivers_path: str | Path | None = None,
     roles_path: str | Path | None = None,
+    audit_key: str | bytes | None = None,
+    audit_key_id: str = "local",
 ):
     class CaterHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -93,7 +103,13 @@ def make_handler(
             return
 
         def _runtime(self) -> Runtime:
-            return Runtime(db_path, drivers_path=drivers_path, roles_path=roles_path)
+            return Runtime(
+                db_path,
+                drivers_path=drivers_path,
+                roles_path=roles_path,
+                audit_key=audit_key,
+                audit_key_id=audit_key_id,
+            )
 
         def _send_html(self, body: str) -> None:
             raw = body.encode("utf-8")
@@ -242,6 +258,8 @@ def event_to_dict(event: Event) -> dict[str, Any]:
         "payload": event.payload,
         "prev_hash": event.prev_hash,
         "hash": event.hash,
+        "key_id": event.key_id,
+        "signature": event.signature,
     }
 
 

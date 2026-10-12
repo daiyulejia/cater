@@ -50,6 +50,24 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(report.ok, report.describe())
             self.assertEqual(report.checked, rt.log.count())
 
+    def test_hmac_audit_signature_verifies_and_rejects_wrong_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "audit.db")
+            with Runtime(db, audit_key="secret", audit_key_id="test-key") as rt:
+                task_id = rt.create_task("Sign me")
+                rt.battle(task_id)
+                signed_event = rt.log.read(task_id=task_id)[0]
+                self.assertEqual(signed_event.key_id, "test-key")
+                self.assertIsNotNone(signed_event.signature)
+                report = rt.verify_chain()
+                self.assertTrue(report.ok, report.describe())
+                self.assertEqual(report.signed, rt.log.count())
+
+            with Runtime(db, audit_key="wrong") as rt:
+                report = rt.verify_chain()
+                self.assertFalse(report.ok)
+                self.assertEqual(report.reason, "signature mismatch")
+
     def test_task_state_is_folded_from_events(self):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("Fold me")
@@ -182,6 +200,15 @@ class CliTests(unittest.TestCase):
         code, out = self.run_cli("chain")
         self.assertEqual(code, 0)
         self.assertIn("hash chain ok", out)
+
+    def test_cli_chain_reports_signed_events(self):
+        code = main(["--db", self.db, "--audit-key", "secret", "demo"])
+        self.assertEqual(code, 0)
+        self.out.seek(0)
+        self.out.truncate(0)
+        code = main(["--db", self.db, "--audit-key", "secret", "chain"])
+        self.assertEqual(code, 0)
+        self.assertIn("signed", self.out.getvalue())
 
     def test_cli_new_battle_inbox_decide(self):
         code, out = self.run_cli("new", "Build demo", "--accept", "three roles", "--battle")

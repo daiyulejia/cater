@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .runtime import Runtime
@@ -15,7 +16,21 @@ DEFAULT_DB = Path.cwd() / ".cater" / "cater.db"
 def open_runtime(args: argparse.Namespace) -> Runtime:
     db = Path(args.db or DEFAULT_DB)
     db.parent.mkdir(parents=True, exist_ok=True)
-    return Runtime(db, drivers_path=args.drivers, roles_path=args.roles)
+    return Runtime(
+        db,
+        drivers_path=args.drivers,
+        roles_path=args.roles,
+        audit_key=resolve_audit_key(args),
+        audit_key_id=args.audit_key_id,
+    )
+
+
+def resolve_audit_key(args: argparse.Namespace) -> str | None:
+    if args.audit_key:
+        return args.audit_key
+    if args.audit_key_file:
+        return Path(args.audit_key_file).read_text(encoding="utf-8").strip()
+    return os.environ.get("CATER_AUDIT_KEY")
 
 
 def cmd_new(args: argparse.Namespace) -> int:
@@ -135,7 +150,15 @@ def cmd_demo(args: argparse.Namespace) -> int:
 def cmd_web(args: argparse.Namespace) -> int:
     db = Path(args.db or DEFAULT_DB)
     db.parent.mkdir(parents=True, exist_ok=True)
-    serve(db, host=args.host, port=args.port, drivers_path=args.drivers, roles_path=args.roles)
+    serve(
+        db,
+        host=args.host,
+        port=args.port,
+        drivers_path=args.drivers,
+        roles_path=args.roles,
+        audit_key=resolve_audit_key(args),
+        audit_key_id=args.audit_key_id,
+    )
     return 0
 
 
@@ -144,6 +167,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", help="SQLite database path")
     parser.add_argument("--drivers", help="driver config JSON")
     parser.add_argument("--roles", help="role config JSON")
+    parser.add_argument("--audit-key", help="HMAC audit key")
+    parser.add_argument("--audit-key-file", help="file containing HMAC audit key")
+    parser.add_argument("--audit-key-id", default="local", help="audit key identifier")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_new = sub.add_parser("new", help="create a task")
