@@ -56,7 +56,7 @@ On Windows, if `python` points to the Microsoft Store placeholder, use:
 ## Commands
 
 ```bash
-python -m cater.cli new "Build the first demo" --accept "three roles respond" --run
+python -m cater.cli new "Build the first demo" --accept "three roles respond" --dispatch --run
 python -m cater.cli run <task_id>
 python -m cater.cli battle <task_id>
 python -m cater.cli dispatch <task_id>

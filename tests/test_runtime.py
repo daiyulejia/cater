@@ -524,6 +524,7 @@ class CliTests(unittest.TestCase):
         code, out = self.run_cli("demo")
         self.assertEqual(code, 0)
         self.assertIn("task:", out)
+        self.assertIn("mission: dispatched", out)
         code, out = self.run_cli("chain")
         self.assertEqual(code, 0)
         self.assertIn("hash chain ok", out)
@@ -538,14 +539,16 @@ class CliTests(unittest.TestCase):
         self.assertIn("signed", self.out.getvalue())
 
     def test_cli_new_battle_inbox_decide(self):
-        code, out = self.run_cli("new", "Build demo", "--accept", "three roles", "--run")
+        code, out = self.run_cli("new", "Build demo", "--accept", "three roles", "--dispatch", "--run")
         self.assertEqual(code, 0)
         task_id = next(line for line in out.splitlines() if line.startswith("created ")).split()[1]
+        self.assertIn("mission dispatched", out)
         self.assertIn("round complete", out)
 
         code, out = self.run_cli("show", task_id)
         self.assertEqual(code, 0)
         self.assertIn("cabinet=vetoed", out)
+        self.assertIn("assignments=3", out)
         self.assertIn("ladder:", out)
         self.assertIn("Cabinet: vetoed", out)
 
@@ -556,15 +559,6 @@ class CliTests(unittest.TestCase):
         code, out = self.run_cli("run", task_id)
         self.assertEqual(code, 0)
         self.assertIn("round complete", out)
-
-        code, out = self.run_cli("dispatch", task_id)
-        self.assertEqual(code, 0)
-        self.assertIn("mission dispatched", out)
-        self.assertIn('"subtasks"', out)
-
-        code, out = self.run_cli("show", task_id)
-        self.assertEqual(code, 0)
-        self.assertIn("assignments=3", out)
 
         code, out = self.run_cli(
             "command",
@@ -634,6 +628,20 @@ class CliTests(unittest.TestCase):
         custom_out = self.out.getvalue()
         self.assertIn("driver_attempts=3", custom_out)
         self.assertIn("circuit_breaker_threshold=4", custom_out)
+
+    def test_cli_dispatch_command(self):
+        code, out = self.run_cli("new", "Dispatch only")
+        self.assertEqual(code, 0)
+        task_id = next(line for line in out.splitlines() if line.startswith("created ")).split()[1]
+
+        code, out = self.run_cli("dispatch", task_id)
+        self.assertEqual(code, 0)
+        self.assertIn("mission dispatched", out)
+        self.assertIn('"subtasks"', out)
+
+        code, out = self.run_cli("show", task_id)
+        self.assertEqual(code, 0)
+        self.assertIn("assignments=3", out)
 
     def test_cli_export_json_and_jsonl(self):
         code, _ = self.run_cli("demo")
@@ -763,6 +771,7 @@ class WebTests(unittest.TestCase):
                 {
                     "goal": "Create from web",
                     "acceptance": "battle runs\ninbox updates",
+                    "dispatch": "on",
                     "battle": "on",
                 }
             ).encode("utf-8")
@@ -782,6 +791,7 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(len(tasks), 1)
                 self.assertEqual(tasks[0].status, "rework")
                 self.assertEqual(tasks[0].acceptance, ["battle runs", "inbox updates"])
+                self.assertEqual(len(tasks[0].assignments), 3)
 
             with urlopen(f"{base}/", timeout=5) as response:
                 index = response.read().decode("utf-8")

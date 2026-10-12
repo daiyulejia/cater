@@ -40,6 +40,9 @@ def cmd_new(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         task_id = rt.create_task(args.goal, args.accept or [])
         print(f"created {task_id}")
+        if args.dispatch:
+            rt.dispatch(task_id)
+            print("mission dispatched")
         if args.run or args.battle:
             result = rt.battle(task_id) if args.battle else rt.collaborate(task_id)
             task = rt.task(task_id)
@@ -245,8 +248,10 @@ def cmd_demo(args: argparse.Namespace) -> int:
             "Build a first Cater demo that proves agents can collaborate and decide autonomously",
             ["three roles contribute", "cabinet policy records the next action"],
         )
+        rt.dispatch(task_id)
         result = rt.collaborate(task_id)
         print(f"task: {task_id}")
+        print("mission: dispatched")
         print(json.dumps(result["brief"], ensure_ascii=False, indent=2))
         task = rt.task(task_id)
         print(f"\nagent decision: {task.decision['resolution']} ({task.decision['reason']})")
@@ -291,6 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_new = sub.add_parser("new", help="create a task")
     p_new.add_argument("goal")
     p_new.add_argument("--accept", action="append")
+    p_new.add_argument("--dispatch", action="store_true", help="dispatch mission before running")
     p_new.add_argument("--run", action="store_true", help="run one collaboration round immediately")
     p_new.add_argument("--battle", action="store_true", help="run one forced governance round immediately")
     p_new.set_defaults(func=cmd_new)

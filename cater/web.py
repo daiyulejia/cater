@@ -110,6 +110,8 @@ def make_handler(
                 ]
                 with self._runtime() as rt:
                     task_id = rt.create_task(goal, acceptance)
+                    if data.get("dispatch", [""])[0] == "on":
+                        rt.dispatch(task_id)
                     if data.get("battle", [""])[0] == "on":
                         rt.collaborate(task_id)
                 self._redirect(f"/tasks/{task_id}")
@@ -261,6 +263,10 @@ def render_index(rt: Runtime) -> str:
               </label>
               <label>Acceptance
                 <textarea name="acceptance" rows="4"></textarea>
+              </label>
+              <label class="checkline">
+                <input type="checkbox" name="dispatch" checked>
+                <span>Dispatch mission first</span>
               </label>
               <label class="checkline">
                 <input type="checkbox" name="battle" checked>
