@@ -699,6 +699,7 @@ def _distribution_panel(task: TaskSnapshot, roles: list[Any]) -> str:
           {direct_form}
         </section>
         """
+    visible_assignments = _latest_assignments_by_owner(task.assignments)
     rows = "\n".join(
         f"""
         <li>
@@ -708,14 +709,14 @@ def _distribution_panel(task: TaskSnapshot, roles: list[Any]) -> str:
           <small>{escape(item.get("acceptance"))}</small>
         </li>
         """
-        for item in task.assignments
+        for item in visible_assignments
     )
     plan_reason = ""
     if task.plan:
         plan_reason = f'<p class="muted">{escape(task.plan.get("reason", ""))}</p>'
     return f"""
     <section class="panel">
-      <div class="panel-head"><h2>Task Distribution</h2><span>{len(task.assignments)} assigned</span></div>
+      <div class="panel-head"><h2>Task Distribution</h2><span>{len(visible_assignments)} active / {len(task.assignments)} total</span></div>
       {plan_reason}
       <ol class="assignment-list">{rows}</ol>
       {direct_form}
@@ -775,6 +776,19 @@ def _decision_panel(task: TaskSnapshot) -> str:
       </form>
     </article>
     """
+
+
+def _latest_assignments_by_owner(assignments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_owner: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in assignments:
+        owner = str(item.get("owner") or "")
+        if not owner:
+            continue
+        if owner not in by_owner:
+            order.append(owner)
+        by_owner[owner] = item
+    return [by_owner[owner] for owner in order if owner in by_owner]
 
 
 def _command_panel(task: TaskSnapshot) -> str:

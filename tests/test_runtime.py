@@ -258,6 +258,36 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("your_assignment=Implement the smallest useful path", driver.prompts[1])
         self.assertIn("assigned_work=dev:", driver.prompts[0])
 
+    def test_reassignment_keeps_prompt_and_web_distribution_compact(self):
+        driver = PromptCaptureDriver()
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "governance": {"trigger_on_option_split": false},
+                  "cabinet": {"approval_threshold": 1, "quorum": 1, "veto_roles": []},
+                  "roles": [
+                    {"id":"dev","name":"Developer","role":"developer","driver":"memory"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"memory": driver}) as rt:
+                task_id = rt.create_task("Reassign compactly")
+                rt.assign(task_id, "dev", objective="Old objective")
+                rt.assign(task_id, "dev", objective="New objective")
+                task = rt.task(task_id)
+                html = render_task(task, rt.log.read(task_id=task_id))
+                rt.collaborate(task_id)
+
+        self.assertEqual(len(task.assignments), 2)
+        self.assertIn("1 active / 2 total", html)
+        self.assertIn("New objective", html)
+        self.assertNotIn("Old objective", driver.prompts[0])
+        self.assertIn("your_assignment=New objective", driver.prompts[0])
+
     def test_collaboration_round_skips_governance_without_disagreement(self):
         driver = PromptCaptureDriver()
         with tempfile.TemporaryDirectory() as tmp:

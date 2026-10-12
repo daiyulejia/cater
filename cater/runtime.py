@@ -551,8 +551,9 @@ class Runtime:
     def _task_memory(task: TaskSnapshot, role_id: str | None = None) -> str:
         parts = []
         if task.assignments:
+            latest_assignments = _latest_assignments_by_owner(task.assignments)
             owned = [
-                item for item in task.assignments[-6:]
+                item for item in latest_assignments
                 if role_id is not None and str(item.get("owner") or "") == role_id
             ]
             if owned:
@@ -564,7 +565,7 @@ class Runtime:
                     + str(current.get("acceptance") or "")[:120]
                 )
             assignments = []
-            for item in task.assignments[-6:]:
+            for item in latest_assignments:
                 owner = str(item.get("owner") or "")
                 objective = str(item.get("objective") or "")
                 if owner and objective:
@@ -819,6 +820,19 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
 
 def load_roles(path: str | Path | None = None) -> list[Role]:
     return load_runtime_config(path).roles
+
+
+def _latest_assignments_by_owner(assignments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_owner: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for item in assignments:
+        owner = str(item.get("owner") or "")
+        if not owner:
+            continue
+        if owner not in by_owner:
+            order.append(owner)
+        by_owner[owner] = item
+    return [by_owner[owner] for owner in order if owner in by_owner]
 
 
 def _pack_path(name: str) -> Path:
