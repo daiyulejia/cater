@@ -25,21 +25,23 @@ LangChain / LangGraph 可以作为某个 driver 或复杂执行后端的内部�
 ## 快速开始
 
 ```bash
-python -m cater.cli demo
-python -m cater.cli drivers
-python -m cater.cli show
-python -m cater.cli inbox
-python -m cater.cli policy
-python -m cater.cli dispatch <task_id>
-python -m cater.cli run <task_id>
-python -m cater.cli export <task_id>
-python -m cater.cli review <task_id>
-python -m cater.cli events <task_id>
-python -m cater.cli decide <task_id> --resolution done --reason "Ship the smallest loop first"
-python -m cater.cli web
+cater demo
+cater drivers
+cater show
+cater inbox
+cater policy
+cater dispatch <task_id>
+cater run <task_id>
+cater export <task_id>
+cater review <task_id>
+cater events <task_id>
+cater decide <task_id> --resolution done --reason "Ship the smallest loop first"
+cater web
 ```
 
 默认数据库写入 `./.cater/cater.db`。
+
+如果是在源码目录直接运行，等价写法是 `python -m cater.cli ...`。
 
 ## 本地验证
 

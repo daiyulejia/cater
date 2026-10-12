@@ -25,21 +25,23 @@ LangChain and LangGraph can be useful inside driver implementations or advanced 
 ## Quick Start
 
 ```bash
-python -m cater.cli demo
-python -m cater.cli drivers
-python -m cater.cli show
-python -m cater.cli inbox
-python -m cater.cli policy
-python -m cater.cli dispatch <task_id>
-python -m cater.cli run <task_id>
-python -m cater.cli export <task_id>
-python -m cater.cli review <task_id>
-python -m cater.cli events <task_id>
-python -m cater.cli decide <task_id> --resolution done --reason "Ship the smallest loop first"
-python -m cater.cli web
+cater demo
+cater drivers
+cater show
+cater inbox
+cater policy
+cater dispatch <task_id>
+cater run <task_id>
+cater export <task_id>
+cater review <task_id>
+cater events <task_id>
+cater decide <task_id> --resolution done --reason "Ship the smallest loop first"
+cater web
 ```
 
 By default Cater writes to `./.cater/cater.db`.
+
+From a source checkout, the equivalent form is `python -m cater.cli ...`.
 
 ## Verification
 
