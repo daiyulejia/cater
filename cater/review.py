@@ -31,13 +31,14 @@ def build_review(
         _product_lens(tasks),
         _design_lens(tasks, events),
         _distribution_lens(tasks),
+        _collaboration_lens(tasks),
         _testing_lens(tasks, chain),
         _ui_lens(tasks),
         _logic_lens(tasks),
         _reliability_lens(tasks),
         _adoption_lens(tasks, profiles),
     ]
-    next_actions = [lens["action"] for lens in lenses if lens["status"] != "ok"]
+    next_actions = _next_actions(tasks, lenses)
     return {
         "scope": scope,
         "health": "attention" if next_actions else "steady",
@@ -60,6 +61,21 @@ def _summary(
     if next_actions:
         return f"{len(next_actions)} review lens(es) found actionable follow-up."
     return f"{len(tasks)} task(s), {len(events)} event(s), no immediate review blockers."
+
+
+def _next_actions(tasks: list[TaskSnapshot], lenses: list[dict[str, str]]) -> list[str]:
+    if not tasks:
+        return ["Run cater demo to create the first replayable task."]
+    actions = []
+    seen = set()
+    for lens in lenses:
+        if lens["status"] == "ok":
+            continue
+        action = lens["action"]
+        if action not in seen:
+            actions.append(action)
+            seen.add(action)
+    return actions
 
 
 def _lens(lens_id: str, status: str, finding: str, action: str) -> dict[str, str]:
@@ -118,6 +134,22 @@ def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     if full:
         return _lens("design", "watch", "Only full cabinet dispatch is represented.", "Use direct assignment for a small task to avoid over-governance and unnecessary token spend.")
     return _lens("design", "watch", "Tasks exist but no distribution path is visible.", "Choose direct assignment for simple work or dispatch for complex work.")
+
+
+def _collaboration_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
+    multi_agent = [
+        task for task in tasks
+        if len({message.get("actor") for message in task.messages}) > 1
+    ]
+    if not multi_agent:
+        return _lens("logic", "watch", "No multi-agent exchange is visible yet.", "Run at least two roles before judging third-layer collaboration quality.")
+    linked = [
+        task for task in multi_agent
+        if any(message.get("target") or message.get("reply_to") for message in task.messages)
+    ]
+    if linked:
+        return _lens("logic", "ok", "At least one worker exchange uses explicit reply metadata.", "Keep replies purposeful; do not turn ordinary work into unnecessary chatter.")
+    return _lens("logic", "watch", "Multi-agent output exists but no explicit worker-to-worker reply is visible.", "Use target/reply_to when one agent continues, corrects, or hands off another agent's work.")
 
 
 def _testing_lens(tasks: list[TaskSnapshot], chain: ChainReport) -> dict[str, str]:

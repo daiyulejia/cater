@@ -52,6 +52,20 @@ python -m cater.cli battle <task_id>
 
 Governance is not the default work mode. It is the anti-drift mechanism.
 
+## Worker Communication
+
+Worker agents should normally collaborate before governance enters. A worker can
+continue, correct, or hand off another worker's output by returning:
+
+```json
+{"target": "dev", "reply_to": 12}
+```
+
+`target` names the role being addressed. `reply_to` points at a prior event
+sequence number, so the exchange stays replayable through the append-only event
+log. This keeps ordinary third-layer communication cheap while still making real
+disagreement visible enough for governance to trigger when needed.
+
 ## Choosing A Path
 
 - If one role can execute safely, use direct assignment.

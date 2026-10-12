@@ -30,7 +30,8 @@ Use these questions during recurring self-review:
 5. Direct assignment safety: when humans bypass upper layers, do low confidence, challenge, or failures still bring oversight back?
 6. Replay usefulness: can a maintainer understand why a task went through direct assignment, cabinet dispatch, or governance?
 7. Integration evidence: did any new tool or framework get adopted because of verified behavior rather than names and assumptions?
-8. Removal pressure: which mechanism would we delete first if the project felt slow or heavy?
+8. Worker exchange quality: are agents responding, handing off, or correcting one another when useful, or just producing parallel monologues?
+9. Removal pressure: which mechanism would we delete first if the project felt slow or heavy?
 
 ## Decision Rule
 
@@ -47,6 +48,8 @@ Prefer the lightest path that preserves ownership, observability, and recovery.
 - Every new task creates assignments for every role by default.
 - Review text is longer than the work it critiques.
 - Multiple agents restate the same idea without adding evidence.
+- Multi-agent output never contains explicit handoff or reply links, even when work clearly depends on another role.
+- Agents add reply links to every message and turn collaboration into chatter instead of progress.
 - Cabinet votes happen on obvious implementation details.
 - Token cost grows mainly because of framework ceremony.
 - Human direct assignments never receive later oversight, even when execution fails.

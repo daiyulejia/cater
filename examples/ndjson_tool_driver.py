@@ -46,6 +46,8 @@ def handle(request: dict[str, Any]) -> dict[str, Any]:
 
 def build_response(*, role: str, prompt: str, context: dict[str, Any]) -> dict[str, Any]:
     goal = str(context.get("goal") or "the task")
+    # Real adapters may add target/reply_to when they are intentionally
+    # continuing or correcting a visible prior event from the prompt.
     return {
         "stance": "assert",
         "option_id": "external-tool",

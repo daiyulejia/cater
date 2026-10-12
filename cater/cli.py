@@ -9,6 +9,7 @@ from pathlib import Path
 
 from . import __version__
 from .ladder import decision_ladder
+from .messages import message_relation
 from .runtime import Runtime
 from .web import event_to_dict, serve, task_to_dict
 
@@ -130,6 +131,10 @@ def cmd_show(args: argparse.Namespace) -> int:
                 print(f"proposal={task.proposal['option_id']} reason={task.proposal['reason']}")
             if task.brief:
                 print(f"brief: {task.brief['dispute']}")
+            if task.messages:
+                print("recent messages:")
+                for message in task.messages[-5:]:
+                    print("  - " + _message_summary(message))
             ladder = decision_ladder(rt.log.read(task_id=args.task_id))
             print("ladder:")
             for step in ladder:
@@ -144,7 +149,9 @@ def cmd_events(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         for event in rt.log.read(task_id=args.task_id):
             text = event.payload.get("text") or event.payload.get("goal") or event.payload.get("reason") or ""
-            print(f"#{event.seq:<3} {event.type:<20} {event.actor.id:<12} {str(text)[:80]}")
+            relation = message_relation(event.payload)
+            suffix = f" [{relation}]" if relation else ""
+            print(f"#{event.seq:<3} {event.type:<20} {event.actor.id:<12} {str(text)[:80]}{suffix}")
     return 0
 
 
@@ -177,6 +184,21 @@ def cmd_export(args: argparse.Namespace) -> int:
 def cmd_review(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         review = rt.review(args.task_id, record=args.record)
+        if args.plain:
+            print(f"health: {review['health']}")
+            print(f"summary: {review['summary']}")
+            print("lenses:")
+            for lens in review.get("lenses", []):
+                print(f"  - {lens['label']}: {lens['status']} - {lens['finding']}")
+                if lens.get("action"):
+                    print(f"    next: {lens['action']}")
+            actions = review.get("next_actions", [])
+            print("next actions:")
+            if not actions:
+                print("  - none")
+            for action in actions:
+                print(f"  - {action}")
+            return 0
         print(json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
@@ -261,6 +283,7 @@ def cmd_policy(args: argparse.Namespace) -> int:
 def cmd_doctor(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         report = rt.verify_chain()
+        ok = report.ok
         print(f"cater={__version__}")
         print(f"database={Path(args.db or DEFAULT_DB)}")
         print(f"roles={len(rt.roles)}")
@@ -269,9 +292,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"driver_attempts={rt.driver_attempts}")
         print(f"circuit_breaker_threshold={rt.circuit_breaker_threshold}")
         for role in rt.roles:
-            status = "configured" if role.driver in rt.drivers else "missing"
+            driver = rt.drivers.get(role.driver)
+            status = "configured" if driver is not None else "missing"
+            if args.probe and driver is not None:
+                probe = getattr(driver, "probe", None)
+                if callable(probe):
+                    alive = bool(probe())
+                    status += f", {'alive' if alive else 'unavailable'}"
+                    ok = ok and alive
+                else:
+                    status += ", no probe"
             print(f"role {role.id}: driver={role.driver} {status}")
-        return 0 if report.ok else 1
+        return 0 if ok else 1
 
 
 def cmd_probe_driver(args: argparse.Namespace) -> int:
@@ -292,6 +324,21 @@ def _unknown_role_message(role_id: str, rt: Runtime) -> str:
     return f"unknown role {role_id!r}; expected one of: {known}"
 
 
+def _message_summary(message: dict) -> str:
+    parts = [
+        f"#{message.get('seq')}",
+        f"{message.get('actor', 'agent')}/{message.get('stance', '')}",
+    ]
+    if message.get("target"):
+        parts.append(f"-> {message['target']}")
+    if message.get("reply_to"):
+        parts.append(f"reply_to #{message['reply_to']}")
+    claim = str(message.get("claim") or "")
+    if claim:
+        parts.append(claim[:80])
+    return " ".join(parts)
+
+
 def cmd_demo(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         task_id = rt.create_task(
@@ -302,8 +349,11 @@ def cmd_demo(args: argparse.Namespace) -> int:
         result = rt.collaborate(task_id)
         print(f"task: {task_id}")
         print("mission: dispatched")
-        print(json.dumps(result["brief"], ensure_ascii=False, indent=2))
+        print(f"brief: {result['brief']['dispute']}")
+        print("recent messages:")
         task = rt.task(task_id)
+        for message in task.messages[-5:]:
+            print("  - " + _message_summary(message))
         print(f"\nagent decision: {task.decision['resolution']} ({task.decision['reason']})")
         print("\nhuman inbox:")
         inbox = rt.inbox()
@@ -311,6 +361,10 @@ def cmd_demo(args: argparse.Namespace) -> int:
             print("- empty")
         for item in inbox:
             print(f"- {item['task_id']}: {item['title']}")
+        print("\nnext:")
+        print(f"- cater show {task_id}")
+        print(f"- cater events {task_id}")
+        print(f"- cater web")
     return 0
 
 
@@ -390,6 +444,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_review = sub.add_parser("review", help="review work from multiple product angles")
     p_review.add_argument("task_id", nargs="?")
     p_review.add_argument("--record", action="store_true", help="append review.generated to the event log")
+    p_review.add_argument("--plain", action="store_true", help="print a human-readable review instead of JSON")
     p_review.set_defaults(func=cmd_review)
 
     sub.add_parser("inbox", help="show exceptional human input requests").set_defaults(func=cmd_inbox)
@@ -411,7 +466,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("chain", help="verify event hash chain").set_defaults(func=cmd_chain)
     sub.add_parser("drivers", help="show roles and configured drivers").set_defaults(func=cmd_drivers)
     sub.add_parser("policy", help="show organization governance policy").set_defaults(func=cmd_policy)
-    sub.add_parser("doctor", help="check runtime wiring and local event chain").set_defaults(func=cmd_doctor)
+    p_doctor = sub.add_parser("doctor", help="check runtime wiring and local event chain")
+    p_doctor.add_argument("--probe", action="store_true", help="actively probe drivers that support a probe method")
+    p_doctor.set_defaults(func=cmd_doctor)
 
     p_probe = sub.add_parser("probe-driver", help="probe a configured driver")
     p_probe.add_argument("name")

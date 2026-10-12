@@ -17,6 +17,7 @@ from cater import __version__
 from cater.cli import main
 from cater.drivers import CliDriver, DriverResponse
 from cater.ladder import decision_ladder
+from cater.messages import message_relation
 from cater.profiles import agent_profiles
 from cater.runtime import Runtime
 from cater.web import make_handler, render_task
@@ -59,7 +60,44 @@ class StaticResponseDriver:
         return DriverResponse(text=self.text, tokens=5)
 
 
+class ReplyDriver:
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def complete(self, *, role: str, prompt: str, context: dict) -> DriverResponse:
+        self.prompts.append(prompt)
+        if role == "planner":
+            text = {
+                "stance": "assert",
+                "option_id": "shared-plan",
+                "claim": "Draft the plan",
+                "evidence": ["first worker output"],
+                "confidence": 0.8,
+                "text": "planner output",
+            }
+        else:
+            text = {
+                "stance": "assert",
+                "option_id": "shared-plan",
+                "claim": "Continue the plan from planner",
+                "evidence": ["uses prior event"],
+                "confidence": 0.8,
+                "text": "builder output",
+                "target": "alpha",
+                "reply_to": 3,
+            }
+        return DriverResponse(text=json.dumps(text), tokens=4)
+
+
 class RuntimeTests(unittest.TestCase):
+    def test_message_relation_formats_optional_reply_metadata(self):
+        self.assertEqual(message_relation({}), "")
+        self.assertEqual(message_relation({"target": "alpha"}), "target alpha")
+        self.assertEqual(
+            message_relation({"target": "alpha", "reply_to": 3}),
+            "target alpha | reply_to #3",
+        )
+
     def test_package_version_matches_project_metadata(self):
         project = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
         self.assertEqual(project["project"]["version"], __version__)
@@ -191,6 +229,63 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("recent_commands=Use prior output", driver.prompts[2])
         self.assertIn("alpha/assert: memory claim 1", driver.prompts[2])
         self.assertIn("beta/assert: memory claim 2", driver.prompts[2])
+
+    def test_agents_can_address_prior_outputs_by_event_seq(self):
+        driver = ReplyDriver()
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "governance": {"trigger_on_option_split": false},
+                  "cabinet": {"approval_threshold": 2, "quorum": 2, "veto_roles": []},
+                  "roles": [
+                    {"id":"alpha","name":"Alpha","role":"planner","driver":"reply"},
+                    {"id":"beta","name":"Beta","role":"builder","driver":"reply"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"reply": driver}) as rt:
+                task_id = rt.create_task("Coordinate workers")
+                result = rt.collaborate(task_id)
+                task = rt.task(task_id)
+                html = render_task(task, rt.log.read(task_id=task_id))
+
+        self.assertIn("Agent-to-agent policy", driver.prompts[0])
+        self.assertIn("alpha/assert: Draft the plan (#3)", driver.prompts[1])
+        self.assertEqual(task.messages[1]["target"], "alpha")
+        self.assertEqual(task.messages[1]["reply_to"], 3)
+        self.assertEqual(result["brief"]["positions"][1]["target"], "alpha")
+        self.assertEqual(result["brief"]["positions"][1]["reply_to"], 3)
+        self.assertIn("reply_to #3", html)
+
+    def test_invalid_agent_reply_metadata_is_dropped(self):
+        driver = StaticResponseDriver(
+            '{"stance":"assert","option_id":"A","claim":"Invalid link",'
+            '"evidence":[],"confidence":0.8,"text":"bad refs","target":"ghost","reply_to":999}'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "cabinet": {"approval_threshold": 1, "quorum": 1, "veto_roles": []},
+                  "roles": [
+                    {"id":"alpha","name":"Alpha","role":"planner","driver":"static"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"static": driver}) as rt:
+                task_id = rt.create_task("Ignore invalid links")
+                rt.collaborate(task_id)
+                message = rt.task(task_id).messages[0]
+
+        self.assertNotIn("target", message)
+        self.assertNotIn("reply_to", message)
 
     def test_dispatch_records_pyramid_task_distribution(self):
         driver = PromptCaptureDriver()
@@ -484,6 +579,13 @@ class RuntimeTests(unittest.TestCase):
             self.assertIn("review.generated", event_types)
             self.assertEqual(task.reviews[-1]["scope"], task_id)
 
+    def test_review_next_actions_are_usable_for_empty_workspace(self):
+        with Runtime(":memory:") as rt:
+            review = rt.review()
+
+        self.assertEqual(review["next_actions"], ["Run cater demo to create the first replayable task."])
+        self.assertEqual(review["summary"], "No tasks yet; create a small task and run one collaboration round.")
+
     def test_review_flags_distribution_weight_and_gaps(self):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("Review distribution")
@@ -500,6 +602,38 @@ class RuntimeTests(unittest.TestCase):
             review = rt.review()
             findings = [item["finding"] for item in review["lenses"]]
             self.assertTrue(any("direct worker assignment and cabinet dispatch" in finding for finding in findings))
+
+    def test_review_flags_worker_exchange_quality(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("Flat exchange")
+            rt.collaborate(task_id)
+            review = rt.review(task_id)
+            findings = [item["finding"] for item in review["lenses"]]
+            self.assertTrue(any("no explicit worker-to-worker reply" in finding for finding in findings))
+
+        driver = ReplyDriver()
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "governance": {"trigger_on_option_split": false},
+                  "cabinet": {"approval_threshold": 2, "quorum": 2, "veto_roles": []},
+                  "roles": [
+                    {"id":"alpha","name":"Alpha","role":"planner","driver":"reply"},
+                    {"id":"beta","name":"Beta","role":"builder","driver":"reply"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"reply": driver}) as rt:
+                task_id = rt.create_task("Linked exchange")
+                rt.collaborate(task_id)
+                review = rt.review(task_id)
+                findings = [item["finding"] for item in review["lenses"]]
+
+        self.assertTrue(any("uses explicit reply metadata" in finding for finding in findings))
 
 
 class CabinetTests(unittest.TestCase):
@@ -615,6 +749,10 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("task:", out)
         self.assertIn("mission: dispatched", out)
+        self.assertIn("brief:", out)
+        self.assertIn("recent messages:", out)
+        self.assertIn("next:", out)
+        self.assertIn("cater show", out)
         code, out = self.run_cli("chain")
         self.assertEqual(code, 0)
         self.assertIn("hash chain ok", out)
@@ -732,6 +870,21 @@ class CliTests(unittest.TestCase):
         self.assertIn("chain=hash chain ok", out)
         self.assertIn("role product: driver=product configured", out)
 
+    def test_cli_doctor_can_probe_cli_drivers(self):
+        driver_script = Path(__file__).resolve().parent / "fixtures" / "ndjson_driver.py"
+        config = Path(self.tmp.name) / "drivers.json"
+        config.write_text(
+            '{"drivers":[{"kind":"cli","name":"product","command":["'
+            + sys.executable.replace("\\", "\\\\")
+            + '","'
+            + str(driver_script).replace("\\", "\\\\")
+            + '"],"timeout":5}]}',
+            encoding="utf-8",
+        )
+        code = main(["--db", self.db, "--drivers", str(config), "doctor", "--probe"])
+        self.assertEqual(code, 0)
+        self.assertIn("role product: driver=product configured, alive", self.out.getvalue())
+
     def test_cli_dispatch_command(self):
         code, out = self.run_cli("new", "Dispatch only")
         self.assertEqual(code, 0)
@@ -776,6 +929,82 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("expected one of: product, dev, test", out)
 
+    def test_cli_show_includes_recent_messages(self):
+        code, out = self.run_cli("new", "Show message links", "--run")
+        self.assertEqual(code, 0)
+        task_id = next(line for line in out.splitlines() if line.startswith("created ")).split()[1]
+
+        code, out = self.run_cli("show", task_id)
+        self.assertEqual(code, 0)
+        self.assertIn("recent messages:", out)
+        self.assertIn("product/assert", out)
+
+    def test_cli_events_include_worker_reply_links(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            drivers = Path(tmp) / "drivers.json"
+            roles.write_text(
+                """
+                {
+                  "governance": {"trigger_on_option_split": false},
+                  "cabinet": {"approval_threshold": 2, "quorum": 2, "veto_roles": []},
+                  "roles": [
+                    {"id":"alpha","name":"Alpha","role":"planner","driver":"reply"},
+                    {"id":"beta","name":"Beta","role":"builder","driver":"reply"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            drivers.write_text(
+                json.dumps(
+                    {
+                        "drivers": [
+                            {
+                                "kind": "scripted",
+                                "name": "reply",
+                                "script": [
+                                    json.dumps(
+                                        {
+                                            "stance": "assert",
+                                            "option_id": "shared-plan",
+                                            "claim": "Draft the plan",
+                                            "evidence": [],
+                                            "confidence": 0.8,
+                                            "text": "planner output",
+                                        }
+                                    ),
+                                    json.dumps(
+                                        {
+                                            "stance": "assert",
+                                            "option_id": "shared-plan",
+                                            "claim": "Continue the plan",
+                                            "evidence": [],
+                                            "confidence": 0.8,
+                                            "text": "builder output",
+                                            "target": "alpha",
+                                            "reply_to": 3,
+                                        }
+                                    ),
+                                ],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with Runtime(self.db, roles_path=roles, drivers_path=drivers) as rt:
+                task_id = rt.create_task("CLI event links")
+                rt.collaborate(task_id)
+
+            self.out.seek(0)
+            self.out.truncate(0)
+            code = main(["--db", self.db, "--roles", str(roles), "--drivers", str(drivers), "events", task_id])
+            out = self.out.getvalue()
+
+        self.assertEqual(code, 0)
+        self.assertIn("[target alpha | reply_to #3]", out)
+
     def test_cli_export_json_and_jsonl(self):
         code, _ = self.run_cli("demo")
         self.assertEqual(code, 0)
@@ -813,8 +1042,43 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("review.generated", out)
 
+    def test_cli_review_plain_output(self):
+        code, _ = self.run_cli("demo")
+        self.assertEqual(code, 0)
+
+        code, out = self.run_cli("review", "--plain")
+        self.assertEqual(code, 0)
+        self.assertIn("health:", out)
+        self.assertIn("lenses:", out)
+        self.assertIn("next actions:", out)
+        self.assertNotIn('"lenses"', out)
+
 
 class WebTests(unittest.TestCase):
+    def test_render_task_shows_worker_reply_links_in_messages_and_timeline(self):
+        driver = ReplyDriver()
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "governance": {"trigger_on_option_split": false},
+                  "cabinet": {"approval_threshold": 2, "quorum": 2, "veto_roles": []},
+                  "roles": [
+                    {"id":"alpha","name":"Alpha","role":"planner","driver":"reply"},
+                    {"id":"beta","name":"Beta","role":"builder","driver":"reply"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"reply": driver}) as rt:
+                task_id = rt.create_task("Render reply links")
+                rt.collaborate(task_id)
+                html = render_task(rt.task(task_id), rt.log.read(task_id=task_id))
+
+        self.assertIn("target alpha | reply_to #3", html)
+
     def test_render_task_includes_cabinet_timeline_and_decision_form(self):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("Render me")
@@ -830,6 +1094,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("Timeline", html)
         self.assertIn("Human Command", html)
         self.assertIn("Self Review", html)
+        self.assertIn("next-actions", html)
         self.assertIn("Force governance", controls_html)
         self.assertIn("governance round forced", html)
         self.assertIn("cabinet.voted", html)

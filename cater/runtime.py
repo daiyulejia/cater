@@ -225,6 +225,7 @@ class Runtime:
 
         profiles = self.profiles()
         utterances = []
+        role_ids = {role.id for role in self.roles}
         for role in self.roles:
             driver = self.drivers[role.driver]
             prompt = self._prompt(task, role, profiles.get(role.id), utterances)
@@ -247,6 +248,23 @@ class Runtime:
                 "tokens": response.tokens,
                 "driver": role.driver,
             }
+            visible_refs = {
+                int(item["seq"])
+                for item in task.messages
+                if isinstance(item.get("seq"), int)
+            }
+            visible_refs.update(
+                event.seq
+                for item in utterances
+                for event in [item.get("event")]
+                if isinstance(getattr(event, "seq", None), int)
+            )
+            target = self._optional_target(parsed.get("target"), role_ids)
+            reply_to = self._optional_reply_to(parsed.get("reply_to"), visible_refs)
+            if target is not None:
+                payload["target"] = target
+            if reply_to is not None:
+                payload["reply_to"] = reply_to
             event = self.log.emit(
                 actor=Actor.agent(role.id, role.role),
                 type=event_type,
@@ -521,10 +539,13 @@ class Runtime:
             "Collaboration policy: produce the most useful next contribution first; "
             "use stance=challenge only for material disagreement, risk, or missing evidence; "
             "do not force a debate when normal collaboration is enough.\n"
+            "Agent-to-agent policy: when you are continuing, correcting, or handing off another "
+            "agent's output, include target=<role id> and reply_to=<event seq> in the JSON.\n"
             f"{memory}\n"
             f"{task_memory}\n"
             f"{round_memory}\n"
-            "Return JSON with stance, option_id, claim, evidence, confidence, text."
+            "Return JSON with stance, option_id, claim, evidence, confidence, text, "
+            "and optional target, reply_to."
         )
 
     @staticmethod
@@ -591,8 +612,10 @@ class Runtime:
                 actor = str(item.get("actor") or "agent")
                 stance = str(item.get("stance") or "")
                 claim = str(item.get("claim") or "")
+                seq = item.get("seq")
                 if claim:
-                    messages.append(f"{actor}/{stance}: {claim[:180]}")
+                    suffix = f" (#{seq})" if seq is not None else ""
+                    messages.append(f"{actor}/{stance}: {claim[:180]}{suffix}")
             if messages:
                 parts.append("recent_agent_outputs=" + " | ".join(messages))
         if not parts:
@@ -649,11 +672,31 @@ class Runtime:
             payload = item["payload"]
             stance = str(payload.get("stance") or "")
             claim = str(payload.get("claim") or "")
+            event = item.get("event")
+            seq = getattr(event, "seq", None)
             if claim:
-                items.append(f"{role.id}/{stance}: {claim[:180]}")
+                suffix = f" (#{seq})" if seq is not None else ""
+                items.append(f"{role.id}/{stance}: {claim[:180]}{suffix}")
         if not items:
             return "Current round memory: earlier outputs had no claims."
         return "Current round memory: " + " | ".join(items) + "."
+
+    @staticmethod
+    def _optional_target(value: Any, role_ids: set[str]) -> str | None:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text if text in role_ids else None
+
+    @staticmethod
+    def _optional_reply_to(value: Any, visible_refs: set[int]) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            seq = int(value)
+        except (TypeError, ValueError):
+            return None
+        return seq if seq in visible_refs else None
 
     @staticmethod
     def _parse_response(text: str) -> dict[str, Any]:
@@ -722,6 +765,8 @@ class Runtime:
                     "evidence": payload.get("evidence", []),
                     "confidence": payload.get("confidence"),
                     "stance": payload.get("stance"),
+                    "target": payload.get("target"),
+                    "reply_to": payload.get("reply_to"),
                 }
             )
         options = [
@@ -765,6 +810,8 @@ class Runtime:
                     "evidence": payload.get("evidence", []),
                     "confidence": payload.get("confidence"),
                     "stance": payload.get("stance"),
+                    "target": payload.get("target"),
+                    "reply_to": payload.get("reply_to"),
                 }
             )
         cabinet = tally_votes(

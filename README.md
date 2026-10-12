@@ -31,10 +31,12 @@ cater show
 cater inbox
 cater policy
 cater doctor
+cater doctor --probe
 cater dispatch <task_id>
 cater run <task_id>
 cater export <task_id>
 cater review <task_id>
+cater review --plain
 cater events <task_id>
 cater decide <task_id> --resolution done --reason "Ship the smallest loop first"
 cater web
@@ -69,10 +71,12 @@ cater events [task_id]
 cater export [task_id] --format json
 cater export [task_id] --format jsonl
 cater review [task_id] --record
+cater review [task_id] --plain
 cater inbox
 cater profiles
 cater policy
 cater doctor
+cater doctor --probe
 cater decide <task_id> --resolution done --reason "Accepted"
 cater chain
 cater drivers
@@ -98,6 +102,7 @@ Implemented now:
 - SQLite append-only event store with hash-chain verification
 - task creation, collaboration rounds, risk-triggered governance, targeted battle, cabinet vote, supreme fallback, and rare human command/override
 - optional pyramid-style task distribution with mission framing, cabinet decomposition, direct worker assignment, and replayable plans
+- lightweight worker-to-worker replies through role targets and event-sequence references
 - deterministic scripted drivers for repeatable demos and tests
 - configurable roles and drivers from JSON
 - long-lived NDJSON CLI drivers with probe and crash recovery
@@ -190,11 +195,11 @@ Use `cater export` to produce a machine-readable replay bundle, or `cater export
 ## Self Review
 
 ```bash
-cater review
+cater review --plain
 cater review <task_id> --record
 ```
 
-`review` inspects the work from product, design, testing, UI, logic, reliability, and adoption angles. Without `--record` it is a pure projection; with `--record` it appends a `review.generated` event so the critique itself becomes replayable.
+`review` inspects the work from product, design, testing, UI, logic, reliability, and adoption angles. Use `--plain` for a quick human-readable pass. Without `--record` it is a pure projection; with `--record` it appends a `review.generated` event so the critique itself becomes replayable.
 
 Architecture-level review lives in [docs/architecture-review.md](docs/architecture-review.md). It asks whether Cater's own distribution and governance mechanisms are still worth their token, latency, and complexity cost.
 
@@ -227,7 +232,7 @@ Cater should grow through small usable loops. Each iteration should be reviewed 
 - design: can the process be understood at a glance?
 - testing: can failures be replayed and reproduced?
 - UI: is the human command surface calm and actionable?
-- logic: are events, projections, and driver boundaries still simple?
+- logic: are events, projections, worker exchanges, and driver boundaries still simple?
 - adoption: can a new contributor run it without extra services?
 
 ## Design Principles

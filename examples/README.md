@@ -36,6 +36,27 @@ Completion response:
 }
 ```
 
+The nested `text` JSON is the agent message payload. It may include optional
+worker-to-worker reply metadata when the backend is genuinely continuing,
+correcting, or handing off another agent's output:
+
+```json
+{
+  "stance": "assert",
+  "option_id": "A",
+  "claim": "Continue the implementation plan from dev",
+  "evidence": ["uses prior worker output"],
+  "confidence": 0.8,
+  "text": "I will continue from the referenced implementation note.",
+  "target": "dev",
+  "reply_to": 12
+}
+```
+
+`target` must be a configured role id. `reply_to` must point to an event sequence
+that was visible to the agent in the prompt. Cater drops invalid reply metadata
+instead of storing speculative links.
+
 ## Integration Rule
 
 Do not infer behavior from package names, function names, or framework marketing.

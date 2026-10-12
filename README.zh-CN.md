@@ -31,10 +31,12 @@ cater show
 cater inbox
 cater policy
 cater doctor
+cater doctor --probe
 cater dispatch <task_id>
 cater run <task_id>
 cater export <task_id>
 cater review <task_id>
+cater review --plain
 cater events <task_id>
 cater decide <task_id> --resolution done --reason "Ship the smallest loop first"
 cater web
@@ -69,10 +71,12 @@ cater events [task_id]
 cater export [task_id] --format json
 cater export [task_id] --format jsonl
 cater review [task_id] --record
+cater review [task_id] --plain
 cater inbox
 cater profiles
 cater policy
 cater doctor
+cater doctor --probe
 cater decide <task_id> --resolution done --reason "Accepted"
 cater chain
 cater drivers
@@ -98,6 +102,7 @@ cater --audit-key "dev-secret" chain
 - SQLite 只追加事件流 + 哈希链校验
 - 任务创建、协作轮次、风险触发治理、必要时 battle、内阁投票、最高者兜底、极少数人类命令/覆盖
 - 可选的金字塔式任务分发，包含 mission 定义、内阁拆解、直接派给执行层和可回放 plan
+- 执行层 agent 可通过目标角色和事件序号进行轻量定向回应
 - 确定性 scripted driver，便于演示和测试
 - JSON 配置角色与 driver
 - 长驻 NDJSON CLI driver，支持存活探针与崩溃自愈
@@ -190,11 +195,11 @@ cater --audit-key "dev-secret" chain
 ## 自省复盘
 
 ```bash
-cater review
+cater review --plain
 cater review <task_id> --record
 ```
 
-`review` 会从产品、设计、测试、UI、逻辑、可靠性和采用门槛等角度审视当前工作。不带 `--record` 时它只是纯投影；带 `--record` 时会追加 `review.generated` 事件，让批判和修正建议本身也可回放。
+`review` 会从产品、设计、测试、UI、逻辑、可靠性和采用门槛等角度审视当前工作。`--plain` 用于快速阅读。不带 `--record` 时它只是纯投影；带 `--record` 时会追加 `review.generated` 事件，让批判和修正建议本身也可回放。
 
 架构级自审见 [docs/architecture-review.md](docs/architecture-review.md)。它专门检查 Cater 自己的分发、裁判、治理机制是否值得付出 token、延迟和复杂度成本。
 
@@ -227,7 +232,7 @@ Cater 应该通过一个个可用小闭环生长。每次迭代都要从多个�
 - 设计：协作过程是否能一眼看懂？
 - 测试：失败是否可回放、可复现？
 - UI：人类命令入口是否清晰、克制、可行动？
-- 逻辑：事件、投影、driver 边界是否仍然简单？
+- 逻辑：事件、投影、执行层交流和 driver 边界是否仍然简单？
 - 采用：新贡献者是否不依赖额外服务就能跑起来？
 
 ## 设计原则

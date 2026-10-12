@@ -14,6 +14,7 @@ from .assignments import latest_assignments_by_owner
 from .events import Event
 from .fold import TaskSnapshot
 from .ladder import decision_ladder
+from .messages import message_relation
 from .review import build_review
 from .runtime import Runtime
 
@@ -522,12 +523,16 @@ def _review_panel(review: dict[str, Any]) -> str:
         for item in review.get("lenses", [])
     )
     actions = review.get("next_actions", [])
-    next_text = " | ".join(str(item) for item in actions[:3]) if actions else "No immediate action"
+    if actions:
+        action_rows = "\n".join(f"<li>{escape(item)}</li>" for item in actions[:3])
+        next_block = f'<ul class="next-actions">{action_rows}</ul>'
+    else:
+        next_block = '<p class="muted">No immediate action</p>'
     return f"""
     <section class="panel">
       <div class="panel-head"><h2>Self Review</h2><span>{escape(review.get("health"))}</span></div>
       <p class="muted">{escape(review.get("summary"))}</p>
-      <p class="muted">{escape(next_text)}</p>
+      {next_block}
       <ol class="review-list">{lenses}</ol>
     </section>
     """
@@ -583,10 +588,13 @@ def _task_row(task: TaskSnapshot, needs_decision: bool) -> str:
 
 def _message_card(item: dict[str, Any]) -> str:
     evidence = ", ".join(str(value) for value in item.get("evidence", []))
+    link_text = message_relation(item)
+    link_row = f"<small>{escape(link_text)}</small>" if link_text else ""
     return f"""
     <article class="message">
       <header><strong>{escape(item.get("actor", "agent"))}</strong><span>{escape(item.get("stance", ""))}</span></header>
       <p>{escape(item.get("claim", ""))}</p>
+      {link_row}
       <small>{escape(evidence)}</small>
     </article>
     """
@@ -646,12 +654,14 @@ def _event_row(event: Event) -> str:
         or event.payload.get("strategy")
         or ""
     )
+    relation = message_relation(event.payload)
+    relation_row = f"<small>{escape(relation)}</small>" if relation else ""
     return f"""
     <li>
       <span>#{event.seq}</span>
       <strong>{escape(event.type)}</strong>
       <em>{escape(event.actor.id)}</em>
-      <p>{escape(text)}</p>
+      <p>{escape(text)}{relation_row}</p>
     </li>
     """
 
@@ -989,6 +999,15 @@ td small {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+.next-actions {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.next-actions li + li {
+  margin-top: 4px;
 }
 .review-list li, .assignment-list li {
   border: 1px solid var(--line);
