@@ -80,7 +80,7 @@ Implemented now:
 - configurable roles and drivers from JSON
 - long-lived NDJSON CLI drivers with probe and crash recovery
 - configurable cabinet vote tally with approval threshold, quorum, veto roles, recommendation, and open concerns
-- local Web replay UI for task summary, timeline, messages, cabinet tally, and human decision
+- local Web workbench for task creation, battle start, inbox, replay, cabinet tally, and human decision
 - driver failure containment with retry attempts, failure events, and an in-process circuit breaker
 - optional HMAC audit signatures on top of the event hash chain
 - pure fold from events to task snapshots
@@ -92,7 +92,7 @@ Implemented now:
 - JSON 配置角色与 driver
 - 长驻 NDJSON CLI driver，支持存活探针与崩溃自愈
 - 可配置内阁投票 tally，包含通过阈值、quorum、否决角色、推荐项与开放疑虑
-- 本地 Web 回放界面，展示任务摘要、时间线、消息、内阁 tally 和人类拍板
+- 本地 Web 工作台，支持任务创建、启动 battle、inbox、回放、内阁 tally 和人类拍板
 - driver 失败 containment，包含重试、失败事件和进程内 circuit breaker
 - 在事件哈希链之上的可选 HMAC 审计签名
 - 从事件流纯函数折叠任务快照
@@ -189,13 +189,13 @@ Next iterations:
 
 1. Product entry: make `cater demo`, `cater new`, `cater inbox`, and `cater drivers` feel like a coherent first-run workflow.
 2. Cabinet layer: add auto-proposed decisions and richer policy explanations.
-3. Web replay: improve the local web view with task creation, live refresh, filters, and clearer decision ergonomics.
+3. Web replay: add live refresh, filters, and clearer decision ergonomics.
 4. Reliability: make circuit breaker policy configurable and expose recovery controls in CLI/Web.
 5. Audit: add key rotation metadata, unsigned-history policy, and exportable audit reports.
 6. Distribution: add examples for wrapping popular third-party CLIs while keeping the core dependency-free.
 1. 产品入口：让 `cater demo`、`cater new`、`cater inbox`、`cater drivers` 形成连贯的新手首次体验。
 2. 内阁层：加入自动建议决策和更丰富的策略解释。
-3. Web 回放：继续增强本地 Web 视图，加入任务创建、实时刷新、过滤器和更清晰的拍板体验。
+3. Web 回放：加入实时刷新、过滤器和更清晰的拍板体验。
 4. 可靠性：让 circuit breaker 策略可配置，并在 CLI/Web 暴露恢复控制。
 5. 审计：加入 key rotation 元数据、未签名历史策略和可导出的审计报告。
 6. 分发：补充主流第三方 CLI wrapper 示例，同时保持核心零依赖。

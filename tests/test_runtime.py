@@ -316,6 +316,41 @@ class WebTests(unittest.TestCase):
             with Runtime(db) as rt:
                 self.assertEqual(rt.task(task_id).status, "done")
 
+    def test_web_can_create_task_and_run_battle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-create.db")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join, 1)
+            self.addCleanup(server.shutdown)
+
+            body = urlencode(
+                {
+                    "goal": "Create from web",
+                    "acceptance": "battle runs\ninbox updates",
+                    "battle": "on",
+                }
+            ).encode("utf-8")
+            request = Request(
+                f"{base}/tasks",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            with urlopen(request, timeout=5) as response:
+                page = response.read().decode("utf-8")
+
+            self.assertIn("Create from web", page)
+            self.assertIn("Cabinet", page)
+            with Runtime(db) as rt:
+                tasks = rt.tasks()
+                self.assertEqual(len(tasks), 1)
+                self.assertEqual(tasks[0].status, "escalated")
+                self.assertEqual(tasks[0].acceptance, ["battle runs", "inbox updates"])
+
 
 if __name__ == "__main__":
     unittest.main()

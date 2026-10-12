@@ -82,20 +82,43 @@ def make_handler(
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/")
+            if path == "/tasks":
+                data = self._read_form()
+                goal = data.get("goal", [""])[0].strip()
+                if not goal:
+                    self.send_response(HTTPStatus.SEE_OTHER)
+                    self.send_header("Location", "/")
+                    self.end_headers()
+                    return
+                acceptance = [
+                    line.strip()
+                    for line in data.get("acceptance", [""])[0].splitlines()
+                    if line.strip()
+                ]
+                with self._runtime() as rt:
+                    task_id = rt.create_task(goal, acceptance)
+                    if data.get("battle", [""])[0] == "on":
+                        rt.battle(task_id)
+                self._redirect(f"/tasks/{task_id}")
+                return
+            if path.startswith("/tasks/") and path.endswith("/battle"):
+                task_id = path.split("/")[2]
+                with self._runtime() as rt:
+                    if rt.task(task_id) is None:
+                        return self._not_found()
+                    rt.battle(task_id)
+                self._redirect(f"/tasks/{task_id}")
+                return
             if path.startswith("/tasks/") and path.endswith("/decide"):
                 task_id = path.split("/")[2]
-                length = int(self.headers.get("Content-Length", "0") or "0")
-                raw = self.rfile.read(length).decode("utf-8")
-                data = parse_qs(raw)
+                data = self._read_form()
                 resolution = data.get("resolution", ["done"])[0]
                 reason = data.get("reason", [""])[0].strip() or "Decided from Cater web"
                 with self._runtime() as rt:
                     if rt.task(task_id) is None:
                         return self._not_found()
                     rt.decide(task_id, resolution, reason)
-                self.send_response(HTTPStatus.SEE_OTHER)
-                self.send_header("Location", f"/tasks/{task_id}")
-                self.end_headers()
+                self._redirect(f"/tasks/{task_id}")
                 return
             return self._not_found()
 
@@ -135,6 +158,16 @@ def make_handler(
             self.end_headers()
             self.wfile.write(raw)
 
+        def _read_form(self) -> dict[str, list[str]]:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            raw = self.rfile.read(length).decode("utf-8")
+            return parse_qs(raw)
+
+        def _redirect(self, location: str) -> None:
+            self.send_response(HTTPStatus.SEE_OTHER)
+            self.send_header("Location", location)
+            self.end_headers()
+
     return CaterHandler
 
 
@@ -155,6 +188,34 @@ def render_index(rt: Runtime) -> str:
             <h1>Human-steerable agent workbench</h1>
           </div>
           <span class="chain">{escape(chain.describe())}</span>
+        </section>
+        <section class="grid">
+          <article class="panel">
+            <div class="panel-head">
+              <h2>New Task</h2>
+              <span>create</span>
+            </div>
+            <form method="post" action="/tasks">
+              <label>Goal
+                <textarea name="goal" rows="3" required></textarea>
+              </label>
+              <label>Acceptance
+                <textarea name="acceptance" rows="4"></textarea>
+              </label>
+              <label class="checkline">
+                <input type="checkbox" name="battle" checked>
+                <span>Run battle now</span>
+              </label>
+              <button type="submit">Create task</button>
+            </form>
+          </article>
+          <article class="panel">
+            <div class="panel-head">
+              <h2>Inbox</h2>
+              <span>{len(inbox)} pending</span>
+            </div>
+            {_inbox_list(tasks, inbox)}
+          </article>
         </section>
         <section class="panel">
           <div class="panel-head">
@@ -325,6 +386,9 @@ def _decision_panel(task: TaskSnapshot) -> str:
         <article class="panel">
           <div class="panel-head"><h2>Decision</h2><span>not required</span></div>
           <p class="muted">This task is not waiting for human input.</p>
+          <form method="post" action="/tasks/{escape(task.id)}/battle">
+            <button type="submit">Run battle</button>
+          </form>
         </article>
         """
     return f"""
@@ -365,6 +429,16 @@ def _failure_panel(task: TaskSnapshot) -> str:
       <ol class="failure-list">{rows}</ol>
     </section>
     """
+
+
+def _inbox_list(tasks: list[TaskSnapshot], inbox: set[str]) -> str:
+    pending = [task for task in tasks if task.id in inbox]
+    if not pending:
+        return '<p class="muted">Inbox empty</p>'
+    rows = "\n".join(
+        f'<li><a href="/tasks/{escape(task.id)}">{escape(task.goal)}</a></li>' for task in pending
+    )
+    return f'<ul class="inbox-list">{rows}</ul>'
 
 
 def escape(value: Any) -> str:
@@ -510,11 +584,21 @@ dd {
   display: block;
   margin-bottom: 8px;
 }
-.timeline {
 .failure-list {
   list-style: none;
   padding: 0;
   margin: 0;
+}
+.inbox-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+.inbox-list li {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
 }
 .failure-list li {
   border-top: 1px solid var(--line);
@@ -557,6 +641,15 @@ label {
   gap: 6px;
   color: var(--muted);
   font-size: 13px;
+}
+label.checkline {
+  display: flex;
+  align-items: center;
+  color: var(--ink);
+}
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
 }
 select, textarea {
   width: 100%;
