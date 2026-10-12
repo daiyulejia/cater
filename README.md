@@ -58,27 +58,27 @@ On Windows, if `python` points to the Microsoft Store placeholder, use:
 ## Commands
 
 ```bash
-python -m cater.cli new "Fix the CLI typo" --assign-to dev --run
-python -m cater.cli run <task_id>
-python -m cater.cli battle <task_id>
-python -m cater.cli dispatch <task_id>
-python -m cater.cli assign <task_id> dev --objective "Implement the smallest useful path"
-python -m cater.cli show [task_id]
-python -m cater.cli events [task_id]
-python -m cater.cli export [task_id] --format json
-python -m cater.cli export [task_id] --format jsonl
-python -m cater.cli review [task_id] --record
-python -m cater.cli inbox
-python -m cater.cli profiles
-python -m cater.cli policy
-python -m cater.cli decide <task_id> --resolution done --reason "Accepted"
-python -m cater.cli chain
-python -m cater.cli drivers
-python -m cater.cli --drivers drivers.json probe-driver product
-python -m cater.cli --driver-attempts 3 --circuit-breaker-threshold 4 run <task_id>
-python -m cater.cli web --host 127.0.0.1 --port 8765
-python -m cater.cli --audit-key "dev-secret" demo
-python -m cater.cli --audit-key "dev-secret" chain
+cater new "Fix the CLI typo" --assign-to dev --run
+cater run <task_id>
+cater battle <task_id>
+cater dispatch <task_id>
+cater assign <task_id> dev --objective "Implement the smallest useful path"
+cater show [task_id]
+cater events [task_id]
+cater export [task_id] --format json
+cater export [task_id] --format jsonl
+cater review [task_id] --record
+cater inbox
+cater profiles
+cater policy
+cater decide <task_id> --resolution done --reason "Accepted"
+cater chain
+cater drivers
+cater --drivers drivers.json probe-driver product
+cater --driver-attempts 3 --circuit-breaker-threshold 4 run <task_id>
+cater web --host 127.0.0.1 --port 8765
+cater --audit-key "dev-secret" demo
+cater --audit-key "dev-secret" chain
 ```
 
 `run` is the normal collaboration loop. It records agent contributions and only activates governance when there is a challenge, option split, low confidence, or another risk signal. `battle` forces a governance round when you intentionally want cabinet review.
@@ -177,8 +177,8 @@ Governance triggers decide when normal collaboration should involve the cabinet.
 The event log always has a hash chain. If you provide an audit key, new events also receive an HMAC signature:
 
 ```bash
-python -m cater.cli --audit-key "dev-secret" demo
-python -m cater.cli --audit-key "dev-secret" chain
+cater --audit-key "dev-secret" demo
+cater --audit-key "dev-secret" chain
 ```
 
 You can also use `--audit-key-file` or the `CATER_AUDIT_KEY` environment variable.
@@ -188,8 +188,8 @@ Use `cater export` to produce a machine-readable replay bundle, or `cater export
 ## Self Review
 
 ```bash
-python -m cater.cli review
-python -m cater.cli review <task_id> --record
+cater review
+cater review <task_id> --record
 ```
 
 `review` inspects the work from product, design, testing, UI, logic, reliability, and adoption angles. Without `--record` it is a pure projection; with `--record` it appends a `review.generated` event so the critique itself becomes replayable.

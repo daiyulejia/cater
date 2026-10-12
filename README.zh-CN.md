@@ -58,27 +58,27 @@ python scripts/check.py
 ## 命令
 
 ```bash
-python -m cater.cli new "Fix the CLI typo" --assign-to dev --run
-python -m cater.cli run <task_id>
-python -m cater.cli battle <task_id>
-python -m cater.cli dispatch <task_id>
-python -m cater.cli assign <task_id> dev --objective "Implement the smallest useful path"
-python -m cater.cli show [task_id]
-python -m cater.cli events [task_id]
-python -m cater.cli export [task_id] --format json
-python -m cater.cli export [task_id] --format jsonl
-python -m cater.cli review [task_id] --record
-python -m cater.cli inbox
-python -m cater.cli profiles
-python -m cater.cli policy
-python -m cater.cli decide <task_id> --resolution done --reason "Accepted"
-python -m cater.cli chain
-python -m cater.cli drivers
-python -m cater.cli --drivers drivers.json probe-driver product
-python -m cater.cli --driver-attempts 3 --circuit-breaker-threshold 4 run <task_id>
-python -m cater.cli web --host 127.0.0.1 --port 8765
-python -m cater.cli --audit-key "dev-secret" demo
-python -m cater.cli --audit-key "dev-secret" chain
+cater new "Fix the CLI typo" --assign-to dev --run
+cater run <task_id>
+cater battle <task_id>
+cater dispatch <task_id>
+cater assign <task_id> dev --objective "Implement the smallest useful path"
+cater show [task_id]
+cater events [task_id]
+cater export [task_id] --format json
+cater export [task_id] --format jsonl
+cater review [task_id] --record
+cater inbox
+cater profiles
+cater policy
+cater decide <task_id> --resolution done --reason "Accepted"
+cater chain
+cater drivers
+cater --drivers drivers.json probe-driver product
+cater --driver-attempts 3 --circuit-breaker-threshold 4 run <task_id>
+cater web --host 127.0.0.1 --port 8765
+cater --audit-key "dev-secret" demo
+cater --audit-key "dev-secret" chain
 ```
 
 `run` 是常规协作循环：记录 agent 的产出，并且只有在出现 challenge、方案分裂、低置信度或其他风险信号时才启动治理层。`battle` 是强制治理轮次，用于你明确希望内阁审查的时候。
@@ -177,8 +177,8 @@ Skills 和 MCP 也应该放在这条边界后面：用 driver 进程包住它们
 事件流始终有哈希链。如果提供 audit key，新事件还会带上 HMAC 签名：
 
 ```bash
-python -m cater.cli --audit-key "dev-secret" demo
-python -m cater.cli --audit-key "dev-secret" chain
+cater --audit-key "dev-secret" demo
+cater --audit-key "dev-secret" chain
 ```
 
 也可以使用 `--audit-key-file` 或 `CATER_AUDIT_KEY` 环境变量。
@@ -188,8 +188,8 @@ python -m cater.cli --audit-key "dev-secret" chain
 ## 自省复盘
 
 ```bash
-python -m cater.cli review
-python -m cater.cli review <task_id> --record
+cater review
+cater review <task_id> --record
 ```
 
 `review` 会从产品、设计、测试、UI、逻辑、可靠性和采用门槛等角度审视当前工作。不带 `--record` 时它只是纯投影；带 `--record` 时会追加 `review.generated` 事件，让批判和修正建议本身也可回放。
