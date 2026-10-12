@@ -276,8 +276,7 @@ def render_task(task: TaskSnapshot, events: list[Event]) -> str:
     message_cards = "\n".join(_message_card(item) for item in task.messages)
     timeline = "\n".join(_event_row(event) for event in events)
     ladder = "\n".join(_ladder_step(step) for step in decision_ladder(events))
-    cabinet = task.cabinet or {}
-    options = "\n".join(_option_card(item) for item in cabinet.get("options", []))
+    governance = _governance_panel(task)
     decision = _decision_panel(task)
     command = _command_panel(task)
     failures = _failure_panel(task)
@@ -292,16 +291,7 @@ def render_task(task: TaskSnapshot, events: list[Event]) -> str:
           <span class="status">{escape(task.status)}</span>
         </section>
         <section class="grid">
-          <article class="panel">
-            <div class="panel-head"><h2>Cabinet</h2><span>{escape(cabinet.get("status", "pending"))}</span></div>
-            <dl class="metrics">
-              <div><dt>threshold</dt><dd>{escape(cabinet.get("approval_threshold", "-"))}</dd></div>
-              <div><dt>recommendation</dt><dd>{escape(cabinet.get("recommendation", "none"))}</dd></div>
-              <div><dt>votes</dt><dd>{escape(len(cabinet.get("votes", [])))}</dd></div>
-            </dl>
-            <p class="muted">{escape(cabinet.get("reason", ""))}</p>
-            <div class="options">{options}</div>
-          </article>
+          {governance}
           {decision}
         </section>
         <section class="panel">
@@ -400,12 +390,14 @@ def event_to_dict(event: Event) -> dict[str, Any]:
 
 def _task_row(task: TaskSnapshot, needs_decision: bool) -> str:
     cabinet = task.cabinet or {}
+    governance = (task.brief or {}).get("governance", {}) if isinstance(task.brief, dict) else {}
+    governance_status = cabinet.get("status") or governance.get("status", "-")
     decision = "input needed" if needs_decision else (task.decision or {}).get("resolution", "-")
     return f"""
     <tr>
       <td><a href="/tasks/{escape(task.id)}">{escape(task.goal)}</a><small>{escape(task.id)}</small></td>
       <td><span class="pill">{escape(task.status)}</span></td>
-      <td>{escape(cabinet.get("status", "-"))}</td>
+      <td>{escape(governance_status)}</td>
       <td>{len(task.messages)}</td>
       <td>{escape(decision)}</td>
     </tr>
@@ -419,6 +411,37 @@ def _message_card(item: dict[str, Any]) -> str:
       <header><strong>{escape(item.get("actor", "agent"))}</strong><span>{escape(item.get("stance", ""))}</span></header>
       <p>{escape(item.get("claim", ""))}</p>
       <small>{escape(evidence)}</small>
+    </article>
+    """
+
+
+def _governance_panel(task: TaskSnapshot) -> str:
+    if task.cabinet:
+        cabinet = task.cabinet
+        options = "\n".join(_option_card(item) for item in cabinet.get("options", []))
+        return f"""
+        <article class="panel">
+          <div class="panel-head"><h2>Cabinet</h2><span>{escape(cabinet.get("status", "pending"))}</span></div>
+          <dl class="metrics">
+            <div><dt>threshold</dt><dd>{escape(cabinet.get("approval_threshold", "-"))}</dd></div>
+            <div><dt>recommendation</dt><dd>{escape(cabinet.get("recommendation", "none"))}</dd></div>
+            <div><dt>votes</dt><dd>{escape(len(cabinet.get("votes", [])))}</dd></div>
+          </dl>
+          <p class="muted">{escape(cabinet.get("reason", ""))}</p>
+          <div class="options">{options}</div>
+        </article>
+        """
+
+    brief = task.brief or {}
+    governance = brief.get("governance", {}) if isinstance(brief, dict) else {}
+    options = "\n".join(_option_card(item) for item in brief.get("options", [])) if isinstance(brief, dict) else ""
+    status = governance.get("status") or "pending"
+    reason = governance.get("reason") or "No governance record yet."
+    return f"""
+    <article class="panel">
+      <div class="panel-head"><h2>Governance</h2><span>{escape(status)}</span></div>
+      <p class="muted">{escape(reason)}</p>
+      <div class="options">{options}</div>
     </article>
     """
 

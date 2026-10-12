@@ -166,12 +166,18 @@ class RuntimeTests(unittest.TestCase):
                 task_id = rt.create_task("Collaborate without governance")
                 result = rt.collaborate(task_id)
                 task = rt.task(task_id)
-                event_types = [event.type for event in rt.log.read(task_id=task_id)]
+                events = rt.log.read(task_id=task_id)
+                event_types = [event.type for event in events]
+                ladder = decision_ladder(events)
+                html = render_task(task, events)
 
                 self.assertEqual(task.status, "running")
                 self.assertIsNone(task.cabinet)
                 self.assertNotIn("cabinet.voted", event_types)
                 self.assertEqual(result["brief"]["governance"]["status"], "not_needed")
+                self.assertEqual(ladder[1]["status"], "skipped")
+                self.assertIn("Governance", html)
+                self.assertIn("not_needed", html)
 
                 rt.battle(task_id)
                 task = rt.task(task_id)

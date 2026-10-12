@@ -27,6 +27,12 @@ def decision_ladder(events: list[Event]) -> list[dict[str, Any]]:
             tally = event.payload.get("tally", {})
             steps[1]["status"] = str(tally.get("status", "done"))
             steps[1]["detail"] = str(tally.get("reason", "cabinet vote recorded"))
+        elif event.type == "brief.generated":
+            brief = event.payload.get("brief", {})
+            governance = brief.get("governance", {}) if isinstance(brief, dict) else {}
+            if governance.get("status") == "not_needed":
+                steps[1]["status"] = "skipped"
+                steps[1]["detail"] = str(governance.get("reason", "governance not needed"))
         elif event.type == "supreme.decided":
             steps[2]["status"] = "done"
             steps[2]["detail"] = str(event.payload.get("reason", "supreme fallback decided"))
