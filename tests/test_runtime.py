@@ -186,6 +186,42 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("alpha/assert: memory claim 1", driver.prompts[2])
         self.assertIn("beta/assert: memory claim 2", driver.prompts[2])
 
+    def test_dispatch_records_pyramid_task_distribution(self):
+        driver = PromptCaptureDriver()
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "cabinet": {"approval_threshold": 1, "quorum": 1, "veto_roles": []},
+                  "roles": [
+                    {"id":"product","name":"Product","role":"product","driver":"memory"},
+                    {"id":"dev","name":"Developer","role":"developer","driver":"memory"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"memory": driver}) as rt:
+                task_id = rt.create_task("Build pyramid dispatch", ["plan is visible"])
+                result = rt.dispatch(task_id)
+                task = rt.task(task_id)
+                event_types = [event.type for event in rt.log.read(task_id=task_id)]
+
+                self.assertIn("mission.created", event_types)
+                self.assertIn("task.decomposed", event_types)
+                self.assertIn("subtask.assigned", event_types)
+                self.assertIn("plan.proposed", event_types)
+                self.assertEqual(result["plan"]["flow"], ["orchestrator", "cabinet", "workers", "review"])
+                self.assertEqual(len(task.assignments), 2)
+                self.assertEqual(task.assignments[0]["owner"], "product")
+                self.assertEqual(task.assignments[1]["lane"], "implementation")
+
+                rt.collaborate(task_id)
+
+        self.assertIn("assigned_work=product:", driver.prompts[0])
+        self.assertIn("dev:", driver.prompts[0])
+
     def test_collaboration_round_skips_governance_without_disagreement(self):
         driver = PromptCaptureDriver()
         with tempfile.TemporaryDirectory() as tmp:
@@ -521,6 +557,15 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("round complete", out)
 
+        code, out = self.run_cli("dispatch", task_id)
+        self.assertEqual(code, 0)
+        self.assertIn("mission dispatched", out)
+        self.assertIn('"subtasks"', out)
+
+        code, out = self.run_cli("show", task_id)
+        self.assertEqual(code, 0)
+        self.assertIn("assignments=3", out)
+
         code, out = self.run_cli(
             "command",
             task_id,
@@ -672,6 +717,22 @@ class WebTests(unittest.TestCase):
             self.assertIn("cabinet.voted", data)
             self.assertIn('"decision_ladder"', data)
             self.assertIn('"review"', data)
+
+            dispatch_request = Request(
+                f"{base}/tasks/{task_id}/dispatch",
+                data=b"",
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            with urlopen(dispatch_request, timeout=5) as response:
+                page = response.read().decode("utf-8")
+            self.assertIn("Task Distribution", page)
+            self.assertIn("assigned", page)
+
+            with urlopen(f"{base}/api/tasks/{task_id}", timeout=5) as response:
+                data = response.read().decode("utf-8")
+            self.assertIn('"assignments"', data)
+            self.assertIn('"mission"', data)
 
             body = urlencode({"resolution": "done", "reason": "Looks good"}).encode("utf-8")
             request = Request(

@@ -130,6 +130,14 @@ def make_handler(
                     rt.battle(task_id)
                 self._redirect(f"/tasks/{task_id}")
                 return
+            if path.startswith("/tasks/") and path.endswith("/dispatch"):
+                task_id = path.split("/")[2]
+                with self._runtime() as rt:
+                    if rt.task(task_id) is None:
+                        return self._not_found()
+                    rt.dispatch(task_id)
+                self._redirect(f"/tasks/{task_id}")
+                return
             if path.startswith("/tasks/") and path.endswith("/command"):
                 task_id = path.split("/")[2]
                 data = self._read_form()
@@ -306,6 +314,7 @@ def render_task(task: TaskSnapshot, events: list[Event], review: dict[str, Any] 
     ladder = "\n".join(_ladder_step(step) for step in decision_ladder(events))
     governance = _governance_panel(task)
     decision = _decision_panel(task)
+    distribution = _distribution_panel(task)
     command = _command_panel(task)
     failures = _failure_panel(task)
     review = review or build_review(
@@ -329,6 +338,7 @@ def render_task(task: TaskSnapshot, events: list[Event], review: dict[str, Any] 
           {governance}
           {decision}
         </section>
+        {distribution}
         <section class="panel">
           <div class="panel-head"><h2>Decision Ladder</h2><span>autonomy path</span></div>
           <ol class="ladder">{ladder}</ol>
@@ -378,6 +388,9 @@ def task_to_dict(task: TaskSnapshot) -> dict[str, Any]:
         "decision": task.decision,
         "commands": task.commands,
         "reviews": task.reviews,
+        "mission": task.mission,
+        "plan": task.plan,
+        "assignments": task.assignments,
         "tokens": task.tokens,
     }
 
@@ -581,7 +594,14 @@ def _option_card(item: dict[str, Any]) -> str:
 
 
 def _event_row(event: Event) -> str:
-    text = event.payload.get("claim") or event.payload.get("reason") or event.payload.get("goal") or ""
+    text = (
+        event.payload.get("claim")
+        or event.payload.get("reason")
+        or event.payload.get("objective")
+        or event.payload.get("goal")
+        or event.payload.get("strategy")
+        or ""
+    )
     return f"""
     <li>
       <span>#{event.seq}</span>
@@ -599,6 +619,40 @@ def _ladder_step(step: dict[str, Any]) -> str:
       <span>{escape(step.get("status"))}</span>
       <p>{escape(step.get("detail"))}</p>
     </li>
+    """
+
+
+def _distribution_panel(task: TaskSnapshot) -> str:
+    if not task.assignments:
+        return f"""
+        <section class="panel">
+          <div class="panel-head"><h2>Task Distribution</h2><span>not dispatched</span></div>
+          <p class="muted">The pyramid is ready to turn the mission into cabinet-owned execution lanes.</p>
+          <form method="post" action="/tasks/{escape(task.id)}/dispatch">
+            <button type="submit">Dispatch mission</button>
+          </form>
+        </section>
+        """
+    rows = "\n".join(
+        f"""
+        <li>
+          <strong>{escape(item.get("owner"))}</strong>
+          <span>{escape(item.get("lane"))}</span>
+          <p>{escape(item.get("objective"))}</p>
+          <small>{escape(item.get("acceptance"))}</small>
+        </li>
+        """
+        for item in task.assignments
+    )
+    plan_reason = ""
+    if task.plan:
+        plan_reason = f'<p class="muted">{escape(task.plan.get("reason", ""))}</p>'
+    return f"""
+    <section class="panel">
+      <div class="panel-head"><h2>Task Distribution</h2><span>{len(task.assignments)} assigned</span></div>
+      {plan_reason}
+      <ol class="assignment-list">{rows}</ol>
+    </section>
     """
 
 
@@ -624,6 +678,9 @@ def _decision_panel(task: TaskSnapshot) -> str:
           <div class="panel-head"><h2>Agent Decision</h2><span>{escape(task.status)}</span></div>
           <p class="muted">Agents are expected to continue autonomously unless you send a command.</p>
           <div class="button-row">
+            <form method="post" action="/tasks/{escape(task.id)}/dispatch">
+              <button class="secondary" type="submit">Dispatch mission</button>
+            </form>
             <form method="post" action="/tasks/{escape(task.id)}/run">
               <button type="submit">Run next round</button>
             </form>
@@ -856,7 +913,7 @@ td small {
   color: var(--muted);
   font-size: 13px;
 }
-.review-list {
+.review-list, .assignment-list {
   list-style: none;
   padding: 0;
   margin: 14px 0 0;
@@ -864,21 +921,26 @@ td small {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
-.review-list li {
+.review-list li, .assignment-list li {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px;
   background: #fbfcfd;
 }
-.review-list strong, .review-list span {
+.review-list strong, .review-list span, .assignment-list strong, .assignment-list span {
   display: block;
 }
-.review-list span {
+.review-list span, .assignment-list span {
   color: var(--accent);
   font-size: 13px;
   margin-top: 4px;
 }
-.review-list p {
+.review-list p, .assignment-list p {
+  margin-top: 8px;
+}
+.assignment-list small {
+  color: var(--muted);
+  display: block;
   margin-top: 8px;
 }
 dt {
@@ -1060,6 +1122,6 @@ button.secondary {
   .timeline em, .timeline p { grid-column: 2; }
   .ladder { grid-template-columns: 1fr; }
   .policy-grid { grid-template-columns: 1fr; }
-  .review-list { grid-template-columns: 1fr; }
+  .review-list, .assignment-list { grid-template-columns: 1fr; }
 }
 """

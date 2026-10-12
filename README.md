@@ -30,6 +30,7 @@ python -m cater.cli drivers
 python -m cater.cli show
 python -m cater.cli inbox
 python -m cater.cli policy
+python -m cater.cli dispatch <task_id>
 python -m cater.cli run <task_id>
 python -m cater.cli export <task_id>
 python -m cater.cli review <task_id>
@@ -58,6 +59,7 @@ On Windows, if `python` points to the Microsoft Store placeholder, use:
 python -m cater.cli new "Build the first demo" --accept "three roles respond" --run
 python -m cater.cli run <task_id>
 python -m cater.cli battle <task_id>
+python -m cater.cli dispatch <task_id>
 python -m cater.cli show [task_id]
 python -m cater.cli events [task_id]
 python -m cater.cli export [task_id] --format json
@@ -78,6 +80,8 @@ python -m cater.cli --audit-key "dev-secret" chain
 
 `run` is the normal collaboration loop. It records agent contributions and only activates governance when there is a challenge, option split, low confidence, or another risk signal. `battle` forces a governance round when you intentionally want cabinet review.
 
+`dispatch` records the pyramid-style task distribution path: the top layer frames the mission, the cabinet decomposes it into execution lanes, and worker agents receive assigned work before the next collaboration round.
+
 `--driver-attempts` and `--circuit-breaker-threshold` tune retry containment without changing driver code.
 
 ## Current Scope
@@ -86,6 +90,7 @@ Implemented now:
 
 - SQLite append-only event store with hash-chain verification
 - task creation, collaboration rounds, risk-triggered governance, targeted battle, cabinet vote, supreme fallback, and rare human command/override
+- pyramid-style task distribution with mission framing, cabinet decomposition, role assignments, and replayable plans
 - deterministic scripted drivers for repeatable demos and tests
 - configurable roles and drivers from JSON
 - long-lived NDJSON CLI drivers with probe and crash recovery
@@ -188,13 +193,14 @@ python -m cater.cli review <task_id> --record
 
 Next iterations:
 
-1. Product entry: make `cater demo`, `cater new`, `cater run`, `cater command`, and `cater drivers` feel like a coherent first-run workflow.
-2. Collaboration modes: separate normal production exchange from explicit disagreement rounds in CLI/Web.
-3. Web replay: add live refresh and filters.
-4. Memory governance: keep near-term context explainable, bounded, and event-derived; leave deeper learning systems as a future research layer.
-5. Reliability: expose recovery controls in CLI/Web and make failure policies easier to inspect.
-6. Audit: add key rotation metadata, unsigned-history policy, and exportable audit reports.
-7. Distribution: add examples for wrapping popular third-party CLIs while keeping the core dependency-free.
+1. Product entry: make `cater demo`, `cater new`, `cater dispatch`, `cater run`, `cater command`, and `cater drivers` feel like a coherent first-run workflow.
+2. Distribution engine: make cabinet decomposition richer while keeping plans event-derived and inspectable.
+3. Collaboration modes: separate normal production exchange from explicit disagreement rounds in CLI/Web.
+4. Web replay: add live refresh and filters.
+5. Memory governance: keep near-term context explainable, bounded, and event-derived; leave deeper learning systems as a future research layer.
+6. Reliability: expose recovery controls in CLI/Web and make failure policies easier to inspect.
+7. Audit: add key rotation metadata, unsigned-history policy, and exportable audit reports.
+8. Distribution: add examples for wrapping popular third-party CLIs while keeping the core dependency-free.
 
 ## Contributing
 
@@ -217,4 +223,5 @@ Cater should grow through small usable loops. Each iteration should be reviewed 
 2. Events first. State is a view over append-only history.
 3. Drivers are replaceable. Models, CLIs, and APIs are not hardwired.
 4. Collaboration first. Disagreement is normal, but it should be surfaced when it improves the task rather than performed by default.
-5. Humans command and override. Humans can redirect the organization at any time, but are not the default decision engine.
+5. Distribution first. The pyramid is a task-distribution mechanism before it is a dispute-escalation mechanism.
+6. Humans command and override. Humans can redirect the organization at any time, but are not the default decision engine.

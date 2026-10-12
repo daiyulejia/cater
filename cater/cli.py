@@ -66,6 +66,14 @@ def cmd_battle(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_dispatch(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        result = rt.dispatch(args.task_id)
+        print(f"mission dispatched for {args.task_id}")
+        print(json.dumps(result["plan"], ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_show(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         if args.task_id:
@@ -75,6 +83,8 @@ def cmd_show(args: argparse.Namespace) -> int:
                 return 1
             print(f"{task.id} [{task.status}] {task.goal}")
             print(f"messages={len(task.messages)} tokens={task.tokens}")
+            if task.assignments:
+                print(f"assignments={len(task.assignments)}")
             if task.driver_failures:
                 print(f"driver_failures={len(task.driver_failures)}")
             if task.cabinet:
@@ -292,6 +302,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_battle = sub.add_parser("battle", help="force one governance round")
     p_battle.add_argument("task_id")
     p_battle.set_defaults(func=cmd_battle)
+
+    p_dispatch = sub.add_parser("dispatch", help="turn a task into assigned execution lanes")
+    p_dispatch.add_argument("task_id")
+    p_dispatch.set_defaults(func=cmd_dispatch)
 
     p_show = sub.add_parser("show", help="show tasks")
     p_show.add_argument("task_id", nargs="?")

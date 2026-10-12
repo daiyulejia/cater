@@ -117,6 +117,60 @@ class Runtime:
     def battle(self, task_id: str) -> dict[str, Any]:
         return self._run_round(task_id, force_governance=True)
 
+    def dispatch(self, task_id: str) -> dict[str, Any]:
+        task = self.task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+
+        mission = {
+            "goal": task.goal,
+            "acceptance": list(task.acceptance),
+            "source": "orchestrator",
+            "intent": "Turn the human command into executable organizational work.",
+        }
+        self.log.emit(
+            actor=Actor.system("orchestrator"),
+            type="mission.created",
+            task_id=task_id,
+            payload=mission,
+        )
+
+        subtasks = self._decompose_task(task)
+        decomposition = {
+            "source": "cabinet",
+            "strategy": "cabinet divides mission into role-owned execution lanes",
+            "subtasks": subtasks,
+        }
+        self.log.emit(
+            actor=Actor.system("cabinet"),
+            type="task.decomposed",
+            task_id=task_id,
+            payload=decomposition,
+        )
+        for subtask in subtasks:
+            self.log.emit(
+                actor=Actor.system("cabinet"),
+                type="subtask.assigned",
+                task_id=task_id,
+                payload=subtask,
+            )
+
+        plan = {
+            "source": "cabinet",
+            "mission": mission,
+            "subtasks": subtasks,
+            "flow": ["orchestrator", "cabinet", "workers", "review"],
+            "next_action": "run",
+            "reason": "Top layer framed the mission; cabinet assigned executable work to the worker layer.",
+        }
+        self.log.emit(
+            actor=Actor.system("cabinet"),
+            type="plan.proposed",
+            task_id=task_id,
+            payload=plan,
+        )
+        return {"task_id": task_id, "mission": mission, "plan": plan}
+
     def _run_round(self, task_id: str, *, force_governance: bool) -> dict[str, Any]:
         task = self.task(task_id)
         if task is None:
@@ -450,6 +504,15 @@ class Runtime:
     @staticmethod
     def _task_memory(task: TaskSnapshot) -> str:
         parts = []
+        if task.assignments:
+            assignments = []
+            for item in task.assignments[-6:]:
+                owner = str(item.get("owner") or "")
+                objective = str(item.get("objective") or "")
+                if owner and objective:
+                    assignments.append(f"{owner}: {objective[:160]}")
+            if assignments:
+                parts.append("assigned_work=" + " | ".join(assignments))
         if task.commands:
             commands = []
             for item in task.commands[-3:]:
@@ -475,6 +538,39 @@ class Runtime:
         if not parts:
             return "Task memory: no prior collaboration on this task."
         return "Task memory: " + "; ".join(parts) + "."
+
+    def _decompose_task(self, task: TaskSnapshot) -> list[dict[str, Any]]:
+        criteria = list(task.acceptance) or ["produce a useful, verifiable next increment"]
+        subtasks = []
+        for index, role in enumerate(self.roles):
+            criterion = criteria[index % len(criteria)]
+            lane = self._role_lane(role.role)
+            subtasks.append(
+                {
+                    "id": f"{task.id}:{role.id}:{index + 1}",
+                    "owner": role.id,
+                    "role": role.role,
+                    "lane": lane,
+                    "objective": f"{role.name} owns the {lane} lane for: {task.goal}",
+                    "acceptance": criterion,
+                    "depends_on": [] if index == 0 else [f"{task.id}:{self.roles[index - 1].id}:{index}"],
+                    "status": "assigned",
+                }
+            )
+        return subtasks
+
+    @staticmethod
+    def _role_lane(role: str) -> str:
+        normalized = role.lower()
+        if "product" in normalized:
+            return "scope and user value"
+        if "dev" in normalized or "engineer" in normalized:
+            return "implementation"
+        if "test" in normalized or "qa" in normalized:
+            return "verification and risk"
+        if "design" in normalized or "ui" in normalized:
+            return "interaction design"
+        return "execution"
 
     @staticmethod
     def _round_memory(utterances: list[dict[str, Any]]) -> str:

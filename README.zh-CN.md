@@ -30,6 +30,7 @@ python -m cater.cli drivers
 python -m cater.cli show
 python -m cater.cli inbox
 python -m cater.cli policy
+python -m cater.cli dispatch <task_id>
 python -m cater.cli run <task_id>
 python -m cater.cli export <task_id>
 python -m cater.cli review <task_id>
@@ -58,6 +59,7 @@ python scripts/check.py
 python -m cater.cli new "Build the first demo" --accept "three roles respond" --run
 python -m cater.cli run <task_id>
 python -m cater.cli battle <task_id>
+python -m cater.cli dispatch <task_id>
 python -m cater.cli show [task_id]
 python -m cater.cli events [task_id]
 python -m cater.cli export [task_id] --format json
@@ -78,6 +80,8 @@ python -m cater.cli --audit-key "dev-secret" chain
 
 `run` 是常规协作循环：记录 agent 的产出，并且只有在出现 challenge、方案分裂、低置信度或其他风险信号时才启动治理层。`battle` 是强制治理轮次，用于你明确希望内阁审查的时候。
 
+`dispatch` 会记录金字塔式任务分发路径：顶层定义 mission，内阁把 mission 拆成执行 lane，worker agent 在下一轮协作前拿到明确分工。
+
 `--driver-attempts` 和 `--circuit-breaker-threshold` 可以调节 driver 重试与熔断策略，不需要改 driver 代码。
 
 ## 当前范围
@@ -86,6 +90,7 @@ python -m cater.cli --audit-key "dev-secret" chain
 
 - SQLite 只追加事件流 + 哈希链校验
 - 任务创建、协作轮次、风险触发治理、必要时 battle、内阁投票、最高者兜底、极少数人类命令/覆盖
+- 金字塔式任务分发，包含 mission 定义、内阁拆解、角色分工和可回放 plan
 - 确定性 scripted driver，便于演示和测试
 - JSON 配置角色与 driver
 - 长驻 NDJSON CLI driver，支持存活探针与崩溃自愈
@@ -188,13 +193,14 @@ python -m cater.cli review <task_id> --record
 
 下一轮迭代：
 
-1. 产品入口：让 `cater demo`、`cater new`、`cater run`、`cater command`、`cater drivers` 形成连贯的新手首次体验。
-2. 协作模式：在 CLI/Web 区分常规产出交流和显性分歧轮次。
-3. Web 回放：加入实时刷新和过滤器。
-4. 记忆治理：近期保持上下文可解释、有边界、来自事件投影；更深的学习系统留作未来研究层。
-5. 可靠性：在 CLI/Web 暴露恢复控制，并让失败策略更容易检查。
-6. 审计：加入 key rotation 元数据、未签名历史策略和可导出的审计报告。
-7. 分发：补充主流第三方 CLI wrapper 示例，同时保持核心零依赖。
+1. 产品入口：让 `cater demo`、`cater new`、`cater dispatch`、`cater run`、`cater command`、`cater drivers` 形成连贯的新手首次体验。
+2. 分发引擎：让内阁拆解更丰富，同时保持 plan 来自事件、可解释、可检查。
+3. 协作模式：在 CLI/Web 区分常规产出交流和显性分歧轮次。
+4. Web 回放：加入实时刷新和过滤器。
+5. 记忆治理：近期保持上下文可解释、有边界、来自事件投影；更深的学习系统留作未来研究层。
+6. 可靠性：在 CLI/Web 暴露恢复控制，并让失败策略更容易检查。
+7. 审计：加入 key rotation 元数据、未签名历史策略和可导出的审计报告。
+8. 分发：补充主流第三方 CLI wrapper 示例，同时保持核心零依赖。
 
 ## 参与贡献
 
@@ -217,4 +223,5 @@ Cater 应该通过一个个可用小闭环生长。每次迭代都要从多个�
 2. 事件优先：状态只是只追加历史的一个视图。
 3. Driver 可替换：模型、CLI、API 不能焊死在骨架里。
 4. 协作优先：分歧是常态，但只在能改善任务时显性化，而不是默认表演争论。
-5. 人类发命令和覆盖：人类可以随时重定向组织，但不是默认决策引擎。
+5. 分发优先：金字塔首先是任务分发机制，其次才是争议升级机制。
+6. 人类发命令和覆盖：人类可以随时重定向组织，但不是默认决策引擎。
