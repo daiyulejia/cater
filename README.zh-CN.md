@@ -30,6 +30,7 @@ cater drivers
 cater show
 cater inbox
 cater policy
+cater doctor
 cater dispatch <task_id>
 cater run <task_id>
 cater export <task_id>
@@ -71,6 +72,7 @@ cater review [task_id] --record
 cater inbox
 cater profiles
 cater policy
+cater doctor
 cater decide <task_id> --resolution done --reason "Accepted"
 cater chain
 cater drivers

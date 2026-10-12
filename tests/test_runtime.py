@@ -725,6 +725,13 @@ class CliTests(unittest.TestCase):
         self.assertIn("driver_attempts=3", custom_out)
         self.assertIn("circuit_breaker_threshold=4", custom_out)
 
+    def test_cli_doctor(self):
+        code, out = self.run_cli("doctor")
+        self.assertEqual(code, 0)
+        self.assertIn("cater=0.1.0", out)
+        self.assertIn("chain=hash chain ok", out)
+        self.assertIn("role product: driver=product configured", out)
+
     def test_cli_dispatch_command(self):
         code, out = self.run_cli("new", "Dispatch only")
         self.assertEqual(code, 0)

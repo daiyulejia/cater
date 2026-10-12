@@ -258,6 +258,22 @@ def cmd_policy(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        report = rt.verify_chain()
+        print(f"cater={__version__}")
+        print(f"database={Path(args.db or DEFAULT_DB)}")
+        print(f"roles={len(rt.roles)}")
+        print(f"drivers={len(rt.drivers)}")
+        print(f"chain={report.describe()}")
+        print(f"driver_attempts={rt.driver_attempts}")
+        print(f"circuit_breaker_threshold={rt.circuit_breaker_threshold}")
+        for role in rt.roles:
+            status = "configured" if role.driver in rt.drivers else "missing"
+            print(f"role {role.id}: driver={role.driver} {status}")
+        return 0 if report.ok else 1
+
+
 def cmd_probe_driver(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         driver = rt.drivers[args.name]
@@ -395,6 +411,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("chain", help="verify event hash chain").set_defaults(func=cmd_chain)
     sub.add_parser("drivers", help="show roles and configured drivers").set_defaults(func=cmd_drivers)
     sub.add_parser("policy", help="show organization governance policy").set_defaults(func=cmd_policy)
+    sub.add_parser("doctor", help="check runtime wiring and local event chain").set_defaults(func=cmd_doctor)
 
     p_probe = sub.add_parser("probe-driver", help="probe a configured driver")
     p_probe.add_argument("name")
