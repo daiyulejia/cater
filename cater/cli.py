@@ -40,6 +40,9 @@ def resolve_audit_key(args: argparse.Namespace) -> str | None:
 
 def cmd_new(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
+        if args.run and args.battle:
+            print("choose either --run for normal collaboration or --battle for forced governance")
+            return 1
         if args.assign_to and args.assign_to not in {role.id for role in rt.roles}:
             print(_unknown_role_message(args.assign_to, rt))
             return 1

@@ -814,6 +814,11 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("inbox empty", out)
 
+    def test_cli_new_rejects_run_and_battle_together(self):
+        code, out = self.run_cli("new", "Ambiguous mode", "--run", "--battle")
+        self.assertEqual(code, 1)
+        self.assertIn("choose either --run", out)
+
     def test_cli_probe_driver_with_external_config(self):
         driver_script = Path(__file__).resolve().parent / "fixtures" / "ndjson_driver.py"
         config = Path(self.tmp.name) / "drivers.json"
@@ -1185,7 +1190,7 @@ class WebTests(unittest.TestCase):
                     "goal": "Create from web",
                     "acceptance": "battle runs\ninbox updates",
                     "dispatch": "on",
-                    "battle": "on",
+                    "run_now": "on",
                 }
             ).encode("utf-8")
             request = Request(
@@ -1213,6 +1218,8 @@ class WebTests(unittest.TestCase):
             self.assertIn("Reliability", index)
             self.assertIn("Self Review", index)
             self.assertIn("Create from web", index)
+            self.assertIn('name="run_now"', index)
+            self.assertNotIn('name="battle" checked', index)
 
 
 if __name__ == "__main__":

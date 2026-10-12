@@ -117,7 +117,7 @@ def make_handler(
                     assign_owner = data.get("assign_owner", [""])[0].strip()
                     if assign_owner:
                         rt.assign(task_id, assign_owner)
-                    if data.get("battle", [""])[0] == "on":
+                    if data.get("run_now", data.get("battle", [""]))[0] == "on":
                         rt.collaborate(task_id)
                 self._redirect(f"/tasks/{task_id}")
                 return
@@ -293,7 +293,7 @@ def render_index(rt: Runtime) -> str:
                 <span>Dispatch mission first</span>
               </label>
               <label class="checkline">
-                <input type="checkbox" name="battle" checked>
+                <input type="checkbox" name="run_now" checked>
                 <span>Run collaboration round now</span>
               </label>
               <button type="submit">Create task</button>
