@@ -45,6 +45,13 @@ def cmd_show(args: argparse.Namespace) -> int:
                 return 1
             print(f"{task.id} [{task.status}] {task.goal}")
             print(f"messages={len(task.messages)} tokens={task.tokens}")
+            if task.cabinet:
+                print(
+                    "cabinet="
+                    f"{task.cabinet['status']} "
+                    f"threshold={task.cabinet['approval_threshold']} "
+                    f"recommendation={task.cabinet['recommendation']}"
+                )
             if task.brief:
                 print(f"brief: {task.brief['dispute']}")
             return 0

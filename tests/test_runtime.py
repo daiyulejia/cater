@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from cater.cabinet import majority_threshold, tally_votes
 from cater.cli import main
 from cater.drivers import CliDriver
 from cater.runtime import Runtime
@@ -42,6 +43,19 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(first.status, again.status)
             self.assertEqual(len(first.messages), 3)
 
+    def test_battle_records_cabinet_vote_tally(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("Tally me")
+            result = rt.battle(task_id)
+            task = rt.task(task_id)
+            event_types = [event.type for event in rt.log.read(task_id=task_id)]
+
+            self.assertIn("cabinet.voted", event_types)
+            self.assertEqual(task.cabinet["approval_threshold"], 2)
+            self.assertEqual(task.cabinet["status"], "needs_human")
+            self.assertEqual(len(task.cabinet["votes"]), 3)
+            self.assertEqual(result["brief"]["cabinet"], task.cabinet)
+
     def test_runtime_accepts_external_role_and_driver_configs(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -60,6 +74,27 @@ class RuntimeTests(unittest.TestCase):
                 rt.battle(task_id)
                 self.assertEqual(len(rt.task(task_id).messages), 1)
                 self.assertEqual(rt.task(task_id).messages[0]["claim"], "configured")
+
+
+class CabinetTests(unittest.TestCase):
+    def test_majority_threshold(self):
+        self.assertEqual(majority_threshold(0), 1)
+        self.assertEqual(majority_threshold(1), 1)
+        self.assertEqual(majority_threshold(2), 2)
+        self.assertEqual(majority_threshold(3), 2)
+        self.assertEqual(majority_threshold(4), 3)
+
+    def test_tally_votes_recommends_clear_majority(self):
+        tally = tally_votes(
+            [
+                {"actor": "product", "option_id": "A", "stance": "assert", "claim": "ship"},
+                {"actor": "dev", "option_id": "A", "stance": "assert", "claim": "ship"},
+                {"actor": "test", "option_id": "B", "stance": "challenge", "claim": "risk"},
+            ]
+        )
+        self.assertEqual(tally["recommendation"], "A")
+        self.assertEqual(tally["status"], "recommended")
+        self.assertEqual(tally["options"][0]["id"], "A")
 
 
 class DriverTests(unittest.TestCase):
@@ -113,6 +148,10 @@ class CliTests(unittest.TestCase):
         code, out = self.run_cli("new", "Build demo", "--accept", "three roles", "--battle")
         self.assertEqual(code, 0)
         task_id = next(line for line in out.splitlines() if line.startswith("created ")).split()[1]
+
+        code, out = self.run_cli("show", task_id)
+        self.assertEqual(code, 0)
+        self.assertIn("cabinet=needs_human", out)
 
         code, out = self.run_cli("inbox")
         self.assertEqual(code, 0)

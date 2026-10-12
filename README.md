@@ -75,6 +75,7 @@ Implemented now:
 - deterministic scripted drivers for repeatable demos and tests
 - configurable roles and drivers from JSON
 - long-lived NDJSON CLI drivers with probe and crash recovery
+- cabinet vote tally with threshold, recommendation, and open concerns
 - pure fold from events to task snapshots
 - CLI commands for process inspection
 - zero third-party runtime dependencies
@@ -83,6 +84,7 @@ Implemented now:
 - 确定性 scripted driver，便于演示和测试
 - JSON 配置角色与 driver
 - 长驻 NDJSON CLI driver，支持存活探针与崩溃自愈
+- 内阁投票 tally，包含阈值、推荐项与开放疑虑
 - 从事件流纯函数折叠任务快照
 - 面向人的 CLI 过程视图
 - 运行时零第三方依赖
@@ -136,14 +138,14 @@ Next iterations:
 下一轮迭代：
 
 1. Product entry: make `cater demo`, `cater new`, `cater inbox`, and `cater drivers` feel like a coherent first-run workflow.
-2. Cabinet layer: turn agent positions into explicit votes, thresholds, and decision briefs instead of simple disagreement grouping.
-3. Web replay: add a minimal local web view for task summary, event timeline, messages, brief, and human decision.
+2. Cabinet layer: add configurable voting policy, quorum, veto roles, and auto-proposed decisions.
+3. Web replay: add a minimal local web view for task summary, event timeline, messages, cabinet tally, brief, and human decision.
 4. Reliability: add retry containment, circuit breaker, and driver failure events.
 5. Audit: add optional HMAC signatures on top of the hash chain.
 6. Distribution: add examples for wrapping popular third-party CLIs while keeping the core dependency-free.
 1. 产品入口：让 `cater demo`、`cater new`、`cater inbox`、`cater drivers` 形成连贯的新手首次体验。
-2. 内阁层：把 agent 立场升级成明确投票、阈值和裁决简报，而不是只做简单分歧归组。
-3. Web 回放：增加本地极简 Web 视图，展示任务摘要、事件时间线、消息、简报和人类裁决。
+2. 内阁层：加入可配置投票策略、quorum、否决角色与自动建议决策。
+3. Web 回放：增加本地极简 Web 视图，展示任务摘要、事件时间线、消息、内阁 tally、简报和人类裁决。
 4. 可靠性：加入 retry containment、circuit breaker 和 driver 失败事件。
 5. 审计：在哈希链之上增加可选 HMAC 签名。
 6. 分发：补充主流第三方 CLI wrapper 示例，同时保持核心零依赖。

@@ -9,6 +9,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from .cabinet import tally_votes
 from .drivers import Driver, load_drivers
 from .events import Actor, Event, EventLog
 from .fold import TaskSnapshot, fold
@@ -103,6 +104,12 @@ class Runtime:
 
         brief = self._build_brief(task_id, utterances)
         self.log.emit(
+            actor=Actor.system("cabinet"),
+            type="cabinet.voted",
+            task_id=task_id,
+            payload={"tally": brief["cabinet"]},
+        )
+        self.log.emit(
             actor=Actor.system("orchestrator"),
             type="escalation.triggered",
             task_id=task_id,
@@ -167,41 +174,29 @@ class Runtime:
     @staticmethod
     def _build_brief(task_id: str, utterances: list[dict[str, Any]]) -> dict[str, Any]:
         positions = []
-        options: dict[str, dict[str, Any]] = {}
         for item in utterances:
             role: Role = item["role"]
             payload = item["payload"]
-            option_id = payload.get("option_id") or role.id
             positions.append(
                 {
                     "actor": role.id,
+                    "option_id": payload.get("option_id") or role.id,
                     "claim": payload.get("claim", ""),
                     "evidence": payload.get("evidence", []),
                     "confidence": payload.get("confidence"),
                     "stance": payload.get("stance"),
                 }
             )
-            options.setdefault(
-                option_id,
-                {
-                    "id": option_id,
-                    "summary": payload.get("claim", ""),
-                    "supporters": [],
-                    "dissent": [],
-                },
-            )
-            if payload.get("stance") == "challenge":
-                options[option_id]["dissent"].append(role.id)
-            else:
-                options[option_id]["supporters"].append(role.id)
+        cabinet = tally_votes(positions)
 
         return {
             "task_id": task_id,
             "dispute": "Agents proposed different next steps; human decision required.",
             "positions": positions,
-            "consensus": [],
-            "root_cause": "No single option reached consensus in the department battle.",
-            "options": list(options.values()),
+            "consensus": [cabinet["recommendation"]] if cabinet["recommendation"] else [],
+            "root_cause": cabinet["reason"],
+            "cabinet": cabinet,
+            "options": cabinet["options"],
         }
 
 

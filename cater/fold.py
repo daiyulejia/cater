@@ -15,6 +15,7 @@ class TaskSnapshot:
     acceptance: list[str] = field(default_factory=list)
     status: str = "pending"
     messages: list[dict[str, Any]] = field(default_factory=list)
+    cabinet: dict[str, Any] | None = None
     brief: dict[str, Any] | None = None
     decision: dict[str, Any] | None = None
     tokens: int = 0
@@ -46,6 +47,8 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
             task.tokens += int(payload.get("tokens") or 0)
         elif event.type == "escalation.triggered":
             task.status = "escalated"
+        elif event.type == "cabinet.voted":
+            task.cabinet = payload.get("tally") if isinstance(payload.get("tally"), dict) else payload
         elif event.type == "brief.generated":
             task.brief = payload.get("brief") if isinstance(payload.get("brief"), dict) else payload
         elif event.type == "human.decided":

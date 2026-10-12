@@ -22,6 +22,7 @@ EVENT_CATEGORIES = {
     "task.started": "lifecycle",
     "msg.said": "dialogue",
     "msg.challenge": "dialogue",
+    "cabinet.voted": "decision",
     "decision.proposed": "decision",
     "escalation.triggered": "decision",
     "brief.generated": "decision",
