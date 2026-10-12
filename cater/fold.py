@@ -15,6 +15,7 @@ class TaskSnapshot:
     acceptance: list[str] = field(default_factory=list)
     status: str = "pending"
     messages: list[dict[str, Any]] = field(default_factory=list)
+    driver_failures: list[dict[str, Any]] = field(default_factory=list)
     cabinet: dict[str, Any] | None = None
     brief: dict[str, Any] | None = None
     decision: dict[str, Any] | None = None
@@ -45,6 +46,8 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
                 }
             )
             task.tokens += int(payload.get("tokens") or 0)
+        elif event.type == "driver.failed":
+            task.driver_failures.append({"seq": event.seq, **payload})
         elif event.type == "escalation.triggered":
             task.status = "escalated"
         elif event.type == "cabinet.voted":

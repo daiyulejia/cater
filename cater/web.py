@@ -162,6 +162,7 @@ def render_task(task: TaskSnapshot, events: list[Event]) -> str:
     cabinet = task.cabinet or {}
     options = "\n".join(_option_card(item) for item in cabinet.get("options", []))
     decision = _decision_panel(task)
+    failures = _failure_panel(task)
     return page(
         f"Cater / {task.id}",
         f"""
@@ -185,6 +186,7 @@ def render_task(task: TaskSnapshot, events: list[Event]) -> str:
           </article>
           {decision}
         </section>
+        {failures}
         <section class="panel">
           <div class="panel-head"><h2>Messages</h2><span>{len(task.messages)} entries</span></div>
           <div class="messages">{message_cards}</div>
@@ -220,6 +222,7 @@ def task_to_dict(task: TaskSnapshot) -> dict[str, Any]:
         "acceptance": task.acceptance,
         "status": task.status,
         "messages": task.messages,
+        "driver_failures": task.driver_failures,
         "cabinet": task.cabinet,
         "brief": task.brief,
         "decision": task.decision,
@@ -322,6 +325,27 @@ def _decision_panel(task: TaskSnapshot) -> str:
         <button type="submit">Record decision</button>
       </form>
     </article>
+    """
+
+
+def _failure_panel(task: TaskSnapshot) -> str:
+    if not task.driver_failures:
+        return ""
+    rows = "\n".join(
+        f"""
+        <li>
+          <strong>{escape(item.get("driver"))}</strong>
+          <span>{escape(item.get("error_type"))}</span>
+          <p>{escape(item.get("message"))}</p>
+        </li>
+        """
+        for item in task.driver_failures
+    )
+    return f"""
+    <section class="panel">
+      <div class="panel-head"><h2>Driver Failures</h2><span>{len(task.driver_failures)} contained</span></div>
+      <ol class="failure-list">{rows}</ol>
+    </section>
     """
 
 
@@ -467,6 +491,28 @@ dd {
 .message p, .option strong {
   display: block;
   margin-bottom: 8px;
+}
+.timeline {
+.failure-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.failure-list li {
+  border-top: 1px solid var(--line);
+  padding: 10px 0;
+}
+.failure-list strong {
+  display: inline-block;
+  min-width: 120px;
+}
+.failure-list span {
+  color: var(--warn);
+  font-size: 13px;
+}
+.failure-list p {
+  color: var(--muted);
+  margin-top: 4px;
 }
 .timeline {
   list-style: none;

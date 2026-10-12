@@ -20,6 +20,7 @@ GENESIS_HASH = "0" * 64
 EVENT_CATEGORIES = {
     "task.created": "lifecycle",
     "task.started": "lifecycle",
+    "driver.failed": "driver",
     "msg.said": "dialogue",
     "msg.challenge": "dialogue",
     "cabinet.voted": "decision",

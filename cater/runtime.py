@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .cabinet import tally_votes
-from .drivers import Driver, load_drivers
+from .drivers import Driver, DriverResponse, load_drivers
 from .events import Actor, Event, EventLog
 from .fold import TaskSnapshot, fold
 
@@ -31,8 +31,13 @@ class Runtime:
         drivers: dict[str, Driver] | None = None,
         drivers_path: str | Path | None = None,
         roles_path: str | Path | None = None,
+        driver_attempts: int = 2,
+        circuit_breaker_threshold: int = 2,
     ):
         self.log = EventLog(db_path)
+        self.driver_attempts = max(1, driver_attempts)
+        self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
+        self._driver_failures: dict[str, int] = {}
         self.roles = load_roles(roles_path)
         configured_drivers = load_drivers(_pack_path("default_drivers.json"))
         if drivers_path is not None:
@@ -77,10 +82,12 @@ class Runtime:
         for role in self.roles:
             driver = self.drivers[role.driver]
             prompt = self._prompt(task, role)
-            response = driver.complete(
-                role=role.role,
+            response = self._complete_with_containment(
+                task_id=task_id,
+                task=task,
+                role=role,
+                driver=driver,
                 prompt=prompt,
-                context={"task_id": task_id, "goal": task.goal},
             )
             parsed = self._parse_response(response.text)
             event_type = "msg.challenge" if parsed.get("stance") == "challenge" else "msg.said"
@@ -155,6 +162,87 @@ class Runtime:
 
     def verify_chain(self):
         return self.log.verify_chain()
+
+    def _complete_with_containment(
+        self,
+        *,
+        task_id: str,
+        task: TaskSnapshot,
+        role: Role,
+        driver: Driver,
+        prompt: str,
+    ) -> DriverResponse:
+        if self._is_circuit_open(role.driver):
+            self._emit_driver_failure(
+                task_id=task_id,
+                role=role,
+                attempt=0,
+                exc=RuntimeError("circuit breaker is open"),
+                circuit_open=True,
+            )
+            return self._contained_driver_failure(role, "circuit breaker is open")
+
+        last_error: Exception | None = None
+        context = {"task_id": task_id, "goal": task.goal}
+        for attempt in range(1, self.driver_attempts + 1):
+            try:
+                response = driver.complete(role=role.role, prompt=prompt, context=context)
+                self._driver_failures[role.driver] = 0
+                return response
+            except Exception as exc:
+                last_error = exc
+                self._driver_failures[role.driver] = self._driver_failures.get(role.driver, 0) + 1
+                self._emit_driver_failure(
+                    task_id=task_id,
+                    role=role,
+                    attempt=attempt,
+                    exc=exc,
+                    circuit_open=self._is_circuit_open(role.driver),
+                )
+        assert last_error is not None
+        return self._contained_driver_failure(role, str(last_error))
+
+    def _emit_driver_failure(
+        self,
+        *,
+        task_id: str,
+        role: Role,
+        attempt: int,
+        exc: Exception,
+        circuit_open: bool,
+    ) -> None:
+        self.log.emit(
+            actor=Actor.system("driver_gateway"),
+            type="driver.failed",
+            task_id=task_id,
+            payload={
+                "role": role.id,
+                "driver": role.driver,
+                "attempt": attempt,
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+                "circuit_open": circuit_open,
+                "contained": True,
+            },
+        )
+
+    def _is_circuit_open(self, driver_name: str) -> bool:
+        return self._driver_failures.get(driver_name, 0) >= self.circuit_breaker_threshold
+
+    @staticmethod
+    def _contained_driver_failure(role: Role, reason: str) -> DriverResponse:
+        text = json.dumps(
+            {
+                "stance": "challenge",
+                "option_id": f"driver_failure:{role.id}",
+                "claim": f"{role.name} driver failed; human review required",
+                "evidence": [reason],
+                "confidence": 1.0,
+                "text": f"{role.name} could not produce a normal response: {reason}",
+            },
+            ensure_ascii=False,
+        )
+        return DriverResponse(text=text, tokens=0, meta={"driver": role.driver, "contained": True})
 
     def _prompt(self, task: TaskSnapshot, role: Role) -> str:
         return (

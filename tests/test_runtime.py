@@ -12,9 +12,20 @@ from urllib.request import Request, urlopen
 
 from cater.cabinet import majority_threshold, tally_votes
 from cater.cli import main
-from cater.drivers import CliDriver
+from cater.drivers import CliDriver, DriverResponse
 from cater.runtime import Runtime
 from cater.web import make_handler, render_task
+
+
+class AlwaysFailDriver:
+    name = "product"
+
+    def __init__(self):
+        self.calls = 0
+
+    def complete(self, *, role: str, prompt: str, context: dict) -> DriverResponse:
+        self.calls += 1
+        raise RuntimeError("model process exploded")
 
 
 class RuntimeTests(unittest.TestCase):
@@ -79,6 +90,29 @@ class RuntimeTests(unittest.TestCase):
                 rt.battle(task_id)
                 self.assertEqual(len(rt.task(task_id).messages), 1)
                 self.assertEqual(rt.task(task_id).messages[0]["claim"], "configured")
+
+    def test_driver_failure_is_contained_and_opens_circuit(self):
+        driver = AlwaysFailDriver()
+        with Runtime(
+            ":memory:",
+            drivers={"product": driver},
+            driver_attempts=2,
+            circuit_breaker_threshold=2,
+        ) as rt:
+            task_id = rt.create_task("Contain failures")
+            rt.battle(task_id)
+            task = rt.task(task_id)
+
+            self.assertEqual(driver.calls, 2)
+            self.assertEqual(len(task.driver_failures), 2)
+            self.assertIn("model process exploded", task.driver_failures[0]["message"])
+            self.assertTrue(any("driver failed" in msg["claim"] for msg in task.messages))
+            self.assertIn("driver.failed", [event.type for event in rt.log.read(task_id=task_id)])
+
+            rt.battle(task_id)
+            task = rt.task(task_id)
+            self.assertEqual(driver.calls, 2)
+            self.assertTrue(any(item["attempt"] == 0 for item in task.driver_failures))
 
 
 class CabinetTests(unittest.TestCase):

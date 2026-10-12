@@ -46,6 +46,8 @@ def cmd_show(args: argparse.Namespace) -> int:
                 return 1
             print(f"{task.id} [{task.status}] {task.goal}")
             print(f"messages={len(task.messages)} tokens={task.tokens}")
+            if task.driver_failures:
+                print(f"driver_failures={len(task.driver_failures)}")
             if task.cabinet:
                 print(
                     "cabinet="
