@@ -1,7 +1,9 @@
 """Example NDJSON driver for wrapping an external tool process.
 
-This file is intentionally dependency-free. Replace build_response with calls to
-Codex CLI, an MCP client, a local skill runner, LangGraph, or any other backend.
+This file is intentionally dependency-free. Before replacing build_response with
+Codex CLI, an MCP client, a local skill runner, LangGraph, or any other backend,
+inspect that tool's real contract and failure behavior. Do not integrate by
+guessing from names alone.
 """
 
 from __future__ import annotations
