@@ -125,7 +125,7 @@ class Runtime:
         utterances = []
         for role in self.roles:
             driver = self.drivers[role.driver]
-            prompt = self._prompt(task, role, profiles.get(role.id))
+            prompt = self._prompt(task, role, profiles.get(role.id), utterances)
             response = self._complete_with_containment(
                 task_id=task_id,
                 task=task,
@@ -382,8 +382,16 @@ class Runtime:
         )
         return DriverResponse(text=text, tokens=0, meta={"driver": role.driver, "contained": True})
 
-    def _prompt(self, task: TaskSnapshot, role: Role, profile: dict[str, Any] | None = None) -> str:
+    def _prompt(
+        self,
+        task: TaskSnapshot,
+        role: Role,
+        profile: dict[str, Any] | None = None,
+        round_outputs: list[dict[str, Any]] | None = None,
+    ) -> str:
         memory = self._profile_memory(profile)
+        task_memory = self._task_memory(task)
+        round_memory = self._round_memory(round_outputs or [])
         return (
             f"You are {role.name}. Work as one member of an autonomous agent organization.\n"
             f"Goal: {task.goal}\n"
@@ -392,6 +400,8 @@ class Runtime:
             "use stance=challenge only for material disagreement, risk, or missing evidence; "
             "do not force a debate when normal collaboration is enough.\n"
             f"{memory}\n"
+            f"{task_memory}\n"
+            f"{round_memory}\n"
             "Return JSON with stance, option_id, claim, evidence, confidence, text."
         )
 
@@ -415,6 +425,51 @@ class Runtime:
         if last_failure:
             parts.append(f"last_failure={last_failure[:160]}")
         return "Profile memory: " + "; ".join(parts) + "."
+
+    @staticmethod
+    def _task_memory(task: TaskSnapshot) -> str:
+        parts = []
+        if task.commands:
+            commands = []
+            for item in task.commands[-3:]:
+                instruction = str(item.get("instruction") or "")
+                goal = str(item.get("goal") or "")
+                text = instruction
+                if goal:
+                    text += f" goal={goal}"
+                if text:
+                    commands.append(text[:180])
+            if commands:
+                parts.append("recent_commands=" + " | ".join(commands))
+        if task.messages:
+            messages = []
+            for item in task.messages[-6:]:
+                actor = str(item.get("actor") or "agent")
+                stance = str(item.get("stance") or "")
+                claim = str(item.get("claim") or "")
+                if claim:
+                    messages.append(f"{actor}/{stance}: {claim[:180]}")
+            if messages:
+                parts.append("recent_agent_outputs=" + " | ".join(messages))
+        if not parts:
+            return "Task memory: no prior collaboration on this task."
+        return "Task memory: " + "; ".join(parts) + "."
+
+    @staticmethod
+    def _round_memory(utterances: list[dict[str, Any]]) -> str:
+        if not utterances:
+            return "Current round memory: no earlier outputs in this round."
+        items = []
+        for item in utterances[-6:]:
+            role: Role = item["role"]
+            payload = item["payload"]
+            stance = str(payload.get("stance") or "")
+            claim = str(payload.get("claim") or "")
+            if claim:
+                items.append(f"{role.id}/{stance}: {claim[:180]}")
+        if not items:
+            return "Current round memory: earlier outputs had no claims."
+        return "Current round memory: " + " | ".join(items) + "."
 
     @staticmethod
     def _parse_response(text: str) -> dict[str, Any]:

@@ -90,7 +90,7 @@ Implemented now:
 - long-lived NDJSON CLI drivers with probe and crash recovery
 - configurable cabinet vote tally with approval threshold, quorum, veto roles, recommendation, and open concerns
 - local Web workbench for task creation, collaboration rounds, visible decision ladder, rare human input, replay, cabinet tally, and command override
-- agent profile projection from the event stream, fed back into later prompts as lightweight role memory
+- agent profile projection, task-local collaboration memory, and same-round output sharing
 - driver failure containment with retry attempts, failure events, and an in-process circuit breaker
 - optional HMAC audit signatures on top of the event hash chain
 - pure fold from events to task snapshots
@@ -103,7 +103,7 @@ Implemented now:
 - 长驻 NDJSON CLI driver，支持存活探针与崩溃自愈
 - 可配置内阁投票 tally，包含通过阈值、quorum、否决角色、推荐项与开放疑虑
 - 本地 Web 工作台，支持任务创建、启动协作轮次、可视化决策阶梯、极少数人类输入、回放、内阁 tally 和命令覆盖
-- 从事件流投影出的 agent profile，并作为轻量角色记忆反哺后续 prompt
+- 从事件流投影出的 agent profile、任务内协作记忆，以及同一轮内的产出共享
 - driver 失败 containment，包含重试、失败事件和进程内 circuit breaker
 - 在事件哈希链之上的可选 HMAC 审计签名
 - 从事件流纯函数折叠任务快照
@@ -151,6 +151,10 @@ Driver 返回：
 This is intentionally small. LangChain, LangGraph, Codex CLI, Claude Code, Gemini CLI, or a custom API wrapper can live behind this process boundary without leaking into Cater's core runtime.
 
 这个边界刻意很小。LangChain、LangGraph、Codex CLI、Claude Code、Gemini CLI 或自定义 API wrapper 都可以藏在这个进程后面，而不污染 Cater 的核心运行时。
+
+The same boundary is where skills and MCP belong: wrap them in a driver process, let that adapter call the tool, and return Cater's small JSON shape. See `examples/ndjson_tool_driver.py` for a dependency-free adapter skeleton. If your Windows `python` command points to the Microsoft Store placeholder, replace it with the full path to a real Python interpreter in `examples/tool_driver_config.json`.
+
+Skills 和 MCP 也应该放在这条边界后面：用 driver 进程包住它们，让 adapter 调用工具，再返回 Cater 的小 JSON 结构。`examples/ndjson_tool_driver.py` 提供了一个零依赖 adapter 骨架。如果 Windows 上的 `python` 指向 Microsoft Store 占位符，请把 `examples/tool_driver_config.json` 里的命令换成真实 Python 解释器完整路径。
 
 ## Cabinet Policy / 内阁策略
 

@@ -1,0 +1,14 @@
+{
+  "drivers": [
+    {
+      "kind": "cli",
+      "name": "product",
+      "command": [
+        "python",
+        "examples/ndjson_tool_driver.py"
+      ],
+      "timeout": 30,
+      "restart_limit": 1
+    }
+  ]
+}

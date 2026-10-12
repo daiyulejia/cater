@@ -155,6 +155,36 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("supports=1", driver.prompts[1])
         self.assertIn("last_claim=memory claim 1", driver.prompts[1])
 
+    def test_task_memory_shares_prior_agent_outputs_between_roles(self):
+        driver = PromptCaptureDriver()
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "governance": {"trigger_on_option_split": false},
+                  "cabinet": {"approval_threshold": 2, "quorum": 2, "veto_roles": []},
+                  "roles": [
+                    {"id":"alpha","name":"Alpha","role":"planner","driver":"memory"},
+                    {"id":"beta","name":"Beta","role":"builder","driver":"memory"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"memory": driver}) as rt:
+                task_id = rt.create_task("Share work")
+                rt.collaborate(task_id)
+                rt.command(task_id, "Use prior output")
+                rt.collaborate(task_id)
+
+        self.assertEqual(driver.calls, 4)
+        self.assertIn("Current round memory: no earlier outputs", driver.prompts[0])
+        self.assertIn("Current round memory: alpha/assert: memory claim 1", driver.prompts[1])
+        self.assertIn("recent_commands=Use prior output", driver.prompts[2])
+        self.assertIn("alpha/assert: memory claim 1", driver.prompts[2])
+        self.assertIn("beta/assert: memory claim 2", driver.prompts[2])
+
     def test_collaboration_round_skips_governance_without_disagreement(self):
         driver = PromptCaptureDriver()
         with tempfile.TemporaryDirectory() as tmp:
@@ -403,6 +433,21 @@ class DriverTests(unittest.TestCase):
             driver.complete(role="tester", prompt="crash", context={"crash": True})
         response = driver.complete(role="tester", prompt="after", context={})
         self.assertIn("Fixture driver responded", response.text)
+
+    def test_example_tool_driver_speaks_ndjson(self):
+        script = Path(__file__).resolve().parents[1] / "examples" / "ndjson_tool_driver.py"
+        driver = CliDriver("tool", [sys.executable, str(script)], timeout=5)
+        self.addCleanup(driver.close)
+
+        self.assertTrue(driver.probe())
+        response = driver.complete(
+            role="adapter",
+            prompt="Use an external tool",
+            context={"goal": "prove the adapter works"},
+        )
+
+        self.assertIn("external tool", response.text)
+        self.assertGreater(response.tokens, 0)
 
 
 class CliTests(unittest.TestCase):
