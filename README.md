@@ -211,6 +211,10 @@ Next iterations:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the local check command, driver-boundary rules, and commit expectations.
 
+## Docs
+
+See [docs/README.md](docs/README.md) for organization flow and architecture review notes.
+
 ## Iteration Lens
 
 Cater should grow through small usable loops. Each iteration should be reviewed from multiple angles:

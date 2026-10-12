@@ -211,6 +211,10 @@ python -m cater.cli review <task_id> --record
 
 本地验证命令、driver 边界约定和提交说明规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
+## 文档
+
+组织流程和架构自审说明见 [docs/README.md](docs/README.md)。
+
 ## 迭代视角
 
 Cater 应该通过一个个可用小闭环生长。每次迭代都要从多个角度复盘：
