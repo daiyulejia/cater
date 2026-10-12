@@ -29,18 +29,28 @@ class AlwaysFailDriver:
 
 
 class RuntimeTests(unittest.TestCase):
-    def test_battle_escalates_to_human_inbox_and_decision_closes_it(self):
+    def test_battle_records_agent_decision_and_command_updates_goal(self):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("Build Cater seed", ["agents respond"])
             result = rt.battle(task_id)
+            task = rt.task(task_id)
 
-            self.assertEqual(rt.task(task_id).status, "escalated")
+            self.assertEqual(task.status, "rework")
+            self.assertEqual(task.decision["resolution"], "rework")
             self.assertIn("positions", result["brief"])
-            self.assertEqual(len(rt.inbox()), 1)
-
-            rt.decide(task_id, "done", "Ship the smallest loop first")
-            self.assertEqual(rt.task(task_id).status, "done")
             self.assertEqual(rt.inbox(), [])
+
+            rt.command(
+                task_id,
+                "Narrow the scope and try again",
+                goal="Build the smallest autonomous loop",
+                acceptance=["agents decide without human approval"],
+            )
+            task = rt.task(task_id)
+            self.assertEqual(task.status, "running")
+            self.assertEqual(task.goal, "Build the smallest autonomous loop")
+            self.assertEqual(task.acceptance, ["agents decide without human approval"])
+            self.assertEqual(task.commands[-1]["instruction"], "Narrow the scope and try again")
 
     def test_event_hash_chain_verifies(self):
         with Runtime(":memory:") as rt:
@@ -85,6 +95,7 @@ class RuntimeTests(unittest.TestCase):
             event_types = [event.type for event in rt.log.read(task_id=task_id)]
 
             self.assertIn("cabinet.voted", event_types)
+            self.assertIn("agent.decided", event_types)
             self.assertEqual(task.cabinet["approval_threshold"], 2)
             self.assertEqual(task.cabinet["quorum"], 3)
             self.assertEqual(task.cabinet["status"], "vetoed")
@@ -111,6 +122,35 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(len(rt.task(task_id).messages), 1)
                 self.assertEqual(rt.task(task_id).messages[0]["claim"], "configured")
                 self.assertEqual(rt.task(task_id).cabinet["status"], "recommended")
+                self.assertEqual(rt.task(task_id).status, "decided")
+
+    def test_supreme_decides_when_cabinet_has_no_consensus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "cabinet": {"approval_threshold": 3, "quorum": 3, "veto_roles": []},
+                  "roles": [
+                    {"id":"product","name":"Product","role":"product","driver":"product"},
+                    {"id":"dev","name":"Developer","role":"developer","driver":"dev"},
+                    {"id":"test","name":"Tester","role":"tester","driver":"test"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles) as rt:
+                task_id = rt.create_task("Need supreme fallback")
+                rt.battle(task_id)
+                task = rt.task(task_id)
+                event_types = [event.type for event in rt.log.read(task_id=task_id)]
+
+                self.assertEqual(task.cabinet["status"], "needs_supreme")
+                self.assertEqual(task.decision["source"], "supreme")
+                self.assertEqual(task.status, "rework")
+                self.assertIn("supreme.decided", event_types)
+                self.assertEqual(rt.inbox(), [])
 
     def test_driver_failure_is_contained_and_opens_circuit(self):
         driver = AlwaysFailDriver()
@@ -175,6 +215,19 @@ class CabinetTests(unittest.TestCase):
         )
         self.assertEqual(vetoed["status"], "vetoed")
         self.assertEqual(vetoed["vetoed_by"], ["test"])
+
+    def test_tally_votes_routes_unresolved_cabinet_to_supreme(self):
+        tally = tally_votes(
+            [
+                {"actor": "product", "option_id": "A", "stance": "assert"},
+                {"actor": "dev", "option_id": "B", "stance": "assert"},
+                {"actor": "test", "option_id": "C", "stance": "challenge"},
+            ],
+            approval_threshold=3,
+            quorum=3,
+        )
+        self.assertEqual(tally["status"], "needs_supreme")
+        self.assertEqual(tally["top_option"], "A")
 
 
 class DriverTests(unittest.TestCase):
@@ -244,11 +297,23 @@ class CliTests(unittest.TestCase):
 
         code, out = self.run_cli("inbox")
         self.assertEqual(code, 0)
-        self.assertIn(task_id, out)
+        self.assertIn("inbox empty", out)
+
+        code, out = self.run_cli(
+            "command",
+            task_id,
+            "Change the goal",
+            "--goal",
+            "Build an autonomous loop",
+            "--accept",
+            "no human approval required",
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("command recorded", out)
 
         code, out = self.run_cli("decide", task_id, "--resolution", "done", "--reason", "ok")
         self.assertEqual(code, 0)
-        self.assertIn("decision recorded", out)
+        self.assertIn("manual override recorded", out)
 
         code, out = self.run_cli("inbox")
         self.assertEqual(code, 0)
@@ -279,8 +344,9 @@ class WebTests(unittest.TestCase):
 
         self.assertIn("Cabinet", html)
         self.assertIn("Timeline", html)
-        self.assertIn("Record decision", html)
+        self.assertIn("Human Command", html)
         self.assertIn("cabinet.voted", html)
+        self.assertIn("agent.decided", html)
 
     def test_web_api_and_decision_post(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -348,7 +414,7 @@ class WebTests(unittest.TestCase):
             with Runtime(db) as rt:
                 tasks = rt.tasks()
                 self.assertEqual(len(tasks), 1)
-                self.assertEqual(tasks[0].status, "escalated")
+                self.assertEqual(tasks[0].status, "rework")
                 self.assertEqual(tasks[0].acceptance, ["battle runs", "inbox updates"])
 
 

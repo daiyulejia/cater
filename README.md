@@ -1,12 +1,12 @@
 # Cater
 
-> Human-steerable multi-agent collaboration runtime.
+> Autonomous multi-agent organization runtime.
 >
-> 面向人的多 Agent 协作运行时。
+> 自治多 Agent 组织运行时。
 
-Cater turns multiple AI agents into a small, inspectable team. Agents can propose, disagree, escalate, and wait for a human decision instead of pretending they reached consensus.
+Cater turns multiple AI agents into a small, inspectable organization. Agents can battle, review, vote, decide, and only escalate to humans when the organization cannot resolve the task itself.
 
-Cater 把多个 AI agent 组织成一支可观察、可干预的小团队。agent 可以提出方案、互相反对、升级分歧，并等待人类拍板，而不是假装已经达成共识。
+Cater 把多个 AI agent 组织成一个可观察、可干预的自治组织。agent 可以 battle、互评、投票、决策；只有组织自身无法解决时，才极少数升级给人类。
 
 ## Why / 为什么做
 
@@ -16,13 +16,13 @@ Most agent demos optimize for the final answer. Cater treats the process as the 
 
 - every important step is an append-only event
 - task state is folded from the event log
-- disagreements become structured escalation briefs
-- human decisions are normal events
+- disagreements flow through battle, cabinet vote, supreme fallback, and rare human input
+- human commands and manual overrides are normal events
 - the CLI exposes the same surface future Web and mobile clients will use
 - 每个关键步骤都是只追加事件
 - 任务状态由事件流折叠出来
-- 分歧会生成结构化升级简报
-- 人类裁决也是普通事件
+- 分歧会经过 battle、内阁投票、最高者兜底，以及极少数人类输入
+- 人类命令和人工覆盖也是普通事件
 - CLI 暴露的能力会和未来 Web / 移动端共用同一套运行时
 
 ## Positioning / 定位
@@ -31,9 +31,9 @@ Cater is not trying to replace LangChain or LangGraph.
 
 Cater 不试图替代 LangChain 或 LangGraph。
 
-LangChain and LangGraph can be useful inside driver implementations or advanced execution backends. Cater keeps its own event log, task model, escalation path, and human decision semantics so the collaboration process remains inspectable and portable.
+LangChain and LangGraph can be useful inside driver implementations or advanced execution backends. Cater keeps its own event log, task model, decision ladder, and human command semantics so the collaboration process remains inspectable and portable.
 
-LangChain / LangGraph 可以作为某个 driver 或复杂执行后端的内部实现。但 Cater 核心会保留自己的事件流、任务模型、升级路径和人类裁决语义，确保协作过程始终可观察、可迁移、可审计。
+LangChain / LangGraph 可以作为某个 driver 或复杂执行后端的内部实现。但 Cater 核心会保留自己的事件流、任务模型、决策阶梯和人类命令语义，确保协作过程始终可观察、可迁移、可审计。
 
 ## Quick Start / 快速开始
 
@@ -75,24 +75,24 @@ Implemented now:
 当前已经包含：
 
 - SQLite append-only event store with hash-chain verification
-- task creation, battle, escalation, and human decision
+- task creation, battle, cabinet vote, supreme fallback, and rare human command/override
 - deterministic scripted drivers for repeatable demos and tests
 - configurable roles and drivers from JSON
 - long-lived NDJSON CLI drivers with probe and crash recovery
 - configurable cabinet vote tally with approval threshold, quorum, veto roles, recommendation, and open concerns
-- local Web workbench for task creation, battle start, inbox, replay, cabinet tally, and human decision
+- local Web workbench for task creation, battle start, rare human input, replay, cabinet tally, and command override
 - driver failure containment with retry attempts, failure events, and an in-process circuit breaker
 - optional HMAC audit signatures on top of the event hash chain
 - pure fold from events to task snapshots
 - CLI commands for process inspection
 - zero third-party runtime dependencies
 - SQLite 只追加事件流 + 哈希链校验
-- 任务创建、部门 battle、升级、人类拍板
+- 任务创建、底层 battle、内阁投票、最高者兜底、极少数人类命令/覆盖
 - 确定性 scripted driver，便于演示和测试
 - JSON 配置角色与 driver
 - 长驻 NDJSON CLI driver，支持存活探针与崩溃自愈
 - 可配置内阁投票 tally，包含通过阈值、quorum、否决角色、推荐项与开放疑虑
-- 本地 Web 工作台，支持任务创建、启动 battle、inbox、回放、内阁 tally 和人类拍板
+- 本地 Web 工作台，支持任务创建、启动 battle、极少数人类输入、回放、内阁 tally 和命令覆盖
 - driver 失败 containment，包含重试、失败事件和进程内 circuit breaker
 - 在事件哈希链之上的可选 HMAC 审计签名
 - 从事件流纯函数折叠任务快照
@@ -162,9 +162,9 @@ Roles can be configured together with voting policy:
 }
 ```
 
-This keeps the organization model visible. A project can start with simple majority voting, then add quorum or veto roles as reliability needs grow.
+This keeps the organization model visible. A project can start with simple majority voting, then add quorum, veto roles, or a supreme fallback as reliability needs grow.
 
-这让组织模型本身可见。项目可以从简单多数投票开始，再随着可靠性要求增加 quorum 或否决角色。
+这让组织模型本身可见。项目可以从简单多数投票开始，再随着可靠性要求增加 quorum、否决角色或最高者兜底。
 
 ## Audit / 审计
 
@@ -187,14 +187,14 @@ Next iterations:
 
 下一轮迭代：
 
-1. Product entry: make `cater demo`, `cater new`, `cater inbox`, and `cater drivers` feel like a coherent first-run workflow.
-2. Cabinet layer: add auto-proposed decisions and richer policy explanations.
+1. Product entry: make `cater demo`, `cater new`, `cater command`, and `cater drivers` feel like a coherent first-run workflow.
+2. Decision ladder: make battle -> cabinet -> supreme -> rare human fallback explicit in CLI/Web.
 3. Web replay: add live refresh, filters, and clearer decision ergonomics.
 4. Reliability: make circuit breaker policy configurable and expose recovery controls in CLI/Web.
 5. Audit: add key rotation metadata, unsigned-history policy, and exportable audit reports.
 6. Distribution: add examples for wrapping popular third-party CLIs while keeping the core dependency-free.
-1. 产品入口：让 `cater demo`、`cater new`、`cater inbox`、`cater drivers` 形成连贯的新手首次体验。
-2. 内阁层：加入自动建议决策和更丰富的策略解释。
+1. 产品入口：让 `cater demo`、`cater new`、`cater command`、`cater drivers` 形成连贯的新手首次体验。
+2. 决策阶梯：在 CLI/Web 明确展示 battle -> 内阁 -> 最高者 -> 极少数人类兜底。
 3. Web 回放：加入实时刷新、过滤器和更清晰的拍板体验。
 4. 可靠性：让 circuit breaker 策略可配置，并在 CLI/Web 暴露恢复控制。
 5. 审计：加入 key rotation 元数据、未签名历史策略和可导出的审计报告。
@@ -227,7 +227,7 @@ English:
 2. Events first. State is a view over append-only history.
 3. Drivers are replaceable. Models, CLIs, and APIs are not hardwired.
 4. Disagreement is normal. Escalation is a feature, not a failure.
-5. Humans are actors. Human decisions live in the same event stream.
+5. Humans command and override. Humans can redirect the organization at any time, but are not the default decision engine.
 
 中文：
 
@@ -235,4 +235,4 @@ English:
 2. 事件优先：状态只是只追加历史的一个视图。
 3. Driver 可替换：模型、CLI、API 不能焊死在骨架里。
 4. 分歧是常态：升级不是失败，而是一种产品能力。
-5. 人类是一等参与者：人类裁决和 agent 发言进入同一条事件流。
+5. 人类发命令和覆盖：人类可以随时重定向组织，但不是默认决策引擎。

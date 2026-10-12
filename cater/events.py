@@ -26,8 +26,11 @@ EVENT_CATEGORIES = {
     "msg.challenge": "dialogue",
     "cabinet.voted": "decision",
     "decision.proposed": "decision",
+    "agent.decided": "decision",
+    "supreme.decided": "decision",
     "escalation.triggered": "decision",
     "brief.generated": "decision",
+    "human.commanded": "decision",
     "human.decided": "decision",
 }
 

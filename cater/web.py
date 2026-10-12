@@ -109,6 +109,24 @@ def make_handler(
                     rt.battle(task_id)
                 self._redirect(f"/tasks/{task_id}")
                 return
+            if path.startswith("/tasks/") and path.endswith("/command"):
+                task_id = path.split("/")[2]
+                data = self._read_form()
+                instruction = data.get("instruction", [""])[0].strip()
+                goal = data.get("goal", [""])[0].strip() or None
+                acceptance_raw = data.get("acceptance", [""])[0]
+                acceptance = [line.strip() for line in acceptance_raw.splitlines() if line.strip()]
+                with self._runtime() as rt:
+                    if rt.task(task_id) is None:
+                        return self._not_found()
+                    rt.command(
+                        task_id,
+                        instruction or "Updated from Cater web",
+                        goal=goal,
+                        acceptance=acceptance if acceptance_raw.strip() else None,
+                    )
+                self._redirect(f"/tasks/{task_id}")
+                return
             if path.startswith("/tasks/") and path.endswith("/decide"):
                 task_id = path.split("/")[2]
                 data = self._read_form()
@@ -185,7 +203,7 @@ def render_index(rt: Runtime) -> str:
         <section class="topbar">
           <div>
             <p class="eyebrow">Cater Replay</p>
-            <h1>Human-steerable agent workbench</h1>
+            <h1>Autonomous agent workbench</h1>
           </div>
           <span class="chain">{escape(chain.describe())}</span>
         </section>
@@ -211,7 +229,7 @@ def render_index(rt: Runtime) -> str:
           </article>
           <article class="panel">
             <div class="panel-head">
-              <h2>Inbox</h2>
+              <h2>Human Input</h2>
               <span>{len(inbox)} pending</span>
             </div>
             {_inbox_list(tasks, inbox)}
@@ -239,6 +257,7 @@ def render_task(task: TaskSnapshot, events: list[Event]) -> str:
     cabinet = task.cabinet or {}
     options = "\n".join(_option_card(item) for item in cabinet.get("options", []))
     decision = _decision_panel(task)
+    command = _command_panel(task)
     failures = _failure_panel(task)
     return page(
         f"Cater / {task.id}",
@@ -263,6 +282,7 @@ def render_task(task: TaskSnapshot, events: list[Event]) -> str:
           </article>
           {decision}
         </section>
+        {command}
         {failures}
         <section class="panel">
           <div class="panel-head"><h2>Messages</h2><span>{len(task.messages)} entries</span></div>
@@ -301,8 +321,10 @@ def task_to_dict(task: TaskSnapshot) -> dict[str, Any]:
         "messages": task.messages,
         "driver_failures": task.driver_failures,
         "cabinet": task.cabinet,
+        "proposal": task.proposal,
         "brief": task.brief,
         "decision": task.decision,
+        "commands": task.commands,
         "tokens": task.tokens,
     }
 
@@ -326,7 +348,7 @@ def event_to_dict(event: Event) -> dict[str, Any]:
 
 def _task_row(task: TaskSnapshot, needs_decision: bool) -> str:
     cabinet = task.cabinet or {}
-    decision = "pending" if needs_decision else (task.decision or {}).get("resolution", "-")
+    decision = "input needed" if needs_decision else (task.decision or {}).get("resolution", "-")
     return f"""
     <tr>
       <td><a href="/tasks/{escape(task.id)}">{escape(task.goal)}</a><small>{escape(task.id)}</small></td>
@@ -377,15 +399,23 @@ def _decision_panel(task: TaskSnapshot) -> str:
     if task.decision:
         return f"""
         <article class="panel">
-          <div class="panel-head"><h2>Decision</h2><span>{escape(task.decision.get("resolution"))}</span></div>
+          <div class="panel-head"><h2>Agent Decision</h2><span>{escape(task.decision.get("resolution"))}</span></div>
           <p>{escape(task.decision.get("reason", ""))}</p>
         </article>
         """
+    proposal = ""
+    if task.proposal:
+        proposal = f"""
+        <div class="proposal">
+          <strong>Proposed option {escape(task.proposal.get("option_id"))}</strong>
+          <p>{escape(task.proposal.get("reason", ""))}</p>
+        </div>
+        """
     if task.status != "escalated":
-        return """
+        return f"""
         <article class="panel">
-          <div class="panel-head"><h2>Decision</h2><span>not required</span></div>
-          <p class="muted">This task is not waiting for human input.</p>
+          <div class="panel-head"><h2>Agent Decision</h2><span>{escape(task.status)}</span></div>
+          <p class="muted">Agents are expected to continue autonomously unless you send a command.</p>
           <form method="post" action="/tasks/{escape(task.id)}/battle">
             <button type="submit">Run battle</button>
           </form>
@@ -393,7 +423,8 @@ def _decision_panel(task: TaskSnapshot) -> str:
         """
     return f"""
     <article class="panel">
-      <div class="panel-head"><h2>Decision</h2><span>waiting</span></div>
+      <div class="panel-head"><h2>Human Input</h2><span>exception</span></div>
+      {proposal}
       <form method="post" action="/tasks/{escape(task.id)}/decide">
         <label>Resolution
           <select name="resolution">
@@ -404,9 +435,37 @@ def _decision_panel(task: TaskSnapshot) -> str:
         <label>Reason
           <textarea name="reason" rows="4" placeholder="Why is this the right call?"></textarea>
         </label>
-        <button type="submit">Record decision</button>
+        <button type="submit">Record override</button>
       </form>
     </article>
+    """
+
+
+def _command_panel(task: TaskSnapshot) -> str:
+    history = ""
+    if task.commands:
+        rows = "\n".join(
+            f"<li><strong>#{escape(item.get('seq'))}</strong> {escape(item.get('instruction'))}</li>"
+            for item in task.commands[-5:]
+        )
+        history = f'<ul class="inbox-list">{rows}</ul>'
+    return f"""
+    <section class="panel">
+      <div class="panel-head"><h2>Human Command</h2><span>optional</span></div>
+      <form method="post" action="/tasks/{escape(task.id)}/command">
+        <label>Instruction
+          <textarea name="instruction" rows="3" placeholder="Change direction, add a constraint, or override the goal."></textarea>
+        </label>
+        <label>New goal
+          <textarea name="goal" rows="2"></textarea>
+        </label>
+        <label>Acceptance
+          <textarea name="acceptance" rows="3"></textarea>
+        </label>
+        <button type="submit">Send command</button>
+      </form>
+      {history}
+    </section>
     """
 
 
@@ -615,6 +674,17 @@ dd {
 .failure-list p {
   color: var(--muted);
   margin-top: 4px;
+}
+.proposal {
+  border: 1px solid var(--line);
+  background: var(--accent-weak);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 12px;
+}
+.proposal p {
+  color: var(--muted);
+  margin-top: 6px;
 }
 .timeline {
   list-style: none;

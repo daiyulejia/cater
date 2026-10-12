@@ -39,7 +39,8 @@ def cmd_new(args: argparse.Namespace) -> int:
         print(f"created {task_id}")
         if args.battle:
             result = rt.battle(task_id)
-            print(f"escalated: brief event #{result['brief_event']}")
+            task = rt.task(task_id)
+            print(f"battle complete: {task.status}, brief event #{result['brief_event']}")
             print(result["brief"]["dispute"])
     return 0
 
@@ -47,7 +48,8 @@ def cmd_new(args: argparse.Namespace) -> int:
 def cmd_battle(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         result = rt.battle(args.task_id)
-        print(f"escalated: brief event #{result['brief_event']}")
+        task = rt.task(args.task_id)
+        print(f"battle complete: {task.status}, brief event #{result['brief_event']}")
         print(json.dumps(result["brief"], ensure_ascii=False, indent=2))
     return 0
 
@@ -70,6 +72,8 @@ def cmd_show(args: argparse.Namespace) -> int:
                     f"threshold={task.cabinet['approval_threshold']} "
                     f"recommendation={task.cabinet['recommendation']}"
                 )
+            if task.proposal:
+                print(f"proposal={task.proposal['option_id']} reason={task.proposal['reason']}")
             if task.brief:
                 print(f"brief: {task.brief['dispute']}")
             return 0
@@ -97,10 +101,18 @@ def cmd_inbox(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_command(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        acceptance = args.accept if args.accept is not None else None
+        event = rt.command(args.task_id, args.instruction, goal=args.goal, acceptance=acceptance)
+        print(f"command recorded at event #{event.seq}")
+    return 0
+
+
 def cmd_decide(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         event = rt.decide(args.task_id, args.resolution, args.reason)
-        print(f"decision recorded at event #{event.seq}")
+        print(f"manual override recorded at event #{event.seq}")
     return 0
 
 
@@ -135,14 +147,19 @@ def cmd_probe_driver(args: argparse.Namespace) -> int:
 def cmd_demo(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         task_id = rt.create_task(
-            "Build a first Cater demo that proves agents can disagree and escalate",
-            ["three roles respond", "a human decision brief is generated"],
+            "Build a first Cater demo that proves agents can disagree and decide autonomously",
+            ["three roles respond", "cabinet policy records the next action"],
         )
         result = rt.battle(task_id)
         print(f"task: {task_id}")
         print(json.dumps(result["brief"], ensure_ascii=False, indent=2))
-        print("\ninbox:")
-        for item in rt.inbox():
+        task = rt.task(task_id)
+        print(f"\nagent decision: {task.decision['resolution']} ({task.decision['reason']})")
+        print("\nhuman inbox:")
+        inbox = rt.inbox()
+        if not inbox:
+            print("- empty")
+        for item in inbox:
             print(f"- {item['task_id']}: {item['title']}")
     return 0
 
@@ -190,9 +207,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_events.add_argument("task_id", nargs="?")
     p_events.set_defaults(func=cmd_events)
 
-    sub.add_parser("inbox", help="show pending human decisions").set_defaults(func=cmd_inbox)
+    sub.add_parser("inbox", help="show exceptional human input requests").set_defaults(func=cmd_inbox)
 
-    p_decide = sub.add_parser("decide", help="record human decision")
+    p_command = sub.add_parser("command", help="record a human command or goal update")
+    p_command.add_argument("task_id")
+    p_command.add_argument("instruction")
+    p_command.add_argument("--goal")
+    p_command.add_argument("--accept", action="append")
+    p_command.set_defaults(func=cmd_command)
+
+    p_decide = sub.add_parser("decide", help="record a manual human override")
     p_decide.add_argument("task_id")
     p_decide.add_argument("--resolution", choices=["done", "rework"], required=True)
     p_decide.add_argument("--reason", required=True)

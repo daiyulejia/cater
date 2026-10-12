@@ -17,8 +17,10 @@ class TaskSnapshot:
     messages: list[dict[str, Any]] = field(default_factory=list)
     driver_failures: list[dict[str, Any]] = field(default_factory=list)
     cabinet: dict[str, Any] | None = None
+    proposal: dict[str, Any] | None = None
     brief: dict[str, Any] | None = None
     decision: dict[str, Any] | None = None
+    commands: list[dict[str, Any]] = field(default_factory=list)
     tokens: int = 0
 
 
@@ -33,6 +35,13 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
             task.goal = str(payload.get("goal", ""))
             task.acceptance = list(payload.get("acceptance", []) or [])
             task.status = "pending"
+        elif event.type == "human.commanded":
+            task.commands.append({"seq": event.seq, **payload})
+            if payload.get("goal"):
+                task.goal = str(payload["goal"])
+            if "acceptance" in payload:
+                task.acceptance = list(payload.get("acceptance") or [])
+            task.status = "running"
         elif event.type == "task.started":
             task.status = "running"
         elif event.type in {"msg.said", "msg.challenge"}:
@@ -52,6 +61,17 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
             task.status = "escalated"
         elif event.type == "cabinet.voted":
             task.cabinet = payload.get("tally") if isinstance(payload.get("tally"), dict) else payload
+        elif event.type == "decision.proposed":
+            task.proposal = payload
+        elif event.type in {"agent.decided", "supreme.decided"}:
+            task.decision = payload
+            resolution = payload.get("resolution")
+            if resolution == "accepted":
+                task.status = "decided"
+            elif resolution == "rework":
+                task.status = "rework"
+            else:
+                task.status = "running"
         elif event.type == "brief.generated":
             task.brief = payload.get("brief") if isinstance(payload.get("brief"), dict) else payload
         elif event.type == "human.decided":

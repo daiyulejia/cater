@@ -95,6 +95,7 @@ def tally_votes(
         key=lambda item: (-int(item["support"]), int(item["concern"]), str(item["id"])),
     )
     participation = len(votes)
+    top_option = ordered[0]["id"] if ordered else None
     vetoed_by = sorted(
         vote["actor"] for vote in votes if vote["actor"] in veto_set and vote["vote"] == "concern"
     )
@@ -111,8 +112,12 @@ def tally_votes(
         reason = f"Veto role(s) raised concern: {', '.join(vetoed_by)}."
         recommendation = None
     elif recommendation is None:
-        status = "needs_human"
-        reason = f"No option reached approval threshold {threshold} without open concerns."
+        status = "needs_supreme" if top_option is not None else "needs_human"
+        reason = (
+            f"No option reached approval threshold {threshold}; supreme decision should pick from ranked options."
+            if top_option is not None
+            else f"No option reached approval threshold {threshold} and no option was available."
+        )
     else:
         status = "recommended"
         reason = f"Option {recommendation} reached approval threshold {threshold}."
@@ -123,6 +128,7 @@ def tally_votes(
         "quorum": quorum_size,
         "veto_roles": sorted(veto_set),
         "vetoed_by": vetoed_by,
+        "top_option": top_option,
         "status": status,
         "recommendation": recommendation,
         "reason": reason,

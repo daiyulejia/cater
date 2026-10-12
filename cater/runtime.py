@@ -126,18 +126,76 @@ class Runtime:
             task_id=task_id,
             payload={"tally": brief["cabinet"]},
         )
+        if brief["cabinet"]["recommendation"]:
+            self.log.emit(
+                actor=Actor.system("cabinet"),
+                type="decision.proposed",
+                task_id=task_id,
+                payload={
+                    "option_id": brief["cabinet"]["recommendation"],
+                    "reason": brief["cabinet"]["reason"],
+                    "source": "cabinet",
+                    "status": "accepted_by_cabinet",
+                },
+            )
+            self.log.emit(
+                actor=Actor.system("cabinet"),
+                type="agent.decided",
+                task_id=task_id,
+                payload={
+                    "resolution": "accepted",
+                    "option_id": brief["cabinet"]["recommendation"],
+                    "reason": brief["cabinet"]["reason"],
+                    "source": "cabinet",
+                },
+            )
+        elif brief["cabinet"]["status"] == "vetoed":
+            self.log.emit(
+                actor=Actor.system("cabinet"),
+                type="agent.decided",
+                task_id=task_id,
+                payload={
+                    "resolution": "rework",
+                    "option_id": None,
+                    "reason": brief["cabinet"]["reason"],
+                    "source": "cabinet",
+                },
+            )
+        elif brief["cabinet"]["status"] == "needs_supreme":
+            self.log.emit(
+                actor=Actor.system("supreme"),
+                type="supreme.decided",
+                task_id=task_id,
+                payload={
+                    "resolution": "rework",
+                    "option_id": brief["cabinet"]["top_option"],
+                    "reason": brief["cabinet"]["reason"],
+                    "source": "supreme",
+                },
+            )
         self.log.emit(
             actor=Actor.system("orchestrator"),
-            type="escalation.triggered",
+            type="brief.generated"
+            if brief["cabinet"]["status"] in {"recommended", "vetoed", "needs_supreme"}
+            else "escalation.triggered",
             task_id=task_id,
-            payload={"reason": "conflicting_options", "options": brief["options"]},
+            payload={
+                "brief": brief,
+                "reason": "agent_decided"
+                if brief["cabinet"]["status"] in {"recommended", "vetoed", "needs_supreme"}
+                else "needs_human_input",
+                "options": brief["options"],
+            },
         )
-        brief_event = self.log.emit(
-            actor=Actor.system("orchestrator"),
-            type="brief.generated",
-            task_id=task_id,
-            payload={"brief": brief},
-        )
+        if brief["cabinet"]["status"] in {"recommended", "vetoed", "needs_supreme"}:
+            brief_event = self.log.read(task_id=task_id)[-1]
+        else:
+            brief_event = self.log.emit(
+                actor=Actor.system("orchestrator"),
+                type="brief.generated",
+                task_id=task_id,
+                payload={"brief": brief},
+            )
         return {"task_id": task_id, "brief_event": brief_event.seq, "brief": brief}
 
     def decide(self, task_id: str, resolution: str, reason: str) -> Event:
@@ -148,6 +206,28 @@ class Runtime:
             type="human.decided",
             task_id=task_id,
             payload={"resolution": resolution, "reason": reason},
+        )
+
+    def command(
+        self,
+        task_id: str,
+        instruction: str,
+        *,
+        goal: str | None = None,
+        acceptance: list[str] | None = None,
+    ) -> Event:
+        if self.task(task_id) is None:
+            raise KeyError(task_id)
+        payload: dict[str, Any] = {"instruction": instruction}
+        if goal is not None:
+            payload["goal"] = goal
+        if acceptance is not None:
+            payload["acceptance"] = list(acceptance)
+        return self.log.emit(
+            actor=Actor.human("human"),
+            type="human.commanded",
+            task_id=task_id,
+            payload=payload,
         )
 
     def task(self, task_id: str) -> TaskSnapshot | None:
@@ -245,7 +325,7 @@ class Runtime:
             {
                 "stance": "challenge",
                 "option_id": f"driver_failure:{role.id}",
-                "claim": f"{role.name} driver failed; human review required",
+                "claim": f"{role.name} driver failed; autonomous decision needs caution",
                 "evidence": [reason],
                 "confidence": 1.0,
                 "text": f"{role.name} could not produce a normal response: {reason}",
@@ -299,7 +379,7 @@ class Runtime:
 
         return {
             "task_id": task_id,
-            "dispute": "Agents proposed different next steps; human decision required.",
+            "dispute": "Agents proposed different next steps; cabinet policy selected the next action.",
             "positions": positions,
             "consensus": [cabinet["recommendation"]] if cabinet["recommendation"] else [],
             "root_cause": cabinet["reason"],
