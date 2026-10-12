@@ -14,6 +14,7 @@ from cater.cabinet import majority_threshold, tally_votes
 from cater.cli import main
 from cater.drivers import CliDriver, DriverResponse
 from cater.ladder import decision_ladder
+from cater.profiles import agent_profiles
 from cater.runtime import Runtime
 from cater.web import make_handler, render_task
 
@@ -87,6 +88,18 @@ class RuntimeTests(unittest.TestCase):
             again = rt.task(task_id)
             self.assertEqual(first.status, again.status)
             self.assertEqual(len(first.messages), 3)
+
+    def test_agent_profiles_are_projected_from_events(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("Profile agents")
+            rt.battle(task_id)
+            profiles = rt.profiles()
+            from_events = agent_profiles(rt.log.read())
+
+            self.assertEqual(profiles, from_events)
+            self.assertEqual(profiles["product"]["supports"], 1)
+            self.assertEqual(profiles["test"]["challenges"], 1)
+            self.assertIn("Ship the smallest", profiles["product"]["last_claim"])
 
     def test_battle_records_cabinet_vote_tally(self):
         with Runtime(":memory:") as rt:
@@ -337,6 +350,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("alive", self.out.getvalue())
 
+    def test_cli_profiles(self):
+        code, _ = self.run_cli("demo")
+        self.assertEqual(code, 0)
+        code, out = self.run_cli("profiles")
+        self.assertEqual(code, 0)
+        self.assertIn("product", out)
+        self.assertIn("challenges=1", out)
+
 
 class WebTests(unittest.TestCase):
     def test_render_task_includes_cabinet_timeline_and_decision_form(self):
@@ -425,6 +446,11 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(len(tasks), 1)
                 self.assertEqual(tasks[0].status, "rework")
                 self.assertEqual(tasks[0].acceptance, ["battle runs", "inbox updates"])
+
+            with urlopen(f"{base}/", timeout=5) as response:
+                index = response.read().decode("utf-8")
+            self.assertIn("Agent Profiles", index)
+            self.assertIn("Create from web", index)
 
 
 if __name__ == "__main__":

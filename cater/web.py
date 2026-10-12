@@ -198,6 +198,7 @@ def render_index(rt: Runtime) -> str:
     with rt:
         tasks = rt.tasks()
         inbox = {item["task_id"] for item in rt.inbox()}
+        profiles = rt.profiles()
         chain = rt.verify_chain()
     rows = "\n".join(_task_row(task, task.id in inbox) for task in tasks)
     if not rows:
@@ -239,6 +240,13 @@ def render_index(rt: Runtime) -> str:
             </div>
             {_inbox_list(tasks, inbox)}
           </article>
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Agent Profiles</h2>
+            <span>{len(profiles)} active</span>
+          </div>
+          {_profiles_table(profiles)}
         </section>
         <section class="panel">
           <div class="panel-head">
@@ -337,6 +345,32 @@ def task_to_dict(task: TaskSnapshot) -> dict[str, Any]:
         "commands": task.commands,
         "tokens": task.tokens,
     }
+
+
+def _profiles_table(profiles: dict[str, dict[str, Any]]) -> str:
+    if not profiles:
+        return '<p class="muted">No agent activity yet</p>'
+    rows = "\n".join(
+        f"""
+        <tr>
+          <td>{escape(profile['id'])}<small>{escape(profile['role'])}</small></td>
+          <td>{escape(profile['messages'])}</td>
+          <td>{escape(profile['supports'])}</td>
+          <td>{escape(profile['challenges'])}</td>
+          <td>{escape(profile['driver_failures'])}</td>
+          <td>{escape(profile['last_claim'])}</td>
+        </tr>
+        """
+        for profile in profiles.values()
+    )
+    return f"""
+    <table>
+      <thead>
+        <tr><th>Agent</th><th>Messages</th><th>Support</th><th>Challenge</th><th>Failures</th><th>Last Claim</th></tr>
+      </thead>
+      <tbody>{rows}</tbody>
+    </table>
+    """
 
 
 def event_to_dict(event: Event) -> dict[str, Any]:

@@ -13,6 +13,7 @@ from .cabinet import CabinetPolicy, tally_votes
 from .drivers import Driver, DriverResponse, load_drivers
 from .events import Actor, Event, EventLog
 from .fold import TaskSnapshot, fold
+from .profiles import agent_profiles
 
 
 @dataclass(frozen=True)
@@ -249,6 +250,9 @@ class Runtime:
                     }
                 )
         return items
+
+    def profiles(self) -> dict[str, dict[str, Any]]:
+        return agent_profiles(self.log.read())
 
     def verify_chain(self):
         return self.log.verify_chain()

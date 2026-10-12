@@ -106,6 +106,23 @@ def cmd_inbox(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_profiles(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        profiles = rt.profiles()
+        if not profiles:
+            print("no agent activity")
+            return 0
+        for profile in profiles.values():
+            print(
+                f"{profile['id']:<12} role={profile['role']:<12} "
+                f"messages={profile['messages']} supports={profile['supports']} "
+                f"challenges={profile['challenges']} failures={profile['driver_failures']}"
+            )
+            if profile["last_claim"]:
+                print(f"  last: {profile['last_claim']}")
+    return 0
+
+
 def cmd_command(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         acceptance = args.accept if args.accept is not None else None
@@ -213,6 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_events.set_defaults(func=cmd_events)
 
     sub.add_parser("inbox", help="show exceptional human input requests").set_defaults(func=cmd_inbox)
+    sub.add_parser("profiles", help="show projected agent profiles").set_defaults(func=cmd_profiles)
 
     p_command = sub.add_parser("command", help="record a human command or goal update")
     p_command.add_argument("task_id")
