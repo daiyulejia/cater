@@ -5,6 +5,7 @@ import json
 import sys
 import tempfile
 import threading
+import tomllib
 import unittest
 from pathlib import Path
 from http.server import ThreadingHTTPServer
@@ -12,6 +13,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from cater.cabinet import majority_threshold, tally_votes
+from cater import __version__
 from cater.cli import main
 from cater.drivers import CliDriver, DriverResponse
 from cater.ladder import decision_ladder
@@ -58,6 +60,10 @@ class StaticResponseDriver:
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_package_version_matches_project_metadata(self):
+        project = tomllib.loads((Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(project["project"]["version"], __version__)
+
     def test_battle_records_agent_decision_and_command_updates_goal(self):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("Build Cater seed", ["agents respond"])
