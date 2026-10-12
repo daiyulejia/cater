@@ -24,6 +24,8 @@ def serve(
     port: int = 8765,
     drivers_path: str | Path | None = None,
     roles_path: str | Path | None = None,
+    driver_attempts: int = 2,
+    circuit_breaker_threshold: int = 2,
     audit_key: str | bytes | None = None,
     audit_key_id: str = "local",
 ) -> None:
@@ -31,6 +33,8 @@ def serve(
         db_path,
         drivers_path=drivers_path,
         roles_path=roles_path,
+        driver_attempts=driver_attempts,
+        circuit_breaker_threshold=circuit_breaker_threshold,
         audit_key=audit_key,
         audit_key_id=audit_key_id,
     )
@@ -49,6 +53,8 @@ def make_handler(
     *,
     drivers_path: str | Path | None = None,
     roles_path: str | Path | None = None,
+    driver_attempts: int = 2,
+    circuit_breaker_threshold: int = 2,
     audit_key: str | bytes | None = None,
     audit_key_id: str = "local",
 ):
@@ -163,6 +169,8 @@ def make_handler(
                 db_path,
                 drivers_path=drivers_path,
                 roles_path=roles_path,
+                driver_attempts=driver_attempts,
+                circuit_breaker_threshold=circuit_breaker_threshold,
                 audit_key=audit_key,
                 audit_key_id=audit_key_id,
             )
@@ -273,7 +281,7 @@ def render_index(rt: Runtime) -> str:
             <h2>Organization Policy</h2>
             <span>{len(roles)} roles</span>
           </div>
-          {_policy_view(roles, cabinet_policy, governance_policy)}
+          {_policy_view(roles, cabinet_policy, governance_policy, rt.driver_attempts, rt.circuit_breaker_threshold)}
         </section>
         {_review_panel(review)}
         <section class="panel">
@@ -400,7 +408,13 @@ def _profiles_table(profiles: dict[str, dict[str, Any]]) -> str:
     """
 
 
-def _policy_view(roles: list[Any], cabinet_policy: Any, governance_policy: Any) -> str:
+def _policy_view(
+    roles: list[Any],
+    cabinet_policy: Any,
+    governance_policy: Any,
+    driver_attempts: int,
+    circuit_breaker_threshold: int,
+) -> str:
     role_rows = "\n".join(
         f"<li><strong>{escape(role.id)}</strong><span>{escape(role.role)} / {escape(role.driver)}</span></li>"
         for role in roles
@@ -421,6 +435,13 @@ def _policy_view(roles: list[Any], cabinet_policy: Any, governance_policy: Any) 
           <div><dt>threshold</dt><dd>{escape(cabinet_policy.approval_threshold or "majority")}</dd></div>
           <div><dt>quorum</dt><dd>{escape(cabinet_policy.quorum or "-")}</dd></div>
           <div><dt>veto roles</dt><dd>{escape(", ".join(cabinet_policy.veto_roles) or "-")}</dd></div>
+        </dl>
+      </div>
+      <div>
+        <h3>Reliability</h3>
+        <dl class="policy-list">
+          <div><dt>driver attempts</dt><dd>{escape(driver_attempts)}</dd></div>
+          <div><dt>circuit breaker</dt><dd>{escape(circuit_breaker_threshold)}</dd></div>
         </dl>
       </div>
       <div>
@@ -806,7 +827,7 @@ td small {
 }
 .policy-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
 }
 .policy-list {

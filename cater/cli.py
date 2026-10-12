@@ -21,6 +21,8 @@ def open_runtime(args: argparse.Namespace) -> Runtime:
         db,
         drivers_path=args.drivers,
         roles_path=args.roles,
+        driver_attempts=args.driver_attempts,
+        circuit_breaker_threshold=args.circuit_breaker_threshold,
         audit_key=resolve_audit_key(args),
         audit_key_id=args.audit_key_id,
     )
@@ -205,6 +207,9 @@ def cmd_policy(args: argparse.Namespace) -> int:
         print(f"  approval_threshold={rt.cabinet_policy.approval_threshold}")
         print(f"  quorum={rt.cabinet_policy.quorum}")
         print(f"  veto_roles={','.join(rt.cabinet_policy.veto_roles) or '-'}")
+        print("reliability:")
+        print(f"  driver_attempts={rt.driver_attempts}")
+        print(f"  circuit_breaker_threshold={rt.circuit_breaker_threshold}")
         print("roles:")
         for role in rt.roles:
             print(f"  {role.id}: role={role.role} driver={role.driver}")
@@ -253,6 +258,8 @@ def cmd_web(args: argparse.Namespace) -> int:
         port=args.port,
         drivers_path=args.drivers,
         roles_path=args.roles,
+        driver_attempts=args.driver_attempts,
+        circuit_breaker_threshold=args.circuit_breaker_threshold,
         audit_key=resolve_audit_key(args),
         audit_key_id=args.audit_key_id,
     )
@@ -264,6 +271,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", help="SQLite database path")
     parser.add_argument("--drivers", help="driver config JSON")
     parser.add_argument("--roles", help="role config JSON")
+    parser.add_argument("--driver-attempts", type=int, default=2, help="driver retry attempts before containment")
+    parser.add_argument("--circuit-breaker-threshold", type=int, default=2, help="failures before a driver circuit opens")
     parser.add_argument("--audit-key", help="HMAC audit key")
     parser.add_argument("--audit-key-file", help="file containing HMAC audit key")
     parser.add_argument("--audit-key-id", default="local", help="audit key identifier")

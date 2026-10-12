@@ -571,6 +571,24 @@ class CliTests(unittest.TestCase):
         self.assertIn("trigger_on_challenge=True", out)
         self.assertIn("cabinet:", out)
         self.assertIn("veto_roles=test", out)
+        self.assertIn("reliability:", out)
+        self.assertIn("driver_attempts=2", out)
+
+        code = main(
+            [
+                "--db",
+                self.db,
+                "--driver-attempts",
+                "3",
+                "--circuit-breaker-threshold",
+                "4",
+                "policy",
+            ]
+        )
+        self.assertEqual(code, 0)
+        custom_out = self.out.getvalue()
+        self.assertIn("driver_attempts=3", custom_out)
+        self.assertIn("circuit_breaker_threshold=4", custom_out)
 
     def test_cli_export_json_and_jsonl(self):
         code, _ = self.run_cli("demo")
@@ -708,6 +726,7 @@ class WebTests(unittest.TestCase):
                 index = response.read().decode("utf-8")
             self.assertIn("Agent Profiles", index)
             self.assertIn("Organization Policy", index)
+            self.assertIn("Reliability", index)
             self.assertIn("Self Review", index)
             self.assertIn("Create from web", index)
 
