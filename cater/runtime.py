@@ -5,55 +5,13 @@ from __future__ import annotations
 import json
 import uuid
 from dataclasses import dataclass
+from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from .drivers import Driver, ScriptedDriver
+from .drivers import Driver, load_drivers
 from .events import Actor, Event, EventLog
 from .fold import TaskSnapshot, fold
-
-
-DEFAULT_SCRIPT = {
-    "product": [
-        json.dumps(
-            {
-                "stance": "assert",
-                "option_id": "A",
-                "claim": "Ship the smallest user-visible loop first",
-                "evidence": ["acceptance criteria matter more than a broad architecture"],
-                "confidence": 0.78,
-                "text": "I suggest shipping the smallest loop people can inspect and decide on.",
-            },
-            ensure_ascii=False,
-        )
-    ],
-    "dev": [
-        json.dumps(
-            {
-                "stance": "assert",
-                "option_id": "B",
-                "claim": "Harden the driver and event boundary first",
-                "evidence": ["real CLI integration exposes protocol drift and crashes"],
-                "confidence": 0.74,
-                "text": "I suggest connecting real drivers before expanding the UI.",
-            },
-            ensure_ascii=False,
-        )
-    ],
-    "test": [
-        json.dumps(
-            {
-                "stance": "challenge",
-                "option_id": "C",
-                "claim": "Do not claim collaboration works without replayable evidence",
-                "evidence": ["running successfully is not the same as being correct"],
-                "confidence": 0.82,
-                "text": "I object to declaring consensus before preserving process evidence.",
-            },
-            ensure_ascii=False,
-        )
-    ],
-}
 
 
 @dataclass(frozen=True)
@@ -64,23 +22,32 @@ class Role:
     driver: str
 
 
-DEFAULT_ROLES = [
-    Role("product", "Product", "product", "product"),
-    Role("dev", "Developer", "developer", "dev"),
-    Role("test", "Tester", "tester", "test"),
-]
-
-
 class Runtime:
-    def __init__(self, db_path: str | Path = ":memory:", drivers: dict[str, Driver] | None = None):
+    def __init__(
+        self,
+        db_path: str | Path = ":memory:",
+        *,
+        drivers: dict[str, Driver] | None = None,
+        drivers_path: str | Path | None = None,
+        roles_path: str | Path | None = None,
+    ):
         self.log = EventLog(db_path)
-        self.roles = list(DEFAULT_ROLES)
-        self.drivers: dict[str, Driver] = drivers or {
-            name: ScriptedDriver(name, script)
-            for name, script in DEFAULT_SCRIPT.items()
-        }
+        self.roles = load_roles(roles_path)
+        configured_drivers = load_drivers(_pack_path("default_drivers.json"))
+        if drivers_path is not None:
+            configured_drivers.update(load_drivers(drivers_path))
+        if drivers is not None:
+            configured_drivers.update(drivers)
+        self.drivers = configured_drivers
+        missing = sorted({role.driver for role in self.roles} - set(self.drivers))
+        if missing:
+            raise ValueError(f"missing driver(s) for roles: {', '.join(missing)}")
 
     def close(self) -> None:
+        for driver in self.drivers.values():
+            close = getattr(driver, "close", None)
+            if callable(close):
+                close()
         self.log.close()
 
     def __enter__(self) -> "Runtime":
@@ -236,3 +203,27 @@ class Runtime:
             "root_cause": "No single option reached consensus in the department battle.",
             "options": list(options.values()),
         }
+
+
+def load_roles(path: str | Path | None = None) -> list[Role]:
+    source = Path(path) if path is not None else _pack_path("default_roles.json")
+    raw = json.loads(source.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise ValueError("roles config must be a list")
+    roles = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("each role must be an object")
+        roles.append(
+            Role(
+                id=str(item["id"]),
+                name=str(item.get("name") or item["id"]),
+                role=str(item.get("role") or item["id"]),
+                driver=str(item.get("driver") or item["id"]),
+            )
+        )
+    return roles
+
+
+def _pack_path(name: str) -> Path:
+    return Path(str(resources.files("cater").joinpath("packs", name)))

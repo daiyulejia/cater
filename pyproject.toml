@@ -16,3 +16,6 @@ cater = "cater.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["cater*"]
+
+[tool.setuptools.package-data]
+cater = ["packs/*.json"]

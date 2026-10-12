@@ -1,0 +1,28 @@
+{
+  "drivers": [
+    {
+      "kind": "scripted",
+      "name": "product",
+      "tokens_per_call": 200,
+      "script": [
+        "{\"stance\":\"assert\",\"option_id\":\"A\",\"claim\":\"Ship the smallest user-visible loop first\",\"evidence\":[\"acceptance criteria matter more than a broad architecture\"],\"confidence\":0.78,\"text\":\"I suggest shipping the smallest loop people can inspect and decide on.\"}"
+      ]
+    },
+    {
+      "kind": "scripted",
+      "name": "dev",
+      "tokens_per_call": 200,
+      "script": [
+        "{\"stance\":\"assert\",\"option_id\":\"B\",\"claim\":\"Harden the driver and event boundary first\",\"evidence\":[\"real CLI integration exposes protocol drift and crashes\"],\"confidence\":0.74,\"text\":\"I suggest connecting real drivers before expanding the UI.\"}"
+      ]
+    },
+    {
+      "kind": "scripted",
+      "name": "test",
+      "tokens_per_call": 200,
+      "script": [
+        "{\"stance\":\"challenge\",\"option_id\":\"C\",\"claim\":\"Do not claim collaboration works without replayable evidence\",\"evidence\":[\"running successfully is not the same as being correct\"],\"confidence\":0.82,\"text\":\"I object to declaring consensus before preserving process evidence.\"}"
+      ]
+    }
+  ]
+}

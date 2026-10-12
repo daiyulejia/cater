@@ -14,7 +14,7 @@ DEFAULT_DB = Path.cwd() / ".cater" / "cater.db"
 def open_runtime(args: argparse.Namespace) -> Runtime:
     db = Path(args.db or DEFAULT_DB)
     db.parent.mkdir(parents=True, exist_ok=True)
-    return Runtime(db)
+    return Runtime(db, drivers_path=args.drivers, roles_path=args.roles)
 
 
 def cmd_new(args: argparse.Namespace) -> int:
@@ -86,6 +86,27 @@ def cmd_chain(args: argparse.Namespace) -> int:
         return 0 if report.ok else 1
 
 
+def cmd_drivers(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        for role in rt.roles:
+            driver = rt.drivers[role.driver]
+            print(f"{role.id:<12} role={role.role:<12} driver={role.driver:<12} {type(driver).__name__}")
+    return 0
+
+
+def cmd_probe_driver(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        driver = rt.drivers[args.name]
+        probe = getattr(driver, "probe", None)
+        if callable(probe):
+            ok = bool(probe())
+            print(f"{args.name}: {'alive' if ok else 'unavailable'}")
+            return 0 if ok else 1
+        response = driver.complete(role="probe", prompt="ping", context={"probe": True})
+        print(f"{args.name}: complete ok, tokens={response.tokens}, text={response.text[:60]}")
+    return 0
+
+
 def cmd_demo(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         task_id = rt.create_task(
@@ -104,6 +125,8 @@ def cmd_demo(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cater")
     parser.add_argument("--db", help="SQLite database path")
+    parser.add_argument("--drivers", help="driver config JSON")
+    parser.add_argument("--roles", help="role config JSON")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_new = sub.add_parser("new", help="create a task")
@@ -133,6 +156,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_decide.set_defaults(func=cmd_decide)
 
     sub.add_parser("chain", help="verify event hash chain").set_defaults(func=cmd_chain)
+    sub.add_parser("drivers", help="show roles and configured drivers").set_defaults(func=cmd_drivers)
+
+    p_probe = sub.add_parser("probe-driver", help="probe a configured driver")
+    p_probe.add_argument("name")
+    p_probe.set_defaults(func=cmd_probe_driver)
+
     sub.add_parser("demo", help="run a deterministic demo").set_defaults(func=cmd_demo)
     return parser
 

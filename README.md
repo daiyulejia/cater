@@ -39,6 +39,7 @@ LangChain / LangGraph 可以作为某个 driver 或复杂执行后端的内部�
 
 ```bash
 python -m cater.cli demo
+python -m cater.cli drivers
 python -m cater.cli show
 python -m cater.cli inbox
 python -m cater.cli events <task_id>
@@ -59,45 +60,112 @@ python -m cater.cli events [task_id]
 python -m cater.cli inbox
 python -m cater.cli decide <task_id> --resolution done --reason "Accepted"
 python -m cater.cli chain
+python -m cater.cli drivers
+python -m cater.cli --drivers drivers.json probe-driver product
 ```
 
 ## Current Scope / 当前范围
 
-Implemented in the first seed:
+Implemented now:
 
-第一版已经包含：
+当前已经包含：
 
 - SQLite append-only event store with hash-chain verification
 - task creation, battle, escalation, and human decision
 - deterministic scripted drivers for repeatable demos and tests
+- configurable roles and drivers from JSON
+- long-lived NDJSON CLI drivers with probe and crash recovery
 - pure fold from events to task snapshots
 - CLI commands for process inspection
 - zero third-party runtime dependencies
 - SQLite 只追加事件流 + 哈希链校验
 - 任务创建、部门 battle、升级、人类拍板
 - 确定性 scripted driver，便于演示和测试
+- JSON 配置角色与 driver
+- 长驻 NDJSON CLI driver，支持存活探针与崩溃自愈
 - 从事件流纯函数折叠任务快照
 - 面向人的 CLI 过程视图
 - 运行时零第三方依赖
 
+## Driver Config / Driver 配置
+
+Drivers are replaceable. The default package uses deterministic scripted drivers, but you can override any driver with a local CLI process:
+
+Driver 是可替换边界。默认包使用确定性 scripted driver，但你可以用本地 CLI 进程覆盖任意 driver：
+
+```json
+{
+  "drivers": [
+    {
+      "kind": "cli",
+      "name": "product",
+      "command": ["python", "my_driver.py"],
+      "timeout": 120,
+      "restart_limit": 1
+    }
+  ]
+}
+```
+
+The CLI child process speaks newline-delimited JSON. Cater sends:
+
+CLI 子进程使用 NDJSON 协议。Cater 会发送：
+
+```json
+{"id":"...","type":"ping"}
+{"id":"...","type":"complete","role":"product","prompt":"...","context":{"task_id":"...","goal":"..."}}
+```
+
+The driver replies:
+
+Driver 返回：
+
+```json
+{"id":"...","ok":true,"pong":true}
+{"id":"...","ok":true,"text":"{\"stance\":\"assert\",\"option_id\":\"A\",\"claim\":\"...\",\"evidence\":[],\"text\":\"...\"}","tokens":123,"meta":{}}
+```
+
+This is intentionally small. LangChain, LangGraph, Codex CLI, Claude Code, Gemini CLI, or a custom API wrapper can live behind this process boundary without leaking into Cater's core runtime.
+
+这个边界刻意很小。LangChain、LangGraph、Codex CLI、Claude Code、Gemini CLI 或自定义 API wrapper 都可以藏在这个进程后面，而不污染 Cater 的核心运行时。
+
 ## Roadmap / 路线图
 
-Next:
+Next iterations:
 
-下一步：
+下一轮迭代：
 
-- real CLI/API model drivers
-- Web summary and replay view
-- richer escalation brief schema
-- HMAC audit signatures
-- retry containment and circuit breaker
-- mobile decision inbox
-- 真实 CLI/API 模型 driver
-- Web 摘要与过程回放界面
-- 更完整的升级简报 schema
-- HMAC 审计签名
-- retry containment 与 circuit breaker
-- 移动端待拍板收件箱
+1. Product entry: make `cater demo`, `cater new`, `cater inbox`, and `cater drivers` feel like a coherent first-run workflow.
+2. Cabinet layer: turn agent positions into explicit votes, thresholds, and decision briefs instead of simple disagreement grouping.
+3. Web replay: add a minimal local web view for task summary, event timeline, messages, brief, and human decision.
+4. Reliability: add retry containment, circuit breaker, and driver failure events.
+5. Audit: add optional HMAC signatures on top of the hash chain.
+6. Distribution: add examples for wrapping popular third-party CLIs while keeping the core dependency-free.
+1. 产品入口：让 `cater demo`、`cater new`、`cater inbox`、`cater drivers` 形成连贯的新手首次体验。
+2. 内阁层：把 agent 立场升级成明确投票、阈值和裁决简报，而不是只做简单分歧归组。
+3. Web 回放：增加本地极简 Web 视图，展示任务摘要、事件时间线、消息、简报和人类裁决。
+4. 可靠性：加入 retry containment、circuit breaker 和 driver 失败事件。
+5. 审计：在哈希链之上增加可选 HMAC 签名。
+6. 分发：补充主流第三方 CLI wrapper 示例，同时保持核心零依赖。
+
+## Iteration Lens / 迭代视角
+
+Cater should grow through small usable loops. Each iteration should be reviewed from multiple angles:
+
+Cater 应该通过一个个可用小闭环生长。每次迭代都要从多个角度复盘：
+
+- product: does this make the next user action obvious?
+- design: can the process be understood at a glance?
+- testing: can failures be replayed and reproduced?
+- UI: is the human decision point calm and actionable?
+- logic: are events, projections, and driver boundaries still simple?
+- adoption: can a new contributor run it without extra services?
+- 产品：下一步操作是否显而易见？
+- 设计：协作过程是否能一眼看懂？
+- 测试：失败是否可回放、可复现？
+- UI：人类拍板点是否清晰、克制、可行动？
+- 逻辑：事件、投影、driver 边界是否仍然简单？
+- 采用：新贡献者是否不依赖额外服务就能跑起来？
 
 ## Design Principles / 设计原则
 

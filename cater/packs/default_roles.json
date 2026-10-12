@@ -1,0 +1,20 @@
+[
+  {
+    "id": "product",
+    "name": "Product",
+    "role": "product",
+    "driver": "product"
+  },
+  {
+    "id": "dev",
+    "name": "Developer",
+    "role": "developer",
+    "driver": "dev"
+  },
+  {
+    "id": "test",
+    "name": "Tester",
+    "role": "tester",
+    "driver": "test"
+  }
+]
