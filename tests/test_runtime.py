@@ -620,6 +620,13 @@ class RuntimeTests(unittest.TestCase):
             findings = [item["finding"] for item in review["lenses"]]
             self.assertTrue(any("direct worker assignment and cabinet dispatch" in finding for finding in findings))
 
+        with Runtime(":memory:") as rt:
+            full_id = rt.create_task("Full path with dependencies")
+            rt.dispatch(full_id)
+            review = rt.review()
+            findings = [item["finding"] for item in review["lenses"]]
+            self.assertTrue(any("visible dependency structure" in finding for finding in findings))
+
     def test_review_flags_worker_exchange_quality(self):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("Flat exchange")

@@ -132,7 +132,14 @@ def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     if direct:
         return _lens("design", "watch", "Only direct worker assignment is represented.", "Run one cabinet dispatch on a complex task to verify upper-layer oversight.")
     if full:
-        return _lens("design", "watch", "Only full cabinet dispatch is represented.", "Use direct assignment for a small task to avoid over-governance and unnecessary token spend.")
+        has_dependencies = any(
+            item.get("depends_on")
+            for task in full
+            for item in task.assignments
+        )
+        if has_dependencies:
+            return _lens("design", "watch", "Only full cabinet dispatch is represented, with visible dependency structure.", "Use direct assignment for a small task to avoid over-governance and unnecessary token spend.")
+        return _lens("design", "watch", "Only full cabinet dispatch is represented, but no dependency structure is visible.", "Review whether dispatch is adding real sequencing or only ceremony.")
     return _lens("design", "watch", "Tasks exist but no distribution path is visible.", "Choose direct assignment for simple work or dispatch for complex work.")
 
 

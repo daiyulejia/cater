@@ -36,6 +36,12 @@ python -m cater.cli run <task_id>
 
 This path is heavier but more inspectable. It creates replayable mission, decomposition, assignment, and plan events.
 
+Each assigned lane should include a concrete deliverable and explicit
+dependencies. The default lane chain is scope -> implementation -> verification:
+product clarifies value and acceptance, development turns it into an
+implementation path, and testing reviews risk and confidence. If dispatch does
+not add this kind of sequencing clarity, prefer direct assignment.
+
 ## 3. Governance Path
 
 Use this when execution shows risk.
