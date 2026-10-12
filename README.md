@@ -57,7 +57,7 @@ By default Cater writes to `./.cater/cater.db`.
 ```bash
 python -m cater.cli new "Build the first demo" --accept "three roles respond" --run
 python -m cater.cli run <task_id>
-python -m cater.cli battle <task_id>  # compatibility alias for run
+python -m cater.cli battle <task_id>
 python -m cater.cli show [task_id]
 python -m cater.cli events [task_id]
 python -m cater.cli inbox
@@ -71,6 +71,10 @@ python -m cater.cli --audit-key "dev-secret" demo
 python -m cater.cli --audit-key "dev-secret" chain
 ```
 
+`run` is the normal collaboration loop. It records agent contributions and only activates governance when there is a challenge, option split, low confidence, or another risk signal. `battle` forces a governance round when you intentionally want cabinet review.
+
+`run` 是常规协作循环：记录 agent 的产出，并且只有在出现 challenge、方案分裂、低置信度或其他风险信号时才启动治理层。`battle` 是强制治理轮次，用于你明确希望内阁审查的时候。
+
 ## Current Scope / 当前范围
 
 Implemented now:
@@ -78,7 +82,7 @@ Implemented now:
 当前已经包含：
 
 - SQLite append-only event store with hash-chain verification
-- task creation, collaboration rounds, targeted battle, cabinet vote, supreme fallback, and rare human command/override
+- task creation, collaboration rounds, risk-triggered governance, targeted battle, cabinet vote, supreme fallback, and rare human command/override
 - deterministic scripted drivers for repeatable demos and tests
 - configurable roles and drivers from JSON
 - long-lived NDJSON CLI drivers with probe and crash recovery
@@ -91,7 +95,7 @@ Implemented now:
 - CLI commands for process inspection
 - zero third-party runtime dependencies
 - SQLite 只追加事件流 + 哈希链校验
-- 任务创建、协作轮次、必要时 battle、内阁投票、最高者兜底、极少数人类命令/覆盖
+- 任务创建、协作轮次、风险触发治理、必要时 battle、内阁投票、最高者兜底、极少数人类命令/覆盖
 - 确定性 scripted driver，便于演示和测试
 - JSON 配置角色与 driver
 - 长驻 NDJSON CLI driver，支持存活探针与崩溃自愈

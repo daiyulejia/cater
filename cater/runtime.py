@@ -84,7 +84,13 @@ class Runtime:
         self.log.emit(actor=Actor.system("orchestrator"), type="task.started", task_id=task_id)
         return task_id
 
+    def collaborate(self, task_id: str) -> dict[str, Any]:
+        return self._run_round(task_id, force_governance=False)
+
     def battle(self, task_id: str) -> dict[str, Any]:
+        return self._run_round(task_id, force_governance=True)
+
+    def _run_round(self, task_id: str, *, force_governance: bool) -> dict[str, Any]:
         task = self.task(task_id)
         if task is None:
             raise KeyError(task_id)
@@ -120,6 +126,16 @@ class Runtime:
                 payload=payload,
             )
             utterances.append({"event": event, "payload": payload, "role": role})
+
+        if not force_governance and not self._needs_governance(utterances):
+            brief = self._build_collaboration_brief(task_id, utterances)
+            brief_event = self.log.emit(
+                actor=Actor.system("orchestrator"),
+                type="brief.generated",
+                task_id=task_id,
+                payload={"brief": brief, "reason": "collaboration_continues", "options": brief["options"]},
+            )
+            return {"task_id": task_id, "brief_event": brief_event.seq, "brief": brief}
 
         brief = self._build_brief(task_id, utterances, self.cabinet_policy)
         self.log.emit(
@@ -199,9 +215,6 @@ class Runtime:
                 payload={"brief": brief},
             )
         return {"task_id": task_id, "brief_event": brief_event.seq, "brief": brief}
-
-    def collaborate(self, task_id: str) -> dict[str, Any]:
-        return self.battle(task_id)
 
     def decide(self, task_id: str, resolution: str, reason: str) -> Event:
         if resolution not in {"done", "rework"}:
@@ -383,6 +396,59 @@ class Runtime:
         except json.JSONDecodeError:
             return {"stance": "assert", "claim": "", "text": text, "evidence": []}
         return data if isinstance(data, dict) else {"stance": "assert", "text": text}
+
+    @staticmethod
+    def _needs_governance(utterances: list[dict[str, Any]]) -> bool:
+        option_ids = set()
+        for item in utterances:
+            payload = item["payload"]
+            if payload.get("stance") == "challenge":
+                return True
+            option_id = payload.get("option_id")
+            if option_id:
+                option_ids.add(str(option_id))
+            confidence = payload.get("confidence")
+            if isinstance(confidence, (int, float)) and confidence < 0.5:
+                return True
+        return len(option_ids) > 1
+
+    @staticmethod
+    def _build_collaboration_brief(task_id: str, utterances: list[dict[str, Any]]) -> dict[str, Any]:
+        positions = []
+        for item in utterances:
+            role: Role = item["role"]
+            payload = item["payload"]
+            positions.append(
+                {
+                    "actor": role.id,
+                    "option_id": payload.get("option_id") or role.id,
+                    "claim": payload.get("claim", ""),
+                    "evidence": payload.get("evidence", []),
+                    "confidence": payload.get("confidence"),
+                    "stance": payload.get("stance"),
+                }
+            )
+        options = [
+            {
+                "id": item["option_id"],
+                "summary": item["claim"],
+                "support": 1,
+                "concern": 0,
+                "supporters": [item["actor"]],
+                "concerns": [],
+            }
+            for item in positions
+        ]
+        return {
+            "task_id": task_id,
+            "dispute": "Agents collaborated without material disagreement; governance was not needed.",
+            "positions": positions,
+            "consensus": [positions[0]["option_id"]] if positions else [],
+            "root_cause": "No challenge, option split, or low-confidence signal was observed.",
+            "cabinet": None,
+            "governance": {"status": "not_needed", "reason": "normal collaboration round"},
+            "options": options,
+        }
 
     @staticmethod
     def _build_brief(

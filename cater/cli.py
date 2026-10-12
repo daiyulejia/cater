@@ -39,7 +39,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         task_id = rt.create_task(args.goal, args.accept or [])
         print(f"created {task_id}")
         if args.run or args.battle:
-            result = rt.collaborate(task_id)
+            result = rt.battle(task_id) if args.battle else rt.collaborate(task_id)
             task = rt.task(task_id)
             print(f"round complete: {task.status}, brief event #{result['brief_event']}")
             print(result["brief"]["dispute"])
@@ -51,6 +51,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         result = rt.collaborate(args.task_id)
         task = rt.task(args.task_id)
         print(f"round complete: {task.status}, brief event #{result['brief_event']}")
+        print(json.dumps(result["brief"], ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_battle(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        result = rt.battle(args.task_id)
+        task = rt.task(args.task_id)
+        print(f"governance round complete: {task.status}, brief event #{result['brief_event']}")
         print(json.dumps(result["brief"], ensure_ascii=False, indent=2))
     return 0
 
@@ -215,12 +224,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("goal")
     p_new.add_argument("--accept", action="append")
     p_new.add_argument("--run", action="store_true", help="run one collaboration round immediately")
-    p_new.add_argument("--battle", action="store_true")
+    p_new.add_argument("--battle", action="store_true", help="run one forced governance round immediately")
     p_new.set_defaults(func=cmd_new)
 
-    p_run = sub.add_parser("run", aliases=["battle"], help="run one collaboration round")
+    p_run = sub.add_parser("run", help="run one collaboration round")
     p_run.add_argument("task_id")
     p_run.set_defaults(func=cmd_run)
+
+    p_battle = sub.add_parser("battle", help="force one governance round")
+    p_battle.add_argument("task_id")
+    p_battle.set_defaults(func=cmd_battle)
 
     p_show = sub.add_parser("show", help="show tasks")
     p_show.add_argument("task_id", nargs="?")

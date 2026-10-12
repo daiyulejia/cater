@@ -106,12 +106,20 @@ def make_handler(
                         rt.collaborate(task_id)
                 self._redirect(f"/tasks/{task_id}")
                 return
-            if path.startswith("/tasks/") and (path.endswith("/run") or path.endswith("/battle")):
+            if path.startswith("/tasks/") and path.endswith("/run"):
                 task_id = path.split("/")[2]
                 with self._runtime() as rt:
                     if rt.task(task_id) is None:
                         return self._not_found()
                     rt.collaborate(task_id)
+                self._redirect(f"/tasks/{task_id}")
+                return
+            if path.startswith("/tasks/") and path.endswith("/battle"):
+                task_id = path.split("/")[2]
+                with self._runtime() as rt:
+                    if rt.task(task_id) is None:
+                        return self._not_found()
+                    rt.battle(task_id)
                 self._redirect(f"/tasks/{task_id}")
                 return
             if path.startswith("/tasks/") and path.endswith("/command"):
@@ -470,9 +478,14 @@ def _decision_panel(task: TaskSnapshot) -> str:
         <article class="panel">
           <div class="panel-head"><h2>Agent Decision</h2><span>{escape(task.status)}</span></div>
           <p class="muted">Agents are expected to continue autonomously unless you send a command.</p>
-          <form method="post" action="/tasks/{escape(task.id)}/run">
-            <button type="submit">Run next round</button>
-          </form>
+          <div class="button-row">
+            <form method="post" action="/tasks/{escape(task.id)}/run">
+              <button type="submit">Run next round</button>
+            </form>
+            <form method="post" action="/tasks/{escape(task.id)}/battle">
+              <button class="secondary" type="submit">Force governance</button>
+            </form>
+          </div>
         </article>
         """
     return f"""
@@ -819,6 +832,19 @@ button {
   color: #fff;
   font-weight: 700;
   cursor: pointer;
+}
+.button-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.button-row form {
+  display: block;
+}
+button.secondary {
+  background: #eef3f3;
+  color: var(--accent);
+  border: 1px solid var(--line);
 }
 @media (max-width: 760px) {
   main { width: min(100vw - 20px, 1120px); padding-top: 18px; }

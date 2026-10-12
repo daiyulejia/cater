@@ -147,6 +147,37 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("supports=1", driver.prompts[1])
         self.assertIn("last_claim=memory claim 1", driver.prompts[1])
 
+    def test_collaboration_round_skips_governance_without_disagreement(self):
+        driver = PromptCaptureDriver()
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "cabinet": {"approval_threshold": 1, "quorum": 1, "veto_roles": []},
+                  "roles": [
+                    {"id":"memory","name":"Memory","role":"memory","driver":"memory"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"memory": driver}) as rt:
+                task_id = rt.create_task("Collaborate without governance")
+                result = rt.collaborate(task_id)
+                task = rt.task(task_id)
+                event_types = [event.type for event in rt.log.read(task_id=task_id)]
+
+                self.assertEqual(task.status, "running")
+                self.assertIsNone(task.cabinet)
+                self.assertNotIn("cabinet.voted", event_types)
+                self.assertEqual(result["brief"]["governance"]["status"], "not_needed")
+
+                rt.battle(task_id)
+                task = rt.task(task_id)
+                self.assertEqual(task.cabinet["status"], "recommended")
+                self.assertEqual(task.status, "decided")
+
     def test_battle_records_cabinet_vote_tally(self):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("Tally me")
@@ -418,11 +449,14 @@ class WebTests(unittest.TestCase):
             events = rt.log.read(task_id=task_id)
             html = render_task(rt.task(task_id), events)
             ladder = decision_ladder(events)
+            fresh_task_id = rt.create_task("Render controls")
+            controls_html = render_task(rt.task(fresh_task_id), rt.log.read(task_id=fresh_task_id))
 
         self.assertIn("Cabinet", html)
         self.assertIn("Decision Ladder", html)
         self.assertIn("Timeline", html)
         self.assertIn("Human Command", html)
+        self.assertIn("Force governance", controls_html)
         self.assertIn("cabinet.voted", html)
         self.assertIn("agent.decided", html)
         self.assertEqual([step["id"] for step in ladder], ["battle", "cabinet", "supreme", "human"])
