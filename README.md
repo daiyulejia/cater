@@ -56,7 +56,7 @@ On Windows, if `python` points to the Microsoft Store placeholder, use:
 ## Commands
 
 ```bash
-python -m cater.cli new "Build the first demo" --accept "three roles respond" --dispatch --run
+python -m cater.cli new "Fix the CLI typo" --assign-to dev --run
 python -m cater.cli run <task_id>
 python -m cater.cli battle <task_id>
 python -m cater.cli dispatch <task_id>
@@ -84,6 +84,8 @@ python -m cater.cli --audit-key "dev-secret" chain
 `dispatch` records the pyramid-style task distribution path: the top layer frames the mission, the cabinet decomposes it into execution lanes, and worker agents receive assigned work before the next collaboration round. This is optional; small tasks can go straight to a worker with `assign` or `new --assign-to dev --run`.
 
 `--driver-attempts` and `--circuit-breaker-threshold` tune retry containment without changing driver code.
+
+See [docs/organization-flow.md](docs/organization-flow.md) for when to use direct assignment, cabinet dispatch, or governance.
 
 ## Current Scope
 
