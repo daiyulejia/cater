@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 
+from . import __version__
 from .ladder import decision_ladder
 from .runtime import Runtime
 from .web import event_to_dict, serve, task_to_dict
@@ -316,6 +317,7 @@ def cmd_web(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cater")
+    parser.add_argument("--version", action="version", version=f"cater {__version__}")
     parser.add_argument("--db", help="SQLite database path")
     parser.add_argument("--drivers", help="driver config JSON")
     parser.add_argument("--roles", help="role config JSON")

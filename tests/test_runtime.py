@@ -613,6 +613,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("hash chain ok", out)
 
+    def test_cli_version(self):
+        with self.assertRaises(SystemExit) as raised:
+            main(["--version"])
+        self.assertEqual(raised.exception.code, 0)
+        self.assertIn("cater 0.1.0", self.out.getvalue())
+
     def test_cli_chain_reports_signed_events(self):
         code = main(["--db", self.db, "--audit-key", "secret", "demo"])
         self.assertEqual(code, 0)
