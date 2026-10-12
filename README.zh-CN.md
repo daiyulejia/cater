@@ -60,6 +60,7 @@ python -m cater.cli new "Build the first demo" --accept "three roles respond" --
 python -m cater.cli run <task_id>
 python -m cater.cli battle <task_id>
 python -m cater.cli dispatch <task_id>
+python -m cater.cli assign <task_id> dev --objective "Implement the smallest useful path"
 python -m cater.cli show [task_id]
 python -m cater.cli events [task_id]
 python -m cater.cli export [task_id] --format json
@@ -80,7 +81,7 @@ python -m cater.cli --audit-key "dev-secret" chain
 
 `run` 是常规协作循环：记录 agent 的产出，并且只有在出现 challenge、方案分裂、低置信度或其他风险信号时才启动治理层。`battle` 是强制治理轮次，用于你明确希望内阁审查的时候。
 
-`dispatch` 会记录金字塔式任务分发路径：顶层定义 mission，内阁把 mission 拆成执行 lane，worker agent 在下一轮协作前拿到明确分工。
+`dispatch` 会记录金字塔式任务分发路径：顶层定义 mission，内阁把 mission 拆成执行 lane，worker agent 在下一轮协作前拿到明确分工。它是可选能力；小任务可以用 `assign` 或 `new --assign-to dev --run` 直接派给执行层。
 
 `--driver-attempts` 和 `--circuit-breaker-threshold` 可以调节 driver 重试与熔断策略，不需要改 driver 代码。
 
@@ -90,7 +91,7 @@ python -m cater.cli --audit-key "dev-secret" chain
 
 - SQLite 只追加事件流 + 哈希链校验
 - 任务创建、协作轮次、风险触发治理、必要时 battle、内阁投票、最高者兜底、极少数人类命令/覆盖
-- 金字塔式任务分发，包含 mission 定义、内阁拆解、角色分工和可回放 plan
+- 可选的金字塔式任务分发，包含 mission 定义、内阁拆解、直接派给执行层和可回放 plan
 - 确定性 scripted driver，便于演示和测试
 - JSON 配置角色与 driver
 - 长驻 NDJSON CLI driver，支持存活探针与崩溃自愈
@@ -189,6 +190,8 @@ python -m cater.cli review <task_id> --record
 
 `review` 会从产品、设计、测试、UI、逻辑、可靠性和采用门槛等角度审视当前工作。不带 `--record` 时它只是纯投影；带 `--record` 时会追加 `review.generated` 事件，让批判和修正建议本身也可回放。
 
+架构级自审见 [docs/architecture-review.md](docs/architecture-review.md)。它专门检查 Cater 自己的分发、裁判、治理机制是否值得付出 token、延迟和复杂度成本。
+
 ## 路线图
 
 下一轮迭代：
@@ -223,5 +226,6 @@ Cater 应该通过一个个可用小闭环生长。每次迭代都要从多个�
 2. 事件优先：状态只是只追加历史的一个视图。
 3. Driver 可替换：模型、CLI、API 不能焊死在骨架里。
 4. 协作优先：分歧是常态，但只在能改善任务时显性化，而不是默认表演争论。
-5. 分发优先：金字塔首先是任务分发机制，其次才是争议升级机制。
-6. 人类发命令和覆盖：人类可以随时重定向组织，但不是默认决策引擎。
+5. 分发要成比例：简单任务可以直接派给执行层，复杂任务再走内阁拆解。
+6. 监督由事件触发：风险信号、低置信度、失败或 review 发现问题时，上层再重新介入。
+7. 人类发命令和覆盖：人类可以随时重定向组织，但不是默认决策引擎。

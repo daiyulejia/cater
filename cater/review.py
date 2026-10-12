@@ -30,6 +30,7 @@ def build_review(
     lenses = [
         _product_lens(tasks),
         _design_lens(tasks, events),
+        _distribution_lens(tasks),
         _testing_lens(tasks, chain),
         _ui_lens(tasks),
         _logic_lens(tasks),
@@ -85,6 +86,38 @@ def _design_lens(tasks: list[TaskSnapshot], events: list[Event]) -> dict[str, st
     if missing_brief:
         return _lens("design", "watch", "Some agent work lacks a generated brief.", "Run or export the task to preserve a readable process summary.")
     return _lens("design", "ok", "The process has timeline and brief data.", "Keep replay views compact and scannable.")
+
+
+def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
+    if not tasks:
+        return _lens("design", "needs_attention", "No task distribution pattern exists yet.", "Create one small task before evaluating distribution weight.")
+    direct = [
+        task for task in tasks
+        if any(item.get("mode") == "direct" for item in task.assignments)
+    ]
+    full = [
+        task for task in tasks
+        if task.plan and task.plan.get("source") == "cabinet"
+    ]
+    unassigned_active = [
+        task for task in tasks
+        if task.messages and not task.assignments
+    ]
+    overloaded = [
+        task for task in tasks
+        if len(task.assignments) > max(3, len(task.messages) + 2)
+    ]
+    if overloaded:
+        return _lens("design", "watch", "Some tasks may be carrying more assignment structure than useful output.", "Review whether dispatch is adding ceremony, extra agents, or token cost instead of clarity.")
+    if unassigned_active:
+        return _lens("design", "watch", "Some executed tasks have no visible assignment path.", "Use direct assign or dispatch when ownership would clarify the work.")
+    if direct and full:
+        return _lens("design", "ok", "Both direct worker assignment and cabinet dispatch are represented.", "Keep lightweight and full distribution paths available; periodically prune redundant layers.")
+    if direct:
+        return _lens("design", "watch", "Only direct worker assignment is represented.", "Run one cabinet dispatch on a complex task to verify upper-layer oversight.")
+    if full:
+        return _lens("design", "watch", "Only full cabinet dispatch is represented.", "Use direct assignment for a small task to avoid over-governance and unnecessary token spend.")
+    return _lens("design", "watch", "Tasks exist but no distribution path is visible.", "Choose direct assignment for simple work or dispatch for complex work.")
 
 
 def _testing_lens(tasks: list[TaskSnapshot], chain: ChainReport) -> dict[str, str]:

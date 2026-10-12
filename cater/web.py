@@ -112,6 +112,9 @@ def make_handler(
                     task_id = rt.create_task(goal, acceptance)
                     if data.get("dispatch", [""])[0] == "on":
                         rt.dispatch(task_id)
+                    assign_owner = data.get("assign_owner", [""])[0].strip()
+                    if assign_owner:
+                        rt.assign(task_id, assign_owner)
                     if data.get("battle", [""])[0] == "on":
                         rt.collaborate(task_id)
                 self._redirect(f"/tasks/{task_id}")
@@ -138,6 +141,21 @@ def make_handler(
                     if rt.task(task_id) is None:
                         return self._not_found()
                     rt.dispatch(task_id)
+                self._redirect(f"/tasks/{task_id}")
+                return
+            if path.startswith("/tasks/") and path.endswith("/assign"):
+                task_id = path.split("/")[2]
+                data = self._read_form()
+                owner = data.get("owner", [""])[0].strip()
+                objective = data.get("objective", [""])[0].strip() or None
+                acceptance = data.get("acceptance", [""])[0].strip() or None
+                if not owner:
+                    self._redirect(f"/tasks/{task_id}")
+                    return
+                with self._runtime() as rt:
+                    if rt.task(task_id) is None:
+                        return self._not_found()
+                    rt.assign(task_id, owner, objective=objective, acceptance=acceptance)
                 self._redirect(f"/tasks/{task_id}")
                 return
             if path.startswith("/tasks/") and path.endswith("/command"):
@@ -241,6 +259,7 @@ def render_index(rt: Runtime) -> str:
     rows = "\n".join(_task_row(task, task.id in inbox) for task in tasks)
     if not rows:
         rows = '<tr><td colspan="5" class="empty">No tasks yet. Run <code>cater demo</code>.</td></tr>'
+    role_options = _role_options(roles, include_blank=True)
     return page(
         "Cater",
         f"""
@@ -264,8 +283,11 @@ def render_index(rt: Runtime) -> str:
               <label>Acceptance
                 <textarea name="acceptance" rows="4"></textarea>
               </label>
+              <label>Direct worker
+                <select name="assign_owner">{role_options}</select>
+              </label>
               <label class="checkline">
-                <input type="checkbox" name="dispatch" checked>
+                <input type="checkbox" name="dispatch">
                 <span>Dispatch mission first</span>
               </label>
               <label class="checkline">
@@ -425,6 +447,15 @@ def _profiles_table(profiles: dict[str, dict[str, Any]]) -> str:
       <tbody>{rows}</tbody>
     </table>
     """
+
+
+def _role_options(roles: list[Any], *, include_blank: bool = False) -> str:
+    options = ['<option value="">none</option>'] if include_blank else []
+    options.extend(
+        f'<option value="{escape(role.id)}">{escape(role.id)} / {escape(role.role)}</option>'
+        for role in roles
+    )
+    return "\n".join(options)
 
 
 def _policy_view(
@@ -629,14 +660,29 @@ def _ladder_step(step: dict[str, Any]) -> str:
 
 
 def _distribution_panel(task: TaskSnapshot) -> str:
+    direct_form = f"""
+    <form method="post" action="/tasks/{escape(task.id)}/assign" class="compact-form">
+      <label>Direct worker role
+        <input name="owner" placeholder="product, dev, test">
+      </label>
+      <label>Objective
+        <textarea name="objective" rows="2"></textarea>
+      </label>
+      <label>Acceptance
+        <textarea name="acceptance" rows="2"></textarea>
+      </label>
+      <button class="secondary" type="submit">Assign directly</button>
+    </form>
+    """
     if not task.assignments:
         return f"""
         <section class="panel">
           <div class="panel-head"><h2>Task Distribution</h2><span>not dispatched</span></div>
-          <p class="muted">The pyramid is ready to turn the mission into cabinet-owned execution lanes.</p>
+          <p class="muted">Use cabinet dispatch for complex work, or directly assign simple work to one worker role.</p>
           <form method="post" action="/tasks/{escape(task.id)}/dispatch">
             <button type="submit">Dispatch mission</button>
           </form>
+          {direct_form}
         </section>
         """
     rows = "\n".join(
@@ -658,6 +704,7 @@ def _distribution_panel(task: TaskSnapshot) -> str:
       <div class="panel-head"><h2>Task Distribution</h2><span>{len(task.assignments)} assigned</span></div>
       {plan_reason}
       <ol class="assignment-list">{rows}</ol>
+      {direct_form}
     </section>
     """
 
@@ -1085,7 +1132,7 @@ input[type="checkbox"] {
   width: 16px;
   height: 16px;
 }
-select, textarea {
+select, textarea, input[name="owner"] {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1115,6 +1162,11 @@ button.secondary {
   background: #eef3f3;
   color: var(--accent);
   border: 1px solid var(--line);
+}
+.compact-form {
+  border-top: 1px solid var(--line);
+  margin-top: 14px;
+  padding-top: 14px;
 }
 @media (max-width: 760px) {
   main { width: min(100vw - 20px, 1120px); padding-top: 18px; }

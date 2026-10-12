@@ -43,6 +43,14 @@ def cmd_new(args: argparse.Namespace) -> int:
         if args.dispatch:
             rt.dispatch(task_id)
             print("mission dispatched")
+        if args.assign_to:
+            rt.assign(
+                task_id,
+                args.assign_to,
+                objective=args.assign_objective,
+                acceptance=args.assign_accept,
+            )
+            print(f"assigned to {args.assign_to}")
         if args.run or args.battle:
             result = rt.battle(task_id) if args.battle else rt.collaborate(task_id)
             task = rt.task(task_id)
@@ -74,6 +82,19 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
         result = rt.dispatch(args.task_id)
         print(f"mission dispatched for {args.task_id}")
         print(json.dumps(result["plan"], ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_assign(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        result = rt.assign(
+            args.task_id,
+            args.owner,
+            objective=args.objective,
+            acceptance=args.acceptance,
+        )
+        print(f"assigned {args.task_id} to {args.owner}")
+        print(json.dumps(result["assignment"], ensure_ascii=False, indent=2))
     return 0
 
 
@@ -297,6 +318,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_new.add_argument("goal")
     p_new.add_argument("--accept", action="append")
     p_new.add_argument("--dispatch", action="store_true", help="dispatch mission before running")
+    p_new.add_argument("--assign-to", help="directly assign the task to one worker role")
+    p_new.add_argument("--assign-objective", help="objective for --assign-to")
+    p_new.add_argument("--assign-accept", help="acceptance check for --assign-to")
     p_new.add_argument("--run", action="store_true", help="run one collaboration round immediately")
     p_new.add_argument("--battle", action="store_true", help="run one forced governance round immediately")
     p_new.set_defaults(func=cmd_new)
@@ -312,6 +336,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_dispatch = sub.add_parser("dispatch", help="turn a task into assigned execution lanes")
     p_dispatch.add_argument("task_id")
     p_dispatch.set_defaults(func=cmd_dispatch)
+
+    p_assign = sub.add_parser("assign", help="directly assign a task to one worker role")
+    p_assign.add_argument("task_id")
+    p_assign.add_argument("owner")
+    p_assign.add_argument("--objective")
+    p_assign.add_argument("--acceptance")
+    p_assign.set_defaults(func=cmd_assign)
 
     p_show = sub.add_parser("show", help="show tasks")
     p_show.add_argument("task_id", nargs="?")

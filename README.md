@@ -60,6 +60,7 @@ python -m cater.cli new "Build the first demo" --accept "three roles respond" --
 python -m cater.cli run <task_id>
 python -m cater.cli battle <task_id>
 python -m cater.cli dispatch <task_id>
+python -m cater.cli assign <task_id> dev --objective "Implement the smallest useful path"
 python -m cater.cli show [task_id]
 python -m cater.cli events [task_id]
 python -m cater.cli export [task_id] --format json
@@ -80,7 +81,7 @@ python -m cater.cli --audit-key "dev-secret" chain
 
 `run` is the normal collaboration loop. It records agent contributions and only activates governance when there is a challenge, option split, low confidence, or another risk signal. `battle` forces a governance round when you intentionally want cabinet review.
 
-`dispatch` records the pyramid-style task distribution path: the top layer frames the mission, the cabinet decomposes it into execution lanes, and worker agents receive assigned work before the next collaboration round.
+`dispatch` records the pyramid-style task distribution path: the top layer frames the mission, the cabinet decomposes it into execution lanes, and worker agents receive assigned work before the next collaboration round. This is optional; small tasks can go straight to a worker with `assign` or `new --assign-to dev --run`.
 
 `--driver-attempts` and `--circuit-breaker-threshold` tune retry containment without changing driver code.
 
@@ -90,7 +91,7 @@ Implemented now:
 
 - SQLite append-only event store with hash-chain verification
 - task creation, collaboration rounds, risk-triggered governance, targeted battle, cabinet vote, supreme fallback, and rare human command/override
-- pyramid-style task distribution with mission framing, cabinet decomposition, role assignments, and replayable plans
+- optional pyramid-style task distribution with mission framing, cabinet decomposition, direct worker assignment, and replayable plans
 - deterministic scripted drivers for repeatable demos and tests
 - configurable roles and drivers from JSON
 - long-lived NDJSON CLI drivers with probe and crash recovery
@@ -189,6 +190,8 @@ python -m cater.cli review <task_id> --record
 
 `review` inspects the work from product, design, testing, UI, logic, reliability, and adoption angles. Without `--record` it is a pure projection; with `--record` it appends a `review.generated` event so the critique itself becomes replayable.
 
+Architecture-level review lives in [docs/architecture-review.md](docs/architecture-review.md). It asks whether Cater's own distribution and governance mechanisms are still worth their token, latency, and complexity cost.
+
 ## Roadmap
 
 Next iterations:
@@ -223,5 +226,6 @@ Cater should grow through small usable loops. Each iteration should be reviewed 
 2. Events first. State is a view over append-only history.
 3. Drivers are replaceable. Models, CLIs, and APIs are not hardwired.
 4. Collaboration first. Disagreement is normal, but it should be surfaced when it improves the task rather than performed by default.
-5. Distribution first. The pyramid is a task-distribution mechanism before it is a dispute-escalation mechanism.
-6. Humans command and override. Humans can redirect the organization at any time, but are not the default decision engine.
+5. Distribution should be proportional. Simple work can go straight to a worker; complex work can use cabinet dispatch.
+6. Oversight is event-driven. Upper layers re-enter when risk signals, low confidence, failure, or review findings justify it.
+7. Humans command and override. Humans can redirect the organization at any time, but are not the default decision engine.

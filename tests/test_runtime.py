@@ -222,6 +222,42 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("assigned_work=product:", driver.prompts[0])
         self.assertIn("dev:", driver.prompts[0])
 
+    def test_human_can_assign_directly_to_worker_layer(self):
+        driver = PromptCaptureDriver()
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "governance": {"trigger_on_option_split": false},
+                  "cabinet": {"approval_threshold": 2, "quorum": 2, "veto_roles": []},
+                  "roles": [
+                    {"id":"product","name":"Product","role":"product","driver":"memory"},
+                    {"id":"dev","name":"Developer","role":"developer","driver":"memory"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"memory": driver}) as rt:
+                task_id = rt.create_task("Tiny implementation task")
+                result = rt.assign(
+                    task_id,
+                    "dev",
+                    objective="Implement the smallest useful path",
+                    acceptance="dev output is enough",
+                )
+                task = rt.task(task_id)
+                self.assertEqual(result["plan"]["flow"], ["human", "worker", "review"])
+                self.assertEqual(len(task.assignments), 1)
+                self.assertEqual(task.assignments[0]["owner"], "dev")
+
+                rt.collaborate(task_id)
+
+        self.assertNotIn("your_assignment=", driver.prompts[0])
+        self.assertIn("your_assignment=Implement the smallest useful path", driver.prompts[1])
+        self.assertIn("assigned_work=dev:", driver.prompts[0])
+
     def test_collaboration_round_skips_governance_without_disagreement(self):
         driver = PromptCaptureDriver()
         with tempfile.TemporaryDirectory() as tmp:
@@ -410,6 +446,23 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(recorded["scope"], task_id)
             self.assertIn("review.generated", event_types)
             self.assertEqual(task.reviews[-1]["scope"], task_id)
+
+    def test_review_flags_distribution_weight_and_gaps(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("Review distribution")
+            rt.collaborate(task_id)
+            review = rt.review(task_id)
+            findings = [item["finding"] for item in review["lenses"]]
+            self.assertTrue(any("no visible assignment path" in finding for finding in findings))
+
+        with Runtime(":memory:") as rt:
+            direct_id = rt.create_task("Direct path")
+            rt.assign(direct_id, "dev")
+            full_id = rt.create_task("Full path")
+            rt.dispatch(full_id)
+            review = rt.review()
+            findings = [item["finding"] for item in review["lenses"]]
+            self.assertTrue(any("direct worker assignment and cabinet dispatch" in finding for finding in findings))
 
 
 class CabinetTests(unittest.TestCase):
@@ -643,6 +696,20 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("assignments=3", out)
 
+    def test_cli_direct_assign_command(self):
+        code, out = self.run_cli("new", "Assign only")
+        self.assertEqual(code, 0)
+        task_id = next(line for line in out.splitlines() if line.startswith("created ")).split()[1]
+
+        code, out = self.run_cli("assign", task_id, "dev", "--objective", "Implement it")
+        self.assertEqual(code, 0)
+        self.assertIn("assigned", out)
+        self.assertIn('"owner": "dev"', out)
+
+        code, out = self.run_cli("show", task_id)
+        self.assertEqual(code, 0)
+        self.assertIn("assignments=1", out)
+
     def test_cli_export_json_and_jsonl(self):
         code, _ = self.run_cli("demo")
         self.assertEqual(code, 0)
@@ -741,6 +808,17 @@ class WebTests(unittest.TestCase):
                 data = response.read().decode("utf-8")
             self.assertIn('"assignments"', data)
             self.assertIn('"mission"', data)
+
+            assign_body = urlencode({"owner": "dev", "objective": "Direct web work"}).encode("utf-8")
+            assign_request = Request(
+                f"{base}/tasks/{task_id}/assign",
+                data=assign_body,
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            with urlopen(assign_request, timeout=5) as response:
+                page = response.read().decode("utf-8")
+            self.assertIn("Direct web work", page)
 
             body = urlencode({"resolution": "done", "reason": "Looks good"}).encode("utf-8")
             request = Request(

@@ -171,6 +171,52 @@ class Runtime:
         )
         return {"task_id": task_id, "mission": mission, "plan": plan}
 
+    def assign(
+        self,
+        task_id: str,
+        owner: str,
+        *,
+        objective: str | None = None,
+        acceptance: str | None = None,
+    ) -> dict[str, Any]:
+        task = self.task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        role = self._role_by_id(owner)
+        assignment = {
+            "id": f"{task.id}:{role.id}:direct",
+            "owner": role.id,
+            "role": role.role,
+            "lane": self._role_lane(role.role),
+            "objective": objective or f"{role.name} directly owns execution for: {task.goal}",
+            "acceptance": acceptance or (task.acceptance[0] if task.acceptance else "complete the requested work"),
+            "depends_on": [],
+            "status": "assigned",
+            "source": "human",
+            "mode": "direct",
+        }
+        self.log.emit(
+            actor=Actor.human("human"),
+            type="subtask.assigned",
+            task_id=task_id,
+            payload=assignment,
+        )
+        plan = {
+            "source": "human",
+            "mission": {"goal": task.goal, "acceptance": list(task.acceptance), "source": "human"},
+            "subtasks": [assignment],
+            "flow": ["human", "worker", "review"],
+            "next_action": "run",
+            "reason": "Human assigned this task directly to the worker layer.",
+        }
+        self.log.emit(
+            actor=Actor.human("human"),
+            type="plan.proposed",
+            task_id=task_id,
+            payload=plan,
+        )
+        return {"task_id": task_id, "assignment": assignment, "plan": plan}
+
     def _run_round(self, task_id: str, *, force_governance: bool) -> dict[str, Any]:
         task = self.task(task_id)
         if task is None:
@@ -465,7 +511,7 @@ class Runtime:
         round_outputs: list[dict[str, Any]] | None = None,
     ) -> str:
         memory = self._profile_memory(profile)
-        task_memory = self._task_memory(task)
+        task_memory = self._task_memory(task, role.id)
         round_memory = self._round_memory(round_outputs or [])
         return (
             f"You are {role.name}. Work as one member of an autonomous agent organization.\n"
@@ -502,9 +548,21 @@ class Runtime:
         return "Profile memory: " + "; ".join(parts) + "."
 
     @staticmethod
-    def _task_memory(task: TaskSnapshot) -> str:
+    def _task_memory(task: TaskSnapshot, role_id: str | None = None) -> str:
         parts = []
         if task.assignments:
+            owned = [
+                item for item in task.assignments[-6:]
+                if role_id is not None and str(item.get("owner") or "") == role_id
+            ]
+            if owned:
+                current = owned[-1]
+                parts.append(
+                    "your_assignment="
+                    + str(current.get("objective") or "")[:180]
+                    + "; acceptance="
+                    + str(current.get("acceptance") or "")[:120]
+                )
             assignments = []
             for item in task.assignments[-6:]:
                 owner = str(item.get("owner") or "")
@@ -538,6 +596,13 @@ class Runtime:
         if not parts:
             return "Task memory: no prior collaboration on this task."
         return "Task memory: " + "; ".join(parts) + "."
+
+    def _role_by_id(self, role_id: str) -> Role:
+        for role in self.roles:
+            if role.id == role_id:
+                return role
+        known = ", ".join(role.id for role in self.roles)
+        raise ValueError(f"unknown role {role_id!r}; expected one of: {known}")
 
     def _decompose_task(self, task: TaskSnapshot) -> list[dict[str, Any]]:
         criteria = list(task.acceptance) or ["produce a useful, verifiable next increment"]
