@@ -4,6 +4,11 @@
     "quorum": 3,
     "veto_roles": ["test"]
   },
+  "governance": {
+    "trigger_on_challenge": true,
+    "trigger_on_option_split": true,
+    "low_confidence_threshold": 0.5
+  },
   "roles": [
     {
       "id": "product",

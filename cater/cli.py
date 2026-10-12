@@ -162,6 +162,22 @@ def cmd_drivers(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_policy(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        print("governance:")
+        print(f"  trigger_on_challenge={rt.governance_policy.trigger_on_challenge}")
+        print(f"  trigger_on_option_split={rt.governance_policy.trigger_on_option_split}")
+        print(f"  low_confidence_threshold={rt.governance_policy.low_confidence_threshold}")
+        print("cabinet:")
+        print(f"  approval_threshold={rt.cabinet_policy.approval_threshold}")
+        print(f"  quorum={rt.cabinet_policy.quorum}")
+        print(f"  veto_roles={','.join(rt.cabinet_policy.veto_roles) or '-'}")
+        print("roles:")
+        for role in rt.roles:
+            print(f"  {role.id}: role={role.role} driver={role.driver}")
+    return 0
+
+
 def cmd_probe_driver(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         driver = rt.drivers[args.name]
@@ -261,6 +277,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("chain", help="verify event hash chain").set_defaults(func=cmd_chain)
     sub.add_parser("drivers", help="show roles and configured drivers").set_defaults(func=cmd_drivers)
+    sub.add_parser("policy", help="show organization governance policy").set_defaults(func=cmd_policy)
 
     p_probe = sub.add_parser("probe-driver", help="probe a configured driver")
     p_probe.add_argument("name")

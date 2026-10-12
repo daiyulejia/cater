@@ -28,6 +28,31 @@ class Role:
 class RuntimeConfig:
     roles: list[Role]
     cabinet_policy: CabinetPolicy
+    governance_policy: "GovernancePolicy"
+
+
+@dataclass(frozen=True)
+class GovernancePolicy:
+    trigger_on_challenge: bool = True
+    trigger_on_option_split: bool = True
+    low_confidence_threshold: float | None = 0.5
+
+    @staticmethod
+    def from_dict(data: dict[str, Any] | None) -> "GovernancePolicy":
+        if data is None:
+            return GovernancePolicy()
+        if not isinstance(data, dict):
+            raise ValueError("governance config must be an object")
+        threshold = data.get("low_confidence_threshold", 0.5)
+        if threshold is not None:
+            threshold = float(threshold)
+            if threshold < 0 or threshold > 1:
+                raise ValueError("governance.low_confidence_threshold must be between 0 and 1")
+        return GovernancePolicy(
+            trigger_on_challenge=bool(data.get("trigger_on_challenge", True)),
+            trigger_on_option_split=bool(data.get("trigger_on_option_split", True)),
+            low_confidence_threshold=threshold,
+        )
 
 
 class Runtime:
@@ -50,6 +75,7 @@ class Runtime:
         config = load_runtime_config(roles_path)
         self.roles = config.roles
         self.cabinet_policy = config.cabinet_policy
+        self.governance_policy = config.governance_policy
         configured_drivers = load_drivers(_pack_path("default_drivers.json"))
         if drivers_path is not None:
             configured_drivers.update(load_drivers(drivers_path))
@@ -127,8 +153,9 @@ class Runtime:
             )
             utterances.append({"event": event, "payload": payload, "role": role})
 
-        if not force_governance and not self._needs_governance(utterances):
-            brief = self._build_collaboration_brief(task_id, utterances)
+        governance = self._governance_trigger(utterances, force_governance=force_governance)
+        if governance["status"] == "not_needed":
+            brief = self._build_collaboration_brief(task_id, utterances, governance)
             brief_event = self.log.emit(
                 actor=Actor.system("orchestrator"),
                 type="brief.generated",
@@ -137,7 +164,7 @@ class Runtime:
             )
             return {"task_id": task_id, "brief_event": brief_event.seq, "brief": brief}
 
-        brief = self._build_brief(task_id, utterances, self.cabinet_policy)
+        brief = self._build_brief(task_id, utterances, self.cabinet_policy, governance)
         self.log.emit(
             actor=Actor.system("cabinet"),
             type="cabinet.voted",
@@ -397,23 +424,53 @@ class Runtime:
             return {"stance": "assert", "claim": "", "text": text, "evidence": []}
         return data if isinstance(data, dict) else {"stance": "assert", "text": text}
 
-    @staticmethod
-    def _needs_governance(utterances: list[dict[str, Any]]) -> bool:
+    def _governance_trigger(
+        self,
+        utterances: list[dict[str, Any]],
+        *,
+        force_governance: bool,
+    ) -> dict[str, Any]:
+        if force_governance:
+            return {
+                "status": "forced",
+                "reason": "governance round forced by caller",
+                "signals": ["forced"],
+            }
+
+        signals = []
         option_ids = set()
         for item in utterances:
+            role: Role = item["role"]
             payload = item["payload"]
-            if payload.get("stance") == "challenge":
-                return True
+            if self.governance_policy.trigger_on_challenge and payload.get("stance") == "challenge":
+                signals.append(f"challenge:{role.id}")
             option_id = payload.get("option_id")
             if option_id:
                 option_ids.add(str(option_id))
             confidence = payload.get("confidence")
-            if isinstance(confidence, (int, float)) and confidence < 0.5:
-                return True
-        return len(option_ids) > 1
+            threshold = self.governance_policy.low_confidence_threshold
+            if isinstance(confidence, (int, float)) and threshold is not None and confidence < threshold:
+                signals.append(f"low_confidence:{role.id}={confidence}")
+        if self.governance_policy.trigger_on_option_split and len(option_ids) > 1:
+            signals.append("option_split:" + ",".join(sorted(option_ids)))
+        if signals:
+            return {
+                "status": "triggered",
+                "reason": "governance triggered by " + "; ".join(signals),
+                "signals": signals,
+            }
+        return {
+            "status": "not_needed",
+            "reason": "normal collaboration round",
+            "signals": [],
+        }
 
     @staticmethod
-    def _build_collaboration_brief(task_id: str, utterances: list[dict[str, Any]]) -> dict[str, Any]:
+    def _build_collaboration_brief(
+        task_id: str,
+        utterances: list[dict[str, Any]],
+        governance: dict[str, Any],
+    ) -> dict[str, Any]:
         positions = []
         for item in utterances:
             role: Role = item["role"]
@@ -446,7 +503,7 @@ class Runtime:
             "consensus": [positions[0]["option_id"]] if positions else [],
             "root_cause": "No challenge, option split, or low-confidence signal was observed.",
             "cabinet": None,
-            "governance": {"status": "not_needed", "reason": "normal collaboration round"},
+            "governance": governance,
             "options": options,
         }
 
@@ -455,6 +512,7 @@ class Runtime:
         task_id: str,
         utterances: list[dict[str, Any]],
         cabinet_policy: CabinetPolicy,
+        governance: dict[str, Any],
     ) -> dict[str, Any]:
         positions = []
         for item in utterances:
@@ -485,6 +543,7 @@ class Runtime:
             "consensus": [cabinet["recommendation"]] if cabinet["recommendation"] else [],
             "root_cause": cabinet["reason"],
             "cabinet": cabinet,
+            "governance": governance,
             "options": cabinet["options"],
         }
 
@@ -495,9 +554,11 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
     if isinstance(raw, dict):
         roles_raw = raw.get("roles")
         cabinet_raw = raw.get("cabinet")
+        governance_raw = raw.get("governance")
     else:
         roles_raw = raw
         cabinet_raw = None
+        governance_raw = None
     if not isinstance(roles_raw, list):
         raise ValueError("roles config must be a list or an object with roles")
     roles = []
@@ -512,7 +573,11 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
                 driver=str(item.get("driver") or item["id"]),
             )
         )
-    return RuntimeConfig(roles=roles, cabinet_policy=CabinetPolicy.from_dict(cabinet_raw))
+    return RuntimeConfig(
+        roles=roles,
+        cabinet_policy=CabinetPolicy.from_dict(cabinet_raw),
+        governance_policy=GovernancePolicy.from_dict(governance_raw),
+    )
 
 
 def load_roles(path: str | Path | None = None) -> list[Role]:

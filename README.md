@@ -42,6 +42,7 @@ python -m cater.cli demo
 python -m cater.cli drivers
 python -m cater.cli show
 python -m cater.cli inbox
+python -m cater.cli policy
 python -m cater.cli run <task_id>
 python -m cater.cli events <task_id>
 python -m cater.cli decide <task_id> --resolution done --reason "Ship the smallest loop first"
@@ -62,6 +63,7 @@ python -m cater.cli show [task_id]
 python -m cater.cli events [task_id]
 python -m cater.cli inbox
 python -m cater.cli profiles
+python -m cater.cli policy
 python -m cater.cli decide <task_id> --resolution done --reason "Accepted"
 python -m cater.cli chain
 python -m cater.cli drivers
@@ -163,6 +165,11 @@ Roles can be configured together with voting policy:
     "quorum": 3,
     "veto_roles": ["test"]
   },
+  "governance": {
+    "trigger_on_challenge": true,
+    "trigger_on_option_split": true,
+    "low_confidence_threshold": 0.5
+  },
   "roles": [
     {"id": "product", "name": "Product", "role": "product", "driver": "product"},
     {"id": "dev", "name": "Developer", "role": "developer", "driver": "dev"},
@@ -174,6 +181,10 @@ Roles can be configured together with voting policy:
 This keeps the organization model visible. A project can start with simple majority voting, then add quorum, veto roles, or a supreme fallback as reliability needs grow.
 
 这让组织模型本身可见。项目可以从简单多数投票开始，再随着可靠性要求增加 quorum、否决角色或最高者兜底。
+
+Governance triggers decide when normal collaboration should involve the cabinet. Teams can be strict and review every option split, or let agents keep exchanging work until a challenge or low-confidence signal appears.
+
+治理触发条件决定常规协作什么时候需要内阁介入。团队可以严格到方案分裂就审查，也可以允许 agent 继续交换产出，直到出现 challenge 或低置信度信号。
 
 ## Audit / 审计
 

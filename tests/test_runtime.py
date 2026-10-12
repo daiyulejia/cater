@@ -48,6 +48,14 @@ class PromptCaptureDriver:
         return DriverResponse(text=text, tokens=3)
 
 
+class StaticResponseDriver:
+    def __init__(self, text: str):
+        self.text = text
+
+    def complete(self, *, role: str, prompt: str, context: dict) -> DriverResponse:
+        return DriverResponse(text=self.text, tokens=5)
+
+
 class RuntimeTests(unittest.TestCase):
     def test_battle_records_agent_decision_and_command_updates_goal(self):
         with Runtime(":memory:") as rt:
@@ -184,6 +192,44 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(task.cabinet["status"], "recommended")
                 self.assertEqual(task.status, "decided")
 
+    def test_governance_policy_can_ignore_option_split(self):
+        drivers = {
+            "alpha": StaticResponseDriver(
+                '{"stance":"assert","option_id":"A","claim":"Take path A","evidence":[],"confidence":0.9,"text":"A"}'
+            ),
+            "beta": StaticResponseDriver(
+                '{"stance":"assert","option_id":"B","claim":"Take path B","evidence":[],"confidence":0.9,"text":"B"}'
+            ),
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "governance": {
+                    "trigger_on_challenge": true,
+                    "trigger_on_option_split": false,
+                    "low_confidence_threshold": 0.5
+                  },
+                  "cabinet": {"approval_threshold": 2, "quorum": 2, "veto_roles": []},
+                  "roles": [
+                    {"id":"alpha","name":"Alpha","role":"planner","driver":"alpha"},
+                    {"id":"beta","name":"Beta","role":"builder","driver":"beta"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers=drivers) as rt:
+                task_id = rt.create_task("Allow divergent collaboration")
+                result = rt.collaborate(task_id)
+                task = rt.task(task_id)
+
+                self.assertEqual(task.status, "running")
+                self.assertIsNone(task.cabinet)
+                self.assertEqual(len(result["brief"]["options"]), 2)
+                self.assertEqual(result["brief"]["governance"]["status"], "not_needed")
+
     def test_battle_records_cabinet_vote_tally(self):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("Tally me")
@@ -199,6 +245,17 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(task.cabinet["vetoed_by"], ["test"])
             self.assertEqual(len(task.cabinet["votes"]), 3)
             self.assertEqual(result["brief"]["cabinet"], task.cabinet)
+            self.assertEqual(result["brief"]["governance"]["status"], "forced")
+
+    def test_collaboration_records_governance_trigger_reason(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("Trigger governance")
+            result = rt.collaborate(task_id)
+            governance = result["brief"]["governance"]
+
+            self.assertEqual(governance["status"], "triggered")
+            self.assertIn("challenge:test", governance["signals"])
+            self.assertTrue(any(signal.startswith("option_split:") for signal in governance["signals"]))
 
     def test_runtime_accepts_external_role_and_driver_configs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -446,6 +503,14 @@ class CliTests(unittest.TestCase):
         self.assertIn("product", out)
         self.assertIn("challenges=1", out)
 
+    def test_cli_policy(self):
+        code, out = self.run_cli("policy")
+        self.assertEqual(code, 0)
+        self.assertIn("governance:", out)
+        self.assertIn("trigger_on_challenge=True", out)
+        self.assertIn("cabinet:", out)
+        self.assertIn("veto_roles=test", out)
+
 
 class WebTests(unittest.TestCase):
     def test_render_task_includes_cabinet_timeline_and_decision_form(self):
@@ -463,6 +528,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("Timeline", html)
         self.assertIn("Human Command", html)
         self.assertIn("Force governance", controls_html)
+        self.assertIn("governance round forced", html)
         self.assertIn("cabinet.voted", html)
         self.assertIn("agent.decided", html)
         self.assertEqual([step["id"] for step in ladder], ["battle", "cabinet", "supreme", "human"])
@@ -541,6 +607,7 @@ class WebTests(unittest.TestCase):
             with urlopen(f"{base}/", timeout=5) as response:
                 index = response.read().decode("utf-8")
             self.assertIn("Agent Profiles", index)
+            self.assertIn("Organization Policy", index)
             self.assertIn("Create from web", index)
 
 

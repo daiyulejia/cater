@@ -208,6 +208,9 @@ def render_index(rt: Runtime) -> str:
         inbox = {item["task_id"] for item in rt.inbox()}
         profiles = rt.profiles()
         chain = rt.verify_chain()
+        roles = list(rt.roles)
+        cabinet_policy = rt.cabinet_policy
+        governance_policy = rt.governance_policy
     rows = "\n".join(_task_row(task, task.id in inbox) for task in tasks)
     if not rows:
         rows = '<tr><td colspan="5" class="empty">No tasks yet. Run <code>cater demo</code>.</td></tr>'
@@ -255,6 +258,13 @@ def render_index(rt: Runtime) -> str:
             <span>{len(profiles)} active</span>
           </div>
           {_profiles_table(profiles)}
+        </section>
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Organization Policy</h2>
+            <span>{len(roles)} roles</span>
+          </div>
+          {_policy_view(roles, cabinet_policy, governance_policy)}
         </section>
         <section class="panel">
           <div class="panel-head">
@@ -371,6 +381,37 @@ def _profiles_table(profiles: dict[str, dict[str, Any]]) -> str:
     """
 
 
+def _policy_view(roles: list[Any], cabinet_policy: Any, governance_policy: Any) -> str:
+    role_rows = "\n".join(
+        f"<li><strong>{escape(role.id)}</strong><span>{escape(role.role)} / {escape(role.driver)}</span></li>"
+        for role in roles
+    )
+    return f"""
+    <div class="policy-grid">
+      <div>
+        <h3>Governance</h3>
+        <dl class="policy-list">
+          <div><dt>challenge</dt><dd>{escape(governance_policy.trigger_on_challenge)}</dd></div>
+          <div><dt>option split</dt><dd>{escape(governance_policy.trigger_on_option_split)}</dd></div>
+          <div><dt>low confidence</dt><dd>{escape(governance_policy.low_confidence_threshold)}</dd></div>
+        </dl>
+      </div>
+      <div>
+        <h3>Cabinet</h3>
+        <dl class="policy-list">
+          <div><dt>threshold</dt><dd>{escape(cabinet_policy.approval_threshold or "majority")}</dd></div>
+          <div><dt>quorum</dt><dd>{escape(cabinet_policy.quorum or "-")}</dd></div>
+          <div><dt>veto roles</dt><dd>{escape(", ".join(cabinet_policy.veto_roles) or "-")}</dd></div>
+        </dl>
+      </div>
+      <div>
+        <h3>Roles</h3>
+        <ul class="policy-roles">{role_rows}</ul>
+      </div>
+    </div>
+    """
+
+
 def event_to_dict(event: Event) -> dict[str, Any]:
     return {
         "seq": event.seq,
@@ -416,9 +457,12 @@ def _message_card(item: dict[str, Any]) -> str:
 
 
 def _governance_panel(task: TaskSnapshot) -> str:
+    brief = task.brief or {}
+    governance = brief.get("governance", {}) if isinstance(brief, dict) else {}
     if task.cabinet:
         cabinet = task.cabinet
         options = "\n".join(_option_card(item) for item in cabinet.get("options", []))
+        trigger = governance.get("reason", "")
         return f"""
         <article class="panel">
           <div class="panel-head"><h2>Cabinet</h2><span>{escape(cabinet.get("status", "pending"))}</span></div>
@@ -427,13 +471,12 @@ def _governance_panel(task: TaskSnapshot) -> str:
             <div><dt>recommendation</dt><dd>{escape(cabinet.get("recommendation", "none"))}</dd></div>
             <div><dt>votes</dt><dd>{escape(len(cabinet.get("votes", [])))}</dd></div>
           </dl>
+          <p class="muted">{escape(trigger)}</p>
           <p class="muted">{escape(cabinet.get("reason", ""))}</p>
           <div class="options">{options}</div>
         </article>
         """
 
-    brief = task.brief or {}
-    governance = brief.get("governance", {}) if isinstance(brief, dict) else {}
     options = "\n".join(_option_card(item) for item in brief.get("options", [])) if isinstance(brief, dict) else ""
     status = governance.get("status") or "pending"
     reason = governance.get("reason") or "No governance record yet."
@@ -622,6 +665,7 @@ main {
 }
 a { color: var(--accent); text-decoration: none; }
 h1, h2, p { margin: 0; }
+h3 { margin: 0 0 10px; font-size: 14px; }
 h1 { font-size: 28px; line-height: 1.15; font-weight: 720; letter-spacing: 0; }
 h2 { font-size: 16px; }
 .topbar {
@@ -701,6 +745,37 @@ td small {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px;
+}
+.policy-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+.policy-list {
+  margin: 0;
+}
+.policy-list div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding: 8px 0;
+}
+.policy-roles {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.policy-roles li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--line);
+  padding: 8px 0;
+}
+.policy-roles span {
+  color: var(--muted);
+  font-size: 13px;
 }
 dt {
   color: var(--muted);
@@ -880,5 +955,6 @@ button.secondary {
   .timeline li { grid-template-columns: 48px minmax(0, 1fr); }
   .timeline em, .timeline p { grid-column: 2; }
   .ladder { grid-template-columns: 1fr; }
+  .policy-grid { grid-template-columns: 1fr; }
 }
 """
