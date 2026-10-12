@@ -9,7 +9,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from .cabinet import tally_votes
+from .cabinet import CabinetPolicy, tally_votes
 from .drivers import Driver, DriverResponse, load_drivers
 from .events import Actor, Event, EventLog
 from .fold import TaskSnapshot, fold
@@ -21,6 +21,12 @@ class Role:
     name: str
     role: str
     driver: str
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    roles: list[Role]
+    cabinet_policy: CabinetPolicy
 
 
 class Runtime:
@@ -40,7 +46,9 @@ class Runtime:
         self.driver_attempts = max(1, driver_attempts)
         self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
         self._driver_failures: dict[str, int] = {}
-        self.roles = load_roles(roles_path)
+        config = load_runtime_config(roles_path)
+        self.roles = config.roles
+        self.cabinet_policy = config.cabinet_policy
         configured_drivers = load_drivers(_pack_path("default_drivers.json"))
         if drivers_path is not None:
             configured_drivers.update(load_drivers(drivers_path))
@@ -111,7 +119,7 @@ class Runtime:
             )
             utterances.append({"event": event, "payload": payload, "role": role})
 
-        brief = self._build_brief(task_id, utterances)
+        brief = self._build_brief(task_id, utterances, self.cabinet_policy)
         self.log.emit(
             actor=Actor.system("cabinet"),
             type="cabinet.voted",
@@ -262,7 +270,11 @@ class Runtime:
         return data if isinstance(data, dict) else {"stance": "assert", "text": text}
 
     @staticmethod
-    def _build_brief(task_id: str, utterances: list[dict[str, Any]]) -> dict[str, Any]:
+    def _build_brief(
+        task_id: str,
+        utterances: list[dict[str, Any]],
+        cabinet_policy: CabinetPolicy,
+    ) -> dict[str, Any]:
         positions = []
         for item in utterances:
             role: Role = item["role"]
@@ -277,7 +289,13 @@ class Runtime:
                     "stance": payload.get("stance"),
                 }
             )
-        cabinet = tally_votes(positions)
+        cabinet = tally_votes(
+            positions,
+            electorate_size=len(positions),
+            approval_threshold=cabinet_policy.approval_threshold,
+            quorum=cabinet_policy.quorum,
+            veto_roles=cabinet_policy.veto_roles,
+        )
 
         return {
             "task_id": task_id,
@@ -290,13 +308,19 @@ class Runtime:
         }
 
 
-def load_roles(path: str | Path | None = None) -> list[Role]:
+def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
     source = Path(path) if path is not None else _pack_path("default_roles.json")
     raw = json.loads(source.read_text(encoding="utf-8"))
-    if not isinstance(raw, list):
-        raise ValueError("roles config must be a list")
+    if isinstance(raw, dict):
+        roles_raw = raw.get("roles")
+        cabinet_raw = raw.get("cabinet")
+    else:
+        roles_raw = raw
+        cabinet_raw = None
+    if not isinstance(roles_raw, list):
+        raise ValueError("roles config must be a list or an object with roles")
     roles = []
-    for item in raw:
+    for item in roles_raw:
         if not isinstance(item, dict):
             raise ValueError("each role must be an object")
         roles.append(
@@ -307,7 +331,11 @@ def load_roles(path: str | Path | None = None) -> list[Role]:
                 driver=str(item.get("driver") or item["id"]),
             )
         )
-    return roles
+    return RuntimeConfig(roles=roles, cabinet_policy=CabinetPolicy.from_dict(cabinet_raw))
+
+
+def load_roles(path: str | Path | None = None) -> list[Role]:
+    return load_runtime_config(path).roles
 
 
 def _pack_path(name: str) -> Path:

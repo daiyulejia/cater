@@ -7,7 +7,30 @@ from stored messages.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
+
+
+@dataclass(frozen=True)
+class CabinetPolicy:
+    approval_threshold: int | None = None
+    quorum: int | None = None
+    veto_roles: frozenset[str] = field(default_factory=frozenset)
+
+    @staticmethod
+    def from_dict(data: Mapping[str, Any] | None) -> "CabinetPolicy":
+        if not data:
+            return CabinetPolicy()
+        threshold = data.get("approval_threshold")
+        quorum = data.get("quorum")
+        veto_roles = data.get("veto_roles") or []
+        if not isinstance(veto_roles, list):
+            raise ValueError("cabinet.veto_roles must be a list")
+        return CabinetPolicy(
+            approval_threshold=int(threshold) if threshold is not None else None,
+            quorum=int(quorum) if quorum is not None else None,
+            veto_roles=frozenset(str(role) for role in veto_roles),
+        )
 
 
 def tally_votes(
@@ -15,10 +38,14 @@ def tally_votes(
     *,
     electorate_size: int | None = None,
     approval_threshold: int | None = None,
+    quorum: int | None = None,
+    veto_roles: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     rows = [dict(item) for item in positions]
     size = electorate_size if electorate_size is not None else len(rows)
     threshold = approval_threshold if approval_threshold is not None else majority_threshold(size)
+    quorum_size = quorum if quorum is not None else 1
+    veto_set = {str(role) for role in (veto_roles or [])}
     options: dict[str, dict[str, Any]] = {}
     votes = []
 
@@ -67,11 +94,23 @@ def tally_votes(
         options.values(),
         key=lambda item: (-int(item["support"]), int(item["concern"]), str(item["id"])),
     )
+    participation = len(votes)
+    vetoed_by = sorted(
+        vote["actor"] for vote in votes if vote["actor"] in veto_set and vote["vote"] == "concern"
+    )
     recommendation = next(
         (item["id"] for item in ordered if item["support"] >= threshold and item["concern"] == 0),
         None,
     )
-    if recommendation is None:
+    if participation < quorum_size:
+        status = "needs_human"
+        reason = f"Quorum {quorum_size} not met; only {participation} vote(s) recorded."
+        recommendation = None
+    elif vetoed_by:
+        status = "vetoed"
+        reason = f"Veto role(s) raised concern: {', '.join(vetoed_by)}."
+        recommendation = None
+    elif recommendation is None:
         status = "needs_human"
         reason = f"No option reached approval threshold {threshold} without open concerns."
     else:
@@ -81,6 +120,9 @@ def tally_votes(
     return {
         "electorate_size": size,
         "approval_threshold": threshold,
+        "quorum": quorum_size,
+        "veto_roles": sorted(veto_set),
+        "vetoed_by": vetoed_by,
         "status": status,
         "recommendation": recommendation,
         "reason": reason,

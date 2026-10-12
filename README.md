@@ -79,7 +79,7 @@ Implemented now:
 - deterministic scripted drivers for repeatable demos and tests
 - configurable roles and drivers from JSON
 - long-lived NDJSON CLI drivers with probe and crash recovery
-- cabinet vote tally with threshold, recommendation, and open concerns
+- configurable cabinet vote tally with approval threshold, quorum, veto roles, recommendation, and open concerns
 - local Web replay UI for task summary, timeline, messages, cabinet tally, and human decision
 - driver failure containment with retry attempts, failure events, and an in-process circuit breaker
 - optional HMAC audit signatures on top of the event hash chain
@@ -91,7 +91,7 @@ Implemented now:
 - 确定性 scripted driver，便于演示和测试
 - JSON 配置角色与 driver
 - 长驻 NDJSON CLI driver，支持存活探针与崩溃自愈
-- 内阁投票 tally，包含阈值、推荐项与开放疑虑
+- 可配置内阁投票 tally，包含通过阈值、quorum、否决角色、推荐项与开放疑虑
 - 本地 Web 回放界面，展示任务摘要、时间线、消息、内阁 tally 和人类拍板
 - driver 失败 containment，包含重试、失败事件和进程内 circuit breaker
 - 在事件哈希链之上的可选 HMAC 审计签名
@@ -141,6 +141,31 @@ This is intentionally small. LangChain, LangGraph, Codex CLI, Claude Code, Gemin
 
 这个边界刻意很小。LangChain、LangGraph、Codex CLI、Claude Code、Gemini CLI 或自定义 API wrapper 都可以藏在这个进程后面，而不污染 Cater 的核心运行时。
 
+## Cabinet Policy / 内阁策略
+
+Roles can be configured together with voting policy:
+
+角色可以和投票策略一起配置：
+
+```json
+{
+  "cabinet": {
+    "approval_threshold": 2,
+    "quorum": 3,
+    "veto_roles": ["test"]
+  },
+  "roles": [
+    {"id": "product", "name": "Product", "role": "product", "driver": "product"},
+    {"id": "dev", "name": "Developer", "role": "developer", "driver": "dev"},
+    {"id": "test", "name": "Tester", "role": "tester", "driver": "test"}
+  ]
+}
+```
+
+This keeps the organization model visible. A project can start with simple majority voting, then add quorum or veto roles as reliability needs grow.
+
+这让组织模型本身可见。项目可以从简单多数投票开始，再随着可靠性要求增加 quorum 或否决角色。
+
 ## Audit / 审计
 
 The event log always has a hash chain. If you provide an audit key, new events also receive an HMAC signature:
@@ -163,13 +188,13 @@ Next iterations:
 下一轮迭代：
 
 1. Product entry: make `cater demo`, `cater new`, `cater inbox`, and `cater drivers` feel like a coherent first-run workflow.
-2. Cabinet layer: add configurable voting policy, quorum, veto roles, and auto-proposed decisions.
+2. Cabinet layer: add auto-proposed decisions and richer policy explanations.
 3. Web replay: improve the local web view with task creation, live refresh, filters, and clearer decision ergonomics.
 4. Reliability: make circuit breaker policy configurable and expose recovery controls in CLI/Web.
 5. Audit: add key rotation metadata, unsigned-history policy, and exportable audit reports.
 6. Distribution: add examples for wrapping popular third-party CLIs while keeping the core dependency-free.
 1. 产品入口：让 `cater demo`、`cater new`、`cater inbox`、`cater drivers` 形成连贯的新手首次体验。
-2. 内阁层：加入可配置投票策略、quorum、否决角色与自动建议决策。
+2. 内阁层：加入自动建议决策和更丰富的策略解释。
 3. Web 回放：继续增强本地 Web 视图，加入任务创建、实时刷新、过滤器和更清晰的拍板体验。
 4. 可靠性：让 circuit breaker 策略可配置，并在 CLI/Web 暴露恢复控制。
 5. 审计：加入 key rotation 元数据、未签名历史策略和可导出的审计报告。

@@ -86,7 +86,9 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertIn("cabinet.voted", event_types)
             self.assertEqual(task.cabinet["approval_threshold"], 2)
-            self.assertEqual(task.cabinet["status"], "needs_human")
+            self.assertEqual(task.cabinet["quorum"], 3)
+            self.assertEqual(task.cabinet["status"], "vetoed")
+            self.assertEqual(task.cabinet["vetoed_by"], ["test"])
             self.assertEqual(len(task.cabinet["votes"]), 3)
             self.assertEqual(result["brief"]["cabinet"], task.cabinet)
 
@@ -96,7 +98,7 @@ class RuntimeTests(unittest.TestCase):
             roles = root / "roles.json"
             drivers = root / "drivers.json"
             roles.write_text(
-                '[{"id":"fixture","name":"Fixture","role":"tester","driver":"fixture"}]',
+                '{"cabinet":{"approval_threshold":1,"quorum":1},"roles":[{"id":"fixture","name":"Fixture","role":"tester","driver":"fixture"}]}',
                 encoding="utf-8",
             )
             drivers.write_text(
@@ -108,6 +110,7 @@ class RuntimeTests(unittest.TestCase):
                 rt.battle(task_id)
                 self.assertEqual(len(rt.task(task_id).messages), 1)
                 self.assertEqual(rt.task(task_id).messages[0]["claim"], "configured")
+                self.assertEqual(rt.task(task_id).cabinet["status"], "recommended")
 
     def test_driver_failure_is_contained_and_opens_circuit(self):
         driver = AlwaysFailDriver()
@@ -152,6 +155,26 @@ class CabinetTests(unittest.TestCase):
         self.assertEqual(tally["recommendation"], "A")
         self.assertEqual(tally["status"], "recommended")
         self.assertEqual(tally["options"][0]["id"], "A")
+
+    def test_tally_votes_applies_quorum_and_veto_roles(self):
+        low_quorum = tally_votes(
+            [{"actor": "product", "option_id": "A", "stance": "assert"}],
+            quorum=2,
+        )
+        self.assertEqual(low_quorum["status"], "needs_human")
+        self.assertIn("Quorum", low_quorum["reason"])
+
+        vetoed = tally_votes(
+            [
+                {"actor": "product", "option_id": "A", "stance": "assert"},
+                {"actor": "test", "option_id": "A", "stance": "challenge"},
+            ],
+            approval_threshold=1,
+            quorum=2,
+            veto_roles=["test"],
+        )
+        self.assertEqual(vetoed["status"], "vetoed")
+        self.assertEqual(vetoed["vetoed_by"], ["test"])
 
 
 class DriverTests(unittest.TestCase):
@@ -217,7 +240,7 @@ class CliTests(unittest.TestCase):
 
         code, out = self.run_cli("show", task_id)
         self.assertEqual(code, 0)
-        self.assertIn("cabinet=needs_human", out)
+        self.assertIn("cabinet=vetoed", out)
 
         code, out = self.run_cli("inbox")
         self.assertEqual(code, 0)
