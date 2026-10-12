@@ -103,15 +103,15 @@ def make_handler(
                 with self._runtime() as rt:
                     task_id = rt.create_task(goal, acceptance)
                     if data.get("battle", [""])[0] == "on":
-                        rt.battle(task_id)
+                        rt.collaborate(task_id)
                 self._redirect(f"/tasks/{task_id}")
                 return
-            if path.startswith("/tasks/") and path.endswith("/battle"):
+            if path.startswith("/tasks/") and (path.endswith("/run") or path.endswith("/battle")):
                 task_id = path.split("/")[2]
                 with self._runtime() as rt:
                     if rt.task(task_id) is None:
                         return self._not_found()
-                    rt.battle(task_id)
+                    rt.collaborate(task_id)
                 self._redirect(f"/tasks/{task_id}")
                 return
             if path.startswith("/tasks/") and path.endswith("/command"):
@@ -228,7 +228,7 @@ def render_index(rt: Runtime) -> str:
               </label>
               <label class="checkline">
                 <input type="checkbox" name="battle" checked>
-                <span>Run battle now</span>
+                <span>Run collaboration round now</span>
               </label>
               <button type="submit">Create task</button>
             </form>
@@ -470,8 +470,8 @@ def _decision_panel(task: TaskSnapshot) -> str:
         <article class="panel">
           <div class="panel-head"><h2>Agent Decision</h2><span>{escape(task.status)}</span></div>
           <p class="muted">Agents are expected to continue autonomously unless you send a command.</p>
-          <form method="post" action="/tasks/{escape(task.id)}/battle">
-            <button type="submit">Run battle</button>
+          <form method="post" action="/tasks/{escape(task.id)}/run">
+            <button type="submit">Run next round</button>
           </form>
         </article>
         """

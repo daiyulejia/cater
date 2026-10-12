@@ -38,19 +38,19 @@ def cmd_new(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         task_id = rt.create_task(args.goal, args.accept or [])
         print(f"created {task_id}")
-        if args.battle:
-            result = rt.battle(task_id)
+        if args.run or args.battle:
+            result = rt.collaborate(task_id)
             task = rt.task(task_id)
-            print(f"battle complete: {task.status}, brief event #{result['brief_event']}")
+            print(f"round complete: {task.status}, brief event #{result['brief_event']}")
             print(result["brief"]["dispute"])
     return 0
 
 
-def cmd_battle(args: argparse.Namespace) -> int:
+def cmd_run(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
-        result = rt.battle(args.task_id)
+        result = rt.collaborate(args.task_id)
         task = rt.task(args.task_id)
-        print(f"battle complete: {task.status}, brief event #{result['brief_event']}")
+        print(f"round complete: {task.status}, brief event #{result['brief_event']}")
         print(json.dumps(result["brief"], ensure_ascii=False, indent=2))
     return 0
 
@@ -169,10 +169,10 @@ def cmd_probe_driver(args: argparse.Namespace) -> int:
 def cmd_demo(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         task_id = rt.create_task(
-            "Build a first Cater demo that proves agents can disagree and decide autonomously",
-            ["three roles respond", "cabinet policy records the next action"],
+            "Build a first Cater demo that proves agents can collaborate and decide autonomously",
+            ["three roles contribute", "cabinet policy records the next action"],
         )
-        result = rt.battle(task_id)
+        result = rt.collaborate(task_id)
         print(f"task: {task_id}")
         print(json.dumps(result["brief"], ensure_ascii=False, indent=2))
         task = rt.task(task_id)
@@ -214,12 +214,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_new = sub.add_parser("new", help="create a task")
     p_new.add_argument("goal")
     p_new.add_argument("--accept", action="append")
+    p_new.add_argument("--run", action="store_true", help="run one collaboration round immediately")
     p_new.add_argument("--battle", action="store_true")
     p_new.set_defaults(func=cmd_new)
 
-    p_battle = sub.add_parser("battle", help="run department battle")
-    p_battle.add_argument("task_id")
-    p_battle.set_defaults(func=cmd_battle)
+    p_run = sub.add_parser("run", aliases=["battle"], help="run one collaboration round")
+    p_run.add_argument("task_id")
+    p_run.set_defaults(func=cmd_run)
 
     p_show = sub.add_parser("show", help="show tasks")
     p_show.add_argument("task_id", nargs="?")

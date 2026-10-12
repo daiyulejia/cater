@@ -89,10 +89,11 @@ class Runtime:
         if task is None:
             raise KeyError(task_id)
 
+        profiles = self.profiles()
         utterances = []
         for role in self.roles:
             driver = self.drivers[role.driver]
-            prompt = self._prompt(task, role)
+            prompt = self._prompt(task, role, profiles.get(role.id))
             response = self._complete_with_containment(
                 task_id=task_id,
                 task=task,
@@ -198,6 +199,9 @@ class Runtime:
                 payload={"brief": brief},
             )
         return {"task_id": task_id, "brief_event": brief_event.seq, "brief": brief}
+
+    def collaborate(self, task_id: str) -> dict[str, Any]:
+        return self.battle(task_id)
 
     def decide(self, task_id: str, resolution: str, reason: str) -> Event:
         if resolution not in {"done", "rework"}:
@@ -338,12 +342,39 @@ class Runtime:
         )
         return DriverResponse(text=text, tokens=0, meta={"driver": role.driver, "contained": True})
 
-    def _prompt(self, task: TaskSnapshot, role: Role) -> str:
+    def _prompt(self, task: TaskSnapshot, role: Role, profile: dict[str, Any] | None = None) -> str:
+        memory = self._profile_memory(profile)
         return (
-            f"You are {role.name}. Goal: {task.goal}\n"
+            f"You are {role.name}. Work as one member of an autonomous agent organization.\n"
+            f"Goal: {task.goal}\n"
             f"Acceptance: {task.acceptance}\n"
+            "Collaboration policy: produce the most useful next contribution first; "
+            "use stance=challenge only for material disagreement, risk, or missing evidence; "
+            "do not force a debate when normal collaboration is enough.\n"
+            f"{memory}\n"
             "Return JSON with stance, option_id, claim, evidence, confidence, text."
         )
+
+    @staticmethod
+    def _profile_memory(profile: dict[str, Any] | None) -> str:
+        if not profile:
+            return "Profile memory: no prior activity for this role."
+        parts = [
+            f"messages={profile.get('messages', 0)}",
+            f"supports={profile.get('supports', 0)}",
+            f"challenges={profile.get('challenges', 0)}",
+            f"driver_failures={profile.get('driver_failures', 0)}",
+        ]
+        drivers = profile.get("drivers") or []
+        if drivers:
+            parts.append("drivers=" + ",".join(str(item) for item in drivers))
+        last_claim = str(profile.get("last_claim") or "")
+        if last_claim:
+            parts.append(f"last_claim={last_claim[:240]}")
+        last_failure = str(profile.get("last_failure") or "")
+        if last_failure:
+            parts.append(f"last_failure={last_failure[:160]}")
+        return "Profile memory: " + "; ".join(parts) + "."
 
     @staticmethod
     def _parse_response(text: str) -> dict[str, Any]:
@@ -383,7 +414,7 @@ class Runtime:
 
         return {
             "task_id": task_id,
-            "dispute": "Agents proposed different next steps; cabinet policy selected the next action.",
+            "dispute": "Agents exchanged contributions; governance selected the next action when needed.",
             "positions": positions,
             "consensus": [cabinet["recommendation"]] if cabinet["recommendation"] else [],
             "root_cause": cabinet["reason"],

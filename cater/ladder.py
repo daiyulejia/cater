@@ -9,7 +9,12 @@ from .events import Event
 
 def decision_ladder(events: list[Event]) -> list[dict[str, Any]]:
     steps = [
-        {"id": "battle", "label": "Battle", "status": "pending", "detail": "agents have not spoken"},
+        {
+            "id": "battle",
+            "label": "Collaboration",
+            "status": "pending",
+            "detail": "agents have not contributed",
+        },
         {"id": "cabinet", "label": "Cabinet", "status": "pending", "detail": "vote not recorded"},
         {"id": "supreme", "label": "Supreme", "status": "skipped", "detail": "not needed"},
         {"id": "human", "label": "Human", "status": "skipped", "detail": "not needed"},
@@ -17,7 +22,7 @@ def decision_ladder(events: list[Event]) -> list[dict[str, Any]]:
     for event in events:
         if event.type in {"msg.said", "msg.challenge"}:
             steps[0]["status"] = "done"
-            steps[0]["detail"] = "agents exchanged positions"
+            steps[0]["detail"] = "agents exchanged work outputs and positions"
         elif event.type == "cabinet.voted":
             tally = event.payload.get("tally", {})
             steps[1]["status"] = str(tally.get("status", "done"))

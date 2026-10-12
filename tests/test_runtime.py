@@ -30,6 +30,24 @@ class AlwaysFailDriver:
         raise RuntimeError("model process exploded")
 
 
+class PromptCaptureDriver:
+    name = "memory"
+
+    def __init__(self):
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    def complete(self, *, role: str, prompt: str, context: dict) -> DriverResponse:
+        self.calls += 1
+        self.prompts.append(prompt)
+        text = (
+            '{"stance":"assert","option_id":"M","claim":"memory claim '
+            + str(self.calls)
+            + '","evidence":["captured prompt"],"confidence":0.8,"text":"ok"}'
+        )
+        return DriverResponse(text=text, tokens=3)
+
+
 class RuntimeTests(unittest.TestCase):
     def test_battle_records_agent_decision_and_command_updates_goal(self):
         with Runtime(":memory:") as rt:
@@ -100,6 +118,34 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(profiles["product"]["supports"], 1)
             self.assertEqual(profiles["test"]["challenges"], 1)
             self.assertIn("Ship the smallest", profiles["product"]["last_claim"])
+
+    def test_profile_memory_is_fed_into_later_collaboration_prompts(self):
+        driver = PromptCaptureDriver()
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "cabinet": {"approval_threshold": 1, "quorum": 1, "veto_roles": []},
+                  "roles": [
+                    {"id":"memory","name":"Memory","role":"memory","driver":"memory"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"memory": driver}) as rt:
+                task_id = rt.create_task("Carry memory forward")
+                rt.collaborate(task_id)
+                rt.command(task_id, "Continue with what you learned")
+                rt.collaborate(task_id)
+
+        self.assertEqual(driver.calls, 2)
+        self.assertIn("Profile memory: no prior activity", driver.prompts[0])
+        self.assertIn("Collaboration policy", driver.prompts[1])
+        self.assertIn("messages=1", driver.prompts[1])
+        self.assertIn("supports=1", driver.prompts[1])
+        self.assertIn("last_claim=memory claim 1", driver.prompts[1])
 
     def test_battle_records_cabinet_vote_tally(self):
         with Runtime(":memory:") as rt:
@@ -301,9 +347,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("signed", self.out.getvalue())
 
     def test_cli_new_battle_inbox_decide(self):
-        code, out = self.run_cli("new", "Build demo", "--accept", "three roles", "--battle")
+        code, out = self.run_cli("new", "Build demo", "--accept", "three roles", "--run")
         self.assertEqual(code, 0)
         task_id = next(line for line in out.splitlines() if line.startswith("created ")).split()[1]
+        self.assertIn("round complete", out)
 
         code, out = self.run_cli("show", task_id)
         self.assertEqual(code, 0)
@@ -314,6 +361,10 @@ class CliTests(unittest.TestCase):
         code, out = self.run_cli("inbox")
         self.assertEqual(code, 0)
         self.assertIn("inbox empty", out)
+
+        code, out = self.run_cli("run", task_id)
+        self.assertEqual(code, 0)
+        self.assertIn("round complete", out)
 
         code, out = self.run_cli(
             "command",
