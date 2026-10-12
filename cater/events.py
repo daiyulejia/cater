@@ -32,6 +32,7 @@ EVENT_CATEGORIES = {
     "brief.generated": "decision",
     "human.commanded": "decision",
     "human.decided": "decision",
+    "review.generated": "review",
 }
 
 

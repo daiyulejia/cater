@@ -21,6 +21,7 @@ class TaskSnapshot:
     brief: dict[str, Any] | None = None
     decision: dict[str, Any] | None = None
     commands: list[dict[str, Any]] = field(default_factory=list)
+    reviews: list[dict[str, Any]] = field(default_factory=list)
     tokens: int = 0
 
 
@@ -78,4 +79,7 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
             task.decision = payload
             resolution = payload.get("resolution")
             task.status = "done" if resolution == "done" else "running"
+        elif event.type == "review.generated":
+            review = payload.get("review") if isinstance(payload.get("review"), dict) else payload
+            task.reviews.append({"seq": event.seq, **review})
     return tasks

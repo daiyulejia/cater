@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlparse
 from .events import Event
 from .fold import TaskSnapshot
 from .ladder import decision_ladder
+from .review import build_review
 from .runtime import Runtime
 
 
@@ -72,6 +73,7 @@ def make_handler(
                             "task": task_to_dict(task),
                             "events": [event_to_dict(e) for e in events],
                             "decision_ladder": decision_ladder(events),
+                            "review": rt.review(task_id),
                         }
                     )
             if path.startswith("/tasks/"):
@@ -81,7 +83,7 @@ def make_handler(
                     if task is None:
                         return self._not_found()
                     events = rt.log.read(task_id=task_id)
-                    return self._send_html(render_task(task, events))
+                    return self._send_html(render_task(task, events, rt.review(task_id)))
             return self._not_found()
 
         def do_POST(self) -> None:
@@ -211,6 +213,13 @@ def render_index(rt: Runtime) -> str:
         roles = list(rt.roles)
         cabinet_policy = rt.cabinet_policy
         governance_policy = rt.governance_policy
+        review = build_review(
+            tasks=tasks,
+            events=rt.log.read(),
+            profiles=profiles,
+            chain=chain,
+            scope="workspace",
+        )
     rows = "\n".join(_task_row(task, task.id in inbox) for task in tasks)
     if not rows:
         rows = '<tr><td colspan="5" class="empty">No tasks yet. Run <code>cater demo</code>.</td></tr>'
@@ -266,6 +275,7 @@ def render_index(rt: Runtime) -> str:
           </div>
           {_policy_view(roles, cabinet_policy, governance_policy)}
         </section>
+        {_review_panel(review)}
         <section class="panel">
           <div class="panel-head">
             <h2>Tasks</h2>
@@ -282,7 +292,7 @@ def render_index(rt: Runtime) -> str:
     )
 
 
-def render_task(task: TaskSnapshot, events: list[Event]) -> str:
+def render_task(task: TaskSnapshot, events: list[Event], review: dict[str, Any] | None = None) -> str:
     message_cards = "\n".join(_message_card(item) for item in task.messages)
     timeline = "\n".join(_event_row(event) for event in events)
     ladder = "\n".join(_ladder_step(step) for step in decision_ladder(events))
@@ -290,6 +300,13 @@ def render_task(task: TaskSnapshot, events: list[Event]) -> str:
     decision = _decision_panel(task)
     command = _command_panel(task)
     failures = _failure_panel(task)
+    review = review or build_review(
+        tasks=[task],
+        events=events,
+        profiles={},
+        chain=_local_chain_placeholder(),
+        scope=task.id,
+    )
     return page(
         f"Cater / {task.id}",
         f"""
@@ -309,6 +326,7 @@ def render_task(task: TaskSnapshot, events: list[Event]) -> str:
           <ol class="ladder">{ladder}</ol>
         </section>
         {command}
+        {_review_panel(review)}
         {failures}
         <section class="panel">
           <div class="panel-head"><h2>Messages</h2><span>{len(task.messages)} entries</span></div>
@@ -351,6 +369,7 @@ def task_to_dict(task: TaskSnapshot) -> dict[str, Any]:
         "brief": task.brief,
         "decision": task.decision,
         "commands": task.commands,
+        "reviews": task.reviews,
         "tokens": task.tokens,
     }
 
@@ -410,6 +429,45 @@ def _policy_view(roles: list[Any], cabinet_policy: Any, governance_policy: Any) 
       </div>
     </div>
     """
+
+
+def _review_panel(review: dict[str, Any]) -> str:
+    lenses = "\n".join(
+        f"""
+        <li>
+          <strong>{escape(item.get("label"))}</strong>
+          <span>{escape(item.get("status"))}</span>
+          <p>{escape(item.get("finding"))}</p>
+          <small>{escape(item.get("action"))}</small>
+        </li>
+        """
+        for item in review.get("lenses", [])
+    )
+    actions = review.get("next_actions", [])
+    next_text = " | ".join(str(item) for item in actions[:3]) if actions else "No immediate action"
+    return f"""
+    <section class="panel">
+      <div class="panel-head"><h2>Self Review</h2><span>{escape(review.get("health"))}</span></div>
+      <p class="muted">{escape(review.get("summary"))}</p>
+      <p class="muted">{escape(next_text)}</p>
+      <ol class="review-list">{lenses}</ol>
+    </section>
+    """
+
+
+def _local_chain_placeholder() -> Any:
+    class LocalChain:
+        ok = True
+        checked = 0
+        signed = 0
+        head_hash = ""
+        reason = ""
+        broken_at = None
+
+        def describe(self) -> str:
+            return "task-local review"
+
+    return LocalChain()
 
 
 def event_to_dict(event: Event) -> dict[str, Any]:
@@ -777,6 +835,31 @@ td small {
   color: var(--muted);
   font-size: 13px;
 }
+.review-list {
+  list-style: none;
+  padding: 0;
+  margin: 14px 0 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.review-list li {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #fbfcfd;
+}
+.review-list strong, .review-list span {
+  display: block;
+}
+.review-list span {
+  color: var(--accent);
+  font-size: 13px;
+  margin-top: 4px;
+}
+.review-list p {
+  margin-top: 8px;
+}
 dt {
   color: var(--muted);
   font-size: 12px;
@@ -956,5 +1039,6 @@ button.secondary {
   .timeline em, .timeline p { grid-column: 2; }
   .ladder { grid-template-columns: 1fr; }
   .policy-grid { grid-template-columns: 1fr; }
+  .review-list { grid-template-columns: 1fr; }
 }
 """

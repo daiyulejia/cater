@@ -130,6 +130,13 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        review = rt.review(args.task_id, record=args.record)
+        print(json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
 def cmd_inbox(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         items = rt.inbox()
@@ -289,6 +296,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("task_id", nargs="?")
     p_export.add_argument("--format", choices=["json", "jsonl"], default="json")
     p_export.set_defaults(func=cmd_export)
+
+    p_review = sub.add_parser("review", help="review work from multiple product angles")
+    p_review.add_argument("task_id", nargs="?")
+    p_review.add_argument("--record", action="store_true", help="append review.generated to the event log")
+    p_review.set_defaults(func=cmd_review)
 
     sub.add_parser("inbox", help="show exceptional human input requests").set_defaults(func=cmd_inbox)
     sub.add_parser("profiles", help="show projected agent profiles").set_defaults(func=cmd_profiles)

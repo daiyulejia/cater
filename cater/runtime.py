@@ -14,6 +14,7 @@ from .drivers import Driver, DriverResponse, load_drivers
 from .events import Actor, Event, EventLog
 from .fold import TaskSnapshot, fold
 from .profiles import agent_profiles
+from .review import build_review
 
 
 @dataclass(frozen=True)
@@ -297,6 +298,26 @@ class Runtime:
 
     def profiles(self) -> dict[str, dict[str, Any]]:
         return agent_profiles(self.log.read())
+
+    def review(self, task_id: str | None = None, *, record: bool = False) -> dict[str, Any]:
+        events = self.log.read(task_id=task_id)
+        tasks = self.tasks() if task_id is None else ([self.task(task_id)] if self.task(task_id) else [])
+        tasks = [task for task in tasks if task is not None]
+        review = build_review(
+            tasks=tasks,
+            events=events,
+            profiles=self.profiles(),
+            chain=self.verify_chain(),
+            scope=task_id or "workspace",
+        )
+        if record:
+            self.log.emit(
+                actor=Actor.system("reviewer"),
+                type="review.generated",
+                task_id=task_id,
+                payload={"review": review},
+            )
+        return review
 
     def verify_chain(self):
         return self.log.verify_chain()

@@ -360,6 +360,21 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(driver.calls, 2)
             self.assertTrue(any(item["attempt"] == 0 for item in task.driver_failures))
 
+    def test_review_can_be_projected_and_recorded(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("Review me")
+            rt.collaborate(task_id)
+            review = rt.review(task_id)
+            recorded = rt.review(task_id, record=True)
+            task = rt.task(task_id)
+            event_types = [event.type for event in rt.log.read(task_id=task_id)]
+
+            self.assertIn("lenses", review)
+            self.assertEqual(review["scope"], task_id)
+            self.assertEqual(recorded["scope"], task_id)
+            self.assertIn("review.generated", event_types)
+            self.assertEqual(task.reviews[-1]["scope"], task_id)
+
 
 class CabinetTests(unittest.TestCase):
     def test_majority_threshold(self):
@@ -576,6 +591,24 @@ class CliTests(unittest.TestCase):
         self.assertGreater(len(lines), 1)
         self.assertTrue(all(item["task_id"] == task_id for item in lines))
 
+    def test_cli_review_and_record(self):
+        code, _ = self.run_cli("demo")
+        self.assertEqual(code, 0)
+
+        code, out = self.run_cli("review")
+        self.assertEqual(code, 0)
+        review = json.loads(out)
+        self.assertIn("lenses", review)
+        self.assertIn("next_actions", review)
+
+        task_id = self.run_cli("show")[1].split()[0]
+        code, out = self.run_cli("review", task_id, "--record")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["scope"], task_id)
+        code, out = self.run_cli("events", task_id)
+        self.assertEqual(code, 0)
+        self.assertIn("review.generated", out)
+
 
 class WebTests(unittest.TestCase):
     def test_render_task_includes_cabinet_timeline_and_decision_form(self):
@@ -592,6 +625,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("Decision Ladder", html)
         self.assertIn("Timeline", html)
         self.assertIn("Human Command", html)
+        self.assertIn("Self Review", html)
         self.assertIn("Force governance", controls_html)
         self.assertIn("governance round forced", html)
         self.assertIn("cabinet.voted", html)
@@ -619,6 +653,7 @@ class WebTests(unittest.TestCase):
             self.assertIn('"cabinet"', data)
             self.assertIn("cabinet.voted", data)
             self.assertIn('"decision_ladder"', data)
+            self.assertIn('"review"', data)
 
             body = urlencode({"resolution": "done", "reason": "Looks good"}).encode("utf-8")
             request = Request(
@@ -673,6 +708,7 @@ class WebTests(unittest.TestCase):
                 index = response.read().decode("utf-8")
             self.assertIn("Agent Profiles", index)
             self.assertIn("Organization Policy", index)
+            self.assertIn("Self Review", index)
             self.assertIn("Create from web", index)
 
 

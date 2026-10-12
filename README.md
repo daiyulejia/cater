@@ -45,6 +45,7 @@ python -m cater.cli inbox
 python -m cater.cli policy
 python -m cater.cli run <task_id>
 python -m cater.cli export <task_id>
+python -m cater.cli review <task_id>
 python -m cater.cli events <task_id>
 python -m cater.cli decide <task_id> --resolution done --reason "Ship the smallest loop first"
 python -m cater.cli web
@@ -88,6 +89,7 @@ python -m cater.cli show [task_id]
 python -m cater.cli events [task_id]
 python -m cater.cli export [task_id] --format json
 python -m cater.cli export [task_id] --format jsonl
+python -m cater.cli review [task_id] --record
 python -m cater.cli inbox
 python -m cater.cli profiles
 python -m cater.cli policy
@@ -235,6 +237,17 @@ You can also use `--audit-key-file` or the `CATER_AUDIT_KEY` environment variabl
 Use `cater export` to produce a machine-readable replay bundle, or `cater export --format jsonl` to stream raw events.
 
 可以使用 `cater export` 生成机器可读的回放包，或用 `cater export --format jsonl` 导出原始事件流。
+
+## Self Review / 自省复盘
+
+```bash
+python -m cater.cli review
+python -m cater.cli review <task_id> --record
+```
+
+`review` inspects the work from product, design, testing, UI, logic, reliability, and adoption angles. Without `--record` it is a pure projection; with `--record` it appends a `review.generated` event so the critique itself becomes replayable.
+
+`review` 会从产品、设计、测试、UI、逻辑、可靠性和采用门槛等角度审视当前工作。不带 `--record` 时它只是纯投影；带 `--record` 时会追加 `review.generated` 事件，让批判和修正建议本身也可回放。
 
 ## Roadmap / 路线图
 
