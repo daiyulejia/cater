@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .assignments import latest_assignments_by_owner
 from .events import Event
 from .fold import TaskSnapshot
 from .ladder import decision_ladder
@@ -699,7 +700,7 @@ def _distribution_panel(task: TaskSnapshot, roles: list[Any]) -> str:
           {direct_form}
         </section>
         """
-    visible_assignments = _latest_assignments_by_owner(task.assignments)
+    visible_assignments = latest_assignments_by_owner(task.assignments)
     rows = "\n".join(
         f"""
         <li>
@@ -776,19 +777,6 @@ def _decision_panel(task: TaskSnapshot) -> str:
       </form>
     </article>
     """
-
-
-def _latest_assignments_by_owner(assignments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    by_owner: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
-    for item in assignments:
-        owner = str(item.get("owner") or "")
-        if not owner:
-            continue
-        if owner not in by_owner:
-            order.append(owner)
-        by_owner[owner] = item
-    return [by_owner[owner] for owner in order if owner in by_owner]
 
 
 def _command_panel(task: TaskSnapshot) -> str:

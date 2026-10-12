@@ -9,6 +9,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
+from .assignments import latest_assignments_by_owner
 from .cabinet import CabinetPolicy, tally_votes
 from .drivers import Driver, DriverResponse, load_drivers
 from .events import Actor, Event, EventLog
@@ -551,7 +552,7 @@ class Runtime:
     def _task_memory(task: TaskSnapshot, role_id: str | None = None) -> str:
         parts = []
         if task.assignments:
-            latest_assignments = _latest_assignments_by_owner(task.assignments)
+            latest_assignments = latest_assignments_by_owner(task.assignments)
             owned = [
                 item for item in latest_assignments
                 if role_id is not None and str(item.get("owner") or "") == role_id
@@ -820,19 +821,6 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
 
 def load_roles(path: str | Path | None = None) -> list[Role]:
     return load_runtime_config(path).roles
-
-
-def _latest_assignments_by_owner(assignments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    by_owner: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
-    for item in assignments:
-        owner = str(item.get("owner") or "")
-        if not owner:
-            continue
-        if owner not in by_owner:
-            order.append(owner)
-        by_owner[owner] = item
-    return [by_owner[owner] for owner in order if owner in by_owner]
 
 
 def _pack_path(name: str) -> Path:
