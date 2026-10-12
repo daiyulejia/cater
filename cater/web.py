@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .events import Event
 from .fold import TaskSnapshot
+from .ladder import decision_ladder
 from .runtime import Runtime
 
 
@@ -67,7 +68,11 @@ def make_handler(
                         return self._not_found()
                     events = rt.log.read(task_id=task_id)
                     return self._send_json(
-                        {"task": task_to_dict(task), "events": [event_to_dict(e) for e in events]}
+                        {
+                            "task": task_to_dict(task),
+                            "events": [event_to_dict(e) for e in events],
+                            "decision_ladder": decision_ladder(events),
+                        }
                     )
             if path.startswith("/tasks/"):
                 task_id = path.split("/", 2)[2]
@@ -254,6 +259,7 @@ def render_index(rt: Runtime) -> str:
 def render_task(task: TaskSnapshot, events: list[Event]) -> str:
     message_cards = "\n".join(_message_card(item) for item in task.messages)
     timeline = "\n".join(_event_row(event) for event in events)
+    ladder = "\n".join(_ladder_step(step) for step in decision_ladder(events))
     cabinet = task.cabinet or {}
     options = "\n".join(_option_card(item) for item in cabinet.get("options", []))
     decision = _decision_panel(task)
@@ -281,6 +287,10 @@ def render_task(task: TaskSnapshot, events: list[Event]) -> str:
             <div class="options">{options}</div>
           </article>
           {decision}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Decision Ladder</h2><span>autonomy path</span></div>
+          <ol class="ladder">{ladder}</ol>
         </section>
         {command}
         {failures}
@@ -391,6 +401,16 @@ def _event_row(event: Event) -> str:
       <strong>{escape(event.type)}</strong>
       <em>{escape(event.actor.id)}</em>
       <p>{escape(text)}</p>
+    </li>
+    """
+
+
+def _ladder_step(step: dict[str, Any]) -> str:
+    return f"""
+    <li class="ladder-step {escape(step.get("status"))}">
+      <strong>{escape(step.get("label"))}</strong>
+      <span>{escape(step.get("status"))}</span>
+      <p>{escape(step.get("detail"))}</p>
     </li>
     """
 
@@ -691,6 +711,33 @@ dd {
   padding: 0;
   margin: 0;
 }
+.ladder {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.ladder-step {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: #fbfcfd;
+}
+.ladder-step strong, .ladder-step span {
+  display: block;
+}
+.ladder-step span {
+  color: var(--accent);
+  font-size: 13px;
+  margin-top: 4px;
+}
+.ladder-step p {
+  color: var(--muted);
+  margin-top: 8px;
+  font-size: 13px;
+}
 .timeline li {
   display: grid;
   grid-template-columns: 56px 180px 120px minmax(0, 1fr);
@@ -749,5 +796,6 @@ button {
   td { border: 0; padding: 6px 0; }
   .timeline li { grid-template-columns: 48px minmax(0, 1fr); }
   .timeline em, .timeline p { grid-column: 2; }
+  .ladder { grid-template-columns: 1fr; }
 }
 """

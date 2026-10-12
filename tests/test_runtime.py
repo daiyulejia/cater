@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 from cater.cabinet import majority_threshold, tally_votes
 from cater.cli import main
 from cater.drivers import CliDriver, DriverResponse
+from cater.ladder import decision_ladder
 from cater.runtime import Runtime
 from cater.web import make_handler, render_task
 
@@ -294,6 +295,8 @@ class CliTests(unittest.TestCase):
         code, out = self.run_cli("show", task_id)
         self.assertEqual(code, 0)
         self.assertIn("cabinet=vetoed", out)
+        self.assertIn("ladder:", out)
+        self.assertIn("Cabinet: vetoed", out)
 
         code, out = self.run_cli("inbox")
         self.assertEqual(code, 0)
@@ -340,13 +343,18 @@ class WebTests(unittest.TestCase):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("Render me")
             rt.battle(task_id)
-            html = render_task(rt.task(task_id), rt.log.read(task_id=task_id))
+            events = rt.log.read(task_id=task_id)
+            html = render_task(rt.task(task_id), events)
+            ladder = decision_ladder(events)
 
         self.assertIn("Cabinet", html)
+        self.assertIn("Decision Ladder", html)
         self.assertIn("Timeline", html)
         self.assertIn("Human Command", html)
         self.assertIn("cabinet.voted", html)
         self.assertIn("agent.decided", html)
+        self.assertEqual([step["id"] for step in ladder], ["battle", "cabinet", "supreme", "human"])
+        self.assertEqual(ladder[1]["status"], "vetoed")
 
     def test_web_api_and_decision_post(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -367,6 +375,7 @@ class WebTests(unittest.TestCase):
                 data = response.read().decode("utf-8")
             self.assertIn('"cabinet"', data)
             self.assertIn("cabinet.voted", data)
+            self.assertIn('"decision_ladder"', data)
 
             body = urlencode({"resolution": "done", "reason": "Looks good"}).encode("utf-8")
             request = Request(

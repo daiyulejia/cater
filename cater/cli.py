@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 
+from .ladder import decision_ladder
 from .runtime import Runtime
 from .web import serve
 
@@ -76,6 +77,10 @@ def cmd_show(args: argparse.Namespace) -> int:
                 print(f"proposal={task.proposal['option_id']} reason={task.proposal['reason']}")
             if task.brief:
                 print(f"brief: {task.brief['dispute']}")
+            ladder = decision_ladder(rt.log.read(task_id=args.task_id))
+            print("ladder:")
+            for step in ladder:
+                print(f"  - {step['label']}: {step['status']} ({step['detail']})")
             return 0
         for task in rt.tasks():
             print(f"{task.id} [{task.status}] {task.goal}")
