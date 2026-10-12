@@ -717,7 +717,8 @@ def _distribution_panel(task: TaskSnapshot, roles: list[Any]) -> str:
           <strong>{escape(item.get("owner"))}</strong>
           <span>{escape(item.get("lane"))}</span>
           <p>{escape(item.get("objective"))}</p>
-          <small>{escape(item.get("acceptance"))}</small>
+          <small>{escape(item.get("deliverable") or item.get("acceptance"))}</small>
+          <small>{escape(_depends_on_text(item))}</small>
         </li>
         """
         for item in visible_assignments
@@ -733,6 +734,13 @@ def _distribution_panel(task: TaskSnapshot, roles: list[Any]) -> str:
       {direct_form}
     </section>
     """
+
+
+def _depends_on_text(item: dict[str, Any]) -> str:
+    deps = item.get("depends_on") or []
+    if not deps:
+        return "depends on: none"
+    return "depends on: " + ", ".join(str(dep) for dep in deps)
 
 
 def _decision_panel(task: TaskSnapshot) -> str:

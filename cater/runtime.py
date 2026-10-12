@@ -632,21 +632,26 @@ class Runtime:
     def _decompose_task(self, task: TaskSnapshot) -> list[dict[str, Any]]:
         criteria = list(task.acceptance) or ["produce a useful, verifiable next increment"]
         subtasks = []
+        prior_by_lane: dict[str, list[str]] = {}
         for index, role in enumerate(self.roles):
             criterion = criteria[index % len(criteria)]
             lane = self._role_lane(role.role)
+            subtask_id = f"{task.id}:{role.id}:{index + 1}"
+            depends_on = self._lane_dependencies(lane, prior_by_lane)
             subtasks.append(
                 {
-                    "id": f"{task.id}:{role.id}:{index + 1}",
+                    "id": subtask_id,
                     "owner": role.id,
                     "role": role.role,
                     "lane": lane,
                     "objective": f"{role.name} owns the {lane} lane for: {task.goal}",
                     "acceptance": criterion,
-                    "depends_on": [] if index == 0 else [f"{task.id}:{self.roles[index - 1].id}:{index}"],
+                    "deliverable": self._lane_deliverable(lane),
+                    "depends_on": depends_on,
                     "status": "assigned",
                 }
             )
+            prior_by_lane.setdefault(lane, []).append(subtask_id)
         return subtasks
 
     @staticmethod
@@ -661,6 +666,34 @@ class Runtime:
         if "design" in normalized or "ui" in normalized:
             return "interaction design"
         return "execution"
+
+    @staticmethod
+    def _lane_deliverable(lane: str) -> str:
+        if lane == "scope and user value":
+            return "goal framing, user value, and acceptance clarification"
+        if lane == "implementation":
+            return "working implementation plan or code-ready change"
+        if lane == "verification and risk":
+            return "risk review, test strategy, and release confidence"
+        if lane == "interaction design":
+            return "usable interaction flow and interface constraints"
+        return "role-owned execution output"
+
+    @staticmethod
+    def _lane_dependencies(lane: str, prior_by_lane: dict[str, list[str]]) -> list[str]:
+        if lane == "scope and user value":
+            return []
+        if lane == "implementation":
+            return list(prior_by_lane.get("scope and user value", []))
+        if lane == "interaction design":
+            return list(prior_by_lane.get("scope and user value", []))
+        if lane == "verification and risk":
+            deps = []
+            for prior_lane, ids in prior_by_lane.items():
+                if prior_lane != "verification and risk":
+                    deps.extend(ids)
+            return deps
+        return [ids[-1] for ids in prior_by_lane.values() if ids]
 
     @staticmethod
     def _round_memory(utterances: list[dict[str, Any]]) -> str:

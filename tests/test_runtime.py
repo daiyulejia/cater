@@ -317,11 +317,28 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(len(task.assignments), 2)
                 self.assertEqual(task.assignments[0]["owner"], "product")
                 self.assertEqual(task.assignments[1]["lane"], "implementation")
+                self.assertEqual(task.assignments[1]["depends_on"], [task.assignments[0]["id"]])
+                self.assertIn("deliverable", task.assignments[0])
+                html = render_task(task, rt.log.read(task_id=task_id))
+                self.assertIn("working implementation plan or code-ready change", html)
+                self.assertIn("depends on:", html)
 
                 rt.collaborate(task_id)
 
         self.assertIn("assigned_work=product:", driver.prompts[0])
         self.assertIn("dev:", driver.prompts[0])
+
+    def test_dispatch_dependencies_follow_execution_lanes(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("Plan dependencies")
+            rt.dispatch(task_id)
+            task = rt.task(task_id)
+
+        product, dev, test = task.assignments
+        self.assertEqual(product["depends_on"], [])
+        self.assertEqual(dev["depends_on"], [product["id"]])
+        self.assertEqual(test["depends_on"], [product["id"], dev["id"]])
+        self.assertEqual(test["deliverable"], "risk review, test strategy, and release confidence")
 
     def test_human_can_assign_directly_to_worker_layer(self):
         driver = PromptCaptureDriver()
