@@ -53,6 +53,30 @@ By default Cater writes to `./.cater/cater.db`.
 
 默认数据库写入 `./.cater/cater.db`。
 
+## Verification / 本地验证
+
+```bash
+python scripts/check.py
+```
+
+On Windows, if `python` points to the Microsoft Store placeholder, use:
+
+```powershell
+.\scripts\check.ps1
+```
+
+本地验证：
+
+```bash
+python scripts/check.py
+```
+
+如果 Windows 上的 `python` 指向 Microsoft Store 占位符，可以使用：
+
+```powershell
+.\scripts\check.ps1
+```
+
 ## Commands / 命令
 
 ```bash
@@ -225,6 +249,12 @@ Next iterations:
 5. 可靠性：让 circuit breaker 策略可配置，并在 CLI/Web 暴露恢复控制。
 6. 审计：加入 key rotation 元数据、未签名历史策略和可导出的审计报告。
 7. 分发：补充主流第三方 CLI wrapper 示例，同时保持核心零依赖。
+
+## Contributing / 参与贡献
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the local check command, driver-boundary rules, and commit expectations.
+
+本地验证命令、driver 边界约定和提交说明规范见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## Iteration Lens / 迭代视角
 
