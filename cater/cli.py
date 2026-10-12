@@ -38,6 +38,9 @@ def resolve_audit_key(args: argparse.Namespace) -> str | None:
 
 def cmd_new(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
+        if args.assign_to and args.assign_to not in {role.id for role in rt.roles}:
+            print(_unknown_role_message(args.assign_to, rt))
+            return 1
         task_id = rt.create_task(args.goal, args.accept or [])
         print(f"created {task_id}")
         if args.dispatch:
@@ -87,12 +90,16 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
 
 def cmd_assign(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
-        result = rt.assign(
-            args.task_id,
-            args.owner,
-            objective=args.objective,
-            acceptance=args.acceptance,
-        )
+        try:
+            result = rt.assign(
+                args.task_id,
+                args.owner,
+                objective=args.objective,
+                acceptance=args.acceptance,
+            )
+        except ValueError:
+            print(_unknown_role_message(args.owner, rt))
+            return 1
         print(f"assigned {args.task_id} to {args.owner}")
         print(json.dumps(result["assignment"], ensure_ascii=False, indent=2))
     return 0
@@ -261,6 +268,11 @@ def cmd_probe_driver(args: argparse.Namespace) -> int:
         response = driver.complete(role="probe", prompt="ping", context={"probe": True})
         print(f"{args.name}: complete ok, tokens={response.tokens}, text={response.text[:60]}")
     return 0
+
+
+def _unknown_role_message(role_id: str, rt: Runtime) -> str:
+    known = ", ".join(role.id for role in rt.roles)
+    return f"unknown role {role_id!r}; expected one of: {known}"
 
 
 def cmd_demo(args: argparse.Namespace) -> int:

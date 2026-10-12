@@ -710,6 +710,22 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("assignments=1", out)
 
+    def test_cli_direct_assign_reports_unknown_role_without_creating_task(self):
+        code, out = self.run_cli("new", "Bad assign", "--assign-to", "nobody")
+        self.assertEqual(code, 1)
+        self.assertIn("unknown role 'nobody'", out)
+
+        code, out = self.run_cli("show")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "")
+
+        code, out = self.run_cli("new", "Known task")
+        self.assertEqual(code, 0)
+        task_id = next(line for line in out.splitlines() if line.startswith("created ")).split()[1]
+        code, out = self.run_cli("assign", task_id, "nobody")
+        self.assertEqual(code, 1)
+        self.assertIn("expected one of: product, dev, test", out)
+
     def test_cli_export_json_and_jsonl(self):
         code, _ = self.run_cli("demo")
         self.assertEqual(code, 0)
