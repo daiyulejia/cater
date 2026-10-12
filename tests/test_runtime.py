@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 import threading
@@ -555,6 +556,25 @@ class CliTests(unittest.TestCase):
         self.assertIn("trigger_on_challenge=True", out)
         self.assertIn("cabinet:", out)
         self.assertIn("veto_roles=test", out)
+
+    def test_cli_export_json_and_jsonl(self):
+        code, _ = self.run_cli("demo")
+        self.assertEqual(code, 0)
+
+        code, out = self.run_cli("export")
+        self.assertEqual(code, 0)
+        exported = json.loads(out)
+        self.assertTrue(exported["chain"]["ok"])
+        self.assertEqual(len(exported["tasks"]), 1)
+        self.assertGreater(len(exported["events"]), 1)
+        self.assertIn("product", exported["profiles"])
+
+        task_id = exported["tasks"][0]["id"]
+        code, out = self.run_cli("export", task_id, "--format", "jsonl")
+        self.assertEqual(code, 0)
+        lines = [json.loads(line) for line in out.splitlines()]
+        self.assertGreater(len(lines), 1)
+        self.assertTrue(all(item["task_id"] == task_id for item in lines))
 
 
 class WebTests(unittest.TestCase):

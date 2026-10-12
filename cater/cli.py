@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .ladder import decision_ladder
 from .runtime import Runtime
-from .web import serve
+from .web import event_to_dict, serve, task_to_dict
 
 DEFAULT_DB = Path.cwd() / ".cater" / "cater.db"
 
@@ -101,6 +101,32 @@ def cmd_events(args: argparse.Namespace) -> int:
         for event in rt.log.read(task_id=args.task_id):
             text = event.payload.get("text") or event.payload.get("goal") or event.payload.get("reason") or ""
             print(f"#{event.seq:<3} {event.type:<20} {event.actor.id:<12} {str(text)[:80]}")
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        events = rt.log.read(task_id=args.task_id)
+        if args.format == "jsonl":
+            for event in events:
+                print(json.dumps(event_to_dict(event), ensure_ascii=False, sort_keys=True))
+            return 0
+
+        tasks = [task for task in rt.tasks() if args.task_id is None or task.id == args.task_id]
+        report = rt.verify_chain()
+        body = {
+            "chain": {
+                "ok": report.ok,
+                "checked": report.checked,
+                "signed": report.signed,
+                "head_hash": report.head_hash,
+                "reason": report.reason,
+            },
+            "tasks": [task_to_dict(task) for task in tasks],
+            "events": [event_to_dict(event) for event in events],
+            "profiles": rt.profiles(),
+        }
+        print(json.dumps(body, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 
@@ -258,6 +284,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_events = sub.add_parser("events", help="show event log")
     p_events.add_argument("task_id", nargs="?")
     p_events.set_defaults(func=cmd_events)
+
+    p_export = sub.add_parser("export", help="export replay data as JSON or JSONL")
+    p_export.add_argument("task_id", nargs="?")
+    p_export.add_argument("--format", choices=["json", "jsonl"], default="json")
+    p_export.set_defaults(func=cmd_export)
 
     sub.add_parser("inbox", help="show exceptional human input requests").set_defaults(func=cmd_inbox)
     sub.add_parser("profiles", help="show projected agent profiles").set_defaults(func=cmd_profiles)
