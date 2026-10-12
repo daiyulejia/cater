@@ -19,7 +19,6 @@ Most agent demos optimize for the final answer. Cater treats the process as the 
 - disagreements become structured escalation briefs
 - human decisions are normal events
 - the CLI exposes the same surface future Web and mobile clients will use
-
 - 每个关键步骤都是只追加事件
 - 任务状态由事件流折叠出来
 - 分歧会生成结构化升级简报
@@ -74,7 +73,6 @@ Implemented in the first seed:
 - pure fold from events to task snapshots
 - CLI commands for process inspection
 - zero third-party runtime dependencies
-
 - SQLite 只追加事件流 + 哈希链校验
 - 任务创建、部门 battle、升级、人类拍板
 - 确定性 scripted driver，便于演示和测试
@@ -94,7 +92,6 @@ Next:
 - HMAC audit signatures
 - retry containment and circuit breaker
 - mobile decision inbox
-
 - 真实 CLI/API 模型 driver
 - Web 摘要与过程回放界面
 - 更完整的升级简报 schema
@@ -104,11 +101,15 @@ Next:
 
 ## Design Principles / 设计原则
 
+English:
+
 1. Process first. The collaboration process must be visible.
 2. Events first. State is a view over append-only history.
 3. Drivers are replaceable. Models, CLIs, and APIs are not hardwired.
 4. Disagreement is normal. Escalation is a feature, not a failure.
 5. Humans are actors. Human decisions live in the same event stream.
+
+中文：
 
 1. 过程优先：协作过程必须能被看见。
 2. 事件优先：状态只是只追加历史的一个视图。
