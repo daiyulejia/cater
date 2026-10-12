@@ -89,7 +89,7 @@ def make_handler(
                     if task is None:
                         return self._not_found()
                     events = rt.log.read(task_id=task_id)
-                    return self._send_html(render_task(task, events, rt.review(task_id)))
+                    return self._send_html(render_task(task, events, rt.review(task_id), roles=rt.roles))
             return self._not_found()
 
         def do_POST(self) -> None:
@@ -336,13 +336,19 @@ def render_index(rt: Runtime) -> str:
     )
 
 
-def render_task(task: TaskSnapshot, events: list[Event], review: dict[str, Any] | None = None) -> str:
+def render_task(
+    task: TaskSnapshot,
+    events: list[Event],
+    review: dict[str, Any] | None = None,
+    *,
+    roles: list[Any] | None = None,
+) -> str:
     message_cards = "\n".join(_message_card(item) for item in task.messages)
     timeline = "\n".join(_event_row(event) for event in events)
     ladder = "\n".join(_ladder_step(step) for step in decision_ladder(events))
     governance = _governance_panel(task)
     decision = _decision_panel(task)
-    distribution = _distribution_panel(task)
+    distribution = _distribution_panel(task, roles or [])
     command = _command_panel(task)
     failures = _failure_panel(task)
     review = review or build_review(
@@ -659,11 +665,19 @@ def _ladder_step(step: dict[str, Any]) -> str:
     """
 
 
-def _distribution_panel(task: TaskSnapshot) -> str:
+def _distribution_panel(task: TaskSnapshot, roles: list[Any]) -> str:
+    if roles:
+        owner_control = f"""
+        <select name="owner">
+          {_role_options(roles, include_blank=False)}
+        </select>
+        """
+    else:
+        owner_control = '<input name="owner" placeholder="product, dev, test">'
     direct_form = f"""
     <form method="post" action="/tasks/{escape(task.id)}/assign" class="compact-form">
       <label>Direct worker role
-        <input name="owner" placeholder="product, dev, test">
+        {owner_control}
       </label>
       <label>Objective
         <textarea name="objective" rows="2"></textarea>

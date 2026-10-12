@@ -809,6 +809,10 @@ class WebTests(unittest.TestCase):
             self.assertIn('"decision_ladder"', data)
             self.assertIn('"review"', data)
 
+            with urlopen(f"{base}/tasks/{task_id}", timeout=5) as response:
+                page = response.read().decode("utf-8")
+            self.assertIn('<option value="dev">dev / developer</option>', page)
+
             dispatch_request = Request(
                 f"{base}/tasks/{task_id}/dispatch",
                 data=b"",
