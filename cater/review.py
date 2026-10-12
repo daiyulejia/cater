@@ -159,6 +159,8 @@ def _reliability_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     failures = sum(len(task.driver_failures) for task in tasks)
     if failures:
         return _lens("reliability", "watch", f"{failures} contained driver failure(s) recorded.", "Review circuit breaker thresholds and recovery controls.")
+    if any(task.messages for task in tasks):
+        return _lens("reliability", "ok", "No driver failures are recorded.", "When adding third-party tools, verify contracts and failure modes before trusting names.")
     return _lens("reliability", "ok", "No driver failures are recorded.", "Keep containment events visible in replay.")
 
 

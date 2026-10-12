@@ -473,6 +473,7 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertIn("lenses", review)
             self.assertEqual(review["scope"], task_id)
+            self.assertIn("verify contracts and failure modes", " ".join(item["action"] for item in review["lenses"]))
             self.assertEqual(recorded["scope"], task_id)
             self.assertIn("review.generated", event_types)
             self.assertEqual(task.reviews[-1]["scope"], task_id)

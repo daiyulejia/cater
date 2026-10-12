@@ -29,7 +29,8 @@ Use these questions during recurring self-review:
 4. Governance trigger quality: are cabinet rounds catching real risk, or firing because the policy is too sensitive?
 5. Direct assignment safety: when humans bypass upper layers, do low confidence, challenge, or failures still bring oversight back?
 6. Replay usefulness: can a maintainer understand why a task went through direct assignment, cabinet dispatch, or governance?
-7. Removal pressure: which mechanism would we delete first if the project felt slow or heavy?
+7. Integration evidence: did any new tool or framework get adopted because of verified behavior rather than names and assumptions?
+8. Removal pressure: which mechanism would we delete first if the project felt slow or heavy?
 
 ## Decision Rule
 
@@ -49,6 +50,7 @@ Prefer the lightest path that preserves ownership, observability, and recovery.
 - Cabinet votes happen on obvious implementation details.
 - Token cost grows mainly because of framework ceremony.
 - Human direct assignments never receive later oversight, even when execution fails.
+- A third-party tool is trusted because its function names sound right, without contract or failure-mode inspection.
 
 ## Desired Shape
 

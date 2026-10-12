@@ -7,6 +7,7 @@
 Cater's core runtime must stay dependency-free and event-first.
 
 - Keep third-party model APIs, MCP clients, skills, LangChain, LangGraph, and CLIs behind the driver boundary.
+- Do not infer third-party behavior from names alone. Inspect the real contract, failure modes, state, and cost before integration.
 - Register new behavior as events before projecting it into views.
 - Prefer collaboration-first flows; use governance only when it improves reliability or explains a decision.
 - Keep Web/CLI surfaces thin. They should call the same runtime APIs.
@@ -36,6 +37,7 @@ Use meaningful commits. A good commit explains:
 Cater 的核心运行时必须保持零第三方依赖，并坚持事件优先。
 
 - 第三方模型 API、MCP client、skills、LangChain、LangGraph、CLI 都应该放在 driver 边界之后。
+- 不要只看变量名、函数名或项目口号就推断第三方行为；接入前要检查真实协议、失败模式、状态和成本。
 - 新行为先沉淀为事件，再投影到视图。
 - 默认协作优先；治理层只在能提升可靠性或解释决策时出现。
 - Web/CLI 保持轻薄，复用同一套 runtime API。
