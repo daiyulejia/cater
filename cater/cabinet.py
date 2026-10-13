@@ -109,7 +109,7 @@ def tally_votes(
         recommendation = None
     elif vetoed_by:
         status = "vetoed"
-        reason = f"Veto role(s) raised concern: {', '.join(vetoed_by)}."
+        reason = f"否决席位提出了风险异议：{', '.join(vetoed_by)}。"
         recommendation = None
     elif recommendation is None:
         status = "needs_supreme" if top_option is not None else "needs_human"
@@ -120,7 +120,7 @@ def tally_votes(
         )
     else:
         status = "recommended"
-        reason = f"Option {recommendation} reached approval threshold {threshold}."
+        reason = f"方案 {recommendation} 达到 {threshold} 票通过门槛。"
 
     return {
         "electorate_size": size,

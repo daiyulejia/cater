@@ -2597,7 +2597,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("Self Review", html)
         self.assertIn("next-actions", html)
         self.assertIn("Force governance", controls_html)
-        self.assertIn("governance round forced", html)
+        self.assertIn("由顾客明确要求启动治理轮次", html)
         self.assertIn("cabinet.voted", html)
         self.assertIn("agent.decided", html)
         self.assertIn("payload-json", html)

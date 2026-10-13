@@ -1591,7 +1591,7 @@ class Runtime:
         if force_governance:
             return {
                 "status": "forced",
-                "reason": "governance round forced by caller",
+                "reason": "由顾客明确要求启动治理轮次",
                 "signals": ["forced"],
             }
 
@@ -1619,7 +1619,7 @@ class Runtime:
             }
         return {
             "status": "not_needed",
-            "reason": "normal collaboration round",
+            "reason": "常规协作轮次",
             "signals": [],
         }
 
@@ -1658,10 +1658,10 @@ class Runtime:
         ]
         return {
             "task_id": task_id,
-            "dispute": "Agents collaborated without material disagreement; governance was not needed.",
+            "dispute": "伙伴们没有出现实质分歧，这一轮可以顺畅推进。",
             "positions": positions,
             "consensus": [positions[0]["option_id"]] if positions else [],
-            "root_cause": "No challenge, option split, or low-confidence signal was observed.",
+            "root_cause": "没有发现质疑、方案分裂或低置信度信号。",
             "cabinet": None,
             "governance": governance,
             "options": options,
@@ -1703,7 +1703,7 @@ class Runtime:
 
         return {
             "task_id": task_id,
-            "dispute": "Agents exchanged contributions; governance selected the next action when needed.",
+            "dispute": "伙伴们交换了看法，并已确定下一步怎么推进。",
             "positions": positions,
             "consensus": [cabinet["recommendation"]] if cabinet["recommendation"] else [],
             "root_cause": cabinet["reason"],
