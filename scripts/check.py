@@ -7,6 +7,9 @@ import sys
 
 
 def main() -> int:
+    if sys.version_info < (3, 11):
+        print("Cater requires Python 3.11 or newer.", file=sys.stderr)
+        return 1
     commands = [
         [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
     ]
