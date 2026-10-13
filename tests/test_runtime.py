@@ -1390,6 +1390,30 @@ class CliTests(unittest.TestCase):
 
 
 class WebTests(unittest.TestCase):
+    def test_web_serves_optional_built_workroom_from_same_origin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "dist"
+            assets = root / "assets"
+            assets.mkdir(parents=True)
+            (root / "index.html").write_text("<main>workroom</main>", encoding="utf-8")
+            (assets / "workroom.js").write_text("console.log('workroom')", encoding="utf-8")
+            db = str(Path(tmp) / "web-static.db")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db, static_dir=root))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join, 1)
+            self.addCleanup(server.shutdown)
+            base = f"http://127.0.0.1:{server.server_port}"
+
+            with urlopen(f"{base}/", timeout=5) as response:
+                self.assertEqual(response.read().decode("utf-8"), "<main>workroom</main>")
+                self.assertIn("text/html", response.headers["Content-Type"])
+            with urlopen(f"{base}/assets/workroom.js", timeout=5) as response:
+                self.assertIn("console.log", response.read().decode("utf-8"))
+            with urlopen(f"{base}/api/tasks", timeout=5) as response:
+                self.assertEqual(json.loads(response.read().decode("utf-8")), [])
+
     def test_render_index_exposes_local_api_panel(self):
         with Runtime(":memory:") as rt:
             html = render_index(rt)

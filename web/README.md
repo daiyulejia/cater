@@ -6,22 +6,26 @@ people who want a conversation-first task surface.
 
 ## Run locally
 
-Start the Cater API in one terminal:
+Build the workroom once:
+
+```powershell
+cd web
+pnpm install
+pnpm build
+```
+
+Then start Cater normally from the repository root:
 
 ```powershell
 python -m cater.cli web --port 8766
 ```
 
-Start the workroom in another terminal:
+Open `http://127.0.0.1:8766`. Cater serves the built workroom, its API, and the
+full audit replay from one local origin.
 
-```powershell
-cd web
-pnpm install
-pnpm dev
-```
-
-Open `http://127.0.0.1:5173`. Vite proxies `/api` and `/tasks` to the Python
-runtime at port `8766`.
+For frontend development, run `python -m cater.cli web --port 8766` and
+`pnpm dev` in separate terminals, then open `http://127.0.0.1:5173`. Vite
+proxies development requests to Cater's API.
 
 ## Product boundary
 

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import html
 import json
+import mimetypes
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from .assignments import latest_assignments_by_owner
 from .events import Event
@@ -40,6 +41,7 @@ def serve(
         circuit_breaker_threshold=circuit_breaker_threshold,
         audit_key=audit_key,
         audit_key_id=audit_key_id,
+        static_dir=_workroom_dist(),
     )
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Cater web listening on http://{host}:{port}")
@@ -51,6 +53,12 @@ def serve(
         server.server_close()
 
 
+def _workroom_dist() -> Path | None:
+    """Return the optional bundled workroom build when it exists locally."""
+    candidate = Path(__file__).resolve().parents[1] / "web" / "dist"
+    return candidate if (candidate / "index.html").is_file() else None
+
+
 def make_handler(
     db_path: str | Path,
     *,
@@ -60,11 +68,23 @@ def make_handler(
     circuit_breaker_threshold: int = 2,
     audit_key: str | bytes | None = None,
     audit_key_id: str = "local",
+    static_dir: str | Path | None = None,
 ):
+    static_root = Path(static_dir).resolve() if static_dir is not None else None
+
     class CaterHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
+            if static_root is not None and (path == "/" or path.startswith("/assets/") or path == "/favicon.svg"):
+                static_path = static_root / "index.html" if path == "/" else static_root / unquote(path.lstrip("/"))
+                try:
+                    static_path.resolve().relative_to(static_root)
+                except ValueError:
+                    return self._not_found()
+                if static_path.is_file():
+                    return self._send_static(static_path)
+                return self._not_found()
             if path == "/":
                 return self._send_html(render_index(self._runtime()))
             if path == "/api/tasks":
@@ -317,6 +337,15 @@ def make_handler(
             raw = json.dumps(body, ensure_ascii=False, indent=2).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _send_static(self, path: Path) -> None:
+            raw = path.read_bytes()
+            content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)

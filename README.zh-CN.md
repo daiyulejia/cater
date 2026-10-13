@@ -36,9 +36,9 @@ cater web
 
 `cater demo` 展示治理较重的路径。`cater demo --direct` 展示轻量直派路径：没有风险时，治理层保持空闲。demo 命令使用确定性的内置角色和 driver。
 
-如果希望使用对话优先的本地工作台，请保持 `cater web --port 8766` 运行，再在
-[`web/`](web/README.md) 启动可选的 React 前端。Python 运行时仍保持零第三方依赖；
-前端依赖独立管理。
+如果希望使用对话优先的本地工作台，请先按 [`web/`](web/README.md) 构建可选的
+React 前端，再运行 `cater web --port 8766`。Python 运行时会从同一个本地地址托管
+工作台与 API，同时保持零第三方运行依赖；前端依赖独立管理。
 
 再探索组织入口：
 
