@@ -104,13 +104,10 @@ class GuidedDriver:
 def _demo_focus(context: dict[str, Any]) -> str:
     """Keep the bundled demo legible without claiming to understand like a model."""
     goal = str(context.get("goal") or "")
-    normalized = goal.lower()
     if "预约" in goal and "菜单" in goal:
         return "预约、菜单浏览与意见反馈这条顾客流程"
-    if any(term in normalized for term in ("agent", "智能体", "协作", "多角色")):
-        return "可观察的多角色协作流程"
-    if any(term in normalized for term in ("网页", "页面", "ui", "界面", "web")):
-        return "用户能完成的网页交互路径"
+    if goal.strip():
+        return _short_text(goal)
     acceptance = context.get("acceptance")
     if isinstance(acceptance, list):
         first = next((str(item).strip() for item in acceptance if str(item).strip()), "")

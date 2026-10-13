@@ -892,6 +892,7 @@ class Runtime:
     def _interpret_task(self, task: TaskSnapshot) -> dict[str, Any]:
         """Produce a bounded, user-visible task analysis for the local runtime."""
         text = task.goal.strip()
+        topic = self._task_topic(text)
         normalized = text.lower()
         complex_terms = (
             "系统", "架构", "重构", "迁移", "多", "集成", "接入", "安全", "上线",
@@ -905,21 +906,21 @@ class Runtime:
         else:
             complexity = "light"
 
-        scope = ["明确可交付结果与验收边界"]
-        objective = "把需求转化为可执行、可验证的最小成果闭环。"
-        summary = "先识别交付边界与风险，再决定协作深度。"
+        scope = [f"围绕“{topic}”明确可交付结果与验收边界"]
+        objective = f"围绕“{topic}”形成可执行、可验证的最小成果。"
+        summary = f"店长会先收拢“{topic}”的目标、边界和验收方式，再安排协作。"
         if any(term in normalized for term in ("agent", "智能体", "协作", "多角色", "多agent")):
-            objective = "形成可观察的多角色协作闭环，并让分工、讨论与成果能够回放。"
-            summary = "该请求涉及组织协作方式，需要同时校准任务流、角色边界与可观察性。"
+            objective = f"围绕“{topic}”形成可观察的多角色协作闭环，并留下可回放的结果。"
+            summary = f"店长会先收拢“{topic}”的协作边界和验收方式，再安排协作。"
         elif any(term in normalized for term in ("网页", "页面", "ui", "交互", "界面", "web")):
-            objective = "交付一条可完成任务的交互路径，并用可见状态呈现过程与结果。"
-            summary = "该请求以使用体验为中心，需要先确定用户入口、关键状态和结果承载方式。"
+            objective = f"围绕“{topic}”交付一条可完成任务的交互路径，并让过程与结果可见。"
+            summary = f"店长会先收拢“{topic}”的用户入口、关键状态和验收方式，再安排协作。"
         elif any(term in normalized for term in ("代码", "接口", "cli", "api", "实现", "开发", "python", "java")):
-            objective = "交付可运行的实现改动，并为关键行为保留验证证据。"
-            summary = "该请求包含工程实现，需要先收束模块边界、接口行为和验证方式。"
+            objective = f"围绕“{topic}”交付可运行的实现改动，并为关键行为保留验证证据。"
+            summary = f"店长会先收拢“{topic}”的实现边界和验证方式，再安排协作。"
         elif any(term in normalized for term in ("文档", "readme", "说明", "文档")):
-            objective = "形成准确、可执行且面向使用者的项目说明。"
-            summary = "该请求以知识传达为主，需要校准读者、结构和可操作性。"
+            objective = f"围绕“{topic}”形成准确、可执行且面向使用者的项目说明。"
+            summary = f"店长会先收拢“{topic}”的读者、结构和可操作性，再安排协作。"
         if any(term in normalized for term in ("网页", "页面", "ui", "交互", "界面", "web")):
             scope.append("形成完整且可验证的交互路径")
         if any(term in normalized for term in ("代码", "接口", "cli", "api", "实现", "开发", "python", "java")):
@@ -949,6 +950,14 @@ class Runtime:
                 "检测到跨角色或跨边界信号" if has_complex_signal else "未检测到必须立即升级的跨边界信号",
             ],
         }
+
+    @staticmethod
+    def _task_topic(text: str) -> str:
+        """Keep the local intake tied to the customer's subject without faking model reasoning."""
+        compact = " ".join(text.split()).strip("。！？!?；;，, ")
+        if not compact:
+            return "当前任务"
+        return compact if len(compact) <= 40 else compact[:37] + "…"
 
     @staticmethod
     def _select_route(

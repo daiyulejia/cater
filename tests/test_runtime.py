@@ -532,6 +532,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result["route"]["route"], "collaborate")
         self.assertEqual(task.interpretation["complexity"], "standard")
         self.assertIn("交互路径", task.interpretation["objective"])
+        self.assertIn("团队做一个网页任务入口", task.interpretation["objective"])
+        self.assertIn("团队做一个网页任务入口", task.interpretation["summary"])
         self.assertEqual(task.route["route"], "collaborate")
         self.assertEqual(task.mission["goal"], task.interpretation["objective"])
         self.assertIn("task.interpreted", event_types)
