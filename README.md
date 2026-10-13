@@ -216,6 +216,10 @@ Driver 返回：
 {"id":"...","ok":true,"text":"{\"stance\":\"assert\",\"option_id\":\"A\",\"claim\":\"...\",\"evidence\":[],\"text\":\"...\"}","tokens":123,"meta":{"token_usage":"reported"}}
 ```
 
+通过 `cater web` 接入时，CLI driver 会在整个 Web 服务存活期间复用同一个长驻进程；每个 HTTP
+请求仍使用独立的 SQLite 连接，服务退出时才统一关闭 driver。这样既保留请求间的工具会话，又不让
+Web 线程共享数据库连接。
+
 这个边界刻意很小。LangChain、LangGraph、Codex CLI、Claude Code、Gemini CLI 或自定义 API wrapper 都可以藏在这个进程后面，而不污染 Cater 的核心运行时。
 
 CLI driver 的 `command` 是本机执行权限，不是安全沙箱：只加载自己维护或已审阅来源的 driver

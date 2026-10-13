@@ -89,6 +89,7 @@ class Runtime:
         circuit_breaker_threshold: int = 2,
         audit_key: str | bytes | None = None,
         audit_key_id: str = "local",
+        close_drivers_on_close: bool = True,
     ):
         config = load_runtime_config(roles_path)
         configured_drivers = load_drivers(_pack_path("default_drivers.json"))
@@ -109,12 +110,14 @@ class Runtime:
         self.organization = config.organization
         self.organization_fingerprint = _organization_fingerprint(config)
         self.drivers = configured_drivers
+        self._close_drivers_on_close = close_drivers_on_close
 
     def close(self) -> None:
-        for driver in self.drivers.values():
-            close = getattr(driver, "close", None)
-            if callable(close):
-                close()
+        if self._close_drivers_on_close:
+            for driver in self.drivers.values():
+                close = getattr(driver, "close", None)
+                if callable(close):
+                    close()
         self.log.close()
 
     def __enter__(self) -> "Runtime":

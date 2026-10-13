@@ -273,6 +273,9 @@ def serve(
             "refusing to expose the unauthenticated Cater control plane beyond localhost; "
             "use --allow-remote only behind an authenticated network boundary"
         )
+    # Each request needs its own thread-bound SQLite connection.  CLI drivers
+    # are process resources, so the server owns one pool for its full lifetime.
+    driver_owner = Runtime(":memory:", drivers_path=drivers_path, roles_path=roles_path)
     handler = make_handler(
         db_path,
         drivers_path=drivers_path,
@@ -282,6 +285,7 @@ def serve(
         audit_key=audit_key,
         audit_key_id=audit_key_id,
         static_dir=_workroom_dist(),
+        shared_drivers=driver_owner.drivers,
     )
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Cater web listening on http://{host}:{port}")
@@ -291,6 +295,7 @@ def serve(
         pass
     finally:
         server.server_close()
+        driver_owner.close()
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -324,6 +329,7 @@ def make_handler(
     audit_key_id: str = "local",
     static_dir: str | Path | None = None,
     runtime_factory: Callable[[], Runtime] | None = None,
+    shared_drivers: dict[str, Any] | None = None,
 ):
     static_root = Path(static_dir).resolve() if static_dir is not None else None
 
@@ -338,6 +344,8 @@ def make_handler(
             circuit_breaker_threshold=circuit_breaker_threshold,
             audit_key=audit_key,
             audit_key_id=audit_key_id,
+            drivers=shared_drivers,
+            close_drivers_on_close=shared_drivers is None,
         )
 
     activities = ActivityRunner(build_runtime)

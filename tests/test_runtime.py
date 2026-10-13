@@ -1338,6 +1338,15 @@ class DriverTests(unittest.TestCase):
             driver.complete(role="tester", prompt="x" * (4 * 1024 * 1024 + 1), context={})
         self.assertIsNone(driver._proc)
 
+    def test_runtime_can_leave_shared_driver_open(self):
+        driver = CliDriver("fixture", self.fixture_command(), timeout=5)
+        self.addCleanup(driver.close)
+        with Runtime(":memory:", drivers={"product": driver}, close_drivers_on_close=False):
+            self.assertTrue(driver.probe())
+        self.assertIsNotNone(driver._proc)
+        assert driver._proc is not None
+        self.assertIsNone(driver._proc.poll())
+
     def test_openai_compatible_driver_uses_environment_key_and_reports_provider_usage(self):
         captured: dict[str, object] = {}
 
@@ -2176,6 +2185,33 @@ class WebTests(unittest.TestCase):
                 urlopen(request, timeout=5)
             self.assertEqual(raised.exception.code, 400)
             self.assertIn("request body exceeds", raised.exception.read().decode("utf-8"))
+
+    def test_web_reuses_a_shared_cli_driver_across_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "shared-driver.db")
+            driver = CliDriver(
+                "product",
+                [sys.executable, str(Path(__file__).resolve().parent / "fixtures" / "ndjson_driver.py")],
+                timeout=5,
+            )
+            self.addCleanup(driver.close)
+            base = start_test_web(self, db, shared_drivers={"product": driver})
+            request = Request(
+                f"{base}/api/tasks",
+                data=json.dumps({"goal": "Use the shared CLI driver", "run": True}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=5) as response:
+                self.assertEqual(response.status, 201)
+            self.assertIsNotNone(driver._proc)
+            assert driver._proc is not None
+            pid = driver._proc.pid
+            with urlopen(f"{base}/api/tasks", timeout=5) as response:
+                self.assertEqual(response.status, 200)
+            self.assertIsNotNone(driver._proc)
+            assert driver._proc is not None
+            self.assertEqual(driver._proc.pid, pid)
 
     def test_web_rejects_cross_origin_writes_and_sets_browser_security_headers(self):
         with tempfile.TemporaryDirectory() as tmp:
