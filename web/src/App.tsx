@@ -35,9 +35,9 @@ const statusText = (value?: string) => ({
   assigned: '已指派', recommended: '已建议', vetoed: '已否决', needs_supreme: '待最高决策', needs_human: '待人工处理',
 }[value ?? ''] ?? value ?? '未知')
 
-const actorText = (value: string) => ({ human: '你', orchestrator: '总控', cabinet: '铲屎官内阁', supreme: '最高决策者', store_manager: '店长', reviewer: '复盘员', driver_gateway: '驱动网关', caretaker_product: '需求铲屎官', caretaker_engineering: '工程铲屎官', caretaker_quality: '质量铲屎官', product: '月亮', dev: '米寇', test: '三角' }[value] ?? value)
+const actorText = (value: string) => ({ human: '你', orchestrator: '总控', cabinet: '内阁', supreme: '最高决策者', store_manager: '店长', reviewer: '复盘员', driver_gateway: '驱动网关', cabinet_product: '白露', cabinet_engineering: '阿程', cabinet_quality: '知夏', caretaker_product: '白露', caretaker_engineering: '阿程', caretaker_quality: '知夏', product: '月亮', dev: '米寇', test: '三角' }[value] ?? value)
 
-const roleText = (value: string) => ({ human: '顾客', orchestrator: '任务编排', cabinet: '铲屎官内阁', supreme: '最高决策', store_manager: '猫咖店长', developer: '开发工程师', tester: '测试工程师', product: '产品负责人' }[value] ?? value)
+const roleText = (value: string) => ({ human: '顾客', orchestrator: '任务编排', cabinet: '内阁', supreme: '最高决策', store_manager: '猫咖店长', developer: '开发工程师', tester: '测试工程师', product: '产品负责人' }[value] ?? value)
 
 const activityText = (activity?: Activity) => {
   if (activity?.state === 'queued') return '协作已排队'
@@ -76,6 +76,9 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>): 
       ],
       replyTo: typeof payload.reply_to === 'number' ? payload.reply_to : undefined,
     })
+    const memberNames = (value: unknown) => Array.isArray(value)
+      ? value.filter((id): id is string => typeof id === 'string').map((id) => identities[id]?.name ?? actorText(id))
+      : []
     if (event.type === 'task.created') return [message('新任务', String(payload.goal ?? ''), 'human')]
     if (event.type === 'activity.queued') return [message('协作已排队', String(payload.action) === 'battle' ? '团队将进入内阁审议。' : '团队将开始下一轮协作。', 'system')]
     if (event.type === 'activity.completed') return [message('本轮协作完成', String(payload.action) === 'battle' ? '内阁审议已结束。' : '团队已完成这一轮协作。', 'system')]
@@ -83,9 +86,15 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>): 
     if (event.type === 'human.commanded') return [message('方向更新', String(payload.instruction ?? ''), 'human')]
     if (event.type === 'task.interpreted') return [message('总控任务理解', `${String(payload.summary ?? '')}\n${String(payload.objective ?? '')}`, 'system')]
     if (event.type === 'task.routed') return [message('总控路由判断', reasonText(String(payload.reason ?? '已选择下一步协作路径。')), 'system')]
-    if (event.type === 'cabinet.convened') return [message('召集内阁', reasonText(String(payload.reason ?? '任务需要内阁校准。')), 'system')]
+    if (event.type === 'cabinet.convened') {
+      const names = memberNames(payload.members)
+      return [message(names.length ? `店长召集 ${names.join('、')}` : '召集内阁', `${reasonText(String(payload.reason ?? '任务需要内阁校准。'))}${names.length ? `\n本次由 ${names.join('、')} 先行校准。` : ''}`, 'system')]
+    }
     if (event.type === 'mission.created') return [message('任务使命已发布', String(payload.goal ?? ''), 'system')]
-    if (event.type === 'task.decomposed') return [message(String(payload.source) === 'cabinet' ? '内阁完成任务拆解' : '总控完成任务拆解', String(payload.strategy ?? '执行计划已就绪。'), 'system')]
+    if (event.type === 'task.decomposed') {
+      const names = memberNames(payload.members)
+      return [message(String(payload.source) === 'cabinet' ? `${names.join('、') || '内阁'}完成任务拆解` : '总控完成任务拆解', String(payload.strategy ?? '执行计划已就绪。'), 'system')]
+    }
     if (event.type === 'subtask.assigned') return [message(`已指派给 @${String(payload.owner ?? '团队')}`, String(payload.objective ?? ''), 'system')]
     if (event.type === 'plan.proposed') return [message('执行计划已发布', reasonText(String(payload.reason ?? '')), 'system')]
     if (event.type === 'msg.said' || event.type === 'msg.challenge') return [message(event.type === 'msg.challenge' ? '提出质疑' : undefined, String(payload.text ?? payload.claim ?? ''), 'agent')]

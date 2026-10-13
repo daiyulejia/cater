@@ -69,11 +69,12 @@ class GuidedDriver:
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
         focus = _demo_focus(context)
         role_lower = role.lower()
-        if "铲屎官" in role:
-            text, claim, evidence = _caretaker_response(role_lower, focus)
+        identity = _speaker_name(context, role)
+        if _is_cabinet_member(context):
+            text, claim, evidence = _cabinet_response(role_lower, focus, identity)
             deliverables: list[dict[str, str]] = []
         else:
-            text, claim, evidence, deliverable = _cat_response(role_lower, focus)
+            text, claim, evidence, deliverable = _cat_response(role_lower, focus, identity)
             deliverables = [deliverable]
         payload = {
             "stance": "assert",
@@ -123,44 +124,56 @@ def _short_text(text: str) -> str:
     return compact if len(compact) <= 42 else compact[:39] + "..."
 
 
-def _cat_response(role: str, focus: str) -> tuple[str, str, list[str], dict[str, str]]:
+def _speaker_name(context: dict[str, Any], fallback: str) -> str:
+    role = context.get("role")
+    if isinstance(role, dict) and isinstance(role.get("name"), str) and role["name"].strip():
+        return role["name"].strip()
+    return fallback
+
+
+def _is_cabinet_member(context: dict[str, Any]) -> bool:
+    role = context.get("role")
+    return isinstance(role, dict) and role.get("cabinet_member") is True
+
+
+def _cat_response(role: str, focus: str, name: str) -> tuple[str, str, list[str], dict[str, str]]:
     if "工程" in role or "实现" in role:
         return (
-            f"米寇接下实现线：我会先把“{focus}”收成一个能跑、能验证的最小路径，再把依赖和风险写清楚。",
+            f"{name}接下实现线：我会先把“{focus}”收成一个能跑、能验证的最小路径，再把依赖和风险写清楚。",
             "先落地可验证的最小实现路径",
             ["先确认接口与状态边界", "保留可运行或可复现的证据"],
-            {"title": "米寇的实现路径", "summary": "已收束实现边界，并准备提供可运行验证。", "kind": "plan"},
+            {"title": f"{name}的实现路径", "summary": "已收束实现边界，并准备提供可运行验证。", "kind": "plan"},
         )
     if "质量" in role or "验证" in role:
         return (
-            f"三角会盯住“{focus}”的验收：我先列出最容易漏掉的风险，再确认结果真的能回放。",
+            f"{name}会盯住“{focus}”的验收：我先列出最容易漏掉的风险，再确认结果真的能回放。",
             "先用可回放证据守住验收边界",
             ["结果需要能被复查", "范围变化要有回归检查"],
-            {"title": "三角的验证清单", "summary": "已建立面向验收与回放的风险检查点。", "kind": "checklist"},
+            {"title": f"{name}的验证清单", "summary": "已建立面向验收与回放的风险检查点。", "kind": "checklist"},
         )
     return (
-        f"月亮先把这单听明白：围绕“{focus}”，我会把用户真正能感受到的结果和边界整理出来。",
+        f"{name}先把这单听明白：围绕“{focus}”，我会把用户真正能感受到的结果和边界整理出来。",
         "先把用户价值和可见结果讲清楚",
         ["先明确顾客能看到什么结果", "避免把不必要的复杂度带进第一步"],
-        {"title": "月亮的任务收束", "summary": "已将需求整理为用户可感知、可判断的交付方向。", "kind": "brief"},
+        {"title": f"{name}的任务收束", "summary": "已将需求整理为用户可感知、可判断的交付方向。", "kind": "brief"},
     )
 
 
-def _caretaker_response(role: str, focus: str) -> tuple[str, str, list[str]]:
+def _cabinet_response(role: str, focus: str, name: str) -> tuple[str, str, list[str]]:
     if "工程" in role or "实现" in role:
         return (
-            f"工程铲屎官看过猫咪们的产出：这单“{focus}”可以沿最小实现路径推进，依赖和恢复边界要留在台面上。",
+            f"{name}看过猫咪们的产出：这单“{focus}”可以沿最小实现路径推进，依赖和恢复边界要留在台面上。",
             "认可最小实现路径，并要求保留依赖与恢复边界",
             ["实现顺序应当可追踪", "异常时需要可恢复的退路"],
         )
     if "质量" in role or "风险" in role:
         return (
-            f"质量铲屎官补一条：推进“{focus}”前，成果必须能对照验收复查；证据不足时再回来补。",
+            f"{name}补一条：推进“{focus}”前，成果必须能对照验收复查；证据不足时再回来补。",
             "认可推进，但以可复查证据作为通过条件",
             ["验收结果需要可复查", "风险不能只写在口头结论里"],
         )
     return (
-        f"需求铲屎官确认方向：猫咪们应该先交付能让顾客判断的成果，再逐步扩展“{focus}”的范围。",
+        f"{name}确认方向：猫咪们应该先交付能让顾客判断的成果，再逐步扩展“{focus}”的范围。",
         "认可先交付可判断成果，再扩展范围",
         ["先对齐顾客可见价值", "避免分工变成无效仪式"],
     )

@@ -4,7 +4,7 @@
 
 > 像一家猫咖一样协作的自治多 Agent 组织运行时。
 
-Cater 把多个 AI agent 组织成一个可观察、可干预的自治组织：顾客只说目标，店长负责理解和路由，铲屎官内阁只在需要治理时出现，执行猫咪负责协作交付。agent 以协作产出为主，互相交换成果；必要时才把真实分歧显性化、投票或决策；只有组织自身无法解决时，才极少数升级给人类。
+Cater 把多个 AI agent 组织成一个可观察、可干预的自治组织：顾客只说目标，店长负责理解和路由，内阁只在需要治理时出现，执行猫咪负责协作交付。agent 以协作产出为主，互相交换成果；必要时才把真实分歧显性化、投票或决策；只有组织自身无法解决时，才极少数升级给人类。
 
 ## 为什么做
 
@@ -111,7 +111,7 @@ cater --audit-key "dev-secret" chain --json
 
 `run` 是常规协作循环：记录 agent 的产出，并且只有在出现 challenge、方案分裂、低置信度或其他风险信号时才启动治理层。`battle` 是强制治理轮次，用于你明确希望内阁审查的时候。
 
-`dispatch` 会记录金字塔式任务分发路径：店长定义 mission，铲屎官内阁把 mission 拆成执行 lane，执行猫咪在下一轮协作前拿到明确分工。它是可选能力；小任务可以用 `assign` 或 `new --assign-to dev --run` 直接派给执行层。默认三只执行猫为月亮（需求与体验）、米寇（工程实现）和三角（质量与验证）；它们与内阁席位在配置上相互独立。
+`dispatch` 会记录金字塔式任务分发路径：店长定义 mission，内阁把 mission 拆成执行 lane，执行猫咪在下一轮协作前拿到明确分工。它是可选能力；小任务可以用 `assign` 或 `new --assign-to dev --run` 直接派给执行层。默认三只执行猫为月亮（需求与体验）、米寇（工程实现）和三角（质量与验证）；内阁成员为白露（需求）、阿程（工程）和知夏（质量），它们与执行席位在配置上相互独立。
 
 `path` 会汇总单个任务经过的分发、协作、治理和决策步骤。
 
@@ -198,6 +198,10 @@ Driver 返回：
 ```
 
 这个边界刻意很小。LangChain、LangGraph、Codex CLI、Claude Code、Gemini CLI 或自定义 API wrapper 都可以藏在这个进程后面，而不污染 Cater 的核心运行时。
+
+## 角色命名
+
+角色卡中的 `name` 是界面对话、成果和分工中显示的名字，`role` 定义职责，`charter` 定义该席位面对模型时的工作约束。默认内阁成员是白露、阿程和知夏；想换成自己的角色名，只需复制并修改 `cater/packs/default_roles.json`，再用 `--roles` 指向这份文件。运行时不会把角色名写死在代码里。
 
 Skills 和 MCP 也应该放在这条边界后面：用 driver 进程包住它们，让 adapter 调用工具，再返回 Cater 的小 JSON 结构。`examples/ndjson_tool_driver.py` 提供了一个零依赖 adapter 骨架。如果 Windows 上的 `python` 指向 Microsoft Store 占位符，请把 `examples/tool_driver_config.json` 里的命令换成真实 Python 解释器完整路径。
 

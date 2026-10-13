@@ -226,14 +226,17 @@ class Runtime:
 
         interpretation = task.interpretation or self._interpret_task(task)
         objective = str(interpretation["objective"])
+        cabinet_members = self.cabinet_roles if source == "cabinet" else []
         planner = "内阁" if source == "cabinet" else self.organization.leader.name
+        planner_names = [role.name for role in cabinet_members]
+        planner_label = f"内阁（{'、'.join(planner_names)}）" if planner_names else planner
         planner_actor = Actor.system("cabinet") if source == "cabinet" else self._leader_actor()
         mission = {
             "goal": objective,
             "original_goal": task.goal,
             "acceptance": list(task.acceptance),
             "source": source,
-            "intent": f"{planner}将任务理解转化为组织可执行的工作。",
+            "intent": f"{planner_label}将任务理解转化为组织可执行的工作。",
         }
         self.log.emit(
             actor=self._leader_actor(),
@@ -245,7 +248,8 @@ class Runtime:
         subtasks = self._decompose_task(task, objective=objective)
         decomposition = {
             "source": source,
-            "strategy": f"{planner}依据任务理解，将目标拆分为各角色负责的执行线。",
+            "members": [role.id for role in cabinet_members],
+            "strategy": f"{planner_label}依据任务理解，将目标拆分为各角色负责的执行线。",
             "subtasks": subtasks,
         }
         self.log.emit(
@@ -264,6 +268,7 @@ class Runtime:
 
         plan = {
             "source": source,
+            "members": [role.id for role in cabinet_members],
             "mission": mission,
             "subtasks": subtasks,
             "flow": (["orchestrator", "cabinet", "workers", "review"] if source == "cabinet" else ["leader", "workers", "review"]),
@@ -648,6 +653,7 @@ class Runtime:
                 "name": role.name,
                 "description": role.role,
                 "charter": role.charter,
+                "cabinet_member": role.id in self.organization.cabinet_members,
             },
             "prior_outputs": [
                 {

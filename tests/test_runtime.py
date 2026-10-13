@@ -542,6 +542,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(task.route["route"], "cabinet")
         self.assertEqual(task.plan["source"], "cabinet")
         self.assertIn("cabinet.convened", [event.type for event in events])
+        self.assertEqual(task.plan["members"], ["cabinet_product", "cabinet_engineering", "cabinet_quality"])
         self.assertIn("内阁", task.route["reason"])
 
     def test_reassignment_keeps_prompt_and_web_distribution_compact(self):
@@ -758,6 +759,7 @@ class RuntimeTests(unittest.TestCase):
         with Runtime(":memory:") as rt:
             self.assertTrue(rt.organization.cabinet_members.isdisjoint(rt.organization.worker_members))
             self.assertEqual([role.name for role in rt.worker_roles], ["月亮", "米寇", "三角"])
+            self.assertEqual([role.name for role in rt.cabinet_roles], ["白露", "阿程", "知夏"])
             self.assertTrue(all(role.charter for role in rt.roles))
             task_id = rt.create_task("Check separate organization layers")
             rt.battle(task_id)
@@ -765,9 +767,9 @@ class RuntimeTests(unittest.TestCase):
 
         actors = [message["actor"] for message in task.messages]
         self.assertEqual(actors[:3], ["product", "dev", "test"])
-        self.assertEqual(set(actors[3:]), {"caretaker_product", "caretaker_engineering", "caretaker_quality"})
+        self.assertEqual(set(actors[3:]), {"cabinet_product", "cabinet_engineering", "cabinet_quality"})
         self.assertEqual({vote["actor"] for vote in task.cabinet["votes"]}, {
-            "caretaker_product", "caretaker_engineering", "caretaker_quality",
+            "cabinet_product", "cabinet_engineering", "cabinet_quality",
         })
 
     def test_supreme_decides_when_cabinet_has_no_consensus(self):
@@ -1309,7 +1311,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("governance:", out)
         self.assertIn("trigger_on_challenge=True", out)
         self.assertIn("cabinet:", out)
-        self.assertIn("veto_roles=caretaker_quality", out)
+        self.assertIn("veto_roles=cabinet_quality", out)
         self.assertIn("reliability:", out)
         self.assertIn("driver_attempts=2", out)
 
