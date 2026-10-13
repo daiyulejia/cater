@@ -217,6 +217,17 @@ def cmd_export(args: argparse.Namespace) -> int:
 def cmd_review(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         review = rt.review(args.task_id, record=args.record)
+        if args.next:
+            steps = review.get("next_steps") or []
+            if not steps:
+                print("no immediate action")
+                return 0
+            step = steps[0]
+            print(
+                f"{step.get('priority', 'medium')}/{step.get('label', step.get('source', 'review'))}: "
+                f"{step.get('action')}"
+            )
+            return 0
         if args.plain:
             print(f"health: {review['health']}")
             print(f"summary: {review['summary']}")
@@ -546,6 +557,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_review.add_argument("task_id", nargs="?")
     p_review.add_argument("--record", action="store_true", help="append review.generated to the event log")
     p_review.add_argument("--plain", action="store_true", help="print a human-readable review instead of JSON")
+    p_review.add_argument("--next", action="store_true", help="print only the highest-priority next step")
     p_review.set_defaults(func=cmd_review)
 
     sub.add_parser("inbox", help="show exceptional human input requests").set_defaults(func=cmd_inbox)

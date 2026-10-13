@@ -1184,6 +1184,18 @@ class CliTests(unittest.TestCase):
         self.assertIn("[medium/", out)
         self.assertNotIn('"lenses"', out)
 
+    def test_cli_review_next_output(self):
+        code, out = self.run_cli("review", "--next")
+        self.assertEqual(code, 0)
+        self.assertIn("high/Product: Run cater demo", out)
+
+        code, _ = self.run_cli("demo")
+        self.assertEqual(code, 0)
+        code, out = self.run_cli("review", "--next")
+        self.assertEqual(code, 0)
+        self.assertIn(":", out)
+        self.assertNotIn('"next_steps"', out)
+
 
 class WebTests(unittest.TestCase):
     def test_render_index_exposes_local_api_panel(self):

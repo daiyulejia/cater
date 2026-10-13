@@ -49,6 +49,7 @@ cater dispatch <task_id>
 cater run <task_id>
 cater export <task_id>
 cater events <task_id>
+cater review --next
 cater decide <task_id> --resolution done --reason "Ship the smallest loop first"
 ```
 
