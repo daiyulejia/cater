@@ -126,6 +126,7 @@ GET /api/chain
 
 `POST /api/tasks` 接收 JSON：必填 `goal`，可选 `acceptance`，以及可选布尔值 `dispatch`、`run` 或 `battle`。
 任务动作接口会返回和 `GET /api/tasks/<task_id>` 一致的回放 payload。
+零依赖客户端示例见 [examples/api_client.py](examples/api_client.py)。
 
 ## 当前范围
 

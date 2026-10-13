@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import threading
@@ -749,6 +750,31 @@ class DriverTests(unittest.TestCase):
 
         self.assertIn("external tool", response.text)
         self.assertGreater(response.tokens, 0)
+
+    def test_example_api_client_drives_web_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "api-client.db")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join, 1)
+            self.addCleanup(server.shutdown)
+
+            script = Path(__file__).resolve().parents[1] / "examples" / "api_client.py"
+            result = subprocess.run(
+                [sys.executable, str(script), "--base-url", base, "--goal", "API example task"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("task=task_", result.stdout)
+            self.assertIn("messages=3", result.stdout)
+            self.assertIn("chain_ok=True", result.stdout)
 
 
 class CliTests(unittest.TestCase):

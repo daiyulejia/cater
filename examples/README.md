@@ -2,6 +2,23 @@
 
 Examples in this folder show how to wrap external tools without letting them leak into Cater core.
 
+## Web API Client
+
+Start Cater locally:
+
+```bash
+cater web
+```
+
+Then, from another terminal:
+
+```bash
+python examples/api_client.py
+```
+
+The example creates a task through `POST /api/tasks`, runs one collaboration
+round through `POST /api/tasks/<task_id>/run`, and verifies `/api/chain`.
+
 ## NDJSON Driver Contract
 
 A CLI driver reads one JSON request per line and writes one JSON response per line.

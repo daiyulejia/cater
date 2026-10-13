@@ -126,6 +126,7 @@ GET /api/chain
 
 `POST /api/tasks` accepts JSON with `goal`, optional `acceptance`, and optional booleans `dispatch`, `run`, or `battle`.
 Task action endpoints return the same replay payload as `GET /api/tasks/<task_id>`.
+See [examples/api_client.py](examples/api_client.py) for a zero-dependency client.
 
 ## Current Scope
 
