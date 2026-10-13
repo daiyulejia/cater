@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
@@ -498,8 +499,11 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
         endpoint = data.get("endpoint")
         model = data.get("model")
         api_key_env = data.get("api_key_env")
-        if not isinstance(endpoint, str) or not endpoint.startswith(("https://", "http://")):
-            raise ValueError(f"openai_compatible driver {name!r} requires an http(s) endpoint")
+        if not isinstance(endpoint, str) or not _safe_api_endpoint(endpoint):
+            raise ValueError(
+                f"openai_compatible driver {name!r} requires an HTTPS endpoint "
+                "(HTTP is permitted only for localhost development)"
+            )
         if not isinstance(model, str) or not model.strip():
             raise ValueError(f"openai_compatible driver {name!r} requires a non-empty model")
         if not isinstance(api_key_env, str) or not api_key_env.strip():
@@ -520,6 +524,16 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
             token_budget=_token_budget(data, name),
         )
     raise ValueError(f"unknown driver kind: {kind!r}")
+
+
+def _safe_api_endpoint(endpoint: str) -> bool:
+    parsed = urlparse(endpoint)
+    if parsed.scheme == "https" and bool(parsed.netloc):
+        return True
+    if parsed.scheme != "http":
+        return False
+    host = (parsed.hostname or "").lower()
+    return host in {"localhost", "127.0.0.1", "::1"}
 
 
 def _token_budget(data: dict[str, Any], name: str) -> int | None:

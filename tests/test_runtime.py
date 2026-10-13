@@ -1470,8 +1470,24 @@ class DriverTests(unittest.TestCase):
                 '{"drivers":[{"kind":"openai_compatible","name":"bad","endpoint":"ftp://example","model":"x","api_key_env":"KEY"}]}',
                 encoding="utf-8",
             )
-            with self.assertRaisesRegex(ValueError, "http\\(s\\) endpoint"):
+            with self.assertRaisesRegex(ValueError, "requires an HTTPS endpoint"):
                 load_drivers(drivers)
+
+    def test_openai_compatible_driver_config_requires_https_except_local_development(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drivers = Path(tmp) / "drivers.json"
+            drivers.write_text(
+                '{"drivers":[{"kind":"openai_compatible","name":"unsafe","endpoint":"http://models.example.test/v1","model":"x","api_key_env":"KEY"}]}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "requires an HTTPS endpoint"):
+                load_drivers(drivers)
+
+            drivers.write_text(
+                '{"drivers":[{"kind":"openai_compatible","name":"local","endpoint":"http://127.0.0.1:11434/v1/chat/completions","model":"x","api_key_env":"KEY"}]}',
+                encoding="utf-8",
+            )
+            self.assertIn("local", load_drivers(drivers))
             drivers.write_text(
                 '{"drivers":[{"kind":"openai_compatible","name":"bad","endpoint":"https://example","model":"x"}]}',
                 encoding="utf-8",

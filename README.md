@@ -228,6 +228,8 @@ Driver 返回：
 
 `openai_compatible` 是零第三方依赖的 Chat Completions 适配器。配置文件只放 `endpoint`、`model` 和 `api_key_env`；真实密钥只从当前进程环境读取，绝不进入角色卡、事件链、审计导出或网页。它接受兼容 Chat Completions 请求/响应形状的服务。使用前把示例里的占位 endpoint 与模型替换为实际值，再设置相应环境变量，例如：
 
+外部 endpoint 默认必须使用 HTTPS，防止 API key 与任务内容经明文网络发送；仅 `localhost`、`127.0.0.1` 和 `::1` 的本地开发模型服务允许 HTTP。
+
 ```powershell
 $env:CATER_COUNCIL_API_KEY = "..."
 $env:CATER_WORKSHOP_API_KEY = "..."
