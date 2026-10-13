@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .assignments import latest_assignments_by_owner
@@ -267,6 +267,7 @@ def serve(
     circuit_breaker_threshold: int = 2,
     audit_key: str | bytes | None = None,
     audit_key_id: str = "local",
+    audit_keys: Mapping[str, str | bytes] | None = None,
     allow_remote: bool = False,
     access_token: str | None = None,
 ) -> None:
@@ -295,6 +296,7 @@ def serve(
         circuit_breaker_threshold=circuit_breaker_threshold,
         audit_key=audit_key,
         audit_key_id=audit_key_id,
+        audit_keys=audit_keys,
         static_dir=_workroom_dist(),
         shared_drivers=driver_owner.drivers,
         shared_driver_health=driver_health,
@@ -340,6 +342,7 @@ def make_handler(
     circuit_breaker_threshold: int = 2,
     audit_key: str | bytes | None = None,
     audit_key_id: str = "local",
+    audit_keys: Mapping[str, str | bytes] | None = None,
     static_dir: str | Path | None = None,
     runtime_factory: Callable[[], Runtime] | None = None,
     shared_drivers: dict[str, Any] | None = None,
@@ -361,6 +364,7 @@ def make_handler(
             circuit_breaker_threshold=circuit_breaker_threshold,
             audit_key=audit_key,
             audit_key_id=audit_key_id,
+            audit_keys=audit_keys,
             drivers=shared_drivers,
             close_drivers_on_close=shared_drivers is None,
             driver_health=shared_driver_health,

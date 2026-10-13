@@ -317,7 +317,9 @@ cater --audit-key "dev-secret" demo
 cater --audit-key "dev-secret" chain
 ```
 
-也可以使用 `--audit-key-file` 或 `CATER_AUDIT_KEY` 环境变量。
+也可以使用 `--audit-key-file` 或 `CATER_AUDIT_KEY` 环境变量。需要轮换密钥时，为新的写入密钥设置新的
+`--audit-key-id`，再通过 `--audit-keyring-file` 提供一个仅保存在受保护位置的 JSON 映射，例如
+`{"2026-q1":"旧密钥"}`；它让历史签名按原始 `key_id` 继续校验。密钥文件不得提交到仓库。
 
 可以使用 `cater export` 生成机器可读的回放包，或用 `cater export --format jsonl` 导出原始事件流。
 

@@ -222,6 +222,30 @@ class RuntimeTests(unittest.TestCase):
                 self.assertFalse(report.ok)
                 self.assertEqual(report.reason, "signature mismatch")
 
+    def test_hmac_audit_keyring_verifies_history_after_key_rotation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "rotated-audit.db")
+            with Runtime(db, audit_key="old-secret", audit_key_id="2026-q1") as rt:
+                rt.create_task("Signed before rotation")
+
+            with Runtime(
+                db,
+                audit_key="new-secret",
+                audit_key_id="2026-q2",
+                audit_keys={"2026-q1": "old-secret"},
+            ) as rt:
+                rt.create_task("Signed after rotation")
+                report = rt.verify_chain()
+                signed_ids = {event.key_id for event in rt.log.read() if event.signature}
+
+            self.assertTrue(report.ok, report.describe())
+            self.assertEqual(signed_ids, {"2026-q1", "2026-q2"})
+
+            with Runtime(db, audit_key="new-secret", audit_key_id="2026-q2", audit_keys={}) as rt:
+                report = rt.verify_chain()
+            self.assertFalse(report.ok)
+            self.assertIn("key_id='2026-q1'", report.reason)
+
     def test_task_state_is_folded_from_events(self):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("Fold me")
@@ -1779,6 +1803,27 @@ class CliTests(unittest.TestCase):
         code = main(["--db", self.db, "--audit-key", "secret", "chain"])
         self.assertEqual(code, 0)
         self.assertIn("signed", self.out.getvalue())
+
+    def test_cli_chain_can_verify_a_rotated_audit_keyring(self):
+        with Runtime(self.db, audit_key="old-secret", audit_key_id="2026-q1") as rt:
+            rt.create_task("old signed history")
+        keyring = Path(self.tmp.name) / "audit-keyring.json"
+        keyring.write_text('{"2026-q1":"old-secret"}', encoding="utf-8")
+
+        self.out.seek(0)
+        self.out.truncate(0)
+        code = main(
+            [
+                "--db", self.db,
+                "--audit-key", "new-secret",
+                "--audit-key-id", "2026-q2",
+                "--audit-keyring-file", str(keyring),
+                "chain",
+            ]
+        )
+
+        self.assertEqual(code, 0)
+        self.assertIn("hash chain ok", self.out.getvalue())
 
     def test_cli_chain_json(self):
         code, _ = self.run_cli("demo")

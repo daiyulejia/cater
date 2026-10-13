@@ -10,7 +10,7 @@ import uuid
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .assignments import latest_assignments_by_owner
 from .cabinet import CabinetPolicy, tally_votes
@@ -112,6 +112,7 @@ class Runtime:
         circuit_breaker_threshold: int = 2,
         audit_key: str | bytes | None = None,
         audit_key_id: str = "local",
+        audit_keys: Mapping[str, str | bytes] | None = None,
         close_drivers_on_close: bool = True,
         driver_health: "DriverHealth | None" = None,
     ):
@@ -124,7 +125,7 @@ class Runtime:
         missing = sorted({role.driver for role in config.roles} - set(configured_drivers))
         if missing:
             raise ValueError(f"missing driver(s) for roles: {', '.join(missing)}")
-        self.log = EventLog(db_path, audit_key=audit_key, key_id=audit_key_id)
+        self.log = EventLog(db_path, audit_key=audit_key, key_id=audit_key_id, audit_keys=audit_keys)
         self.driver_attempts = max(1, driver_attempts)
         self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
         self._driver_health = driver_health or DriverHealth()

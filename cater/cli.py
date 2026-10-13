@@ -71,6 +71,7 @@ def open_runtime(args: argparse.Namespace) -> Runtime:
         circuit_breaker_threshold=args.circuit_breaker_threshold,
         audit_key=resolve_audit_key(args),
         audit_key_id=args.audit_key_id,
+        audit_keys=resolve_audit_keys(args),
     )
 
 
@@ -80,6 +81,18 @@ def resolve_audit_key(args: argparse.Namespace) -> str | None:
     if args.audit_key_file:
         return Path(args.audit_key_file).read_text(encoding="utf-8").strip()
     return os.environ.get("CATER_AUDIT_KEY")
+
+
+def resolve_audit_keys(args: argparse.Namespace) -> dict[str, str] | None:
+    if not args.audit_keyring_file:
+        return None
+    try:
+        data = json.loads(Path(args.audit_keyring_file).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("audit keyring file must contain a JSON object") from exc
+    if not isinstance(data, dict) or not all(isinstance(key, str) and isinstance(value, str) for key, value in data.items()):
+        raise ValueError("audit keyring file must map key ids to string keys")
+    return data
 
 
 def resolve_web_access_token(args: argparse.Namespace) -> str | None:
@@ -574,6 +587,7 @@ def cmd_demo_direct(args: argparse.Namespace) -> int:
             circuit_breaker_threshold=args.circuit_breaker_threshold,
             audit_key=resolve_audit_key(args),
             audit_key_id=args.audit_key_id,
+            audit_keys=resolve_audit_keys(args),
         ) as rt:
             task_id = rt.create_task(
                 "完成一项低风险直派任务，不需要额外治理仪式",
@@ -610,6 +624,7 @@ def cmd_web(args: argparse.Namespace) -> int:
         circuit_breaker_threshold=args.circuit_breaker_threshold,
         audit_key=resolve_audit_key(args),
         audit_key_id=args.audit_key_id,
+        audit_keys=resolve_audit_keys(args),
         allow_remote=args.allow_remote,
         access_token=resolve_web_access_token(args),
     )
@@ -627,6 +642,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--audit-key", help="HMAC audit key")
     parser.add_argument("--audit-key-file", help="file containing HMAC audit key")
     parser.add_argument("--audit-key-id", default="local", help="audit key identifier")
+    parser.add_argument("--audit-keyring-file", help="JSON file mapping historical audit key ids to HMAC keys")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_new = sub.add_parser("new", help="create a task")

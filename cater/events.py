@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 GENESIS_HASH = "0" * 64
 
@@ -116,10 +116,17 @@ class EventLog:
         *,
         audit_key: str | bytes | None = None,
         key_id: str = "local",
+        audit_keys: Mapping[str, str | bytes] | None = None,
     ):
         self.path = str(path)
+        self.key_id = _normalize_key_id(key_id)
+        self.audit_keys = _normalize_audit_keys(audit_keys)
         self.audit_key = _normalize_audit_key(audit_key)
-        self.key_id = key_id
+        self._single_audit_key_fallback = self.audit_key is not None and audit_keys is None
+        if self.audit_key is not None:
+            self.audit_keys[self.key_id] = self.audit_key
+        elif self.key_id in self.audit_keys:
+            self.audit_key = self.audit_keys[self.key_id]
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(self.path, timeout=5)
@@ -232,9 +239,20 @@ class EventLog:
                 return ChainReport(False, checked, event.seq, "payload or metadata changed", prev)
             if event.signature:
                 signed += 1
-                if self.audit_key is None:
-                    return ChainReport(False, checked, event.seq, "signature present but no audit key supplied", prev, signed)
-                expected_signature = self._sign(event.hash)
+                event_key_id = event.key_id or self.key_id
+                signing_key = self.audit_keys.get(event_key_id)
+                if signing_key is None and self._single_audit_key_fallback:
+                    signing_key = self.audit_key
+                if signing_key is None:
+                    return ChainReport(
+                        False,
+                        checked,
+                        event.seq,
+                        f"signature present but no audit key supplied for key_id={event_key_id!r}",
+                        prev,
+                        signed,
+                    )
+                expected_signature = self._sign_with(signing_key, event.hash)
                 if not hmac.compare_digest(event.signature, expected_signature):
                     return ChainReport(False, checked, event.seq, "signature mismatch", prev, signed)
             prev = event.hash
@@ -293,7 +311,11 @@ class EventLog:
 
     def _sign(self, fingerprint: str) -> str:
         assert self.audit_key is not None
-        return hmac.new(self.audit_key, fingerprint.encode("utf-8"), hashlib.sha256).hexdigest()
+        return self._sign_with(self.audit_key, fingerprint)
+
+    @staticmethod
+    def _sign_with(key: bytes, fingerprint: str) -> str:
+        return hmac.new(key, fingerprint.encode("utf-8"), hashlib.sha256).hexdigest()
 
     @staticmethod
     def _fingerprint(
@@ -327,3 +349,22 @@ def _normalize_audit_key(value: str | bytes | None) -> bytes | None:
     if isinstance(value, bytes):
         return value
     return value.encode("utf-8")
+
+
+def _normalize_audit_keys(values: Mapping[str, str | bytes] | None) -> dict[str, bytes]:
+    if values is None:
+        return {}
+    keys: dict[str, bytes] = {}
+    for key_id, value in values.items():
+        normalized = _normalize_audit_key(value)
+        if normalized is None:
+            raise ValueError("audit keyring values must not be null")
+        keys[_normalize_key_id(key_id)] = normalized
+    return keys
+
+
+def _normalize_key_id(value: str) -> str:
+    key_id = value.strip()
+    if not key_id:
+        raise ValueError("audit key id must not be empty")
+    return key_id
