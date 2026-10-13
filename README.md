@@ -79,12 +79,14 @@ cater doctor
 cater doctor --probe
 cater decide <task_id> --resolution done --reason "Accepted"
 cater chain
+cater chain --json
 cater drivers
 cater --drivers drivers.json probe-driver product
 cater --driver-attempts 3 --circuit-breaker-threshold 4 run <task_id>
 cater web --host 127.0.0.1 --port 8765
 cater --audit-key "dev-secret" demo
 cater --audit-key "dev-secret" chain
+cater --audit-key "dev-secret" chain --json
 ```
 
 `run` is the normal collaboration loop. It records agent contributions and only activates governance when there is a challenge, option split, low confidence, or another risk signal. `battle` forces a governance round when you intentionally want cabinet review.

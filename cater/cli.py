@@ -252,6 +252,23 @@ def cmd_decide(args: argparse.Namespace) -> int:
 def cmd_chain(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         report = rt.verify_chain()
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "ok": report.ok,
+                        "checked": report.checked,
+                        "signed": report.signed,
+                        "head_hash": report.head_hash,
+                        "broken_at": report.broken_at,
+                        "reason": report.reason,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+            return 0 if report.ok else 1
         print(report.describe())
         return 0 if report.ok else 1
 
@@ -466,7 +483,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_decide.add_argument("--reason", required=True)
     p_decide.set_defaults(func=cmd_decide)
 
-    sub.add_parser("chain", help="verify event hash chain").set_defaults(func=cmd_chain)
+    p_chain = sub.add_parser("chain", help="verify event hash chain")
+    p_chain.add_argument("--json", action="store_true", help="print machine-readable chain status")
+    p_chain.set_defaults(func=cmd_chain)
     sub.add_parser("drivers", help="show roles and configured drivers").set_defaults(func=cmd_drivers)
     sub.add_parser("policy", help="show organization governance policy").set_defaults(func=cmd_policy)
     p_doctor = sub.add_parser("doctor", help="check runtime wiring and local event chain")

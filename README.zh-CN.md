@@ -79,12 +79,14 @@ cater doctor
 cater doctor --probe
 cater decide <task_id> --resolution done --reason "Accepted"
 cater chain
+cater chain --json
 cater drivers
 cater --drivers drivers.json probe-driver product
 cater --driver-attempts 3 --circuit-breaker-threshold 4 run <task_id>
 cater web --host 127.0.0.1 --port 8765
 cater --audit-key "dev-secret" demo
 cater --audit-key "dev-secret" chain
+cater --audit-key "dev-secret" chain --json
 ```
 
 `run` 是常规协作循环：记录 agent 的产出，并且只有在出现 challenge、方案分裂、低置信度或其他风险信号时才启动治理层。`battle` 是强制治理轮次，用于你明确希望内阁审查的时候。

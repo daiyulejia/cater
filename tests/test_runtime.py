@@ -796,6 +796,17 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("signed", self.out.getvalue())
 
+    def test_cli_chain_json(self):
+        code, _ = self.run_cli("demo")
+        self.assertEqual(code, 0)
+
+        code, out = self.run_cli("chain", "--json")
+        self.assertEqual(code, 0)
+        report = json.loads(out)
+        self.assertTrue(report["ok"])
+        self.assertGreater(report["checked"], 0)
+        self.assertIn("head_hash", report)
+
     def test_cli_new_battle_inbox_decide(self):
         code, out = self.run_cli("new", "Build demo", "--accept", "three roles", "--dispatch", "--run")
         self.assertEqual(code, 0)
