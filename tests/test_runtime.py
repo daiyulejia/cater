@@ -803,6 +803,16 @@ class DriverTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "string array script"):
                 load_drivers(drivers)
 
+    def test_scripted_driver_config_rejects_negative_tokens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drivers = Path(tmp) / "drivers.json"
+            drivers.write_text(
+                '{"drivers":[{"kind":"scripted","name":"bad","tokens_per_call":-1}]}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "tokens_per_call must be non-negative"):
+                load_drivers(drivers)
+
     def test_example_tool_driver_speaks_ndjson(self):
         script = Path(__file__).resolve().parents[1] / "examples" / "ndjson_tool_driver.py"
         driver = CliDriver("tool", [sys.executable, str(script)], timeout=5)

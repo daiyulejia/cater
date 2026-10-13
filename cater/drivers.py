@@ -206,10 +206,13 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
         script = data.get("script") or []
         if not isinstance(script, list) or not all(isinstance(item, str) for item in script):
             raise ValueError(f"scripted driver {name!r} requires a string array script")
+        tokens_per_call = int(data.get("tokens_per_call", 200))
+        if tokens_per_call < 0:
+            raise ValueError(f"scripted driver {name!r} tokens_per_call must be non-negative")
         return ScriptedDriver(
             name,
             list(script),
-            tokens_per_call=int(data.get("tokens_per_call", 200)),
+            tokens_per_call=tokens_per_call,
         )
     if kind == "cli":
         command = data.get("command")
