@@ -97,6 +97,16 @@ cater --audit-key "dev-secret" chain --json
 
 什么时候用直接派发、内阁分发或治理路径，见 [docs/organization-flow.md](docs/organization-flow.md)。
 
+## 本地 Web API
+
+启动 `cater web` 后，本地工具可以通过这些入口读取机器友好的状态：
+
+```text
+GET /api/tasks
+GET /api/tasks/<task_id>
+GET /api/chain
+```
+
 ## 当前范围
 
 当前已经包含：

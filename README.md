@@ -97,6 +97,16 @@ cater --audit-key "dev-secret" chain --json
 
 See [docs/organization-flow.md](docs/organization-flow.md) for when to use direct assignment, cabinet dispatch, or governance.
 
+## Local Web API
+
+When `cater web` is running, local tools can read machine-friendly state from:
+
+```text
+GET /api/tasks
+GET /api/tasks/<task_id>
+GET /api/chain
+```
+
 ## Current Scope
 
 Implemented now:

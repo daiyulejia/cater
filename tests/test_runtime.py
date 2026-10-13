@@ -1210,6 +1210,28 @@ class WebTests(unittest.TestCase):
             with Runtime(db) as rt:
                 self.assertEqual(rt.task(task_id).status, "done")
 
+    def test_web_api_chain_reports_audit_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-chain.db")
+            with Runtime(db) as rt:
+                rt.create_task("Expose chain status")
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join, 1)
+            self.addCleanup(server.shutdown)
+
+            with urlopen(f"{base}/api/chain", timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+
+            self.assertTrue(data["ok"])
+            self.assertGreaterEqual(data["checked"], 1)
+            self.assertIn("hash chain ok", data["summary"])
+            self.assertIn("head_hash", data)
+
     def test_web_direct_assign_reports_unknown_role(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-bad-assign.db")

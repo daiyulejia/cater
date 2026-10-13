@@ -69,6 +69,9 @@ def make_handler(
             if path == "/api/tasks":
                 with self._runtime() as rt:
                     return self._send_json([task_to_dict(task) for task in rt.tasks()])
+            if path == "/api/chain":
+                with self._runtime() as rt:
+                    return self._send_json(chain_to_dict(rt.verify_chain()))
             if path.startswith("/api/tasks/"):
                 task_id = path.split("/", 3)[3]
                 with self._runtime() as rt:
@@ -445,6 +448,18 @@ def task_to_dict(task: TaskSnapshot) -> dict[str, Any]:
         "plan": task.plan,
         "assignments": task.assignments,
         "tokens": task.tokens,
+    }
+
+
+def chain_to_dict(report: Any) -> dict[str, Any]:
+    return {
+        "ok": report.ok,
+        "checked": report.checked,
+        "signed": report.signed,
+        "head_hash": report.head_hash,
+        "broken_at": report.broken_at,
+        "reason": report.reason,
+        "summary": report.describe(),
     }
 
 
