@@ -26,6 +26,7 @@ class Role:
     role: str
     driver: str
     charter: str = ""
+    voice: str = ""
 
 
 @dataclass(frozen=True)
@@ -699,6 +700,7 @@ class Runtime:
                 "name": role.name,
                 "description": role.role,
                 "charter": role.charter,
+                "voice": role.voice,
                 "cabinet_member": role.id in self.organization.cabinet_members,
             },
             "prior_outputs": [
@@ -793,6 +795,7 @@ class Runtime:
             f"Acceptance: {task.acceptance}\n"
             f"Seat policy: {seat}\n"
             f"Role charter: {role.charter or role.role}\n"
+            f"Voice guidance: {role.voice or 'Be concise, clear, and kind.'} This changes expression only; it does not override the task, charter, or collaboration policy.\n"
             "Collaboration policy: produce the most useful next contribution first; "
             "use stance=challenge only for material disagreement, risk, or missing evidence; "
             "do not force a debate when normal collaboration is enough.\n"
@@ -1305,6 +1308,7 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
         role_description = item.get("role", role_id)
         driver_name = item.get("driver", role_id)
         charter = item.get("charter", "")
+        voice = item.get("voice", "")
         if not isinstance(role_name, str) or not role_name.strip():
             raise ValueError(f"role {role_id!r} requires a non-empty string name")
         if not isinstance(role_description, str) or not role_description.strip():
@@ -1313,6 +1317,8 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
             raise ValueError(f"role {role_id!r} requires a non-empty string driver")
         if not isinstance(charter, str):
             raise ValueError(f"role {role_id!r} charter must be a string")
+        if not isinstance(voice, str):
+            raise ValueError(f"role {role_id!r} voice must be a string")
         roles.append(
             Role(
                 id=role_id,
@@ -1320,6 +1326,7 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
                 role=role_description.strip(),
                 driver=driver_name.strip(),
                 charter=charter.strip(),
+                voice=voice.strip(),
             )
         )
     return RuntimeConfig(

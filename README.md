@@ -209,7 +209,7 @@ Driver 返回：
 
 ## 角色命名
 
-角色卡中的 `name` 是界面对话、成果和分工中显示的名字，`role` 定义职责，`charter` 定义该席位面对模型时的工作约束。默认内阁成员是白露、阿程和知夏；想换成自己的角色名，只需复制并修改 `cater/packs/default_roles.json`，再用 `--roles` 指向这份文件。运行时不会把角色名写死在代码里。
+角色卡中的 `name` 是界面对话、成果和分工中显示的名字，`role` 定义职责，`charter` 定义该席位面对模型时的工作约束，`voice` 则是可选的表达方式提示。`voice` 只能影响说话风格，不能覆盖任务、职责或协作规则。默认内阁成员是白露、阿程和知夏；想换成自己的角色名或口吻，只需复制并修改 `cater/packs/default_roles.json`，再用 `--roles` 指向这份文件。运行时不会把角色名写死在代码里。
 
 Skills 和 MCP 也应该放在这条边界后面：用 driver 进程包住它们，让 adapter 调用工具，再返回 Cater 的小 JSON 结构。`examples/ndjson_tool_driver.py` 提供了一个零依赖 adapter 骨架。如果 Windows 上的 `python` 指向 Microsoft Store 占位符，请把 `examples/tool_driver_config.json` 里的命令换成真实 Python 解释器完整路径。
 

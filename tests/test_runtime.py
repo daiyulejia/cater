@@ -399,6 +399,7 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertIn("Agent-to-agent policy", driver.prompts[0])
         self.assertIn("User-facing response", driver.prompts[0])
+        self.assertIn("Voice guidance", driver.prompts[0])
         match = re.search(r"alpha/assert: Draft the plan \(#(\d+)\)", driver.prompts[1])
         self.assertIsNotNone(match)
         prior_seq = int(match.group(1))
@@ -735,6 +736,13 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-empty string driver"):
                 Runtime(":memory:", roles_path=roles)
 
+            roles.write_text(
+                '{"roles":[{"id":"dev","name":"Dev","role":"developer","driver":"dev","voice":7}]}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "voice must be a string"):
+                Runtime(":memory:", roles_path=roles)
+
             roles.write_text('{"roles":[]}', encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "at least one role"):
                 Runtime(":memory:", roles_path=roles)
@@ -780,6 +788,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual([role.name for role in rt.worker_roles], ["月亮", "米寇", "三角"])
             self.assertEqual([role.name for role in rt.cabinet_roles], ["白露", "阿程", "知夏"])
             self.assertTrue(all(role.charter for role in rt.roles))
+            self.assertTrue(all(role.voice for role in rt.roles))
             task_id = rt.create_task("Check separate organization layers")
             rt.battle(task_id)
             task = rt.task(task_id)
