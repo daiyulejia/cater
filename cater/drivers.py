@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 
 
 MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_CLI_RESPONSE_CHARS = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -325,20 +326,26 @@ class CliDriver:
 
     def _readline(self, proc: subprocess.Popen[str]) -> str:
         assert proc.stdout is not None
-        out: queue.Queue[str] = queue.Queue(maxsize=1)
+        out: queue.Queue[str | None] = queue.Queue(maxsize=1)
 
         def reader() -> None:
             try:
-                out.put(proc.stdout.readline())
+                line = proc.stdout.readline(MAX_CLI_RESPONSE_CHARS + 1)
+                out.put(None if len(line) > MAX_CLI_RESPONSE_CHARS else line)
             except ValueError:
                 out.put("")
 
         thread = threading.Thread(target=reader, daemon=True)
         thread.start()
         try:
-            return out.get(timeout=self.timeout)
+            line = out.get(timeout=self.timeout)
         except queue.Empty as exc:
             raise DriverUnavailable(f"{self.name} did not respond within {self.timeout}s") from exc
+        if line is None:
+            raise DriverProtocolError(
+                f"{self.name} response exceeds {MAX_CLI_RESPONSE_CHARS} character limit"
+            )
+        return line
 
 
 class OpenAICompatibleDriver:

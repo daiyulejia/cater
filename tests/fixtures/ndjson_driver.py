@@ -17,6 +17,9 @@ for line in sys.stdin:
     if req.get("type") == "complete":
         if (req.get("context") or {}).get("crash"):
             sys.exit(7)
+        if (req.get("context") or {}).get("oversized"):
+            print("x" * (4 * 1024 * 1024 + 1), flush=True)
+            continue
         send(
             {
                 "id": rid,
