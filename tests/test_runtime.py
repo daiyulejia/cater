@@ -629,14 +629,18 @@ class RuntimeTests(unittest.TestCase):
             review = rt.review(task_id)
             recorded = rt.review(task_id, record=True)
             task = rt.task(task_id)
-            event_types = [event.type for event in rt.log.read(task_id=task_id)]
+            events = rt.log.read(task_id=task_id)
+            event_types = [event.type for event in events]
+            review_event = [event for event in events if event.type == "review.generated"][-1]
 
             self.assertIn("lenses", review)
+            self.assertIn("next_steps", review)
             self.assertEqual(review["scope"], task_id)
             self.assertIn("verify contracts and failure modes", " ".join(item["action"] for item in review["lenses"]))
             self.assertEqual(recorded["scope"], task_id)
             self.assertIn("review.generated", event_types)
             self.assertEqual(task.reviews[-1]["scope"], task_id)
+            self.assertEqual(review_event.payload["review"]["next_steps"], recorded["next_steps"])
 
     def test_review_next_actions_are_usable_for_empty_workspace(self):
         with Runtime(":memory:") as rt:
