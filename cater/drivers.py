@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 
 MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_CLI_RESPONSE_CHARS = 4 * 1024 * 1024
+MAX_CLI_REQUEST_BYTES = 4 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -281,10 +282,18 @@ class CliDriver:
         raise last_error
 
     def _send_once(self, payload: dict[str, Any]) -> dict[str, Any]:
+        try:
+            request_line = json.dumps(payload, ensure_ascii=False)
+        except (TypeError, ValueError) as exc:
+            raise DriverProtocolError(f"{self.name} request is not JSON serializable") from exc
+        if len(request_line.encode("utf-8")) > MAX_CLI_REQUEST_BYTES:
+            raise DriverProtocolError(
+                f"{self.name} request exceeds {MAX_CLI_REQUEST_BYTES} byte limit"
+            )
         proc = self._ensure_started()
         assert proc.stdin is not None
         try:
-            proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            proc.stdin.write(request_line + "\n")
             proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
             raise DriverUnavailable(f"{self.name} stdin is not writable") from exc

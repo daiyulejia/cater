@@ -26,6 +26,8 @@ from .runtime import Runtime
 
 
 MAX_REQUEST_BYTES = 1_048_576
+MAX_REJECT_DRAIN_BYTES = 65_536
+REJECT_DRAIN_TIMEOUT_SECONDS = 0.25
 
 
 class ActivityRunner:
@@ -794,6 +796,8 @@ def make_handler(
                 self._bad_request("invalid Content-Length")
                 return None
             if length < 0 or length > MAX_REQUEST_BYTES:
+                self._discard_near_limit_rejected_body(length)
+                self.close_connection = True
                 self._bad_request(f"request body exceeds {MAX_REQUEST_BYTES} byte limit")
                 return None
             try:
@@ -801,6 +805,25 @@ def make_handler(
             except UnicodeDecodeError:
                 self._bad_request("request body must be UTF-8")
                 return None
+
+        def _discard_near_limit_rejected_body(self, length: int) -> None:
+            """Let ordinary clients finish a just-over-limit upload before replying.
+
+            Closing a Windows socket while its client is still sending can turn a
+            deliberate 400 into a connection-reset error.  Only drain a tiny
+            overage, under a short timeout; a clearly large or slow upload is
+            still rejected without consuming unbounded request data.
+            """
+            if length > MAX_REQUEST_BYTES + MAX_REJECT_DRAIN_BYTES:
+                return
+            previous_timeout = self.connection.gettimeout()
+            try:
+                self.connection.settimeout(REJECT_DRAIN_TIMEOUT_SECONDS)
+                self.rfile.read(length)
+            except OSError:
+                pass
+            finally:
+                self.connection.settimeout(previous_timeout)
 
         def _redirect(self, location: str) -> None:
             self.send_response(HTTPStatus.SEE_OTHER)

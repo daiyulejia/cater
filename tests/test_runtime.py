@@ -1331,6 +1331,13 @@ class DriverTests(unittest.TestCase):
         response = driver.complete(role="tester", prompt="after", context={})
         self.assertIn("Fixture driver responded", response.text)
 
+    def test_cli_driver_rejects_oversized_request_before_starting_child(self):
+        driver = CliDriver("fixture", self.fixture_command(), timeout=5, restart_limit=0)
+        self.addCleanup(driver.close)
+        with self.assertRaisesRegex(DriverProtocolError, "request exceeds"):
+            driver.complete(role="tester", prompt="x" * (4 * 1024 * 1024 + 1), context={})
+        self.assertIsNone(driver._proc)
+
     def test_openai_compatible_driver_uses_environment_key_and_reports_provider_usage(self):
         captured: dict[str, object] = {}
 
