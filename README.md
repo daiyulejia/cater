@@ -43,6 +43,8 @@ cater drivers
 cater show
 cater inbox
 cater policy
+cater path <task_id>
+cater path <task_id> --json
 cater doctor
 cater doctor --probe
 cater doctor --json
@@ -106,6 +108,8 @@ cater --audit-key "dev-secret" chain --json
 `run` is the normal collaboration loop. It records agent contributions and only activates governance when there is a challenge, option split, low confidence, or another risk signal. `battle` forces a governance round when you intentionally want cabinet review.
 
 `dispatch` records the pyramid-style task distribution path: the top layer frames the mission, the cabinet decomposes it into execution lanes, and worker agents receive assigned work before the next collaboration round. This is optional; small tasks can go straight to a worker with `assign` or `new --assign-to dev --run`.
+
+`path` summarizes how one task moved through distribution, collaboration, governance, and decision steps.
 
 `--driver-attempts` and `--circuit-breaker-threshold` tune retry containment without changing driver code.
 

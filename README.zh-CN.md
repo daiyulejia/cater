@@ -88,6 +88,8 @@ cater review [task_id] --next
 cater inbox
 cater profiles
 cater policy
+cater path <task_id>
+cater path <task_id> --json
 cater doctor
 cater doctor --probe
 cater doctor --probe --json
@@ -106,6 +108,8 @@ cater --audit-key "dev-secret" chain --json
 `run` 是常规协作循环：记录 agent 的产出，并且只有在出现 challenge、方案分裂、低置信度或其他风险信号时才启动治理层。`battle` 是强制治理轮次，用于你明确希望内阁审查的时候。
 
 `dispatch` 会记录金字塔式任务分发路径：顶层定义 mission，内阁把 mission 拆成执行 lane，worker agent 在下一轮协作前拿到明确分工。它是可选能力；小任务可以用 `assign` 或 `new --assign-to dev --run` 直接派给执行层。
+
+`path` 会汇总单个任务经过的分发、协作、治理和决策步骤。
 
 `--driver-attempts` 和 `--circuit-breaker-threshold` 可以调节 driver 重试与熔断策略，不需要改 driver 代码。
 

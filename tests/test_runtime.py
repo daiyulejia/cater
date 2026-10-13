@@ -1075,6 +1075,23 @@ class CliTests(unittest.TestCase):
         self.assertIn("driver_attempts=3", custom_out)
         self.assertIn("circuit_breaker_threshold=4", custom_out)
 
+    def test_cli_path_command(self):
+        code, out = self.run_cli("new", "Route this task", "--assign-to", "dev", "--run")
+        self.assertEqual(code, 0)
+        task_id = next(line for line in out.splitlines() if line.startswith("created ")).split()[1]
+
+        code, out = self.run_cli("path", task_id)
+        self.assertEqual(code, 0)
+        self.assertIn("Distribution", out)
+        self.assertIn("direct", out)
+        self.assertIn("Collaboration", out)
+
+        code, out = self.run_cli("path", task_id, "--json")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data[0]["id"], "distribution")
+        self.assertEqual(data[0]["status"], "direct")
+
     def test_cli_doctor(self):
         code, out = self.run_cli("doctor")
         self.assertEqual(code, 0)

@@ -12,6 +12,7 @@ from typing import Any
 from . import __version__
 from .ladder import decision_ladder
 from .messages import message_relation
+from .path import organization_path
 from .runtime import Runtime
 from .web import event_to_dict, serve, task_to_dict
 
@@ -351,6 +352,21 @@ def cmd_policy(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_path(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        task = rt.task(args.task_id)
+        if task is None:
+            raise KeyError(args.task_id)
+        events = rt.log.read(task_id=args.task_id)
+        path = organization_path(task, events)
+        if args.json:
+            print(json.dumps(path, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0
+        for step in path:
+            print(f"{step['label']:<14} {step['status']:<18} {step['detail']}")
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         data = _doctor_report(rt, args, probe=bool(args.probe))
@@ -625,6 +641,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_chain.set_defaults(func=cmd_chain)
     sub.add_parser("drivers", help="show roles and configured drivers").set_defaults(func=cmd_drivers)
     sub.add_parser("policy", help="show organization governance policy").set_defaults(func=cmd_policy)
+    p_path = sub.add_parser("path", help="show a task's organization path")
+    p_path.add_argument("task_id")
+    p_path.add_argument("--json", action="store_true", help="print machine-readable organization path")
+    p_path.set_defaults(func=cmd_path)
+
     p_doctor = sub.add_parser("doctor", help="check runtime wiring and local event chain")
     p_doctor.add_argument("--probe", action="store_true", help="actively probe drivers that support a probe method")
     p_doctor.add_argument("--json", action="store_true", help="print machine-readable doctor status")
