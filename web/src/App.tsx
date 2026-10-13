@@ -35,7 +35,7 @@ const statusText = (value?: string) => ({
   assigned: '已指派', recommended: '已建议', vetoed: '已否决', needs_supreme: '待最高决策', needs_human: '待人工处理',
 }[value ?? ''] ?? value ?? '未知')
 
-const actorText = (value: string) => ({ human: '你', orchestrator: '总控', cabinet: '内阁', supreme: '最高决策者', store_manager: '店长', reviewer: '复盘员', driver_gateway: '驱动网关', cabinet_product: '白露', cabinet_engineering: '阿程', cabinet_quality: '知夏', caretaker_product: '白露', caretaker_engineering: '阿程', caretaker_quality: '知夏', product: '月亮', dev: '米寇', test: '三角' }[value] ?? value)
+const actorText = (value: string) => ({ human: '你', orchestrator: '店长', cabinet: '内阁', supreme: '最高决策者', store_manager: '店长', reviewer: '复盘员', driver_gateway: '驱动网关', cabinet_product: '白露', cabinet_engineering: '阿程', cabinet_quality: '知夏', caretaker_product: '白露', caretaker_engineering: '阿程', caretaker_quality: '知夏', product: '月亮', dev: '米寇', test: '三角' }[value] ?? value)
 
 const roleText = (value: string) => ({ human: '顾客', orchestrator: '任务编排', cabinet: '内阁', supreme: '最高决策', store_manager: '猫咖店长', developer: '开发工程师', tester: '测试工程师', product: '产品负责人' }[value] ?? value)
 
@@ -88,8 +88,8 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>): 
     if (event.type === 'activity.completed') return [message('本轮协作完成', String(payload.action) === 'battle' ? '内阁审议已结束。' : '团队已完成这一轮协作。', 'system')]
     if (event.type === 'activity.failed') return [message('协作异常', String(payload.message ?? '后台协作未能完成。'), 'system')]
     if (event.type === 'human.commanded') return [message('方向更新', String(payload.instruction ?? ''), 'human')]
-    if (event.type === 'task.interpreted') return [message('总控任务理解', `${String(payload.summary ?? '')}\n${String(payload.objective ?? '')}`, 'system', 'decision')]
-    if (event.type === 'task.routed') return [message('总控路由判断', reasonText(String(payload.reason ?? '已选择下一步协作路径。')), 'system', 'decision')]
+    if (event.type === 'task.interpreted') return [message('店长先把这单听明白', `${String(payload.summary ?? '')}\n${String(payload.objective ?? '')}`, 'system', 'decision')]
+    if (event.type === 'task.routed') return [message('店长决定先这样推进', reasonText(String(payload.reason ?? '已选择下一步协作路径。')), 'system', 'decision')]
     if (event.type === 'cabinet.convened') {
       const names = memberNames(payload.members)
       return [message(names.length ? `店长召集 ${names.join('、')}` : '召集内阁', `${reasonText(String(payload.reason ?? '任务需要内阁校准。'))}${names.length ? `\n本次由 ${names.join('、')} 先行校准。` : ''}`, 'system', 'decision')]
@@ -97,10 +97,14 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>): 
     if (event.type === 'mission.created') return [message('任务使命已发布', String(payload.goal ?? ''), 'system')]
     if (event.type === 'task.decomposed') {
       const names = memberNames(payload.members)
-      return [message(String(payload.source) === 'cabinet' ? `${names.join('、') || '内阁'}完成任务拆解` : '总控完成任务拆解', String(payload.strategy ?? '执行计划已就绪。'), 'system', 'decision')]
+      return [message(String(payload.source) === 'cabinet' ? `${names.join('、') || '内阁'}完成任务拆解` : '店长安排好分工', String(payload.strategy ?? '执行计划已就绪。'), 'system', 'decision')]
     }
-    if (event.type === 'subtask.assigned') return [message(`已指派给 @${String(payload.owner ?? '团队')}`, String(payload.objective ?? ''), 'system')]
+    if (event.type === 'subtask.assigned') {
+      const owner = String(payload.owner ?? '团队')
+      return [message(`已指派给 @${identities[owner]?.name ?? actorText(owner)}`, String(payload.objective ?? ''), 'system')]
+    }
     if (event.type === 'plan.proposed') return [message('执行计划已发布', reasonText(String(payload.reason ?? '')), 'system', 'decision')]
+    if (event.type === 'agent.working') return [message('开始处理', String(payload.summary ?? '正在处理本执行线。'), 'agent')]
     if (event.type === 'msg.said' || event.type === 'msg.challenge') return [message(event.type === 'msg.challenge' ? '提出质疑' : undefined, String(payload.text ?? payload.claim ?? ''), 'agent')]
     if (event.type === 'deliverable.published') return [message('发布成果', `${String(payload.title ?? '未命名成果')}\n${String(payload.summary ?? '')}`, 'agent', 'deliverable')]
     if (event.type === 'cabinet.voted') {

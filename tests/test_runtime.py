@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -80,6 +81,7 @@ class ReplyDriver:
                 "text": "planner output",
             }
         else:
+            match = re.search(r"\(#(\d+)\)", prompt)
             text = {
                 "stance": "assert",
                 "option_id": "shared-plan",
@@ -88,7 +90,7 @@ class ReplyDriver:
                 "confidence": 0.8,
                 "text": "builder output",
                 "target": "alpha",
-                "reply_to": 3,
+                "reply_to": int(match.group(1)) if match else None,
             }
         return DriverResponse(text=json.dumps(text), tokens=4)
 
@@ -216,9 +218,13 @@ class RuntimeTests(unittest.TestCase):
             task_id = rt.create_task("验证默认成果")
             rt.collaborate(task_id)
             task = rt.task(task_id)
-            outcomes = [event for event in rt.log.read(task_id=task_id) if event.type == "deliverable.published"]
+            events = rt.log.read(task_id=task_id)
+            outcomes = [event for event in events if event.type == "deliverable.published"]
+            working = [event for event in events if event.type == "agent.working"]
 
         self.assertEqual(len(outcomes), 3)
+        self.assertEqual([event.actor.id for event in working], ["product", "dev", "test"])
+        self.assertIn("用户路径", working[0].payload["summary"])
         self.assertEqual(
             [item["title"] for item in task.deliverables],
             ["月亮的任务收束", "米寇的实现路径", "三角的验证清单"],
@@ -389,12 +395,14 @@ class RuntimeTests(unittest.TestCase):
                 html = render_task(task, rt.log.read(task_id=task_id))
 
         self.assertIn("Agent-to-agent policy", driver.prompts[0])
-        self.assertIn("alpha/assert: Draft the plan (#3)", driver.prompts[1])
+        match = re.search(r"alpha/assert: Draft the plan \(#(\d+)\)", driver.prompts[1])
+        self.assertIsNotNone(match)
+        prior_seq = int(match.group(1))
         self.assertEqual(task.messages[1]["target"], "alpha")
-        self.assertEqual(task.messages[1]["reply_to"], 3)
+        self.assertEqual(task.messages[1]["reply_to"], prior_seq)
         self.assertEqual(result["brief"]["positions"][1]["target"], "alpha")
-        self.assertEqual(result["brief"]["positions"][1]["reply_to"], 3)
-        self.assertIn("reply_to #3", html)
+        self.assertEqual(result["brief"]["positions"][1]["reply_to"], prior_seq)
+        self.assertIn(f"reply_to #{prior_seq}", html)
 
     def test_invalid_agent_reply_metadata_is_dropped(self):
         driver = StaticResponseDriver(
@@ -1502,7 +1510,7 @@ class CliTests(unittest.TestCase):
                                             "confidence": 0.8,
                                             "text": "builder output",
                                             "target": "alpha",
-                                            "reply_to": 3,
+                                            "reply_to": 4,
                                         }
                                     ),
                                 ],
@@ -1522,7 +1530,7 @@ class CliTests(unittest.TestCase):
             out = self.out.getvalue()
 
         self.assertEqual(code, 0)
-        self.assertIn("[target alpha | reply_to #3]", out)
+        self.assertRegex(out, r"\[target alpha \| reply_to #\d+\]")
 
     def test_cli_export_json_and_jsonl(self):
         code, _ = self.run_cli("demo")
@@ -1741,7 +1749,7 @@ class WebTests(unittest.TestCase):
                 rt.collaborate(task_id)
                 html = render_task(rt.task(task_id), rt.log.read(task_id=task_id))
 
-        self.assertIn("target alpha | reply_to #3", html)
+        self.assertRegex(html, r"target alpha \| reply_to #\d+")
 
     def test_render_task_includes_cabinet_timeline_and_decision_form(self):
         with Runtime(":memory:") as rt:
@@ -1777,8 +1785,9 @@ class WebTests(unittest.TestCase):
             events = rt.log.read(task_id=task_id)
             html = render_task(rt.task(task_id), events, timeline_category="dialogue")
 
+        dialogue_events = [event for event in events if event.category == "dialogue"]
         self.assertIn("dialogue", html)
-        self.assertIn(f"6 / {len(events)} events", html)
+        self.assertIn(f"{len(dialogue_events)} / {len(events)} events", html)
         self.assertIn("msg.said", html)
         self.assertNotIn("task.created", html)
 

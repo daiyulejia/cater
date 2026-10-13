@@ -469,6 +469,12 @@ class Runtime:
         for role in roles:
             driver = self.drivers[role.driver]
             prompt = self._prompt(task, role, profiles.get(role.id), utterances)
+            self.log.emit(
+                actor=Actor.agent(role.id, role.role),
+                type="agent.working",
+                task_id=task_id,
+                payload=self._work_status(role),
+            )
             response = self._complete_with_containment(
                 task_id=task_id,
                 task=task,
@@ -523,6 +529,21 @@ class Runtime:
             utterances.append(item)
             produced.append(item)
         return produced
+
+    def _work_status(self, role: Role) -> dict[str, str]:
+        """Publish a bounded progress signal, never hidden model reasoning."""
+        if role.id in self.organization.cabinet_members:
+            return {"stage": "review", "summary": f"{role.name}正在校准现有产出与决策边界。"}
+        lane = self._role_lane(role.id, role.role)
+        if lane == "目标与用户价值":
+            summary = f"{role.name}正在梳理用户路径和验收边界。"
+        elif lane == "实现":
+            summary = f"{role.name}正在收束实现路径、依赖与恢复边界。"
+        elif lane == "验证与风险":
+            summary = f"{role.name}正在准备验证证据并检查风险。"
+        else:
+            summary = f"{role.name}正在推进本执行线。"
+        return {"stage": "work", "summary": summary}
 
     def _cabinet_roles_for_consultation(self, utterances: list[dict[str, Any]]) -> list[Role]:
         """Ask distinct cabinet seats only when the workers actually need governance."""
