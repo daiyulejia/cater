@@ -4,6 +4,7 @@ import {
   CornerDownRight, FileText, Menu, Plus, Send, ShieldCheck, Users,
 } from 'lucide-react'
 import catTrio from './assets/cat-trio.png'
+import catCanned from './assets/cat-canned.png'
 
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
 type Message = { seq: number; actor: string; role: string; type: string; claim?: string; text?: string; stance?: string; target?: string; reply_to?: number }
@@ -65,6 +66,7 @@ function reasonText(value: string): string {
 function Portrait({ id, size = 'md' }: { id: string; size?: 'sm' | 'md' | 'lg' }) {
   const position = ({ product: '0% 50%', test: '50% 50%', dev: '100% 50%' }[id])
   const dimensions = ({ sm: 'size-7', md: 'size-9', lg: 'size-11' }[size])
+  if (id === 'design') return <span className={`${dimensions} shrink-0 rounded-full border-2 border-[#fffaf4] bg-cover bg-center shadow-sm`} style={{ backgroundImage: `url(${catCanned})` }} />
   if (!position) return <span className={`grid ${dimensions} shrink-0 place-items-center rounded-full bg-[#e7ddd1] text-[#705545]`}><Cat size={size === 'lg' ? 22 : 16} /></span>
   return <span className={`${dimensions} shrink-0 rounded-full border-2 border-[#fffaf4] bg-cover shadow-sm`} style={{ backgroundImage: `url(${catTrio})`, backgroundSize: '300% 100%', backgroundPosition: position }} />
 }
