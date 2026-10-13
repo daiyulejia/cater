@@ -435,6 +435,8 @@ def make_handler(
             return self._not_found()
 
         def do_POST(self) -> None:
+            if not self._is_same_origin_write():
+                return self._forbidden("cross-origin writes are not allowed")
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/")
             if path == "/api/tasks":
@@ -682,6 +684,7 @@ def make_handler(
             raw = body.encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -690,6 +693,7 @@ def make_handler(
             raw = json.dumps(body, ensure_ascii=False, indent=2).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -725,6 +729,42 @@ def make_handler(
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
+
+        def _forbidden(self, message: str) -> None:
+            raw = message.encode("utf-8")
+            self.send_response(HTTPStatus.FORBIDDEN)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _is_same_origin_write(self) -> bool:
+            """Reject browser cross-site form/fetch writes without breaking local scripts.
+
+            Non-browser callers commonly omit Origin, while browsers attach it
+            to cross-site writes.  An absent Origin therefore remains allowed
+            for the local API and CLI, but an asserted Origin must match the
+            host serving Cater.
+            """
+            origin = self.headers.get("Origin")
+            if not origin:
+                return True
+            parsed = urlparse(origin)
+            return parsed.scheme == "http" and parsed.netloc == self.headers.get("Host", "")
+
+        def end_headers(self) -> None:
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+            self.send_header(
+                "Content-Security-Policy",
+                "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; "
+                "form-action 'self'; connect-src 'self'; img-src 'self' data:; "
+                "object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'",
+            )
+            super().end_headers()
 
         def _read_form(self) -> dict[str, list[str]]:
             raw = self._read_body()

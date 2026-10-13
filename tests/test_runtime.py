@@ -2122,6 +2122,26 @@ class WebTests(unittest.TestCase):
                 urlopen(request, timeout=5)
             self.assertEqual(raised.exception.code, 400)
             self.assertIn("request body exceeds", raised.exception.read().decode("utf-8"))
+
+    def test_web_rejects_cross_origin_writes_and_sets_browser_security_headers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "origin.db")
+            base = start_test_web(self, db)
+            request = Request(
+                f"{base}/api/tasks",
+                data=json.dumps({"goal": "cross-origin task"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json", "Origin": "https://evil.example"},
+            )
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(request, timeout=5)
+            self.assertEqual(raised.exception.code, 403)
+            self.assertEqual(raised.exception.headers["X-Frame-Options"], "DENY")
+            self.assertIn("default-src 'self'", raised.exception.headers["Content-Security-Policy"])
+
+            with urlopen(f"{base}/api/tasks", timeout=5) as response:
+                self.assertEqual(response.headers["Cache-Control"], "no-store")
+                self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
     def test_web_marks_interrupted_background_activity_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-recovery.db")
