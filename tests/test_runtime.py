@@ -2320,6 +2320,15 @@ class WebTests(unittest.TestCase):
             self.assertEqual(raised.exception.headers["X-Frame-Options"], "DENY")
             self.assertIn("default-src 'self'", raised.exception.headers["Content-Security-Policy"])
 
+            proxied_https = Request(
+                f"{base}/api/tasks",
+                data=json.dumps({"goal": "HTTPS reverse proxy task"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json", "Origin": base.replace("http://", "https://", 1)},
+            )
+            with urlopen(proxied_https, timeout=5) as response:
+                self.assertEqual(response.status, 201)
+
             with urlopen(f"{base}/api/tasks", timeout=5) as response:
                 self.assertEqual(response.headers["Cache-Control"], "no-store")
                 self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")

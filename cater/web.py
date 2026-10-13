@@ -807,14 +807,16 @@ def make_handler(
 
             Non-browser callers commonly omit Origin, while browsers attach it
             to cross-site writes.  An absent Origin therefore remains allowed
-            for the local API and CLI, but an asserted Origin must match the
-            host serving Cater.
+            for the local API and CLI, but an asserted Origin must use HTTP(S)
+            and match the host serving Cater.  HTTPS is accepted here because
+            a TLS reverse proxy terminates encryption before forwarding to this
+            deliberately minimal local HTTP server.
             """
             origin = self.headers.get("Origin")
             if not origin:
                 return True
             parsed = urlparse(origin)
-            return parsed.scheme == "http" and parsed.netloc == self.headers.get("Host", "")
+            return parsed.scheme in {"http", "https"} and parsed.netloc == self.headers.get("Host", "")
 
         def end_headers(self) -> None:
             self.send_header("X-Content-Type-Options", "nosniff")
