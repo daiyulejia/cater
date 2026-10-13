@@ -54,6 +54,14 @@ const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   return response.json() as Promise<T>
 }
 
+function userFacingError(error: unknown, fallback: string): string {
+  const message = error instanceof Error ? error.message.trim() : ''
+  if (message === 'access token is required') {
+    return '这个工作台需要访问令牌。请使用带 #access_token=… 的地址重新打开。'
+  }
+  return message || fallback
+}
+
 const statusText = (value?: string) => ({
   pending: '待开始', running: '进行中', rework: '需返工', decided: '已定下', done: '已完成', escalated: '待处理',
   assigned: '已指派', accepted: '已定下', rejected: '未通过', recommended: '已建议', vetoed: '已否决', needs_supreme: '待最高决策', needs_human: '待人工处理',
@@ -235,23 +243,23 @@ function App() {
     setSelectedId((current) => preferredId ?? current ?? nextTasks.at(-1)?.id ?? null)
   }
 
-  useEffect(() => { void refresh().catch((err: Error) => setError(err.message)) }, [])
+  useEffect(() => { void refresh().catch((err: unknown) => setError(userFacingError(err, '暂时无法读取任务。'))) }, [])
   useEffect(() => {
     void api<OrgRole[]>('/api/organization').then((nextRoles) => {
       setRoles(nextRoles)
-    }).catch((err: Error) => setError(err.message))
+    }).catch((err: unknown) => setError(userFacingError(err, '暂时无法读取团队信息。')))
   }, [])
-  useEffect(() => { void api<Organization>('/api/organization/profile').then(setOrganization).catch((err: Error) => setError(err.message)) }, [])
+  useEffect(() => { void api<Organization>('/api/organization/profile').then(setOrganization).catch((err: unknown) => setError(userFacingError(err, '暂时无法读取团队配置。'))) }, [])
   useEffect(() => {
     if (!selectedId) { setDetail(null); return }
-    void api<TaskDetail>(`/api/tasks/${selectedId}`).then(setDetail).catch((err: Error) => setError(err.message))
+    void api<TaskDetail>(`/api/tasks/${selectedId}`).then(setDetail).catch((err: unknown) => setError(userFacingError(err, '暂时无法读取任务详情。')))
   }, [selectedId])
   useEffect(() => {
     if (!selectedId || !detail?.activity?.active) return
     const poll = () => void api<TaskDetail>(`/api/tasks/${selectedId}`).then((next) => {
       setDetail(next)
       setTasks((current) => current.map((item) => item.id === next.task.id ? { ...next.task, activity: next.activity } : item))
-    }).catch((err: Error) => setError(err.message))
+    }).catch((err: unknown) => setError(userFacingError(err, '暂时无法刷新协作进度。')))
     poll()
     const timer = window.setInterval(poll, 800)
     return () => window.clearInterval(timer)
@@ -278,7 +286,7 @@ function App() {
         }),
       })
       setDraft(''); setComposerMode('message'); setChatFilter('all'); await refresh(result.task.id); setDetail(result)
-    } catch (err) { setError(err instanceof Error ? err.message : '创建任务失败') }
+    } catch (err) { setError(userFacingError(err, '创建任务失败')) }
     finally { setIsSending(false) }
   }
 
@@ -288,7 +296,7 @@ function App() {
     try {
       const result = await api<TaskDetail>(`/api/tasks/${selectedId}/command`, { method: 'POST', body: JSON.stringify({ instruction: message.trim(), continue: true }) })
       setMessage(''); setDetail(result); await refresh(selectedId)
-    } catch (err) { setError(err instanceof Error ? err.message : '发送指令失败') }
+    } catch (err) { setError(userFacingError(err, '发送指令失败')) }
     finally { setIsSending(false) }
   }
 

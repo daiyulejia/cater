@@ -2578,6 +2578,7 @@ class WebTests(unittest.TestCase):
         bundle_text = "\n".join(bundle.read_text(encoding="utf-8") for bundle in bundles)
         self.assertIn("对话筛选", bundle_text)
         self.assertIn("和店长聊聊", bundle_text)
+        self.assertIn("这个工作台需要访问令牌", bundle_text)
         self.assertNotIn("向猫咖下单", bundle_text)
 
     def test_web_serves_optional_built_workroom_from_same_origin(self):
