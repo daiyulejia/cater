@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from importlib import resources
@@ -384,6 +385,9 @@ class Runtime:
         if self.task(task_id) is None:
             raise KeyError(task_id)
         payload: dict[str, Any] = {"instruction": instruction}
+        mentions = self._mentioned_roles(instruction)
+        if mentions:
+            payload["mentions"] = mentions
         if goal is not None:
             payload["goal"] = goal
         if acceptance is not None:
@@ -628,6 +632,14 @@ class Runtime:
                 return role
         known = ", ".join(role.id for role in self.roles)
         raise ValueError(f"unknown role {role_id!r}; expected one of: {known}")
+
+    def _mentioned_roles(self, instruction: str) -> list[str]:
+        """Return known role ids explicitly addressed by a human command."""
+        return [
+            role.id
+            for role in self.roles
+            if re.search(rf"(?<![\w-])@{re.escape(role.id)}\b", instruction, flags=re.IGNORECASE)
+        ]
 
     def _decompose_task(self, task: TaskSnapshot) -> list[dict[str, Any]]:
         criteria = list(task.acceptance) or ["produce a useful, verifiable next increment"]

@@ -271,6 +271,8 @@ def make_handler(
                         goal=goal,
                         acceptance=acceptance if acceptance_raw.strip() else None,
                     )
+                    if data.get("run_now", [""])[0] == "on":
+                        rt.collaborate(task_id)
                 self._redirect(f"/tasks/{task_id}")
                 return
             if path.startswith("/tasks/") and path.endswith("/decide"):

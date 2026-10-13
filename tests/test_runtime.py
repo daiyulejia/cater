@@ -1764,6 +1764,30 @@ class WebTests(unittest.TestCase):
             self.assertIn('name="run_now"', index)
             self.assertNotIn('name="battle" checked', index)
 
+    def test_web_command_can_request_the_next_collaboration_round(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-command-round.db")
+            with Runtime(db) as rt:
+                task_id = rt.create_task("Continue this conversation")
+
+            base = start_test_web(self, db)
+            body = urlencode({"instruction": "@dev propose the smallest next step", "run_now": "on"}).encode("utf-8")
+            request = Request(
+                f"{base}/tasks/{task_id}/command",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            with urlopen(request, timeout=5) as response:
+                page = response.read().decode("utf-8")
+
+            self.assertIn("@dev propose the smallest next step", page)
+            with Runtime(db) as rt:
+                task = rt.task(task_id)
+                self.assertEqual(task.commands[-1]["instruction"], "@dev propose the smallest next step")
+                self.assertEqual(task.commands[-1]["mentions"], ["dev"])
+                self.assertEqual(len(task.messages), 3)
+
 
 if __name__ == "__main__":
     unittest.main()
