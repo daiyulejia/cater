@@ -1842,8 +1842,10 @@ class WebTests(unittest.TestCase):
             with urlopen(f"{base}/", timeout=5) as response:
                 self.assertEqual(response.read().decode("utf-8"), "<main>workroom</main>")
                 self.assertIn("text/html", response.headers["Content-Type"])
+                self.assertEqual(response.headers["Cache-Control"], "no-cache")
             with urlopen(f"{base}/assets/workroom.js", timeout=5) as response:
                 self.assertIn("console.log", response.read().decode("utf-8"))
+                self.assertEqual(response.headers["Cache-Control"], "public, max-age=31536000, immutable")
             with urlopen(f"{base}/api/tasks", timeout=5) as response:
                 self.assertEqual(json.loads(response.read().decode("utf-8")), [])
 

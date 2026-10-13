@@ -598,6 +598,13 @@ def make_handler(
             content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
+            # The entry document chooses the current hashed bundle, so it must
+            # revalidate after an upgrade. Immutable bundle assets can remain
+            # aggressively cached without trapping the UI on an old release.
+            if path.name == "index.html":
+                self.send_header("Cache-Control", "no-cache")
+            elif "/assets/" in path.as_posix():
+                self.send_header("Cache-Control", "public, max-age=31536000, immutable")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
