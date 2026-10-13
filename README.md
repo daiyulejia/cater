@@ -214,6 +214,24 @@ Driver 返回：
 
 这个边界刻意很小。LangChain、LangGraph、Codex CLI、Claude Code、Gemini CLI 或自定义 API wrapper 都可以藏在这个进程后面，而不污染 Cater 的核心运行时。
 
+### 角色、团队与账号如何对应
+
+一个角色卡只引用一个 driver 名；因此同一 driver 可以被多个角色复用。默认配置中，白露和月亮共享 `product`，阿程和米寇共享 `dev`，知夏和三角共享 `test`。这让接入粒度可以按实际成本、权限和模型能力选择：
+
+- **按专业角色**：使用 [`examples/openai_compatible_driver_config.json`](examples/openai_compatible_driver_config.json)，给产品、设计、工程和质量分别配置模型或账号。
+- **按组织层级**：使用 [`examples/layered_api_driver_config.json`](examples/layered_api_driver_config.json) 与 [`examples/layered_api_roles.json`](examples/layered_api_roles.json)，内阁共用一个通道，执行猫共用另一个通道。
+- **按本机登录账号**：继续使用 CLI driver；不同 driver 可以启动不同的本机 adapter 进程，各自继承对应工具的登录态。
+
+`openai_compatible` 是零第三方依赖的 Chat Completions 适配器。配置文件只放 `endpoint`、`model` 和 `api_key_env`；真实密钥只从当前进程环境读取，绝不进入角色卡、事件链、审计导出或网页。它接受兼容 Chat Completions 请求/响应形状的服务。使用前把示例里的占位 endpoint 与模型替换为实际值，再设置相应环境变量，例如：
+
+```powershell
+$env:CATER_COUNCIL_API_KEY = "..."
+$env:CATER_WORKSHOP_API_KEY = "..."
+cater --roles examples/layered_api_roles.json --drivers examples/layered_api_driver_config.json web
+```
+
+网页会显示“本地演示”“部分成员已接入外部驱动”或“已接入外部驱动”，并按执行成员显示通道状态；它不会显示账号、端点或密钥。provider 未返回可验证的 `usage.total_tokens` 时，成本会记为未知而不是伪造为零。
+
 `meta.token_usage` 可选值为 `reported`、`estimated`、`unavailable`。缺省值是 `reported`，供已经返回可信用量的第三方 driver 保持兼容；演示 driver 会标记为 `estimated`。若 provider 没有可验证的用量数据，必须标记为 `unavailable`，Cater 会在回放和 `review` 中把成本显示为未知，而不是把它误报成零。随附的 Codex CLI 适配器遵循这一规则。
 
 ## 角色命名

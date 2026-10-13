@@ -1,0 +1,22 @@
+{
+  "drivers": [
+    {
+      "kind": "openai_compatible",
+      "name": "council",
+      "endpoint": "https://api.example.com/v1/chat/completions",
+      "model": "replace-with-council-model",
+      "api_key_env": "CATER_COUNCIL_API_KEY",
+      "timeout": 120,
+      "temperature": 0.25
+    },
+    {
+      "kind": "openai_compatible",
+      "name": "workshop",
+      "endpoint": "https://api.example.com/v1/chat/completions",
+      "model": "replace-with-worker-model",
+      "api_key_env": "CATER_WORKSHOP_API_KEY",
+      "timeout": 120,
+      "temperature": 0.3
+    }
+  ]
+}

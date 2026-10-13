@@ -77,3 +77,36 @@ CATER_CODEX_WORKDIR=<现有目录>             # 可选的 Codex 工作目录
 跳过审批或跳过沙箱的危险参数。它只将简短的失败原因写回 Cater，避免把 CLI stderr、
 令牌或其他潜在敏感内容写进可回放事件链。每次模型调用的实际 tokens 当前由 Codex
 CLI 不提供给此适配器，因此事件中会记录为 `0`，不伪造成本数据。
+
+## OpenAI 兼容 API 适配器
+
+[`openai_compatible_driver_config.json`](openai_compatible_driver_config.json) 是按专业
+通道配置的模板：产品、设计、工程、质量可以使用不同模型或不同账号。它直接使用
+Python 标准库发出 Chat Completions 请求，不需要在 Cater 核心安装 SDK。先把每个
+`endpoint` 和 `model` 的占位值替换为 provider 的真实值，再把密钥放到当前终端环境：
+
+```powershell
+$env:CATER_PRODUCT_API_KEY = "..."
+$env:CATER_DESIGN_API_KEY = "..."
+$env:CATER_DEV_API_KEY = "..."
+$env:CATER_TEST_API_KEY = "..."
+cater --drivers examples/openai_compatible_driver_config.json doctor
+cater --drivers examples/openai_compatible_driver_config.json web
+```
+
+不把密钥写进 JSON、角色卡或任务消息。该 adapter 只把 provider 已返回的
+`usage.total_tokens` 作为真实用量；缺失时会明确标记为未知。它不做不可靠的
+“存活探针”，首次实际任务才是端点、模型名和账户权限的完整验证。
+
+如果想让内阁共用一个账号、执行层共用另一个账号，可成对使用
+[`layered_api_driver_config.json`](layered_api_driver_config.json) 与
+[`layered_api_roles.json`](layered_api_roles.json)：
+
+```powershell
+$env:CATER_COUNCIL_API_KEY = "..."
+$env:CATER_WORKSHOP_API_KEY = "..."
+cater --roles examples/layered_api_roles.json --drivers examples/layered_api_driver_config.json web
+```
+
+同一个 driver 被多个角色引用时，会共享该通道的账户、模型、速率限制和 token 预算；
+是否拆分，取决于权限隔离、成本归属和模型专长，而不是角色数量。

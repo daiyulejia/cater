@@ -1,0 +1,40 @@
+{
+  "drivers": [
+    {
+      "kind": "openai_compatible",
+      "name": "product",
+      "endpoint": "https://api.example.com/v1/chat/completions",
+      "model": "replace-with-product-model",
+      "api_key_env": "CATER_PRODUCT_API_KEY",
+      "timeout": 120,
+      "temperature": 0.3
+    },
+    {
+      "kind": "openai_compatible",
+      "name": "design",
+      "endpoint": "https://api.example.com/v1/chat/completions",
+      "model": "replace-with-design-model",
+      "api_key_env": "CATER_DESIGN_API_KEY",
+      "timeout": 120,
+      "temperature": 0.4
+    },
+    {
+      "kind": "openai_compatible",
+      "name": "dev",
+      "endpoint": "https://api.example.com/v1/chat/completions",
+      "model": "replace-with-engineering-model",
+      "api_key_env": "CATER_DEV_API_KEY",
+      "timeout": 120,
+      "temperature": 0.2
+    },
+    {
+      "kind": "openai_compatible",
+      "name": "test",
+      "endpoint": "https://api.example.com/v1/chat/completions",
+      "model": "replace-with-quality-model",
+      "api_key_env": "CATER_TEST_API_KEY",
+      "timeout": 120,
+      "temperature": 0.2
+    }
+  ]
+}

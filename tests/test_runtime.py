@@ -21,7 +21,7 @@ from urllib.request import Request, urlopen
 from cater.cabinet import majority_threshold, tally_votes
 from cater import __version__, web as web_module
 from cater.cli import main
-from cater.drivers import CliDriver, DriverResponse, load_drivers
+from cater.drivers import CliDriver, DriverResponse, DriverUnavailable, OpenAICompatibleDriver, load_drivers
 from cater.ladder import decision_ladder
 from cater.messages import message_relation
 from cater.profiles import agent_profiles
@@ -1149,6 +1149,65 @@ class DriverTests(unittest.TestCase):
         response = driver.complete(role="tester", prompt="after", context={})
         self.assertIn("Fixture driver responded", response.text)
 
+    def test_openai_compatible_driver_uses_environment_key_and_reports_provider_usage(self):
+        captured: dict[str, object] = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {
+                        "choices": [{"message": {"content": '{"stance":"assert","text":"完成"}'}}],
+                        "usage": {"total_tokens": 37},
+                    }
+                ).encode("utf-8")
+
+        def fake_open(request, *, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        driver = OpenAICompatibleDriver(
+            "worker-api",
+            endpoint="https://models.example.test/v1/chat/completions",
+            model="test-model",
+            api_key_env="CATER_TEST_API_KEY",
+            timeout=9,
+            temperature=0.2,
+        )
+        with patch.dict("cater.drivers.os.environ", {"CATER_TEST_API_KEY": "secret-value"}, clear=False), patch(
+            "cater.drivers.urlopen", side_effect=fake_open
+        ):
+            response = driver.complete(role="worker", prompt="Return JSON", context={})
+
+        request = captured["request"]
+        assert isinstance(request, Request)
+        body = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request.get_header("Authorization"), "Bearer secret-value")
+        self.assertEqual(body["model"], "test-model")
+        self.assertEqual(body["temperature"], 0.2)
+        self.assertEqual(response.tokens, 37)
+        self.assertEqual(response.meta["token_usage"], "reported")
+        self.assertIn("完成", response.text)
+        self.assertEqual(captured["timeout"], 9)
+
+    def test_openai_compatible_driver_does_not_send_a_request_without_its_key(self):
+        driver = OpenAICompatibleDriver(
+            "worker-api",
+            endpoint="https://models.example.test/v1/chat/completions",
+            model="test-model",
+            api_key_env="CATER_MISSING_KEY",
+        )
+        with patch.dict("cater.drivers.os.environ", {}, clear=True), patch("cater.drivers.urlopen") as open_request:
+            with self.assertRaisesRegex(DriverUnavailable, "CATER_MISSING_KEY"):
+                driver.complete(role="worker", prompt="Return JSON", context={})
+        open_request.assert_not_called()
+
     def test_scripted_driver_config_rejects_string_script(self):
         with tempfile.TemporaryDirectory() as tmp:
             drivers = Path(tmp) / "drivers.json"
@@ -1205,6 +1264,22 @@ class DriverTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "restart_limit must be non-negative"):
+                load_drivers(drivers)
+
+    def test_openai_compatible_driver_config_rejects_incomplete_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drivers = Path(tmp) / "drivers.json"
+            drivers.write_text(
+                '{"drivers":[{"kind":"openai_compatible","name":"bad","endpoint":"ftp://example","model":"x","api_key_env":"KEY"}]}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "http\\(s\\) endpoint"):
+                load_drivers(drivers)
+            drivers.write_text(
+                '{"drivers":[{"kind":"openai_compatible","name":"bad","endpoint":"https://example","model":"x"}]}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "api_key_env"):
                 load_drivers(drivers)
 
     def test_example_tool_driver_speaks_ndjson(self):
@@ -2217,6 +2292,30 @@ class WebTests(unittest.TestCase):
         self.assertEqual(len(profile["cabinet"]), 3)
         self.assertTrue(profile["workers"][0]["charter"])
         self.assertEqual(profile["mode"], "local_demo")
+        self.assertTrue(all(item["mode"] == "local_demo" for item in profile["worker_drivers"]))
+
+    def test_web_marks_a_partially_connected_team_as_mixed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-mixed-drivers.db")
+            drivers = Path(tmp) / "drivers.json"
+            drivers.write_text(
+                json.dumps(
+                    {
+                        "drivers": [
+                            {"kind": "cli", "name": "product", "command": [sys.executable, "-c", "pass"]}
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            base = start_test_web(self, db, drivers_path=drivers)
+            with urlopen(f"{base}/api/organization/profile", timeout=5) as response:
+                profile = json.loads(response.read().decode("utf-8"))
+
+        by_role = {item["role_id"]: item["mode"] for item in profile["worker_drivers"]}
+        self.assertEqual(profile["mode"], "mixed_driver")
+        self.assertEqual(by_role["product"], "external")
+        self.assertEqual(by_role["design"], "local_demo")
 
     def test_web_api_can_create_and_run_task(self):
         with tempfile.TemporaryDirectory() as tmp:

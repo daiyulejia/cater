@@ -226,6 +226,11 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _driver_mode(driver: Any) -> str:
+    """Classify drivers without exposing commands, endpoints, or secrets."""
+    return "local_demo" if type(driver).__name__ in {"GuidedDriver", "ScriptedDriver"} else "external"
+
+
 def serve(
     db_path: str | Path,
     *,
@@ -336,10 +341,16 @@ def make_handler(
                     )
             if path == "/api/organization/profile":
                 with self._runtime() as rt:
-                    driver_types = {
-                        type(rt.drivers[role.driver]).__name__
-                        for role in rt.roles
-                    }
+                    worker_drivers = [
+                        {
+                            "role_id": role.id,
+                            "name": role.name,
+                            "driver": role.driver,
+                            "mode": _driver_mode(rt.drivers[role.driver]),
+                        }
+                        for role in rt.worker_roles
+                    ]
+                    modes = {item["mode"] for item in worker_drivers}
                     return self._send_json(
                         {
                             "leader": _role_to_dict(rt.organization.leader),
@@ -347,9 +358,10 @@ def make_handler(
                             "workers": [_role_to_dict(role) for role in rt.worker_roles],
                             "mode": (
                                 "local_demo"
-                                if driver_types <= {"GuidedDriver", "ScriptedDriver"}
-                                else "external_driver"
+                                if modes <= {"local_demo"}
+                                else "external_driver" if modes <= {"external"} else "mixed_driver"
                             ),
+                            "worker_drivers": worker_drivers,
                         }
                     )
             if path == "/api/chain":
