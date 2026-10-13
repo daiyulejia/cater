@@ -880,6 +880,8 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
         governance_raw = None
     if not isinstance(roles_raw, list):
         raise ValueError("roles config must be a list or an object with roles")
+    if not roles_raw:
+        raise ValueError("roles config requires at least one role")
     roles = []
     seen_role_ids: set[str] = set()
     for item in roles_raw:

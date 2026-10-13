@@ -590,6 +590,10 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-empty string driver"):
                 Runtime(":memory:", roles_path=roles)
 
+            roles.write_text('{"roles":[]}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "at least one role"):
+                Runtime(":memory:", roles_path=roles)
+
     def test_supreme_decides_when_cabinet_has_no_consensus(self):
         with tempfile.TemporaryDirectory() as tmp:
             roles = Path(tmp) / "roles.json"
