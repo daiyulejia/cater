@@ -1349,6 +1349,7 @@ class WebTests(unittest.TestCase):
             controls_html = render_task(rt.task(fresh_task_id), rt.log.read(task_id=fresh_task_id))
 
         self.assertIn("Cabinet", html)
+        self.assertIn("Organization Path", html)
         self.assertIn("Decision Ladder", html)
         self.assertIn("Timeline", html)
         self.assertIn("Human Command", html)
@@ -1385,6 +1386,7 @@ class WebTests(unittest.TestCase):
             self.assertIn('"cabinet"', data)
             self.assertIn("cabinet.voted", data)
             self.assertIn('"decision_ladder"', data)
+            self.assertIn('"organization_path"', data)
             self.assertIn('"review"', data)
 
             with urlopen(f"{base}/tasks/{task_id}", timeout=5) as response:
@@ -1477,6 +1479,7 @@ class WebTests(unittest.TestCase):
             self.assertTrue(data["task"]["messages"])
             self.assertIn("review", data)
             self.assertIn("decision_ladder", data)
+            self.assertEqual(data["organization_path"][0]["status"], "cabinet_dispatch")
 
     def test_web_api_rejects_run_and_battle_conflict(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1552,6 +1555,7 @@ class WebTests(unittest.TestCase):
             with urlopen(assign, timeout=5) as response:
                 data = json.loads(response.read().decode("utf-8"))
             self.assertEqual(data["task"]["assignments"][-1]["owner"], "dev")
+            self.assertEqual(data["organization_path"][0]["status"], "direct")
 
             command = Request(
                 f"{base}/api/tasks/{task_id}/command",

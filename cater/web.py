@@ -15,6 +15,7 @@ from .events import Event
 from .fold import TaskSnapshot
 from .ladder import decision_ladder
 from .messages import message_relation
+from .path import organization_path
 from .review import build_review
 from .runtime import Runtime
 
@@ -475,6 +476,7 @@ def render_task(
     message_cards = "\n".join(_message_card(item) for item in task.messages)
     timeline = "\n".join(_event_row(event) for event in events)
     ladder = "\n".join(_ladder_step(step) for step in decision_ladder(events))
+    path = "\n".join(_path_step(step) for step in organization_path(task, events))
     governance = _governance_panel(task)
     decision = _decision_panel(task)
     distribution = _distribution_panel(task, roles or [])
@@ -500,6 +502,10 @@ def render_task(
         <section class="grid">
           {governance}
           {decision}
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>Organization Path</h2><span>task route</span></div>
+          <ol class="path-list">{path}</ol>
         </section>
         {_acceptance_panel(task)}
         {distribution}
@@ -581,6 +587,7 @@ def task_api_payload(rt: Runtime, task_id: str) -> dict[str, Any]:
         "task": task_to_dict(task),
         "events": [event_to_dict(e) for e in events],
         "decision_ladder": decision_ladder(events),
+        "organization_path": organization_path(task, events),
         "review": rt.review(task_id),
     }
 
@@ -869,6 +876,16 @@ def _event_row(event: Event) -> str:
 def _ladder_step(step: dict[str, Any]) -> str:
     return f"""
     <li class="ladder-step {escape(step.get("status"))}">
+      <strong>{escape(step.get("label"))}</strong>
+      <span>{escape(step.get("status"))}</span>
+      <p>{escape(step.get("detail"))}</p>
+    </li>
+    """
+
+
+def _path_step(step: dict[str, Any]) -> str:
+    return f"""
+    <li>
       <strong>{escape(step.get("label"))}</strong>
       <span>{escape(step.get("status"))}</span>
       <p>{escape(step.get("detail"))}</p>
@@ -1212,7 +1229,7 @@ td small {
   color: var(--muted);
   font-size: 13px;
 }
-.review-list, .assignment-list, .acceptance-list {
+.review-list, .assignment-list, .acceptance-list, .path-list {
   list-style: none;
   padding: 0;
   margin: 14px 0 0;
@@ -1236,21 +1253,24 @@ td small {
 .next-actions span {
   color: var(--accent);
 }
-.review-list li, .assignment-list li, .acceptance-list li {
+.path-list {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.review-list li, .assignment-list li, .acceptance-list li, .path-list li {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px;
   background: #fbfcfd;
 }
-.review-list strong, .review-list span, .assignment-list strong, .assignment-list span {
+.review-list strong, .review-list span, .assignment-list strong, .assignment-list span, .path-list strong, .path-list span {
   display: block;
 }
-.review-list span, .assignment-list span {
+.review-list span, .assignment-list span, .path-list span {
   color: var(--accent);
   font-size: 13px;
   margin-top: 4px;
 }
-.review-list p, .assignment-list p {
+.review-list p, .assignment-list p, .path-list p {
   margin-top: 8px;
 }
 .assignment-list small {
@@ -1443,6 +1463,6 @@ button.secondary {
   .ladder { grid-template-columns: 1fr; }
   .policy-grid { grid-template-columns: 1fr; }
   .api-grid { grid-template-columns: 1fr; }
-  .review-list, .assignment-list, .acceptance-list { grid-template-columns: 1fr; }
+  .review-list, .assignment-list, .acceptance-list, .path-list { grid-template-columns: 1fr; }
 }
 """
