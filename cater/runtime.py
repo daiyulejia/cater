@@ -1122,7 +1122,11 @@ class Runtime:
     def _task_memory(task: TaskSnapshot, role_id: str | None = None) -> str:
         parts = []
         if task.assignments:
-            latest_assignments = latest_assignments_by_owner(task.assignments)
+            latest_assignments = [
+                item
+                for item in latest_assignments_by_owner(task.assignments)
+                if item.get("status", "assigned") == "assigned"
+            ]
             owned = [
                 item for item in latest_assignments
                 if role_id is not None and str(item.get("owner") or "") == role_id
@@ -1152,9 +1156,13 @@ class Runtime:
                 if goal:
                     text += f" goal={goal}"
                 if text:
-                    commands.append(text[:180])
+                    commands.append(f"#{item.get('seq')}: {text[:180]}")
             if commands:
-                parts.append("recent_commands=" + " | ".join(commands))
+                parts.append(
+                    "recent_customer_directions_oldest_to_newest="
+                    + " | ".join(commands)
+                    + "; latest explicit direction overrides an earlier conflicting direction"
+                )
         if task.messages:
             messages = []
             for item in task.messages[-6:]:

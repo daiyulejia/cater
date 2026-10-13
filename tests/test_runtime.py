@@ -468,7 +468,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(driver.calls, 4)
         self.assertIn("Current round memory: no earlier outputs", driver.prompts[0])
         self.assertIn("Current round memory: alpha/assert: memory claim 1", driver.prompts[1])
-        self.assertIn("recent_commands=Use prior output", driver.prompts[2])
+        self.assertIn("recent_customer_directions_oldest_to_newest=#9: Use prior output", driver.prompts[2])
         self.assertIn("alpha/assert: memory claim 1", driver.prompts[2])
         self.assertIn("beta/assert: memory claim 2", driver.prompts[2])
 
@@ -699,6 +699,19 @@ class RuntimeTests(unittest.TestCase):
             latest = {item["owner"]: item for item in task.assignments}
             self.assertEqual(latest["product"]["status"], "deferred")
             self.assertEqual(latest["design"]["status"], "assigned")
+
+    def test_task_memory_excludes_deferred_work_and_orders_customer_directions(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("做一个网页任务入口")
+            rt.intake(task_id)
+            rt.command(task_id, "这一步只让 @罐头 先处理界面")
+            rt.command(task_id, "目标改为：先把输入框做到可用")
+            memory = rt._task_memory(rt.task(task_id), "design")
+
+        self.assertIn("assigned_work=design:", memory)
+        self.assertNotIn("product:", memory)
+        self.assertIn("recent_customer_directions_oldest_to_newest=", memory)
+        self.assertIn("latest explicit direction overrides", memory)
 
     def test_explicit_goal_rewrite_updates_the_task_and_next_plan(self):
         with Runtime(":memory:") as rt:
