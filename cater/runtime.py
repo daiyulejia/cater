@@ -353,6 +353,18 @@ class Runtime:
                 task_id=task_id,
                 payload={"brief": brief, "reason": "collaboration_continues", "options": brief["options"]},
             )
+            if self._can_complete_without_governance(utterances):
+                self.log.emit(
+                    actor=self._leader_actor(),
+                    type="agent.decided",
+                    task_id=task_id,
+                    payload={
+                        "resolution": "accepted",
+                        "option_id": brief["consensus"][0],
+                        "reason": "成员已形成一致结论，店长确认本轮成果可用。",
+                        "source": "leader",
+                    },
+                )
             return {"task_id": task_id, "brief_event": brief_event.seq, "brief": brief}
 
         cabinet_roles = self._cabinet_roles_for_consultation(utterances)
@@ -529,6 +541,19 @@ class Runtime:
             utterances.append(item)
             produced.append(item)
         return produced
+
+    @staticmethod
+    def _can_complete_without_governance(utterances: list[dict[str, Any]]) -> bool:
+        """Autonomously close only a genuinely converged, non-challenged round."""
+        if not utterances:
+            return False
+        positions = [item["payload"] for item in utterances]
+        options = {str(position.get("option_id") or "") for position in positions}
+        return (
+            len(options) == 1
+            and bool(next(iter(options)))
+            and all(position.get("stance") != "challenge" for position in positions)
+        )
 
     def _work_status(self, role: Role) -> dict[str, str]:
         """Publish a bounded progress signal, never hidden model reasoning."""

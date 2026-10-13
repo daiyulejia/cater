@@ -611,7 +611,9 @@ class RuntimeTests(unittest.TestCase):
                 ladder = decision_ladder(events)
                 html = render_task(task, events)
 
-                self.assertEqual(task.status, "running")
+                self.assertEqual(task.status, "decided")
+                self.assertEqual(task.decision["source"], "leader")
+                self.assertIn("agent.decided", event_types)
                 self.assertIsNone(task.cabinet)
                 self.assertNotIn("cabinet.voted", event_types)
                 self.assertEqual(result["brief"]["governance"]["status"], "not_needed")
@@ -683,10 +685,13 @@ class RuntimeTests(unittest.TestCase):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("Default collaboration")
             result = rt.collaborate(task_id)
+            task = rt.task(task_id)
             governance = result["brief"]["governance"]
 
             self.assertEqual(governance["status"], "not_needed")
             self.assertEqual(governance["signals"], [])
+            self.assertEqual(task.status, "decided")
+            self.assertEqual(task.decision["source"], "leader")
 
     def test_runtime_accepts_external_role_and_driver_configs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2118,7 +2123,8 @@ class WebTests(unittest.TestCase):
             with Runtime(db) as rt:
                 tasks = rt.tasks()
                 self.assertEqual(len(tasks), 1)
-                self.assertEqual(tasks[0].status, "running")
+                self.assertEqual(tasks[0].status, "decided")
+                self.assertEqual(tasks[0].decision["source"], "leader")
                 self.assertEqual(tasks[0].acceptance, ["battle runs", "inbox updates"])
                 self.assertEqual(len(tasks[0].assignments), 3)
 
