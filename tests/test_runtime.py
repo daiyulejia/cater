@@ -1082,6 +1082,14 @@ class CliTests(unittest.TestCase):
         self.assertIn("chain=hash chain ok", out)
         self.assertIn("role product: driver=product configured", out)
 
+        code, out = self.run_cli("doctor", "--json")
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["roles"], 3)
+        self.assertEqual(data["chain"]["summary"], "hash chain ok, checked 0 event(s)")
+        self.assertEqual(data["role_checks"][0]["status"], "configured")
+
     def test_cli_reports_config_errors_without_traceback(self):
         roles = Path(self.tmp.name) / "bad-roles.json"
         roles.write_text('{"roles":[{"name":"Missing id"}]}', encoding="utf-8")
@@ -1106,6 +1114,15 @@ class CliTests(unittest.TestCase):
         code = main(["--db", self.db, "--drivers", str(config), "doctor", "--probe"])
         self.assertEqual(code, 0)
         self.assertIn("role product: driver=product configured, alive", self.out.getvalue())
+
+        self.out.seek(0)
+        self.out.truncate(0)
+        code = main(["--db", self.db, "--drivers", str(config), "doctor", "--probe", "--json"])
+        self.assertEqual(code, 0)
+        data = json.loads(self.out.getvalue())
+        product = next(item for item in data["role_checks"] if item["id"] == "product")
+        self.assertTrue(product["probe"])
+        self.assertEqual(product["driver_type"], "CliDriver")
 
     def test_cli_dispatch_command(self):
         code, out = self.run_cli("new", "Dispatch only")

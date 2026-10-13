@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from . import __version__
 from .ladder import decision_ladder
@@ -352,28 +353,71 @@ def cmd_policy(args: argparse.Namespace) -> int:
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
-        report = rt.verify_chain()
-        ok = report.ok
-        print(f"cater={__version__}")
-        print(f"database={Path(args.db or DEFAULT_DB)}")
-        print(f"roles={len(rt.roles)}")
-        print(f"drivers={len(rt.drivers)}")
-        print(f"chain={report.describe()}")
-        print(f"driver_attempts={rt.driver_attempts}")
-        print(f"circuit_breaker_threshold={rt.circuit_breaker_threshold}")
-        for role in rt.roles:
-            driver = rt.drivers.get(role.driver)
-            status = "configured" if driver is not None else "missing"
-            if args.probe and driver is not None:
-                probe = getattr(driver, "probe", None)
-                if callable(probe):
-                    alive = bool(probe())
-                    status += f", {'alive' if alive else 'unavailable'}"
-                    ok = ok and alive
-                else:
-                    status += ", no probe"
-            print(f"role {role.id}: driver={role.driver} {status}")
-        return 0 if ok else 1
+        data = _doctor_report(rt, args, probe=bool(args.probe))
+        if args.json:
+            print(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
+            return 0 if data["ok"] else 1
+        print(f"cater={data['cater']}")
+        print(f"database={data['database']}")
+        print(f"roles={data['roles']}")
+        print(f"drivers={data['drivers']}")
+        print(f"chain={data['chain']['summary']}")
+        print(f"driver_attempts={data['reliability']['driver_attempts']}")
+        print(f"circuit_breaker_threshold={data['reliability']['circuit_breaker_threshold']}")
+        for role in data["role_checks"]:
+            status = role["status"]
+            if role["probe"] is not None:
+                status += f", {'alive' if role['probe'] else 'unavailable'}"
+            elif args.probe:
+                status += ", no probe"
+            print(f"role {role['id']}: driver={role['driver']} {status}")
+        return 0 if data["ok"] else 1
+
+
+def _doctor_report(rt: Runtime, args: argparse.Namespace, *, probe: bool) -> dict[str, Any]:
+    report = rt.verify_chain()
+    role_checks = []
+    ok = report.ok
+    for role in rt.roles:
+        driver = rt.drivers.get(role.driver)
+        status = "configured" if driver is not None else "missing"
+        probe_result = None
+        if probe and driver is not None:
+            probe_fn = getattr(driver, "probe", None)
+            if callable(probe_fn):
+                probe_result = bool(probe_fn())
+                ok = ok and probe_result
+        role_checks.append(
+            {
+                "id": role.id,
+                "role": role.role,
+                "driver": role.driver,
+                "driver_type": type(driver).__name__ if driver is not None else None,
+                "status": status,
+                "probe": probe_result,
+            }
+        )
+    return {
+        "ok": ok,
+        "cater": __version__,
+        "database": str(Path(args.db or DEFAULT_DB)),
+        "roles": len(rt.roles),
+        "drivers": len(rt.drivers),
+        "chain": {
+            "ok": report.ok,
+            "checked": report.checked,
+            "signed": report.signed,
+            "head_hash": report.head_hash,
+            "broken_at": report.broken_at,
+            "reason": report.reason,
+            "summary": report.describe(),
+        },
+        "reliability": {
+            "driver_attempts": rt.driver_attempts,
+            "circuit_breaker_threshold": rt.circuit_breaker_threshold,
+        },
+        "role_checks": role_checks,
+    }
 
 
 def cmd_probe_driver(args: argparse.Namespace) -> int:
@@ -583,6 +627,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("policy", help="show organization governance policy").set_defaults(func=cmd_policy)
     p_doctor = sub.add_parser("doctor", help="check runtime wiring and local event chain")
     p_doctor.add_argument("--probe", action="store_true", help="actively probe drivers that support a probe method")
+    p_doctor.add_argument("--json", action="store_true", help="print machine-readable doctor status")
     p_doctor.set_defaults(func=cmd_doctor)
 
     p_probe = sub.add_parser("probe-driver", help="probe a configured driver")
