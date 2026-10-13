@@ -452,7 +452,7 @@ def cmd_demo_direct(args: argparse.Namespace) -> int:
         with Runtime(
             db,
             drivers_path=drivers_path,
-            roles_path=args.roles,
+            roles_path=None,
             driver_attempts=args.driver_attempts,
             circuit_breaker_threshold=args.circuit_breaker_threshold,
             audit_key=resolve_audit_key(args),

@@ -859,6 +859,23 @@ class CliTests(unittest.TestCase):
         self.assertIn("governance: not_needed", out)
         self.assertIn("cater review", out)
 
+    def test_cli_direct_demo_uses_deterministic_default_roles(self):
+        roles = Path(self.tmp.name) / "roles.json"
+        roles.write_text(
+            """
+            {
+              "roles": [
+                {"id":"solo","name":"Solo","role":"solo","driver":"solo"}
+              ]
+            }
+            """,
+            encoding="utf-8",
+        )
+        code = main(["--db", self.db, "--roles", str(roles), "demo", "--direct"])
+
+        self.assertEqual(code, 0)
+        self.assertIn("assigned: dev", self.out.getvalue())
+
     def test_cli_version(self):
         with self.assertRaises(SystemExit) as raised:
             main(["--version"])
