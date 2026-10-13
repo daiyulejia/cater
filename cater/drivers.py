@@ -51,7 +51,11 @@ class ScriptedDriver:
         else:
             text = self.script[self.cursor % len(self.script)]
             self.cursor += 1
-        return DriverResponse(text=text, tokens=self.tokens_per_call, meta={"driver": self.name})
+        return DriverResponse(
+            text=text,
+            tokens=self.tokens_per_call,
+            meta={"driver": self.name, "token_usage": "estimated"},
+        )
 
 
 class GuidedDriver:
@@ -97,7 +101,7 @@ class GuidedDriver:
         return DriverResponse(
             text=json.dumps(payload, ensure_ascii=False),
             tokens=self.tokens_per_call,
-            meta={"driver": self.name, "mode": "guided_demo"},
+            meta={"driver": self.name, "mode": "guided_demo", "token_usage": "estimated"},
         )
 
 

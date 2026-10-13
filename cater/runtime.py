@@ -513,6 +513,7 @@ class Runtime:
                 "confidence": parsed.get("confidence"),
                 "text": parsed.get("text", response.text),
                 "tokens": response.tokens,
+                "token_usage": self._token_usage(response),
                 "driver": role.driver,
             }
             visible_refs = {
@@ -777,7 +778,20 @@ class Runtime:
             },
             ensure_ascii=False,
         )
-        return DriverResponse(text=text, tokens=0, meta={"driver": role.driver, "contained": True})
+        return DriverResponse(
+            text=text,
+            tokens=0,
+            meta={"driver": role.driver, "contained": True, "token_usage": "unavailable"},
+        )
+
+    @staticmethod
+    def _token_usage(response: DriverResponse) -> str:
+        """Normalize optional driver telemetry without trusting missing data as zero."""
+        meta = response.meta if isinstance(response.meta, dict) else {}
+        source = meta.get("token_usage")
+        if source in {"reported", "estimated", "unavailable"}:
+            return str(source)
+        return "reported"
 
     def _prompt(
         self,

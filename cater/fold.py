@@ -29,6 +29,7 @@ class TaskSnapshot:
     assignments: list[dict[str, Any]] = field(default_factory=list)
     deliverables: list[dict[str, Any]] = field(default_factory=list)
     tokens: int = 0
+    token_usage: dict[str, int] = field(default_factory=dict)
 
 
 def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
@@ -76,6 +77,10 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
                 }
             )
             task.tokens += int(payload.get("tokens") or 0)
+            source = payload.get("token_usage", "reported")
+            if source not in {"reported", "estimated", "unavailable"}:
+                source = "reported"
+            task.token_usage[source] = task.token_usage.get(source, 0) + 1
         elif event.type == "driver.failed":
             task.driver_failures.append({"seq": event.seq, **payload})
         elif event.type == "escalation.triggered":

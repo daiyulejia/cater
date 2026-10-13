@@ -59,12 +59,13 @@ class PromptCaptureDriver:
 
 
 class StaticResponseDriver:
-    def __init__(self, text: str, tokens: int = 5):
+    def __init__(self, text: str, tokens: int = 5, meta: dict | None = None):
         self.text = text
         self.tokens = tokens
+        self.meta = meta
 
     def complete(self, *, role: str, prompt: str, context: dict) -> DriverResponse:
-        return DriverResponse(text=self.text, tokens=self.tokens)
+        return DriverResponse(text=self.text, tokens=self.tokens, meta=self.meta)
 
 
 class ReplyDriver:
@@ -1013,6 +1014,27 @@ class RuntimeTests(unittest.TestCase):
                 findings = [item["finding"] for item in review["lenses"]]
 
         self.assertTrue(any("5000 token" in finding for finding in findings))
+
+    def test_review_does_not_treat_unreported_token_usage_as_free(self):
+        driver = StaticResponseDriver(
+            '{"stance":"assert","option_id":"A","claim":"External output","evidence":[],"confidence":0.8,"text":"ok"}',
+            tokens=0,
+            meta={"token_usage": "unavailable"},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                '''{"cabinet":{"approval_threshold":1,"quorum":1,"veto_roles":[]},"roles":[{"id":"cost","name":"Cost","role":"planner","driver":"static"}]}''',
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"static": driver}) as rt:
+                task_id = rt.create_task("Watch unknown cost")
+                rt.collaborate(task_id)
+                task = rt.task(task_id)
+                review = rt.review(task_id)
+
+        self.assertEqual(task.token_usage, {"unavailable": 1})
+        self.assertTrue(any("usage is unavailable" in item["finding"] for item in review["lenses"]))
 
 
 class CabinetTests(unittest.TestCase):

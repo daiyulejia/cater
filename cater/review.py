@@ -187,6 +187,23 @@ def _cost_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     tokens = sum(task.tokens for task in tasks)
     if not messages:
         return _lens("design", "ok", "No token-bearing agent output is recorded yet.", "Measure token cost once real driver output exists.")
+    sources = {source: sum(task.token_usage.get(source, 0) for task in tasks) for source in ("reported", "estimated", "unavailable")}
+    unavailable = sources["unavailable"]
+    estimated = sources["estimated"]
+    if unavailable:
+        return _lens(
+            "design",
+            "watch",
+            f"Token usage is unavailable for {unavailable} of {messages} message(s); the recorded {tokens} token(s) is incomplete.",
+            "Treat cost as unknown until the connected driver reports verified usage telemetry.",
+        )
+    if estimated:
+        return _lens(
+            "design",
+            "watch",
+            f"Token usage is estimated for {estimated} of {messages} message(s); {tokens} token(s) is not a billing total.",
+            "Use provider-reported usage before making cost decisions from this workspace.",
+        )
     average = tokens / messages
     if tokens >= 4000 or average >= 1500:
         return _lens("design", "watch", f"Agent output used {tokens} token(s) across {messages} message(s).", "Review whether fewer roles, direct assignment, or a smaller prompt would preserve quality with less cost.")

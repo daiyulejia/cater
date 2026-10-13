@@ -10,6 +10,10 @@ Environment variables:
   CATER_CODEX_TIMEOUT  Per-completion timeout in seconds (default: 180).
   CATER_CODEX_WORKDIR  Optional existing directory passed to Codex with ``-C``.
 
+Codex CLI's documented ``exec`` contract does not expose verified usage totals
+in the structured final-message file. The adapter therefore marks usage as
+``unavailable`` instead of pretending that an unknown amount is zero.
+
 The adapter intentionally uses Codex's read-only sandbox and never enables
 approval bypass flags.  It does not forward CLI stderr into Cater events.
 """
@@ -105,7 +109,11 @@ def handle(request: dict[str, Any]) -> dict[str, Any]:
         "ok": True,
         "text": json.dumps(payload, ensure_ascii=False),
         "tokens": 0,
-        "meta": {"adapter": "examples.codex_cli_driver", "mode": "codex_exec"},
+        "meta": {
+            "adapter": "examples.codex_cli_driver",
+            "mode": "codex_exec",
+            "token_usage": "unavailable",
+        },
     }
 
 

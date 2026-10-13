@@ -203,10 +203,12 @@ Driver 返回：
 
 ```json
 {"id":"...","ok":true,"pong":true}
-{"id":"...","ok":true,"text":"{\"stance\":\"assert\",\"option_id\":\"A\",\"claim\":\"...\",\"evidence\":[],\"text\":\"...\"}","tokens":123,"meta":{}}
+{"id":"...","ok":true,"text":"{\"stance\":\"assert\",\"option_id\":\"A\",\"claim\":\"...\",\"evidence\":[],\"text\":\"...\"}","tokens":123,"meta":{"token_usage":"reported"}}
 ```
 
 这个边界刻意很小。LangChain、LangGraph、Codex CLI、Claude Code、Gemini CLI 或自定义 API wrapper 都可以藏在这个进程后面，而不污染 Cater 的核心运行时。
+
+`meta.token_usage` 可选值为 `reported`、`estimated`、`unavailable`。缺省值是 `reported`，供已经返回可信用量的第三方 driver 保持兼容；演示 driver 会标记为 `estimated`。若 provider 没有可验证的用量数据，必须标记为 `unavailable`，Cater 会在回放和 `review` 中把成本显示为未知，而不是把它误报成零。随附的 Codex CLI 适配器遵循这一规则。
 
 ## 角色命名
 
