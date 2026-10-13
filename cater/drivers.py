@@ -136,14 +136,14 @@ def _is_cabinet_member(context: dict[str, Any]) -> bool:
 def _cat_response(role: str, focus: str, name: str) -> tuple[str, str, list[str], dict[str, str]]:
     if "工程" in role or "实现" in role:
         return (
-            f"{name}接下实现线：我会先把“{focus}”收成一个能跑、能验证的最小路径，再把依赖和风险写清楚。",
+            f"{name}接着往下做：我会先把“{focus}”收成一个能跑、能验证的最小路径，再把依赖和风险写清楚。",
             "先落地可验证的最小实现路径",
             ["先确认接口与状态边界", "保留可运行或可复现的证据"],
             {"title": f"{name}的实现路径", "summary": "已收束实现边界，并准备提供可运行验证。", "kind": "plan"},
         )
     if "质量" in role or "验证" in role:
         return (
-            f"{name}会盯住“{focus}”的验收：我先列出最容易漏掉的风险，再确认结果真的能回放。",
+            f"{name}来帮大家守住边界：推进“{focus}”前，我先列出容易漏掉的地方，再确认结果真的能复查。",
             "先用可回放证据守住验收边界",
             ["结果需要能被复查", "范围变化要有回归检查"],
             {"title": f"{name}的验证清单", "summary": "已建立面向验收与回放的风险检查点。", "kind": "checklist"},
@@ -159,7 +159,7 @@ def _cat_response(role: str, focus: str, name: str) -> tuple[str, str, list[str]
 def _cabinet_response(role: str, focus: str, name: str) -> tuple[str, str, list[str]]:
     if "工程" in role or "实现" in role:
         return (
-            f"{name}看过猫咪们的产出：这单“{focus}”可以沿最小实现路径推进，依赖和恢复边界要留在台面上。",
+            f"{name}看过大家的进展：这单“{focus}”可以沿最小路径推进，依赖和恢复边界要留在台面上。",
             "认可最小实现路径，并要求保留依赖与恢复边界",
             ["实现顺序应当可追踪", "异常时需要可恢复的退路"],
         )
@@ -170,7 +170,7 @@ def _cabinet_response(role: str, focus: str, name: str) -> tuple[str, str, list[
             ["验收结果需要可复查", "风险不能只写在口头结论里"],
         )
     return (
-        f"{name}确认方向：猫咪们应该先交付能让顾客判断的成果，再逐步扩展“{focus}”的范围。",
+        f"{name}确认方向：大家应该先交付能让顾客判断的成果，再逐步扩展“{focus}”的范围。",
         "认可先交付可判断成果，再扩展范围",
         ["先对齐顾客可见价值", "避免分工变成无效仪式"],
     )

@@ -238,6 +238,7 @@ class RuntimeTests(unittest.TestCase):
             messages = rt.task(task_id).messages
 
         self.assertIn("预约、菜单浏览与意见反馈", messages[0]["text"])
+        self.assertNotIn("实现线", messages[1]["text"])
         self.assertEqual(messages[1]["target"], "product")
         self.assertEqual(messages[1]["reply_to"], messages[0]["seq"])
 
@@ -395,6 +396,7 @@ class RuntimeTests(unittest.TestCase):
                 html = render_task(task, rt.log.read(task_id=task_id))
 
         self.assertIn("Agent-to-agent policy", driver.prompts[0])
+        self.assertIn("User-facing response", driver.prompts[0])
         match = re.search(r"alpha/assert: Draft the plan \(#(\d+)\)", driver.prompts[1])
         self.assertIsNotNone(match)
         prior_seq = int(match.group(1))
