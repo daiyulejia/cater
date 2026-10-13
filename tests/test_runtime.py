@@ -130,10 +130,12 @@ class BlockingDriver:
     name = "blocking"
 
     def __init__(self):
+        self.calls = 0
         self.started = threading.Event()
         self.release = threading.Event()
 
     def complete(self, *, role: str, prompt: str, context: dict) -> DriverResponse:
+        self.calls += 1
         self.started.set()
         if not self.release.wait(timeout=3):
             raise RuntimeError("test driver was not released")
@@ -2531,6 +2533,18 @@ class WebTests(unittest.TestCase):
                 sum(event["type"] == "activity.queued" for event in repeated["events"]),
                 1,
             )
+
+            synchronous_duplicate = Request(
+                f"{base}/api/tasks/{task_id}/run",
+                data=b"{}",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(HTTPError) as error:
+                urlopen(synchronous_duplicate, timeout=2)
+            self.assertEqual(error.exception.code, 409)
+            self.assertIn("already running", error.exception.read().decode("utf-8"))
+            self.assertEqual(driver.calls, 1)
 
             driver.release.set()
             deadline = time.monotonic() + 3

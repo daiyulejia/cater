@@ -539,6 +539,8 @@ def make_handler(
                     return
                 background = _truthy(data.get("background"))
                 background_action: str | None = None
+                if action in {"run", "battle"} and not background and activities.status(task_id)["active"]:
+                    return self._conflict("a collaboration activity is already running for this task")
                 with self._runtime() as rt:
                     if rt.task(task_id) is None:
                         return self._not_found()
@@ -762,6 +764,15 @@ def make_handler(
             raw = message.encode("utf-8")
             self.send_response(HTTPStatus.BAD_REQUEST)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _conflict(self, message: str) -> None:
+            raw = message.encode("utf-8")
+            self.send_response(HTTPStatus.CONFLICT)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
