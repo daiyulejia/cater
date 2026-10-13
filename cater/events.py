@@ -21,6 +21,9 @@ GENESIS_HASH = "0" * 64
 EVENT_CATEGORIES = {
     "task.created": "lifecycle",
     "task.started": "lifecycle",
+    "activity.queued": "lifecycle",
+    "activity.completed": "lifecycle",
+    "activity.failed": "lifecycle",
     "mission.created": "planning",
     "task.decomposed": "planning",
     "subtask.assigned": "planning",
@@ -112,8 +115,11 @@ class EventLog:
         self.key_id = key_id
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path)
+        self.db = sqlite3.connect(self.path, timeout=5)
         self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA busy_timeout = 5000")
+        if self.path != ":memory:":
+            self.db.execute("PRAGMA journal_mode = WAL")
         self._init_schema()
 
     def close(self) -> None:

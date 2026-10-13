@@ -5,20 +5,134 @@ from __future__ import annotations
 import html
 import json
 import mimetypes
+import threading
+import uuid
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .assignments import latest_assignments_by_owner
-from .events import Event
+from .events import Actor as EventActor, Event
 from .fold import TaskSnapshot
 from .ladder import decision_ladder
 from .messages import message_relation
 from .path import organization_path
 from .review import build_review
 from .runtime import Runtime
+
+
+class ActivityRunner:
+    """Run long collaboration rounds off the request thread, one per task."""
+
+    def __init__(self, runtime_factory: Callable[[], Runtime]):
+        self._runtime_factory = runtime_factory
+        self._lock = threading.RLock()
+        self._activities: dict[str, dict[str, Any]] = {}
+
+    def status(self, task_id: str) -> dict[str, Any]:
+        with self._lock:
+            activity = dict(self._activities.get(task_id, {}))
+        if not activity:
+            return {"state": "idle", "active": False}
+        activity["active"] = activity["state"] in {"queued", "running"}
+        return activity
+
+    def submit(self, task_id: str, action: str) -> dict[str, Any]:
+        with self._lock:
+            current = self._activities.get(task_id)
+            if current and current["state"] in {"queued", "running"}:
+                return self.status(task_id)
+            activity = {
+                "id": "activity_" + uuid.uuid4().hex[:10],
+                "action": action,
+                "state": "queued",
+                "queued_at": _now_iso(),
+            }
+            self._activities[task_id] = activity
+
+        try:
+            with self._runtime_factory() as runtime:
+                if runtime.task(task_id) is None:
+                    raise KeyError(task_id)
+                runtime.log.emit(
+                    actor=EventActor.system("orchestrator"),
+                    type="activity.queued",
+                    task_id=task_id,
+                    payload={"activity_id": activity["id"], "action": action},
+                )
+        except Exception as exc:
+            self._finish(task_id, activity["id"], "failed", error=str(exc))
+            raise
+
+        thread = threading.Thread(
+            target=self._run,
+            args=(task_id, activity["id"], action),
+            name=f"cater-{action}-{task_id}",
+            daemon=True,
+        )
+        thread.start()
+        return self.status(task_id)
+
+    def _run(self, task_id: str, activity_id: str, action: str) -> None:
+        self._mark_running(task_id, activity_id)
+        try:
+            with self._runtime_factory() as runtime:
+                if action == "run":
+                    runtime.collaborate(task_id)
+                elif action == "battle":
+                    runtime.battle(task_id)
+                else:
+                    raise ValueError(f"unsupported background action {action!r}")
+                runtime.log.emit(
+                    actor=EventActor.system("orchestrator"),
+                    type="activity.completed",
+                    task_id=task_id,
+                    payload={"activity_id": activity_id, "action": action},
+                )
+        except Exception as exc:
+            try:
+                with self._runtime_factory() as runtime:
+                    if runtime.task(task_id) is not None:
+                        runtime.log.emit(
+                            actor=EventActor.system("orchestrator"),
+                            type="activity.failed",
+                            task_id=task_id,
+                            payload={
+                                "activity_id": activity_id,
+                                "action": action,
+                                "error_type": type(exc).__name__,
+                                "message": str(exc),
+                            },
+                        )
+            except Exception:
+                pass
+            self._finish(task_id, activity_id, "failed", error=str(exc))
+            return
+        self._finish(task_id, activity_id, "completed")
+
+    def _mark_running(self, task_id: str, activity_id: str) -> None:
+        with self._lock:
+            activity = self._activities.get(task_id)
+            if activity and activity["id"] == activity_id:
+                activity["state"] = "running"
+                activity["started_at"] = _now_iso()
+
+    def _finish(self, task_id: str, activity_id: str, state: str, *, error: str | None = None) -> None:
+        with self._lock:
+            activity = self._activities.get(task_id)
+            if not activity or activity["id"] != activity_id:
+                return
+            activity["state"] = state
+            activity["finished_at"] = _now_iso()
+            if error:
+                activity["error"] = error
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def serve(
@@ -73,8 +187,24 @@ def make_handler(
     audit_key: str | bytes | None = None,
     audit_key_id: str = "local",
     static_dir: str | Path | None = None,
+    runtime_factory: Callable[[], Runtime] | None = None,
 ):
     static_root = Path(static_dir).resolve() if static_dir is not None else None
+
+    def build_runtime() -> Runtime:
+        if runtime_factory is not None:
+            return runtime_factory()
+        return Runtime(
+            db_path,
+            drivers_path=drivers_path,
+            roles_path=roles_path,
+            driver_attempts=driver_attempts,
+            circuit_breaker_threshold=circuit_breaker_threshold,
+            audit_key=audit_key,
+            audit_key_id=audit_key_id,
+        )
+
+    activities = ActivityRunner(build_runtime)
 
     class CaterHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -93,7 +223,12 @@ def make_handler(
                 return self._send_html(render_index(self._runtime()))
             if path == "/api/tasks":
                 with self._runtime() as rt:
-                    return self._send_json([task_to_dict(task) for task in rt.tasks()])
+                    return self._send_json(
+                        [
+                            {**task_to_dict(task), "activity": activities.status(task.id)}
+                            for task in rt.tasks()
+                        ]
+                    )
             if path == "/api/organization":
                 with self._runtime() as rt:
                     return self._send_json(
@@ -108,7 +243,9 @@ def make_handler(
                     task = rt.task(task_id)
                     if task is None:
                         return self._not_found()
-                    return self._send_json(task_api_payload(rt, task_id))
+                    return self._send_json(
+                        task_api_payload(rt, task_id, activity=activities.status(task_id))
+                    )
             if path.startswith("/tasks/"):
                 task_id = path.split("/", 2)[2]
                 query = parse_qs(parsed.query)
@@ -143,6 +280,7 @@ def make_handler(
                 force_battle = _truthy(data.get("battle"))
                 if run_now and force_battle:
                     return self._bad_request("choose either run for normal collaboration or battle for forced governance")
+                background = _truthy(data.get("background"))
                 assign_owner = str(data.get("assign_to", "")).strip()
                 acceptance = _acceptance_lines(data.get("acceptance"))
                 with self._runtime() as rt:
@@ -158,11 +296,17 @@ def make_handler(
                             objective=_optional_text(data.get("assign_objective")),
                             acceptance=_optional_text(data.get("assign_acceptance")),
                         )
-                    if run_now:
+                    if run_now and not background:
                         rt.collaborate(task_id)
-                    elif force_battle:
+                    elif force_battle and not background:
                         rt.battle(task_id)
-                    return self._send_json(task_api_payload(rt, task_id), status=HTTPStatus.CREATED)
+                background_action = "run" if run_now else "battle" if force_battle else None
+                if background and background_action:
+                    activities.submit(task_id, background_action)
+                return self._send_json(
+                    self._task_payload(task_id, activities),
+                    status=HTTPStatus.ACCEPTED if background and background_action else HTTPStatus.CREATED,
+                )
             if path.startswith("/api/tasks/"):
                 parts = path.split("/")
                 if len(parts) != 5:
@@ -172,14 +316,22 @@ def make_handler(
                 data = self._read_json()
                 if data is None:
                     return
+                background = _truthy(data.get("background"))
+                background_action: str | None = None
                 with self._runtime() as rt:
                     if rt.task(task_id) is None:
                         return self._not_found()
                     try:
                         if action == "run":
-                            rt.collaborate(task_id)
+                            if background:
+                                background_action = "run"
+                            else:
+                                rt.collaborate(task_id)
                         elif action == "battle":
-                            rt.battle(task_id)
+                            if background:
+                                background_action = "battle"
+                            else:
+                                rt.battle(task_id)
                         elif action == "dispatch":
                             rt.dispatch(task_id)
                         elif action == "assign":
@@ -214,7 +366,12 @@ def make_handler(
                             return self._not_found()
                     except ValueError as exc:
                         return self._bad_request(str(exc))
-                    return self._send_json(task_api_payload(rt, task_id))
+                if background_action:
+                    activities.submit(task_id, background_action)
+                return self._send_json(
+                    self._task_payload(task_id, activities),
+                    status=HTTPStatus.ACCEPTED if background_action else HTTPStatus.OK,
+                )
             if path == "/tasks":
                 data = self._read_form()
                 goal = data.get("goal", [""])[0].strip()
@@ -324,15 +481,11 @@ def make_handler(
             return
 
         def _runtime(self) -> Runtime:
-            return Runtime(
-                db_path,
-                drivers_path=drivers_path,
-                roles_path=roles_path,
-                driver_attempts=driver_attempts,
-                circuit_breaker_threshold=circuit_breaker_threshold,
-                audit_key=audit_key,
-                audit_key_id=audit_key_id,
-            )
+            return build_runtime()
+
+        def _task_payload(self, task_id: str, runner: ActivityRunner) -> dict[str, Any]:
+            with self._runtime() as runtime:
+                return task_api_payload(runtime, task_id, activity=runner.status(task_id))
 
         def _send_html(self, body: str) -> None:
             raw = body.encode("utf-8")
@@ -635,18 +788,26 @@ def task_to_dict(task: TaskSnapshot) -> dict[str, Any]:
     }
 
 
-def task_api_payload(rt: Runtime, task_id: str) -> dict[str, Any]:
+def task_api_payload(
+    rt: Runtime,
+    task_id: str,
+    *,
+    activity: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     task = rt.task(task_id)
     if task is None:
         raise KeyError(task_id)
     events = rt.log.read(task_id=task_id)
-    return {
+    payload = {
         "task": task_to_dict(task),
         "events": [event_to_dict(e) for e in events],
         "decision_ladder": decision_ladder(events),
         "organization_path": organization_path(task, events),
         "review": rt.review(task_id),
     }
+    if activity is not None:
+        payload["activity"] = activity
+    return payload
 
 
 def chain_to_dict(report: Any) -> dict[str, Any]:

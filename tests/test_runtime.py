@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tomllib
 import unittest
 from pathlib import Path
@@ -92,14 +93,38 @@ class ReplyDriver:
         return DriverResponse(text=json.dumps(text), tokens=4)
 
 
-def start_test_web(testcase: unittest.TestCase, db: str) -> str:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
+class BlockingDriver:
+    name = "blocking"
+
+    def __init__(self):
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def complete(self, *, role: str, prompt: str, context: dict) -> DriverResponse:
+        self.started.set()
+        if not self.release.wait(timeout=3):
+            raise RuntimeError("test driver was not released")
+        return DriverResponse(
+            text='{"stance":"assert","option_id":"A","claim":"background output","text":"background output"}',
+            tokens=1,
+        )
+
+
+def start_test_web(
+    testcase: unittest.TestCase,
+    db: str,
+    *,
+    return_server: bool = False,
+    **handler_options: object,
+) -> str | tuple[str, ThreadingHTTPServer, threading.Thread]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db, **handler_options))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     testcase.addCleanup(server.server_close)
     testcase.addCleanup(thread.join, 1)
     testcase.addCleanup(server.shutdown)
-    return f"http://127.0.0.1:{server.server_port}"
+    base = f"http://127.0.0.1:{server.server_port}"
+    return (base, server, thread) if return_server else base
 
 
 class RuntimeTests(unittest.TestCase):
@@ -1454,6 +1479,78 @@ class CliTests(unittest.TestCase):
 
 
 class WebTests(unittest.TestCase):
+    def test_web_can_run_collaboration_in_background_without_duplicate_rounds(self):
+        driver = BlockingDriver()
+        self.addCleanup(driver.release.set)
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-background.db")
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                json.dumps(
+                    {
+                        "governance": {"trigger_on_option_split": False},
+                        "cabinet": {"approval_threshold": 1, "quorum": 1, "veto_roles": []},
+                        "roles": [{"id": "worker", "name": "执行", "role": "worker", "driver": "blocking"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def runtime_factory() -> Runtime:
+                return Runtime(db, roles_path=roles, drivers={"blocking": driver})
+
+            base, server, thread = start_test_web(
+                self,
+                db,
+                runtime_factory=runtime_factory,
+                return_server=True,
+            )
+            request = Request(
+                f"{base}/api/tasks",
+                data=json.dumps({"goal": "Run in the background", "run": True, "background": True}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=2) as response:
+                self.assertEqual(response.status, 202)
+                queued = json.loads(response.read().decode("utf-8"))
+
+            task_id = queued["task"]["id"]
+            self.assertTrue(queued["activity"]["active"])
+            self.assertTrue(driver.started.wait(timeout=1))
+
+            duplicate = Request(
+                f"{base}/api/tasks/{task_id}/run",
+                data=json.dumps({"background": True}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(duplicate, timeout=2) as response:
+                self.assertEqual(response.status, 202)
+                repeated = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(repeated["activity"]["id"], queued["activity"]["id"])
+            self.assertEqual(
+                sum(event["type"] == "activity.queued" for event in repeated["events"]),
+                1,
+            )
+
+            driver.release.set()
+            deadline = time.monotonic() + 3
+            completed = repeated
+            while time.monotonic() < deadline:
+                with urlopen(f"{base}/api/tasks/{task_id}", timeout=2) as response:
+                    completed = json.loads(response.read().decode("utf-8"))
+                if not completed["activity"]["active"]:
+                    break
+                time.sleep(0.03)
+
+            self.assertEqual(completed["activity"]["state"], "completed")
+            self.assertIn("activity.completed", [event["type"] for event in completed["events"]])
+            self.assertEqual(len(completed["task"]["messages"]), 1)
+            server.shutdown()
+            thread.join(timeout=1)
+            server.server_close()
+
     def test_bundled_workroom_includes_chinese_shell_and_static_assets(self):
         root = Path(web_module.__file__).resolve().parent / "static" / "workroom"
         shell = (root / "index.html").read_text(encoding="utf-8")

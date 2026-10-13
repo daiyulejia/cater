@@ -140,6 +140,9 @@ GET /api/chain
 
 `POST /api/tasks` 接收 JSON：必填 `goal`，可选 `acceptance`，以及可选布尔值 `dispatch`、`run` 或 `battle`。
 任务动作接口会返回和 `GET /api/tasks/<task_id>` 一致的回放 payload。
+在 `run` 或 `battle` 同时传入 `background: true` 时，接口会以 `202 Accepted` 立即返回；响应中的
+`activity` 描述排队或执行状态，事件链会记录排队、完成或失败。对话工作台默认使用这个模式，只有任务
+活跃时才轮询回放。
 零依赖客户端示例见 [examples/api_client.py](examples/api_client.py)。
 
 ## 当前范围

@@ -8,14 +8,16 @@ type Assignment = { id: string; owner: string; role: string; lane: string; objec
 type Message = { seq: number; actor: string; role: string; type: string; claim?: string; text?: string; stance?: string; target?: string; reply_to?: number }
 type Deliverable = { seq: number; title: string; summary: string; kind?: string; uri?: string; message_seq?: number }
 type OrgRole = { id: string; name: string; role: string }
+type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'; active: boolean; error?: string }
 type Task = {
   id: string; goal: string; acceptance: string[]; status: string; messages: Message[]; assignments: Assignment[]
   deliverables: Deliverable[]
+  activity?: Activity
   decision?: { resolution?: string; reason?: string; source?: string }
   brief?: { dispute?: string; consensus?: string[] }; mission?: { goal?: string }; cabinet?: { status?: string; reason?: string }
 }
 type Event = { seq: number; type: string; category: string; actor: { id: string; role: string; kind: string }; payload: Record<string, unknown> }
-type TaskDetail = { task: Task; events: Event[]; review: { health?: string; summary?: string } }
+type TaskDetail = { task: Task; events: Event[]; review: { health?: string; summary?: string }; activity?: Activity }
 type ChatItem = { id: number; actor: string; role: string; kind: 'human' | 'agent' | 'system'; title?: string; text: string; targets: string[]; replyTo?: number; evidence: Event }
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
@@ -32,6 +34,14 @@ const statusText = (value?: string) => ({
 const actorText = (value: string) => ({ human: '你', orchestrator: '总控', cabinet: '内阁', supreme: '最高决策者', reviewer: '复盘员', driver_gateway: '驱动网关', product: '产品', dev: '开发', test: '测试' }[value] ?? value)
 
 const roleText = (value: string) => ({ human: '人类', orchestrator: '任务编排', cabinet: '内阁', supreme: '最高决策', developer: '开发工程师', tester: '测试工程师', product: '产品负责人' }[value] ?? value)
+
+const activityText = (activity?: Activity) => {
+  if (activity?.state === 'queued') return '协作已排队'
+  if (activity?.state === 'running') return '正在协作'
+  if (activity?.state === 'completed') return '协作完成'
+  if (activity?.state === 'failed') return '协作失败'
+  return ''
+}
 
 function reasonText(value: string): string {
   const veto = /^Veto role\(s\) raised concern: (.+)\.$/.exec(value)
@@ -56,6 +66,9 @@ function conversationFor(events: Event[]): ChatItem[] {
       replyTo: typeof payload.reply_to === 'number' ? payload.reply_to : undefined,
     })
     if (event.type === 'task.created') return [message('新任务', String(payload.goal ?? ''), 'human')]
+    if (event.type === 'activity.queued') return [message('协作已排队', String(payload.action) === 'battle' ? '团队将进入内阁审议。' : '团队将开始下一轮协作。', 'system')]
+    if (event.type === 'activity.completed') return [message('本轮协作完成', String(payload.action) === 'battle' ? '内阁审议已结束。' : '团队已完成这一轮协作。', 'system')]
+    if (event.type === 'activity.failed') return [message('协作异常', String(payload.message ?? '后台协作未能完成。'), 'system')]
     if (event.type === 'human.commanded') return [message('方向更新', String(payload.instruction ?? ''), 'human')]
     if (event.type === 'mission.created') return [message('总控已理解任务', String(payload.goal ?? ''), 'system')]
     if (event.type === 'task.decomposed') return [message('内阁完成任务拆解', String(payload.strategy ?? '执行计划已就绪。'), 'system')]
@@ -109,6 +122,16 @@ function App() {
     if (!selectedId) { setDetail(null); return }
     void api<TaskDetail>(`/api/tasks/${selectedId}`).then(setDetail).catch((err: Error) => setError(err.message))
   }, [selectedId])
+  useEffect(() => {
+    if (!selectedId || !detail?.activity?.active) return
+    const poll = () => void api<TaskDetail>(`/api/tasks/${selectedId}`).then((next) => {
+      setDetail(next)
+      setTasks((current) => current.map((item) => item.id === next.task.id ? { ...next.task, activity: next.activity } : item))
+    }).catch((err: Error) => setError(err.message))
+    poll()
+    const timer = window.setInterval(poll, 800)
+    return () => window.clearInterval(timer)
+  }, [selectedId, detail?.activity?.active])
 
   const conversation = useMemo(() => detail ? conversationFor(detail.events) : [], [detail])
   const task = detail?.task
@@ -123,7 +146,7 @@ function App() {
         body: JSON.stringify({
           goal,
           acceptance: acceptance.split('\n').map((item) => item.trim()).filter(Boolean),
-          run: true,
+          run: true, background: true,
           ...(routing === 'dispatch' ? { dispatch: true } : { assign_to: directOwner }),
         }),
       })
@@ -137,7 +160,7 @@ function App() {
     setIsSending(true); setError('')
     try {
       await api(`/api/tasks/${selectedId}/command`, { method: 'POST', body: JSON.stringify({ instruction: message.trim() }) })
-      const result = await api<TaskDetail>(`/api/tasks/${selectedId}/run`, { method: 'POST', body: '{}' })
+      const result = await api<TaskDetail>(`/api/tasks/${selectedId}/run`, { method: 'POST', body: JSON.stringify({ background: true }) })
       setMessage(''); setDetail(result); await refresh(selectedId)
     } catch (err) { setError(err instanceof Error ? err.message : '发送指令失败') }
     finally { setIsSending(false) }
@@ -157,7 +180,7 @@ function App() {
         </aside>
         <section className="flex min-h-0 flex-col border-b border-slate-200 bg-[#fbfbfa] lg:border-b-0">
           {task ? <>
-            <div className="border-b border-slate-200 bg-white px-5 py-4"><div className="flex items-start justify-between gap-4"><div><p className="mb-1 text-xs font-medium tracking-[0.12em] text-teal-700">当前任务</p><h1 className="text-lg font-semibold leading-snug">{task.goal}</h1></div><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">{statusText(task.status)}</span></div></div>
+            <div className="border-b border-slate-200 bg-white px-5 py-4"><div className="flex items-start justify-between gap-4"><div><p className="mb-1 text-xs font-medium tracking-[0.12em] text-teal-700">当前任务</p><h1 className="text-lg font-semibold leading-snug">{task.goal}</h1></div><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${detail?.activity?.active ? 'bg-teal-50 text-teal-800' : 'bg-slate-100 text-slate-600'}`}>{activityText(detail?.activity) || statusText(task.status)}</span></div></div>
             <div className="flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7">{conversation.map((item) => <ChatBubble key={item.id} item={item} />)}</div>
             {composerMode === 'new' ? <TaskComposer draft={draft} acceptance={acceptance} routing={routing} roles={roles} directOwner={directOwner} isSending={isSending} onDraftChange={setDraft} onAcceptanceChange={setAcceptance} onRoutingChange={setRouting} onOwnerChange={setDirectOwner} onCreate={() => void createTask()} /> : <DirectionComposer message={message} isSending={isSending} onMessageChange={setMessage} onSend={() => void sendDirection()} />}
           </> : <><EmptyConversation /><TaskComposer draft={draft} acceptance={acceptance} routing={routing} roles={roles} directOwner={directOwner} isSending={isSending} onDraftChange={setDraft} onAcceptanceChange={setAcceptance} onRoutingChange={setRouting} onOwnerChange={setDirectOwner} onCreate={() => void createTask()} /></>}

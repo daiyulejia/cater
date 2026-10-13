@@ -141,6 +141,9 @@ GET /api/chain
 
 `POST /api/tasks` accepts JSON with `goal`, optional `acceptance`, and optional booleans `dispatch`, `run`, or `battle`.
 Task action endpoints return the same replay payload as `GET /api/tasks/<task_id>`.
+When `background: true` accompanies `run` or `battle`, the endpoint returns `202 Accepted`
+immediately. Its `activity` reports queue/execution state, while the event chain records queue,
+completion, or failure. The workroom uses this mode and polls only while work is active.
 See [examples/api_client.py](examples/api_client.py) for a zero-dependency client.
 
 ## Current Scope
