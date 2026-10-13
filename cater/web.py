@@ -503,7 +503,10 @@ def make_handler(
                         requested_route = "direct"
                     if assign_owner and assign_owner not in {role.id for role in rt.worker_roles}:
                         return self._bad_request(f"unknown role {assign_owner!r}")
-                    task_id = rt.create_task(goal, acceptance)
+                    try:
+                        task_id = rt.create_task(goal, acceptance)
+                    except ValueError as exc:
+                        return self._bad_request(str(exc))
                     if requested_route is not None or not _truthy(data.get("dispatch")):
                         try:
                             rt.intake(
@@ -614,7 +617,10 @@ def make_handler(
                     if line.strip()
                 ]
                 with self._runtime() as rt:
-                    task_id = rt.create_task(goal, acceptance)
+                    try:
+                        task_id = rt.create_task(goal, acceptance)
+                    except ValueError as exc:
+                        return self._bad_request(str(exc))
                     if data.get("dispatch", [""])[0] == "on":
                         rt.dispatch(task_id)
                     assign_owner = data.get("assign_owner", [""])[0].strip()
@@ -679,12 +685,15 @@ def make_handler(
                 with self._runtime() as rt:
                     if rt.task(task_id) is None:
                         return self._not_found()
-                    command = rt.command(
-                        task_id,
-                        instruction or "Updated from Cater web",
-                        goal=goal,
-                        acceptance=acceptance if acceptance_raw.strip() else None,
-                    )
+                    try:
+                        command = rt.command(
+                            task_id,
+                            instruction or "Updated from Cater web",
+                            goal=goal,
+                            acceptance=acceptance if acceptance_raw.strip() else None,
+                        )
+                    except ValueError as exc:
+                        return self._bad_request(str(exc))
                     if data.get("run_now", [""])[0] == "on":
                         if command.payload.get("next_action") == "battle":
                             rt.battle(task_id)

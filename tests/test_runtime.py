@@ -530,6 +530,19 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("Acceptance: ['new acceptance']", driver.prompts[0])
         self.assertNotIn("old acceptance", driver.prompts[0])
 
+    def test_runtime_bounds_user_text_before_it_reaches_prompt_context(self):
+        with Runtime(":memory:") as rt:
+            with self.assertRaisesRegex(ValueError, "goal exceeds 12000"):
+                rt.create_task("x" * 12_001)
+
+            task_id = rt.create_task("Bounded task")
+            with self.assertRaisesRegex(ValueError, "instruction exceeds 12000"):
+                rt.command(task_id, "x" * 12_001)
+            with self.assertRaisesRegex(ValueError, "acceptance exceeds 32 item"):
+                rt.command(task_id, "Update acceptance", acceptance=["ok"] * 33)
+            with self.assertRaisesRegex(ValueError, "assignment objective exceeds 12000"):
+                rt.assign(task_id, "dev", objective="x" * 12_001)
+
     def test_agents_can_address_prior_outputs_by_event_seq(self):
         driver = ReplyDriver()
         with tempfile.TemporaryDirectory() as tmp:
@@ -2706,6 +2719,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("和店长聊聊", bundle_text)
         self.assertIn("这个工作台需要访问令牌", bundle_text)
         self.assertIn("已避免重复启动", bundle_text)
+        self.assertIn("这段内容太长了", bundle_text)
         self.assertIn("role:`alert`", bundle_text)
         self.assertNotIn("向猫咖下单", bundle_text)
 
@@ -3084,6 +3098,26 @@ class WebTests(unittest.TestCase):
 
             self.assertEqual(raised.exception.code, 400)
             self.assertIn("invalid JSON body", raised.exception.read().decode("utf-8"))
+            with Runtime(db) as rt:
+                self.assertEqual(rt.tasks(), [])
+
+    def test_web_api_rejects_oversized_task_text_before_creating_a_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-api-long-goal.db")
+            base = start_test_web(self, db)
+
+            body = json.dumps({"goal": "x" * 12_001}).encode("utf-8")
+            request = Request(
+                f"{base}/api/tasks",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(request, timeout=5)
+
+            self.assertEqual(raised.exception.code, 400)
+            self.assertIn("goal exceeds 12000", raised.exception.read().decode("utf-8"))
             with Runtime(db) as rt:
                 self.assertEqual(rt.tasks(), [])
 

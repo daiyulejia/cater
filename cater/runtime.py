@@ -22,6 +22,43 @@ from .profiles import agent_profiles
 from .review import build_review
 
 
+MAX_TASK_GOAL_CHARS = 12_000
+MAX_COMMAND_CHARS = 12_000
+MAX_ACCEPTANCE_ITEMS = 32
+MAX_ACCEPTANCE_CHARS = 2_000
+MAX_ASSIGNMENT_TEXT_CHARS = 12_000
+
+
+def _required_text(value: object, field: str, limit: int) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be a string")
+    text = value.strip()
+    if not text:
+        raise ValueError(f"{field} must not be empty")
+    if len(text) > limit:
+        raise ValueError(f"{field} exceeds {limit} character limit")
+    return text
+
+
+def _optional_text(value: object, field: str, limit: int) -> str | None:
+    if value is None:
+        return None
+    return _required_text(value, field, limit)
+
+
+def _acceptance_items(value: list[str] | None) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError("acceptance must be a list of strings")
+    if len(value) > MAX_ACCEPTANCE_ITEMS:
+        raise ValueError(f"acceptance exceeds {MAX_ACCEPTANCE_ITEMS} item limit")
+    return [
+        _required_text(item, "acceptance item", MAX_ACCEPTANCE_CHARS)
+        for item in value
+    ]
+
+
 @dataclass(frozen=True)
 class Role:
     id: str
@@ -152,12 +189,14 @@ class Runtime:
         self.close()
 
     def create_task(self, goal: str, acceptance: list[str] | None = None) -> str:
+        goal = _required_text(goal, "goal", MAX_TASK_GOAL_CHARS)
+        acceptance = _acceptance_items(acceptance)
         task_id = "task_" + uuid.uuid4().hex[:10]
         self.log.emit(
             actor=Actor.human("human"),
             type="task.created",
             task_id=task_id,
-            payload={"goal": goal, "acceptance": list(acceptance or [])},
+            payload={"goal": goal, "acceptance": acceptance},
         )
         self.log.emit(
             actor=self._leader_actor(),
@@ -338,6 +377,8 @@ class Runtime:
         task = self.task(task_id)
         if task is None:
             raise KeyError(task_id)
+        objective = _optional_text(objective, "assignment objective", MAX_ASSIGNMENT_TEXT_CHARS)
+        acceptance = _optional_text(acceptance, "assignment acceptance", MAX_ACCEPTANCE_CHARS)
         role = self._worker_by_id(owner)
         assignment = {
             "id": f"{task.id}:{role.id}:direct",
@@ -673,6 +714,9 @@ class Runtime:
     ) -> Event:
         if self.task(task_id) is None:
             raise KeyError(task_id)
+        instruction = _required_text(instruction, "instruction", MAX_COMMAND_CHARS)
+        goal = _optional_text(goal, "goal", MAX_TASK_GOAL_CHARS)
+        normalized_acceptance = _acceptance_items(acceptance) if acceptance is not None else None
         inferred_goal = self._command_goal(instruction) if goal is None else None
         effective_goal = goal if goal is not None else inferred_goal
         payload: dict[str, Any] = {"instruction": instruction}
@@ -691,8 +735,8 @@ class Runtime:
         payload["next_action"] = next_action
         if effective_goal is not None:
             payload["goal"] = effective_goal
-        if acceptance is not None:
-            payload["acceptance"] = list(acceptance)
+        if normalized_acceptance is not None:
+            payload["acceptance"] = normalized_acceptance
         command = self.log.emit(
             actor=Actor.human("human"),
             type="human.commanded",
@@ -715,7 +759,7 @@ class Runtime:
             mentioned_workers=mentioned_workers,
             roster_mode=roster_mode,
             next_action=next_action,
-            context_changed=effective_goal is not None or acceptance is not None,
+            context_changed=effective_goal is not None or normalized_acceptance is not None,
             replan=self._command_requires_replan(instruction, effective_goal is not None),
         )
         return command

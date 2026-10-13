@@ -64,6 +64,8 @@ function userFacingError(error: unknown, fallback: string): string {
   }
   if (known[message]) return known[message]
   if (message.startsWith('unknown role ')) return '点名的伙伴不存在，请从当前猫咖成员中选择。'
+  if (/^(goal|instruction|assignment objective|assignment acceptance) exceeds \d+ character limit$/.test(message)) return '这段内容太长了，请缩短后再发送。'
+  if (message.startsWith('acceptance exceeds ')) return '验收要求太多了，请保留最重要的几条。'
   return message || fallback
 }
 
