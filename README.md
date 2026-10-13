@@ -24,8 +24,18 @@ LangChain and LangGraph can be useful inside driver implementations or advanced 
 
 ## Quick Start
 
+Run a replayable demo first:
+
 ```bash
 cater demo
+cater review <task_id> --plain
+cater chain --json
+cater web
+```
+
+Then explore the organization surface:
+
+```bash
 cater drivers
 cater show
 cater inbox
@@ -35,11 +45,8 @@ cater doctor --probe
 cater dispatch <task_id>
 cater run <task_id>
 cater export <task_id>
-cater review <task_id>
-cater review --plain
 cater events <task_id>
 cater decide <task_id> --resolution done --reason "Ship the smallest loop first"
-cater web
 ```
 
 By default Cater writes to `./.cater/cater.db`.

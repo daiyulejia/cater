@@ -24,8 +24,18 @@ LangChain / LangGraph 可以作为某个 driver 或复杂执行后端的内部�
 
 ## 快速开始
 
+先跑一个可回放 demo：
+
 ```bash
 cater demo
+cater review <task_id> --plain
+cater chain --json
+cater web
+```
+
+再探索组织入口：
+
+```bash
 cater drivers
 cater show
 cater inbox
@@ -35,11 +45,8 @@ cater doctor --probe
 cater dispatch <task_id>
 cater run <task_id>
 cater export <task_id>
-cater review <task_id>
-cater review --plain
 cater events <task_id>
 cater decide <task_id> --resolution done --reason "Ship the smallest loop first"
-cater web
 ```
 
 默认数据库写入 `./.cater/cater.db`。

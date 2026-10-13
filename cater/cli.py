@@ -384,7 +384,10 @@ def cmd_demo(args: argparse.Namespace) -> int:
         print("\nnext:")
         print(f"- cater show {task_id}")
         print(f"- cater events {task_id}")
-        print(f"- cater web")
+        print(f"- cater review {task_id} --plain")
+        print("- cater chain --json")
+        print("- cater web")
+        print(f"- open http://127.0.0.1:8765/api/tasks/{task_id} after starting the web UI")
     return 0
 
 
