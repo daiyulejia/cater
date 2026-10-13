@@ -232,6 +232,36 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("alpha/assert: memory claim 1", driver.prompts[2])
         self.assertIn("beta/assert: memory claim 2", driver.prompts[2])
 
+    def test_command_updates_acceptance_before_next_agent_prompt(self):
+        driver = PromptCaptureDriver()
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "governance": {"trigger_on_option_split": false},
+                  "cabinet": {"approval_threshold": 1, "quorum": 1, "veto_roles": []},
+                  "roles": [
+                    {"id":"memory","name":"Memory","role":"memory","driver":"memory"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"memory": driver}) as rt:
+                task_id = rt.create_task("Original goal", ["old acceptance"])
+                rt.command(
+                    task_id,
+                    "Tighten the target",
+                    goal="Updated goal",
+                    acceptance=["new acceptance"],
+                )
+                rt.collaborate(task_id)
+
+        self.assertIn("Goal: Updated goal", driver.prompts[0])
+        self.assertIn("Acceptance: ['new acceptance']", driver.prompts[0])
+        self.assertNotIn("old acceptance", driver.prompts[0])
+
     def test_agents_can_address_prior_outputs_by_event_seq(self):
         driver = ReplyDriver()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1189,6 +1219,16 @@ class WebTests(unittest.TestCase):
         self.assertIn("agent.decided", html)
         self.assertEqual([step["id"] for step in ladder], ["battle", "cabinet", "supreme", "human"])
         self.assertEqual(ladder[1]["status"], "vetoed")
+
+    def test_render_task_shows_current_acceptance(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("Render acceptance", ["ship one path"])
+            rt.command(task_id, "Update acceptance", acceptance=["prove replay"])
+            html = render_task(rt.task(task_id), rt.log.read(task_id=task_id))
+
+        self.assertIn("Acceptance", html)
+        self.assertIn("prove replay", html)
+        self.assertNotIn("ship one path</li>", html)
 
     def test_web_api_and_decision_post(self):
         with tempfile.TemporaryDirectory() as tmp:

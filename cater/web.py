@@ -501,6 +501,7 @@ def render_task(
           {governance}
           {decision}
         </section>
+        {_acceptance_panel(task)}
         {distribution}
         <section class="panel">
           <div class="panel-head"><h2>Decision Ladder</h2><span>autonomy path</span></div>
@@ -519,6 +520,19 @@ def render_task(
         </section>
         """,
     )
+
+
+def _acceptance_panel(task: TaskSnapshot) -> str:
+    if task.acceptance:
+        items = "\n".join(f"<li>{escape(item)}</li>" for item in task.acceptance)
+    else:
+        items = '<li class="muted">No explicit acceptance criteria yet</li>'
+    return f"""
+    <section class="panel">
+      <div class="panel-head"><h2>Acceptance</h2><span>{len(task.acceptance)} criteria</span></div>
+      <ul class="acceptance-list">{items}</ul>
+    </section>
+    """
 
 
 def page(title: str, body: str) -> str:
@@ -1189,7 +1203,7 @@ td small {
   color: var(--muted);
   font-size: 13px;
 }
-.review-list, .assignment-list {
+.review-list, .assignment-list, .acceptance-list {
   list-style: none;
   padding: 0;
   margin: 14px 0 0;
@@ -1206,7 +1220,7 @@ td small {
 .next-actions li + li {
   margin-top: 4px;
 }
-.review-list li, .assignment-list li {
+.review-list li, .assignment-list li, .acceptance-list li {
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 10px;
@@ -1413,6 +1427,6 @@ button.secondary {
   .ladder { grid-template-columns: 1fr; }
   .policy-grid { grid-template-columns: 1fr; }
   .api-grid { grid-template-columns: 1fr; }
-  .review-list, .assignment-list { grid-template-columns: 1fr; }
+  .review-list, .assignment-list, .acceptance-list { grid-template-columns: 1fr; }
 }
 """
