@@ -4,13 +4,15 @@
 
 ## 本地运行
 
-首次使用先构建工作台：
+只有从源码修改工作台时才需要构建。发布包会自带最近一次已验证的静态工作台。
+
+构建并同步到 Python 包：
 
 ```powershell
-cd web
-pnpm install
-pnpm build
+.\scripts\build_web.ps1
 ```
+
+首次执行前请先在 `web/` 目录运行一次 `pnpm install`。
 
 然后回到仓库根目录，正常启动 Cater：
 

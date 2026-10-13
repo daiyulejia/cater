@@ -54,9 +54,13 @@ def serve(
 
 
 def _workroom_dist() -> Path | None:
-    """Return the optional bundled workroom build when it exists locally."""
-    candidate = Path(__file__).resolve().parents[1] / "web" / "dist"
-    return candidate if (candidate / "index.html").is_file() else None
+    """Return a development build first, then the workroom bundled with Cater."""
+    package_root = Path(__file__).resolve().parents[1]
+    candidates = (
+        package_root / "web" / "dist",
+        Path(__file__).resolve().parent / "static" / "workroom",
+    )
+    return next((candidate for candidate in candidates if (candidate / "index.html").is_file()), None)
 
 
 def make_handler(

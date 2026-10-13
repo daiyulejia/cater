@@ -15,7 +15,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from cater.cabinet import majority_threshold, tally_votes
-from cater import __version__
+from cater import __version__, web as web_module
 from cater.cli import main
 from cater.drivers import CliDriver, DriverResponse, load_drivers
 from cater.ladder import decision_ladder
@@ -1454,6 +1454,16 @@ class CliTests(unittest.TestCase):
 
 
 class WebTests(unittest.TestCase):
+    def test_bundled_workroom_includes_chinese_shell_and_static_assets(self):
+        root = Path(web_module.__file__).resolve().parent / "static" / "workroom"
+        shell = (root / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('lang="zh-CN"', shell)
+        self.assertIn("Cater 自治工作台", shell)
+        self.assertTrue((root / "favicon.svg").is_file())
+        self.assertTrue(list((root / "assets").glob("*.js")))
+        self.assertTrue(list((root / "assets").glob("*.css")))
+
     def test_web_serves_optional_built_workroom_from_same_origin(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "dist"

@@ -36,10 +36,10 @@ cater web
 
 `cater demo` shows the governance-heavy path. `cater demo --direct` shows a lightweight direct-worker path where governance stays idle unless risk appears. Demo commands use deterministic built-in roles and drivers.
 
-For the conversation-first local workroom, build the optional React UI in
-[`web/`](web/README.md) once, then run `cater web --port 8766`. The Python
-runtime serves the built workroom and API from one local address while retaining
-zero third-party runtime dependencies.
+Release packages include the conversation-first local workroom, so `cater web --port
+8766` opens it directly. Build the React UI in [`web/`](web/README.md) only when
+changing it from source. The Python runtime serves the workroom and API from one local
+address while retaining zero third-party runtime dependencies.
 
 Then explore the organization surface:
 
