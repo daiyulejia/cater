@@ -206,6 +206,8 @@ Driver 返回：
 
 Skills 和 MCP 也应该放在这条边界后面：用 driver 进程包住它们，让 adapter 调用工具，再返回 Cater 的小 JSON 结构。`examples/ndjson_tool_driver.py` 提供了一个零依赖 adapter 骨架。如果 Windows 上的 `python` 指向 Microsoft Store 占位符，请把 `examples/tool_driver_config.json` 里的命令换成真实 Python 解释器完整路径。
 
+仓库也提供可直接尝试的 [`examples/codex_cli_driver.py`](examples/codex_cli_driver.py)：它把本机已登录的 Codex CLI 接到同一 NDJSON 边界，默认只读、短生命周期，并用 JSON Schema 限定模型的可见协作消息。接入步骤和安全边界见 [`examples/README.md`](examples/README.md#codex-cli-适配器)。
+
 ## 内阁策略
 
 角色可以和投票策略一起配置：

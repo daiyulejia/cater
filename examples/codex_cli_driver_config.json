@@ -1,0 +1,25 @@
+{
+  "drivers": [
+    {
+      "kind": "cli",
+      "name": "product",
+      "command": ["python", "examples/codex_cli_driver.py"],
+      "timeout": 210,
+      "restart_limit": 1
+    },
+    {
+      "kind": "cli",
+      "name": "dev",
+      "command": ["python", "examples/codex_cli_driver.py"],
+      "timeout": 210,
+      "restart_limit": 1
+    },
+    {
+      "kind": "cli",
+      "name": "test",
+      "command": ["python", "examples/codex_cli_driver.py"],
+      "timeout": 210,
+      "restart_limit": 1
+    }
+  ]
+}

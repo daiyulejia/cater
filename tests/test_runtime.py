@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import importlib.util
 import json
 import re
 import subprocess
@@ -10,6 +11,7 @@ import threading
 import time
 import tomllib
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlencode
@@ -1146,6 +1148,61 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(payload["target"], "alpha")
         self.assertEqual(payload["reply_to"], 12)
         self.assertIn("continues alpha", payload["claim"])
+
+    def test_codex_cli_adapter_answers_ping_without_running_a_model(self):
+        script = Path(__file__).resolve().parents[1] / "examples" / "codex_cli_driver.py"
+        driver = CliDriver("codex", [sys.executable, str(script)], timeout=5)
+        self.addCleanup(driver.close)
+
+        self.assertTrue(driver.probe())
+
+    def test_codex_cli_adapter_uses_read_only_structured_invocation(self):
+        script = Path(__file__).resolve().parents[1] / "examples" / "codex_cli_driver.py"
+        spec = importlib.util.spec_from_file_location("test_codex_cli_driver", script)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        expected = {
+            "stance": "assert",
+            "option_id": "A",
+            "claim": "A concise contribution",
+            "evidence": ["visible task context"],
+            "confidence": 0.8,
+            "text": "我会先交付一个可复查的最小结果。",
+            "target": None,
+            "reply_to": None,
+            "deliverables": [],
+        }
+
+        def fake_run(command, **_kwargs):
+            output = Path(command[command.index("--output-last-message") + 1])
+            output.write_text(json.dumps(expected, ensure_ascii=False), encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(module.subprocess, "run", side_effect=fake_run) as run:
+            response = module.handle(
+                {"id": "req-1", "type": "complete", "role": "developer", "prompt": "Build a page", "context": {}}
+            )
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(json.loads(response["text"]), expected)
+        command = run.call_args.args[0]
+        self.assertIn("--sandbox", command)
+        self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
+        self.assertIn("--output-schema", command)
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
+
+    def test_codex_cli_adapter_accepts_a_quoted_windows_executable_path(self):
+        script = Path(__file__).resolve().parents[1] / "examples" / "codex_cli_driver.py"
+        spec = importlib.util.spec_from_file_location("test_codex_cli_command", script)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        with patch.dict(module.os.environ, {"CATER_CODEX_COMMAND": '"C:\\Program Files\\Codex\\codex.exe" --profile local'}):
+            command = module._codex_command()
+
+        self.assertEqual(command, ["C:\\Program Files\\Codex\\codex.exe", "--profile", "local"])
 
     def test_example_api_client_drives_web_api(self):
         with tempfile.TemporaryDirectory() as tmp:
