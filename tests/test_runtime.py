@@ -1695,11 +1695,11 @@ class CliTests(unittest.TestCase):
     def test_cli_demo_and_chain(self):
         code, out = self.run_cli("demo")
         self.assertEqual(code, 0)
-        self.assertIn("task:", out)
-        self.assertIn("mission: dispatched", out)
-        self.assertIn("brief:", out)
-        self.assertIn("recent messages:", out)
-        self.assertIn("next:", out)
+        self.assertIn("任务：", out)
+        self.assertIn("任务分发：已完成", out)
+        self.assertIn("本轮摘要：", out)
+        self.assertIn("最近协作：", out)
+        self.assertIn("接下来可以：", out)
         self.assertIn("cater show", out)
         self.assertIn("cater review", out)
         self.assertIn("cater chain --json", out)
@@ -1711,9 +1711,9 @@ class CliTests(unittest.TestCase):
     def test_cli_direct_demo_shows_lightweight_path(self):
         code, out = self.run_cli("demo", "--direct")
         self.assertEqual(code, 0)
-        self.assertIn("mode: direct worker collaboration", out)
-        self.assertIn("assigned: dev", out)
-        self.assertIn("governance: not_needed", out)
+        self.assertIn("协作路径：执行猫咪直接协作", out)
+        self.assertIn("已交给：米寇", out)
+        self.assertIn("治理状态：not_needed", out)
         self.assertIn("cater review", out)
 
     def test_cli_direct_demo_uses_deterministic_default_roles(self):
@@ -1731,7 +1731,7 @@ class CliTests(unittest.TestCase):
         code = main(["--db", self.db, "--roles", str(roles), "demo", "--direct"])
 
         self.assertEqual(code, 0)
-        self.assertIn("assigned: dev", self.out.getvalue())
+        self.assertIn("已交给：米寇", self.out.getvalue())
 
     def test_cli_version(self):
         with self.assertRaises(SystemExit) as raised:
