@@ -116,7 +116,10 @@ def make_handler(
                         rt.dispatch(task_id)
                     assign_owner = data.get("assign_owner", [""])[0].strip()
                     if assign_owner:
-                        rt.assign(task_id, assign_owner)
+                        try:
+                            rt.assign(task_id, assign_owner)
+                        except ValueError as exc:
+                            return self._bad_request(str(exc))
                     if data.get("run_now", data.get("battle", [""]))[0] == "on":
                         rt.collaborate(task_id)
                 self._redirect(f"/tasks/{task_id}")
@@ -157,7 +160,10 @@ def make_handler(
                 with self._runtime() as rt:
                     if rt.task(task_id) is None:
                         return self._not_found()
-                    rt.assign(task_id, owner, objective=objective, acceptance=acceptance)
+                    try:
+                        rt.assign(task_id, owner, objective=objective, acceptance=acceptance)
+                    except ValueError as exc:
+                        return self._bad_request(str(exc))
                 self._redirect(f"/tasks/{task_id}")
                 return
             if path.startswith("/tasks/") and path.endswith("/command"):
@@ -224,6 +230,14 @@ def make_handler(
         def _not_found(self) -> None:
             raw = b"not found"
             self.send_response(HTTPStatus.NOT_FOUND)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _bad_request(self, message: str) -> None:
+            raw = message.encode("utf-8")
+            self.send_response(HTTPStatus.BAD_REQUEST)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()

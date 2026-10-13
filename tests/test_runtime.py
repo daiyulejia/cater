@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlencode
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from cater.cabinet import majority_threshold, tally_votes
@@ -1208,6 +1209,33 @@ class WebTests(unittest.TestCase):
 
             with Runtime(db) as rt:
                 self.assertEqual(rt.task(task_id).status, "done")
+
+    def test_web_direct_assign_reports_unknown_role(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-bad-assign.db")
+            with Runtime(db) as rt:
+                task_id = rt.create_task("Serve bad assign")
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join, 1)
+            self.addCleanup(server.shutdown)
+
+            body = urlencode({"owner": "ghost"}).encode("utf-8")
+            request = Request(
+                f"{base}/tasks/{task_id}/assign",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(request, timeout=5)
+
+            self.assertEqual(raised.exception.code, 400)
+            self.assertIn("unknown role 'ghost'", raised.exception.read().decode("utf-8"))
 
     def test_web_can_create_task_and_run_battle(self):
         with tempfile.TemporaryDirectory() as tmp:
