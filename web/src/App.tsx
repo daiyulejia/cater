@@ -248,7 +248,17 @@ function App() {
     setSelectedId((current) => preferredId ?? current ?? nextTasks.at(-1)?.id ?? null)
   }
 
-  useEffect(() => { void refresh().catch((err: unknown) => setError(userFacingError(err, '暂时无法读取任务。'))) }, [])
+  useEffect(() => {
+    let cancelled = false
+    void api<Task[]>('/api/tasks').then((nextTasks) => {
+      if (cancelled) return
+      setTasks(nextTasks)
+      setSelectedId((current) => current ?? nextTasks.at(-1)?.id ?? null)
+    }).catch((err: unknown) => {
+      if (!cancelled) setError(userFacingError(err, '暂时无法读取任务。'))
+    })
+    return () => { cancelled = true }
+  }, [])
   useEffect(() => {
     void api<OrgRole[]>('/api/organization').then((nextRoles) => {
       setRoles(nextRoles)
@@ -256,18 +266,28 @@ function App() {
   }, [])
   useEffect(() => { void api<Organization>('/api/organization/profile').then(setOrganization).catch((err: unknown) => setError(userFacingError(err, '暂时无法读取团队配置。'))) }, [])
   useEffect(() => {
-    if (!selectedId) { setDetail(null); return }
-    void api<TaskDetail>(`/api/tasks/${selectedId}`).then(setDetail).catch((err: unknown) => setError(userFacingError(err, '暂时无法读取任务详情。')))
+    if (!selectedId) return
+    let cancelled = false
+    void api<TaskDetail>(`/api/tasks/${selectedId}`).then((next) => {
+      if (!cancelled) setDetail(next)
+    }).catch((err: unknown) => {
+      if (!cancelled) setError(userFacingError(err, '暂时无法读取任务详情。'))
+    })
+    return () => { cancelled = true }
   }, [selectedId])
   useEffect(() => {
     if (!selectedId || !detail?.activity?.active) return
+    let cancelled = false
     const poll = () => void api<TaskDetail>(`/api/tasks/${selectedId}`).then((next) => {
+      if (cancelled) return
       setDetail(next)
       setTasks((current) => current.map((item) => item.id === next.task.id ? { ...next.task, activity: next.activity } : item))
-    }).catch((err: unknown) => setError(userFacingError(err, '暂时无法刷新协作进度。')))
+    }).catch((err: unknown) => {
+      if (!cancelled) setError(userFacingError(err, '暂时无法刷新协作进度。'))
+    })
     poll()
     const timer = window.setInterval(poll, 800)
-    return () => window.clearInterval(timer)
+    return () => { cancelled = true; window.clearInterval(timer) }
   }, [selectedId, detail?.activity?.active])
 
   const identities = useMemo(() => {
@@ -276,7 +296,7 @@ function App() {
   }, [organization, roles])
   const conversation = useMemo(() => detail ? conversationFor(detail.events, identities, organization) : [], [detail, identities, organization])
   const visibleConversation = useMemo(() => chatFilter === 'all' ? conversation : conversation.filter((item) => item.category === chatFilter), [chatFilter, conversation])
-  const task = detail?.task
+  const task = selectedId ? detail?.task : undefined
 
   const createTask = async () => {
     const goal = draft.trim()
