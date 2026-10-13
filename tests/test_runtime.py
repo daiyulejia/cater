@@ -1687,6 +1687,27 @@ class CliTests(unittest.TestCase):
 
 
 class WebTests(unittest.TestCase):
+    def test_web_marks_interrupted_background_activity_after_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-recovery.db")
+            with Runtime(db) as rt:
+                task_id = rt.create_task("Recover an interrupted activity")
+                rt.log.emit(
+                    actor=web_module.EventActor.system("orchestrator"),
+                    type="activity.queued",
+                    task_id=task_id,
+                    payload={"activity_id": "activity_old", "action": "run"},
+                )
+
+            base = start_test_web(self, db)
+            with urlopen(f"{base}/api/tasks/{task_id}", timeout=2) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+
+            self.assertEqual(payload["activity"]["state"], "failed")
+            self.assertIn("服务在这轮协作结束前重启", payload["activity"]["error"])
+            failures = [event for event in payload["events"] if event["type"] == "activity.failed"]
+            self.assertEqual(failures[-1]["payload"]["error_type"], "InterruptedActivity")
+
     def test_web_can_run_collaboration_in_background_without_duplicate_rounds(self):
         driver = BlockingDriver()
         self.addCleanup(driver.release.set)

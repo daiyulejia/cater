@@ -147,6 +147,9 @@ GET /api/chain
 `POST /api/tasks/<task_id>/command` 传入 `{ "instruction": "...", "continue": true }` 时，
 店长会先记录新方向；若当前轮仍在执行，则把一轮新的协作排在它之后。这样不会粗暴中断本地 CLI，
 也不会让刚补充的意图被正在处理的旧上下文吞掉。
+
+后台协作不会在 Web 服务重启后自动重放旧模型调用：Cater 会把未终结活动写为“因重启中断”，
+并保留原任务、命令和过程证据；随后从对话框补充或确认方向即可用新上下文重新启动，避免重复执行。
 零依赖客户端示例见 [examples/api_client.py](examples/api_client.py)。
 
 ## 当前范围

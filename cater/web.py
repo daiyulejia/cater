@@ -32,6 +32,48 @@ class ActivityRunner:
         self._lock = threading.RLock()
         self._activities: dict[str, dict[str, Any]] = {}
 
+    def recover_interrupted(self) -> int:
+        """Close activities left open by a previous Web process.
+
+        A thread cannot survive a server restart, and replaying its old model
+        call could duplicate side effects against stale task context. Record a
+        durable, visible failure instead; the customer can then continue from
+        the latest command with a freshly assembled round.
+        """
+        pending: dict[str, tuple[str, str]] = {}
+        with self._runtime_factory() as runtime:
+            for event in runtime.log.read():
+                activity_id = event.payload.get("activity_id")
+                if not isinstance(activity_id, str) or not activity_id:
+                    continue
+                if event.type == "activity.queued" and event.task_id:
+                    action = str(event.payload.get("action") or "run")
+                    pending[activity_id] = (event.task_id, action)
+                elif event.type in {"activity.completed", "activity.failed"}:
+                    pending.pop(activity_id, None)
+            for activity_id, (task_id, action) in pending.items():
+                message = "Cater 服务在这轮协作结束前重启；请按最新方向重新启动。"
+                runtime.log.emit(
+                    actor=EventActor.system("orchestrator"),
+                    type="activity.failed",
+                    task_id=task_id,
+                    payload={
+                        "activity_id": activity_id,
+                        "action": action,
+                        "error_type": "InterruptedActivity",
+                        "message": message,
+                    },
+                )
+                self._activities[task_id] = {
+                    "id": activity_id,
+                    "action": action,
+                    "state": "failed",
+                    "active": False,
+                    "error": message,
+                    "finished_at": _now_iso(),
+                }
+        return len(pending)
+
     def status(self, task_id: str) -> dict[str, Any]:
         with self._lock:
             activity = dict(self._activities.get(task_id, {}))
@@ -254,6 +296,7 @@ def make_handler(
         )
 
     activities = ActivityRunner(build_runtime)
+    activities.recover_interrupted()
 
     class CaterHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
