@@ -70,23 +70,23 @@ class Runtime:
         audit_key: str | bytes | None = None,
         audit_key_id: str = "local",
     ):
-        self.log = EventLog(db_path, audit_key=audit_key, key_id=audit_key_id)
-        self.driver_attempts = max(1, driver_attempts)
-        self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
-        self._driver_failures: dict[str, int] = {}
         config = load_runtime_config(roles_path)
-        self.roles = config.roles
-        self.cabinet_policy = config.cabinet_policy
-        self.governance_policy = config.governance_policy
         configured_drivers = load_drivers(_pack_path("default_drivers.json"))
         if drivers_path is not None:
             configured_drivers.update(load_drivers(drivers_path))
         if drivers is not None:
             configured_drivers.update(drivers)
-        self.drivers = configured_drivers
-        missing = sorted({role.driver for role in self.roles} - set(self.drivers))
+        missing = sorted({role.driver for role in config.roles} - set(configured_drivers))
         if missing:
             raise ValueError(f"missing driver(s) for roles: {', '.join(missing)}")
+        self.log = EventLog(db_path, audit_key=audit_key, key_id=audit_key_id)
+        self.driver_attempts = max(1, driver_attempts)
+        self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
+        self._driver_failures: dict[str, int] = {}
+        self.roles = config.roles
+        self.cabinet_policy = config.cabinet_policy
+        self.governance_policy = config.governance_policy
+        self.drivers = configured_drivers
 
     def close(self) -> None:
         for driver in self.drivers.values():

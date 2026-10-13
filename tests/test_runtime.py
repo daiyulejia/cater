@@ -1053,6 +1053,16 @@ class CliTests(unittest.TestCase):
         self.assertIn("chain=hash chain ok", out)
         self.assertIn("role product: driver=product configured", out)
 
+    def test_cli_reports_config_errors_without_traceback(self):
+        roles = Path(self.tmp.name) / "bad-roles.json"
+        roles.write_text('{"roles":[{"name":"Missing id"}]}', encoding="utf-8")
+        code = main(["--db", self.db, "--roles", str(roles), "doctor"])
+        out = self.out.getvalue()
+
+        self.assertEqual(code, 1)
+        self.assertIn("error: each role requires a non-empty string id", out)
+        self.assertNotIn("Traceback", out)
+
     def test_cli_doctor_can_probe_cli_drivers(self):
         driver_script = Path(__file__).resolve().parent / "fixtures" / "ndjson_driver.py"
         config = Path(self.tmp.name) / "drivers.json"
