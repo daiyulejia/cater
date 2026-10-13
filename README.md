@@ -25,15 +25,17 @@ LangChain / LangGraph 可以作为某个 driver 或复杂执行后端的内部�
 
 ## 快速开始
 
-先跑一个可回放 demo：
+从源码目录直接跑一个可回放 demo（Python 3.11+）：
 
 ```bash
-cater demo
-cater demo --direct
-cater review <task_id> --plain
-cater chain --json
-cater web
+python -m cater demo
+python -m cater demo --direct
+python -m cater review <task_id> --plain
+python -m cater chain --json
+python -m cater web
 ```
+
+想把 `cater` 安装成命令后再使用简写，可在仓库根目录执行 `python -m pip install -e .`。这不会给核心运行时增加第三方依赖。
 
 `cater demo` 展示治理较重的路径。`cater demo --direct` 展示轻量直派路径：没有风险时，治理层保持空闲。demo 命令使用确定性的内置角色和 driver。
 
