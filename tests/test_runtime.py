@@ -196,7 +196,7 @@ class RuntimeTests(unittest.TestCase):
             first = rt.task(task_id)
             again = rt.task(task_id)
             self.assertEqual(first.status, again.status)
-            self.assertEqual(len(first.messages), 3)
+            self.assertEqual(len(first.messages), 6)
 
     def test_agent_profiles_are_projected_from_events(self):
         with Runtime(":memory:") as rt:
@@ -209,7 +209,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(profiles["product"]["supports"], 1)
             self.assertEqual(profiles["test"]["challenges"], 0)
             self.assertEqual(profiles["test"]["supports"], 1)
-            self.assertIn("先交付最小", profiles["product"]["last_claim"])
+            self.assertIn("用户价值", profiles["product"]["last_claim"])
 
     def test_default_demo_drivers_publish_replayable_deliverables(self):
         with Runtime(":memory:") as rt:
@@ -221,9 +221,19 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(outcomes), 3)
         self.assertEqual(
             [item["title"] for item in task.deliverables],
-            ["任务澄清", "驱动接入检查清单", "可回放验证要求"],
+            ["月亮的任务收束", "米寇的实现路径", "三角的验证清单"],
         )
         self.assertTrue(all(item["message_seq"] for item in task.deliverables))
+
+    def test_guided_demo_keeps_a_task_focus_and_links_peer_outputs(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("做一个能预约、查看菜单并提交建议的网页")
+            rt.collaborate(task_id)
+            messages = rt.task(task_id).messages
+
+        self.assertIn("预约、菜单浏览与意见反馈", messages[0]["text"])
+        self.assertEqual(messages[1]["target"], "product")
+        self.assertEqual(messages[1]["reply_to"], messages[0]["seq"])
 
     def test_agent_can_publish_structured_deliverables(self):
         response = json.dumps(
@@ -504,6 +514,36 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("your_assignment=Implement the smallest useful path", driver.prompts[0])
         self.assertIn("assigned_work=dev:", driver.prompts[0])
 
+    def test_intake_records_task_understanding_before_lightweight_collaboration(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("为团队做一个网页任务入口", ["用户能发起并查看任务", "过程可回放"])
+            result = rt.intake(task_id)
+            task = rt.task(task_id)
+            event_types = [event.type for event in rt.log.read(task_id=task_id)]
+
+        self.assertEqual(result["route"]["route"], "collaborate")
+        self.assertEqual(task.interpretation["complexity"], "standard")
+        self.assertIn("交互路径", task.interpretation["objective"])
+        self.assertEqual(task.route["route"], "collaborate")
+        self.assertEqual(task.mission["goal"], task.interpretation["objective"])
+        self.assertIn("task.interpreted", event_types)
+        self.assertIn("task.routed", event_types)
+        self.assertIn("task.decomposed", event_types)
+        self.assertEqual(len(task.assignments), 3)
+
+    def test_intake_can_override_direct_preference_and_convene_cabinet(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("重构多 Agent 协作系统并接入安全的外部 CLI", ["可回放", "可验证", "可恢复"])
+            result = rt.intake(task_id, requested_route="direct", preferred_owner="dev")
+            task = rt.task(task_id)
+            events = rt.log.read(task_id=task_id)
+
+        self.assertEqual(result["route"]["route"], "cabinet")
+        self.assertEqual(task.route["route"], "cabinet")
+        self.assertEqual(task.plan["source"], "cabinet")
+        self.assertIn("cabinet.convened", [event.type for event in events])
+        self.assertIn("内阁", task.route["reason"])
+
     def test_reassignment_keeps_prompt_and_web_distribution_compact(self):
         driver = PromptCaptureDriver()
         with tempfile.TemporaryDirectory() as tmp:
@@ -714,6 +754,22 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(len(task.cabinet["votes"]), 2)
         self.assertEqual(task.decision["source"], "cabinet")
 
+    def test_default_cat_cafe_keeps_cabinet_seats_separate_from_execution_cats(self):
+        with Runtime(":memory:") as rt:
+            self.assertTrue(rt.organization.cabinet_members.isdisjoint(rt.organization.worker_members))
+            self.assertEqual([role.name for role in rt.worker_roles], ["月亮", "米寇", "三角"])
+            self.assertTrue(all(role.charter for role in rt.roles))
+            task_id = rt.create_task("Check separate organization layers")
+            rt.battle(task_id)
+            task = rt.task(task_id)
+
+        actors = [message["actor"] for message in task.messages]
+        self.assertEqual(actors[:3], ["product", "dev", "test"])
+        self.assertEqual(set(actors[3:]), {"caretaker_product", "caretaker_engineering", "caretaker_quality"})
+        self.assertEqual({vote["actor"] for vote in task.cabinet["votes"]}, {
+            "caretaker_product", "caretaker_engineering", "caretaker_quality",
+        })
+
     def test_supreme_decides_when_cabinet_has_no_consensus(self):
         with tempfile.TemporaryDirectory() as tmp:
             roles = Path(tmp) / "roles.json"
@@ -760,7 +816,7 @@ class RuntimeTests(unittest.TestCase):
             task = rt.task(task_id)
 
             self.assertEqual(driver.calls, 2)
-            self.assertEqual(len(task.driver_failures), 2)
+            self.assertEqual(len(task.driver_failures), 3)
             self.assertIn("model process exploded", task.driver_failures[0]["message"])
             self.assertTrue(any("driver failed" in msg["claim"] for msg in task.messages))
             self.assertIn("driver.failed", [event.type for event in rt.log.read(task_id=task_id)])
@@ -824,12 +880,39 @@ class RuntimeTests(unittest.TestCase):
             self.assertTrue(any("visible dependency structure" in finding for finding in findings))
 
     def test_review_flags_worker_exchange_quality(self):
+        flat_driver = StaticResponseDriver(
+            '{"stance":"assert","option_id":"A","claim":"independent","text":"independent"}'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "flat-roles.json"
+            roles.write_text(
+                """
+                {
+                  "governance": {"trigger_on_option_split": false},
+                  "cabinet": {"approval_threshold": 2, "quorum": 2, "veto_roles": []},
+                  "roles": [
+                    {"id":"alpha","name":"Alpha","role":"planner","driver":"flat"},
+                    {"id":"beta","name":"Beta","role":"builder","driver":"flat"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"flat": flat_driver}) as rt:
+                task_id = rt.create_task("Flat exchange")
+                rt.collaborate(task_id)
+                review = rt.review(task_id)
+                findings = [item["finding"] for item in review["lenses"]]
+
+        self.assertTrue(any("no explicit worker-to-worker reply" in finding for finding in findings))
+
         with Runtime(":memory:") as rt:
-            task_id = rt.create_task("Flat exchange")
+            task_id = rt.create_task("Guided exchange")
             rt.collaborate(task_id)
             review = rt.review(task_id)
             findings = [item["finding"] for item in review["lenses"]]
-            self.assertTrue(any("no explicit worker-to-worker reply" in finding for finding in findings))
+
+        self.assertTrue(any("uses explicit reply metadata" in finding for finding in findings))
 
         driver = ReplyDriver()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1226,7 +1309,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("governance:", out)
         self.assertIn("trigger_on_challenge=True", out)
         self.assertIn("cabinet:", out)
-        self.assertIn("veto_roles=test", out)
+        self.assertIn("veto_roles=caretaker_quality", out)
         self.assertIn("reliability:", out)
         self.assertIn("driver_attempts=2", out)
 
@@ -1274,7 +1357,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         data = json.loads(out)
         self.assertTrue(data["ok"])
-        self.assertEqual(data["roles"], 3)
+        self.assertEqual(data["roles"], 6)
         self.assertEqual(data["chain"]["summary"], "hash chain ok, checked 0 event(s)")
         self.assertEqual(data["role_checks"][0]["status"], "configured")
 
@@ -1691,7 +1774,7 @@ class WebTests(unittest.TestCase):
             html = render_task(rt.task(task_id), events, timeline_category="dialogue")
 
         self.assertIn("dialogue", html)
-        self.assertIn(f"3 / {len(events)} events", html)
+        self.assertIn(f"6 / {len(events)} events", html)
         self.assertIn("msg.said", html)
         self.assertNotIn("task.created", html)
 
@@ -1724,7 +1807,7 @@ class WebTests(unittest.TestCase):
 
             with urlopen(f"{base}/tasks/{task_id}", timeout=5) as response:
                 page = response.read().decode("utf-8")
-            self.assertIn('<option value="dev">dev / 开发工程师</option>', page)
+            self.assertIn('<option value="dev">dev / 工程实现猫</option>', page)
 
             dispatch_request = Request(
                 f"{base}/tasks/{task_id}/dispatch",
@@ -1783,6 +1866,19 @@ class WebTests(unittest.TestCase):
             self.assertIn("hash chain ok", data["summary"])
             self.assertIn("head_hash", data)
 
+    def test_web_exposes_configured_cat_cafe_identity_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-organization.db")
+            base = start_test_web(self, db)
+            with urlopen(f"{base}/api/organization/profile", timeout=5) as response:
+                profile = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(profile["leader"]["name"], "店长")
+        self.assertEqual([member["name"] for member in profile["workers"]], ["月亮", "米寇", "三角"])
+        self.assertEqual(len(profile["cabinet"]), 3)
+        self.assertTrue(profile["workers"][0]["charter"])
+        self.assertEqual(profile["mode"], "local_demo")
+
     def test_web_api_can_create_and_run_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-api-create.db")
@@ -1813,6 +1909,31 @@ class WebTests(unittest.TestCase):
             self.assertIn("review", data)
             self.assertIn("decision_ladder", data)
             self.assertEqual(data["organization_path"][0]["status"], "cabinet_dispatch")
+
+    def test_web_api_intake_exposes_interpretation_and_can_upgrade_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-api-intake.db")
+            base = start_test_web(self, db)
+            body = json.dumps(
+                {
+                    "goal": "重构多 Agent 协作系统并接入外部 CLI",
+                    "acceptance": ["可回放", "可恢复", "可验证"],
+                    "requested_route": "direct",
+                    "assign_to": "dev",
+                }
+            ).encode("utf-8")
+            request = Request(
+                f"{base}/api/tasks",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(data["task"]["route"]["route"], "cabinet")
+        self.assertIn("协作", data["task"]["interpretation"]["objective"])
+        self.assertIn("cabinet.convened", [event["type"] for event in data["events"]])
 
     def test_web_api_rejects_run_and_battle_conflict(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -25,6 +25,7 @@ class Role:
     name: str
     role: str
     driver: str
+    charter: str = ""
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,80 @@ class Runtime:
         self.log.emit(actor=self._leader_actor(), type="task.started", task_id=task_id)
         return task_id
 
+    def intake(
+        self,
+        task_id: str,
+        *,
+        requested_route: str = "auto",
+        preferred_owner: str | None = None,
+    ) -> dict[str, Any]:
+        """Turn a human request into an inspectable execution route.
+
+        This deliberately records a compact decision summary instead of exposing
+        hidden model reasoning. A future leader driver can replace the local
+        policy without changing the event contract seen by the UI.
+        """
+        if requested_route not in {"auto", "direct"}:
+            raise ValueError("requested_route must be auto or direct")
+        task = self.task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        if preferred_owner:
+            self._worker_by_id(preferred_owner)
+
+        interpretation = self._interpret_task(task)
+        self.log.emit(
+            actor=self._leader_actor(),
+            type="task.interpreted",
+            task_id=task_id,
+            payload=interpretation,
+        )
+        route, reason = self._select_route(
+            interpretation,
+            requested_route=requested_route,
+            preferred_owner=preferred_owner,
+        )
+        route_payload = {
+            "route": route,
+            "requested_route": requested_route,
+            "preferred_owner": preferred_owner,
+            "reason": reason,
+            "complexity": interpretation["complexity"],
+        }
+        self.log.emit(
+            actor=self._leader_actor(),
+            type="task.routed",
+            task_id=task_id,
+            payload=route_payload,
+        )
+
+        if route == "direct":
+            assert preferred_owner is not None
+            role = self._worker_by_id(preferred_owner)
+            self.assign(
+                task_id,
+                preferred_owner,
+                objective=f"{role.name}优先完成：{interpretation['objective']}",
+                acceptance=(task.acceptance[0] if task.acceptance else "交付可验证的最小结果"),
+                source="leader",
+                route_reason=reason,
+            )
+        elif route == "collaborate":
+            self._publish_execution_plan(task_id, source="leader", route_reason=reason)
+        else:
+            self.log.emit(
+                actor=self._leader_actor(),
+                type="cabinet.convened",
+                task_id=task_id,
+                payload={
+                    "reason": reason,
+                    "focus": interpretation["risks"],
+                    "members": [role.id for role in self.cabinet_roles],
+                },
+            )
+            self._publish_execution_plan(task_id, source="cabinet", route_reason=reason)
+        return {"task_id": task_id, "interpretation": interpretation, "route": route_payload}
+
     def collaborate(self, task_id: str) -> dict[str, Any]:
         return self._run_round(task_id, force_governance=False)
 
@@ -136,15 +211,29 @@ class Runtime:
         return self._run_round(task_id, force_governance=True)
 
     def dispatch(self, task_id: str) -> dict[str, Any]:
+        return self._publish_execution_plan(task_id, source="cabinet")
+
+    def _publish_execution_plan(
+        self,
+        task_id: str,
+        *,
+        source: str,
+        route_reason: str | None = None,
+    ) -> dict[str, Any]:
         task = self.task(task_id)
         if task is None:
             raise KeyError(task_id)
 
+        interpretation = task.interpretation or self._interpret_task(task)
+        objective = str(interpretation["objective"])
+        planner = "内阁" if source == "cabinet" else self.organization.leader.name
+        planner_actor = Actor.system("cabinet") if source == "cabinet" else self._leader_actor()
         mission = {
-            "goal": task.goal,
+            "goal": objective,
+            "original_goal": task.goal,
             "acceptance": list(task.acceptance),
-            "source": "orchestrator",
-            "intent": "将人类目标转化为组织可执行的工作。",
+            "source": source,
+            "intent": f"{planner}将任务理解转化为组织可执行的工作。",
         }
         self.log.emit(
             actor=self._leader_actor(),
@@ -153,36 +242,36 @@ class Runtime:
             payload=mission,
         )
 
-        subtasks = self._decompose_task(task)
+        subtasks = self._decompose_task(task, objective=objective)
         decomposition = {
-            "source": "cabinet",
-            "strategy": "内阁将目标拆分为各角色负责的执行线。",
+            "source": source,
+            "strategy": f"{planner}依据任务理解，将目标拆分为各角色负责的执行线。",
             "subtasks": subtasks,
         }
         self.log.emit(
-            actor=Actor.system("cabinet"),
+            actor=planner_actor,
             type="task.decomposed",
             task_id=task_id,
             payload=decomposition,
         )
         for subtask in subtasks:
             self.log.emit(
-                actor=Actor.system("cabinet"),
+                actor=planner_actor,
                 type="subtask.assigned",
                 task_id=task_id,
                 payload=subtask,
             )
 
         plan = {
-            "source": "cabinet",
+            "source": source,
             "mission": mission,
             "subtasks": subtasks,
-            "flow": ["orchestrator", "cabinet", "workers", "review"],
+            "flow": (["orchestrator", "cabinet", "workers", "review"] if source == "cabinet" else ["leader", "workers", "review"]),
             "next_action": "run",
-            "reason": "最高层已明确目标，内阁已将可执行工作分配给执行层。",
+            "reason": route_reason or f"{planner}已根据任务理解完成执行分解。",
         }
         self.log.emit(
-            actor=Actor.system("cabinet"),
+            actor=planner_actor,
             type="plan.proposed",
             task_id=task_id,
             payload=plan,
@@ -196,6 +285,8 @@ class Runtime:
         *,
         objective: str | None = None,
         acceptance: str | None = None,
+        source: str = "human",
+        route_reason: str | None = None,
     ) -> dict[str, Any]:
         task = self.task(task_id)
         if task is None:
@@ -206,29 +297,29 @@ class Runtime:
             "owner": role.id,
             "role": role.role,
             "lane": self._role_lane(role.id, role.role),
-            "objective": objective or f"{role.name}直接负责执行：{task.goal}",
+            "objective": objective or f"{role.name}直接负责执行：{self._task_objective(task)}",
             "acceptance": acceptance or (task.acceptance[0] if task.acceptance else "完成所要求的工作"),
             "depends_on": [],
             "status": "assigned",
-            "source": "human",
+            "source": source,
             "mode": "direct",
         }
         self.log.emit(
-            actor=Actor.human("human"),
+            actor=Actor.human("human") if source == "human" else self._leader_actor(),
             type="subtask.assigned",
             task_id=task_id,
             payload=assignment,
         )
         plan = {
-            "source": "human",
-            "mission": {"goal": task.goal, "acceptance": list(task.acceptance), "source": "human"},
+            "source": source,
+            "mission": {"goal": self._task_objective(task), "acceptance": list(task.acceptance), "source": source},
             "subtasks": [assignment],
-            "flow": ["human", "worker", "review"],
+            "flow": (["human", "worker", "review"] if source == "human" else ["leader", "worker", "review"]),
             "next_action": "run",
-            "reason": "人类将该任务直接指派给执行层。",
+            "reason": route_reason or "人类将该任务直接指派给执行层。",
         }
         self.log.emit(
-            actor=Actor.human("human"),
+            actor=Actor.human("human") if source == "human" else self._leader_actor(),
             type="plan.proposed",
             task_id=task_id,
             payload=plan,
@@ -241,61 +332,12 @@ class Runtime:
             raise KeyError(task_id)
 
         profiles = self.profiles()
-        utterances = []
-        role_ids = {role.id for role in self.roles}
-        for role in self._roles_for_round(task):
-            driver = self.drivers[role.driver]
-            prompt = self._prompt(task, role, profiles.get(role.id), utterances)
-            response = self._complete_with_containment(
-                task_id=task_id,
-                task=task,
-                role=role,
-                driver=driver,
-                prompt=prompt,
-            )
-            parsed = self._parse_response(response.text)
-            event_type = "msg.challenge" if parsed.get("stance") == "challenge" else "msg.said"
-            payload = {
-                "stance": parsed.get("stance", "assert"),
-                "option_id": parsed.get("option_id"),
-                "claim": parsed.get("claim", ""),
-                "evidence": list(parsed.get("evidence", []) or []),
-                "confidence": parsed.get("confidence"),
-                "text": parsed.get("text", response.text),
-                "tokens": response.tokens,
-                "driver": role.driver,
-            }
-            visible_refs = {
-                int(item["seq"])
-                for item in task.messages
-                if isinstance(item.get("seq"), int)
-            }
-            visible_refs.update(
-                event.seq
-                for item in utterances
-                for event in [item.get("event")]
-                if isinstance(getattr(event, "seq", None), int)
-            )
-            target = self._optional_target(parsed.get("target"), role_ids)
-            reply_to = self._optional_reply_to(parsed.get("reply_to"), visible_refs)
-            if target is not None:
-                payload["target"] = target
-            if reply_to is not None:
-                payload["reply_to"] = reply_to
-            event = self.log.emit(
-                actor=Actor.agent(role.id, role.role),
-                type=event_type,
-                task_id=task_id,
-                payload=payload,
-            )
-            for deliverable in self._deliverables(parsed.get("deliverables")):
-                self.log.emit(
-                    actor=Actor.agent(role.id, role.role),
-                    type="deliverable.published",
-                    task_id=task_id,
-                    payload={**deliverable, "message_seq": event.seq},
-                )
-            utterances.append({"event": event, "payload": payload, "role": role})
+        utterances = self._collect_utterances(
+            task_id,
+            task,
+            self._roles_for_round(task),
+            profiles,
+        )
 
         governance = self._governance_trigger(utterances, force_governance=force_governance)
         if governance["status"] == "not_needed":
@@ -307,6 +349,20 @@ class Runtime:
                 payload={"brief": brief, "reason": "collaboration_continues", "options": brief["options"]},
             )
             return {"task_id": task_id, "brief_event": brief_event.seq, "brief": brief}
+
+        cabinet_roles = self._cabinet_roles_for_consultation(utterances)
+        if cabinet_roles:
+            self.log.emit(
+                actor=self._leader_actor(),
+                type="cabinet.convened",
+                task_id=task_id,
+                payload={
+                    "reason": governance["reason"],
+                    "focus": governance["signals"],
+                    "members": [role.id for role in cabinet_roles],
+                },
+            )
+            utterances.extend(self._collect_utterances(task_id, task, cabinet_roles, profiles, utterances))
 
         brief = self._build_brief(
             task_id,
@@ -392,6 +448,81 @@ class Runtime:
                 payload={"brief": brief},
             )
         return {"task_id": task_id, "brief_event": brief_event.seq, "brief": brief}
+
+    def _collect_utterances(
+        self,
+        task_id: str,
+        task: TaskSnapshot,
+        roles: list[Role],
+        profiles: dict[str, dict[str, Any]],
+        earlier: list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run one set of organization members and append their visible output."""
+        utterances = list(earlier or [])
+        produced = []
+        role_ids = {role.id for role in self.roles}
+        for role in roles:
+            driver = self.drivers[role.driver]
+            prompt = self._prompt(task, role, profiles.get(role.id), utterances)
+            response = self._complete_with_containment(
+                task_id=task_id,
+                task=task,
+                role=role,
+                driver=driver,
+                prompt=prompt,
+                round_outputs=utterances,
+            )
+            parsed = self._parse_response(response.text)
+            event_type = "msg.challenge" if parsed.get("stance") == "challenge" else "msg.said"
+            payload = {
+                "stance": parsed.get("stance", "assert"),
+                "option_id": parsed.get("option_id"),
+                "claim": parsed.get("claim", ""),
+                "evidence": list(parsed.get("evidence", []) or []),
+                "confidence": parsed.get("confidence"),
+                "text": parsed.get("text", response.text),
+                "tokens": response.tokens,
+                "driver": role.driver,
+            }
+            visible_refs = {
+                int(item["seq"])
+                for item in task.messages
+                if isinstance(item.get("seq"), int)
+            }
+            visible_refs.update(
+                event.seq
+                for item in utterances
+                for event in [item.get("event")]
+                if isinstance(getattr(event, "seq", None), int)
+            )
+            target = self._optional_target(parsed.get("target"), role_ids)
+            reply_to = self._optional_reply_to(parsed.get("reply_to"), visible_refs)
+            if target is not None:
+                payload["target"] = target
+            if reply_to is not None:
+                payload["reply_to"] = reply_to
+            event = self.log.emit(
+                actor=Actor.agent(role.id, role.role),
+                type=event_type,
+                task_id=task_id,
+                payload=payload,
+            )
+            for deliverable in self._deliverables(parsed.get("deliverables")):
+                self.log.emit(
+                    actor=Actor.agent(role.id, role.role),
+                    type="deliverable.published",
+                    task_id=task_id,
+                    payload={**deliverable, "message_seq": event.seq},
+                )
+            item = {"event": event, "payload": payload, "role": role}
+            utterances.append(item)
+            produced.append(item)
+        return produced
+
+    def _cabinet_roles_for_consultation(self, utterances: list[dict[str, Any]]) -> list[Role]:
+        """Ask distinct cabinet seats only when the workers actually need governance."""
+        already_spoke = {item["role"].id for item in utterances}
+        return [role for role in self.cabinet_roles if role.id not in already_spoke]
 
     def _roles_for_round(self, task: TaskSnapshot) -> list[Role]:
         """Honor an explicit direct assignment without changing normal team collaboration."""
@@ -493,6 +624,7 @@ class Runtime:
         role: Role,
         driver: Driver,
         prompt: str,
+        round_outputs: list[dict[str, Any]] | None = None,
     ) -> DriverResponse:
         if self._is_circuit_open(role.driver):
             self._emit_driver_failure(
@@ -505,7 +637,27 @@ class Runtime:
             return self._contained_driver_failure(role, "circuit breaker is open")
 
         last_error: Exception | None = None
-        context = {"task_id": task_id, "goal": task.goal}
+        context = {
+            "task_id": task_id,
+            "goal": task.goal,
+            "objective": self._task_objective(task),
+            "acceptance": list(task.acceptance),
+            "interpretation": dict(task.interpretation or {}),
+            "role": {
+                "id": role.id,
+                "name": role.name,
+                "description": role.role,
+                "charter": role.charter,
+            },
+            "prior_outputs": [
+                {
+                    "seq": item["event"].seq,
+                    "actor": item["role"].id,
+                    "text": str(item["payload"].get("text") or "")[:500],
+                }
+                for item in (round_outputs or [])[-6:]
+            ],
+        }
         for attempt in range(1, self.driver_attempts + 1):
             try:
                 response = driver.complete(role=role.role, prompt=prompt, context=context)
@@ -576,10 +728,19 @@ class Runtime:
         memory = self._profile_memory(profile)
         task_memory = self._task_memory(task, role.id)
         round_memory = self._round_memory(round_outputs or [])
+        objective = self._task_objective(task)
+        seat = (
+            "You are serving on the cabinet: assess the worker outputs, compare options, and return a decision-ready position."
+            if role.id in self.organization.cabinet_members
+            else "You are an execution member: contribute concrete work, evidence, or a necessary risk signal."
+        )
         return (
             f"You are {role.name}. Work as one member of an autonomous agent organization.\n"
             f"Goal: {task.goal}\n"
+            f"Organization objective: {objective}\n"
             f"Acceptance: {task.acceptance}\n"
+            f"Seat policy: {seat}\n"
+            f"Role charter: {role.charter or role.role}\n"
             "Collaboration policy: produce the most useful next contribution first; "
             "use stance=challenge only for material disagreement, risk, or missing evidence; "
             "do not force a debate when normal collaboration is enough.\n"
@@ -701,7 +862,91 @@ class Runtime:
             if re.search(rf"(?<![\w-])@{re.escape(role.id)}\b", instruction, flags=re.IGNORECASE)
         ]
 
-    def _decompose_task(self, task: TaskSnapshot) -> list[dict[str, Any]]:
+    def _interpret_task(self, task: TaskSnapshot) -> dict[str, Any]:
+        """Produce a bounded, user-visible task analysis for the local runtime."""
+        text = task.goal.strip()
+        normalized = text.lower()
+        complex_terms = (
+            "系统", "架构", "重构", "迁移", "多", "集成", "接入", "安全", "上线",
+            "平台", "workflow", "architecture", "refactor", "migrate", "integrat", "security",
+        )
+        has_complex_signal = any(term in normalized for term in complex_terms)
+        if has_complex_signal or len(task.acceptance) >= 3 or len(text) > 120:
+            complexity = "complex"
+        elif len(task.acceptance) >= 2 or len(text) > 48:
+            complexity = "standard"
+        else:
+            complexity = "light"
+
+        scope = ["明确可交付结果与验收边界"]
+        objective = "把需求转化为可执行、可验证的最小成果闭环。"
+        summary = "先识别交付边界与风险，再决定协作深度。"
+        if any(term in normalized for term in ("agent", "智能体", "协作", "多角色", "多agent")):
+            objective = "形成可观察的多角色协作闭环，并让分工、讨论与成果能够回放。"
+            summary = "该请求涉及组织协作方式，需要同时校准任务流、角色边界与可观察性。"
+        elif any(term in normalized for term in ("网页", "页面", "ui", "交互", "界面", "web")):
+            objective = "交付一条可完成任务的交互路径，并用可见状态呈现过程与结果。"
+            summary = "该请求以使用体验为中心，需要先确定用户入口、关键状态和结果承载方式。"
+        elif any(term in normalized for term in ("代码", "接口", "cli", "api", "实现", "开发", "python", "java")):
+            objective = "交付可运行的实现改动，并为关键行为保留验证证据。"
+            summary = "该请求包含工程实现，需要先收束模块边界、接口行为和验证方式。"
+        elif any(term in normalized for term in ("文档", "readme", "说明", "文档")):
+            objective = "形成准确、可执行且面向使用者的项目说明。"
+            summary = "该请求以知识传达为主，需要校准读者、结构和可操作性。"
+        if any(term in normalized for term in ("网页", "页面", "ui", "交互", "界面", "web")):
+            scope.append("形成完整且可验证的交互路径")
+        if any(term in normalized for term in ("代码", "接口", "cli", "api", "实现", "开发", "python", "java")):
+            scope.append("落实实现边界并保留可运行证据")
+        if not task.acceptance:
+            scope.append("补齐最小验收标准")
+
+        risks = []
+        if complexity == "complex":
+            risks.append("任务涉及多个决策面，直接下发可能遗漏依赖或验收边界")
+        if not task.acceptance:
+            risks.append("尚未给出明确验收标准，需要以可验证成果收束")
+        if not risks:
+            risks.append("保持范围克制，优先验证最小可交付路径")
+
+        return {
+            "summary": summary,
+            "objective": objective,
+            "scope": scope,
+            "constraints": ["保留事件回放证据", "先交付最小有效结果，再扩展范围"],
+            "acceptance": list(task.acceptance) or ["产出可检查的结果与下一步依据"],
+            "complexity": complexity,
+            "risks": risks,
+            "basis": [
+                f"请求长度：{len(text)} 字符",
+                f"验收条件：{len(task.acceptance)} 项",
+                "检测到跨角色或跨边界信号" if has_complex_signal else "未检测到必须立即升级的跨边界信号",
+            ],
+        }
+
+    @staticmethod
+    def _select_route(
+        interpretation: dict[str, Any],
+        *,
+        requested_route: str,
+        preferred_owner: str | None,
+    ) -> tuple[str, str]:
+        complexity = str(interpretation["complexity"])
+        if complexity == "complex":
+            return "cabinet", "任务跨越多个边界或存在明显风险，由内阁先校准拆解与优先级。"
+        if requested_route == "direct" and preferred_owner:
+            if complexity == "light":
+                return "direct", "目标范围较小，保留人类的执行角色偏好并直接交付。"
+            return "collaborate", "任务仍需跨角色校准；总控将人类直派偏好改为协作执行。"
+        return "collaborate", "任务可先由总控完成轻量分解，再由执行层协作推进。"
+
+    @staticmethod
+    def _task_objective(task: TaskSnapshot) -> str:
+        if task.interpretation and task.interpretation.get("objective"):
+            return str(task.interpretation["objective"])
+        return "把需求转化为可执行、可验证的最小成果闭环。"
+
+    def _decompose_task(self, task: TaskSnapshot, *, objective: str | None = None) -> list[dict[str, Any]]:
+        objective = objective or self._task_objective(task)
         criteria = list(task.acceptance) or ["产出有价值且可验证的下一步成果"]
         subtasks = []
         prior_by_lane: dict[str, list[str]] = {}
@@ -716,7 +961,7 @@ class Runtime:
                     "owner": role.id,
                     "role": role.role,
                     "lane": lane,
-                    "objective": f"{role.name}负责“{lane}”：{task.goal}",
+                    "objective": f"{role.name}负责“{lane}”，围绕“{objective}”交付本执行线成果。",
                     "acceptance": criterion,
                     "deliverable": self._lane_deliverable(lane),
                     "depends_on": depends_on,
@@ -995,18 +1240,22 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
         role_name = item.get("name", role_id)
         role_description = item.get("role", role_id)
         driver_name = item.get("driver", role_id)
+        charter = item.get("charter", "")
         if not isinstance(role_name, str) or not role_name.strip():
             raise ValueError(f"role {role_id!r} requires a non-empty string name")
         if not isinstance(role_description, str) or not role_description.strip():
             raise ValueError(f"role {role_id!r} requires a non-empty string role")
         if not isinstance(driver_name, str) or not driver_name.strip():
             raise ValueError(f"role {role_id!r} requires a non-empty string driver")
+        if not isinstance(charter, str):
+            raise ValueError(f"role {role_id!r} charter must be a string")
         roles.append(
             Role(
                 id=role_id,
                 name=role_name.strip(),
                 role=role_description.strip(),
                 driver=driver_name.strip(),
+                charter=charter.strip(),
             )
         )
     return RuntimeConfig(
@@ -1040,10 +1289,6 @@ def _load_organization(data: Any, roles: list[Role]) -> Organization:
 
     cabinet_members = _organization_members(data.get("cabinet_members"), "cabinet_members", role_ids)
     worker_members = _organization_members(data.get("worker_members"), "worker_members", role_ids)
-    if len(cabinet_members) < 2:
-        raise ValueError("organization.cabinet_members requires at least two roles")
-    if not cabinet_members.issubset(worker_members):
-        raise ValueError("organization.cabinet_members must also be execution roles")
     return Organization(
         leader=Leader(**{key: value.strip() for key, value in leader_values.items()}),
         cabinet_members=frozenset(cabinet_members),

@@ -54,6 +54,118 @@ class ScriptedDriver:
         return DriverResponse(text=text, tokens=self.tokens_per_call, meta={"driver": self.name})
 
 
+class GuidedDriver:
+    """Deterministic, task-aware dialogue for the bundled local demo.
+
+    It is intentionally not presented as a model. Its job is to make the
+    out-of-the-box replay readable while a user has not connected a real CLI
+    driver yet.
+    """
+
+    def __init__(self, name: str, tokens_per_call: int = 80):
+        self.name = name
+        self.tokens_per_call = tokens_per_call
+
+    def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
+        focus = _demo_focus(context)
+        role_lower = role.lower()
+        if "铲屎官" in role:
+            text, claim, evidence = _caretaker_response(role_lower, focus)
+            deliverables: list[dict[str, str]] = []
+        else:
+            text, claim, evidence, deliverable = _cat_response(role_lower, focus)
+            deliverables = [deliverable]
+        payload = {
+            "stance": "assert",
+            "option_id": "A",
+            "claim": claim,
+            "evidence": evidence,
+            "confidence": 0.82,
+            "text": text,
+            "deliverables": deliverables,
+        }
+        prior = context.get("prior_outputs")
+        if isinstance(prior, list) and prior:
+            previous = prior[-1]
+            if isinstance(previous, dict):
+                actor = previous.get("actor")
+                seq = previous.get("seq")
+                if isinstance(actor, str) and isinstance(seq, int):
+                    payload["target"] = actor
+                    payload["reply_to"] = seq
+        return DriverResponse(
+            text=json.dumps(payload, ensure_ascii=False),
+            tokens=self.tokens_per_call,
+            meta={"driver": self.name, "mode": "guided_demo"},
+        )
+
+
+def _demo_focus(context: dict[str, Any]) -> str:
+    """Keep the bundled demo legible without claiming to understand like a model."""
+    goal = str(context.get("goal") or "")
+    normalized = goal.lower()
+    if "预约" in goal and "菜单" in goal:
+        return "预约、菜单浏览与意见反馈这条顾客流程"
+    if any(term in normalized for term in ("agent", "智能体", "协作", "多角色")):
+        return "可观察的多角色协作流程"
+    if any(term in normalized for term in ("网页", "页面", "ui", "界面", "web")):
+        return "用户能完成的网页交互路径"
+    acceptance = context.get("acceptance")
+    if isinstance(acceptance, list):
+        first = next((str(item).strip() for item in acceptance if str(item).strip()), "")
+        if first:
+            return _short_text(first)
+    return _short_text(str(context.get("objective") or goal or "当前任务"))
+
+
+def _short_text(text: str) -> str:
+    compact = " ".join(text.split())
+    return compact if len(compact) <= 42 else compact[:39] + "..."
+
+
+def _cat_response(role: str, focus: str) -> tuple[str, str, list[str], dict[str, str]]:
+    if "工程" in role or "实现" in role:
+        return (
+            f"米寇接下实现线：我会先把“{focus}”收成一个能跑、能验证的最小路径，再把依赖和风险写清楚。",
+            "先落地可验证的最小实现路径",
+            ["先确认接口与状态边界", "保留可运行或可复现的证据"],
+            {"title": "米寇的实现路径", "summary": "已收束实现边界，并准备提供可运行验证。", "kind": "plan"},
+        )
+    if "质量" in role or "验证" in role:
+        return (
+            f"三角会盯住“{focus}”的验收：我先列出最容易漏掉的风险，再确认结果真的能回放。",
+            "先用可回放证据守住验收边界",
+            ["结果需要能被复查", "范围变化要有回归检查"],
+            {"title": "三角的验证清单", "summary": "已建立面向验收与回放的风险检查点。", "kind": "checklist"},
+        )
+    return (
+        f"月亮先把这单听明白：围绕“{focus}”，我会把用户真正能感受到的结果和边界整理出来。",
+        "先把用户价值和可见结果讲清楚",
+        ["先明确顾客能看到什么结果", "避免把不必要的复杂度带进第一步"],
+        {"title": "月亮的任务收束", "summary": "已将需求整理为用户可感知、可判断的交付方向。", "kind": "brief"},
+    )
+
+
+def _caretaker_response(role: str, focus: str) -> tuple[str, str, list[str]]:
+    if "工程" in role or "实现" in role:
+        return (
+            f"工程铲屎官看过猫咪们的产出：这单“{focus}”可以沿最小实现路径推进，依赖和恢复边界要留在台面上。",
+            "认可最小实现路径，并要求保留依赖与恢复边界",
+            ["实现顺序应当可追踪", "异常时需要可恢复的退路"],
+        )
+    if "质量" in role or "风险" in role:
+        return (
+            f"质量铲屎官补一条：推进“{focus}”前，成果必须能对照验收复查；证据不足时再回来补。",
+            "认可推进，但以可复查证据作为通过条件",
+            ["验收结果需要可复查", "风险不能只写在口头结论里"],
+        )
+    return (
+        f"需求铲屎官确认方向：猫咪们应该先交付能让顾客判断的成果，再逐步扩展“{focus}”的范围。",
+        "认可先交付可判断成果，再扩展范围",
+        ["先对齐顾客可见价值", "避免分工变成无效仪式"],
+    )
+
+
 class CliDriver:
     """Long-lived NDJSON CLI driver.
 
@@ -214,6 +326,11 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
             list(script),
             tokens_per_call=tokens_per_call,
         )
+    if kind == "guided":
+        tokens_per_call = int(data.get("tokens_per_call", 80))
+        if tokens_per_call < 0:
+            raise ValueError(f"guided driver {name!r} tokens_per_call must be non-negative")
+        return GuidedDriver(name, tokens_per_call=tokens_per_call)
     if kind == "cli":
         command = data.get("command")
         if not isinstance(command, list) or not all(isinstance(item, str) for item in command):

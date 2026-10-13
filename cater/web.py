@@ -242,6 +242,24 @@ def make_handler(
                             for role in rt.worker_roles
                         ]
                     )
+            if path == "/api/organization/profile":
+                with self._runtime() as rt:
+                    driver_types = {
+                        type(rt.drivers[role.driver]).__name__
+                        for role in rt.roles
+                    }
+                    return self._send_json(
+                        {
+                            "leader": _role_to_dict(rt.organization.leader),
+                            "cabinet": [_role_to_dict(role) for role in rt.cabinet_roles],
+                            "workers": [_role_to_dict(role) for role in rt.worker_roles],
+                            "mode": (
+                                "local_demo"
+                                if driver_types <= {"GuidedDriver", "ScriptedDriver"}
+                                else "external_driver"
+                            ),
+                        }
+                    )
             if path == "/api/chain":
                 with self._runtime() as rt:
                     return self._send_json(chain_to_dict(rt.verify_chain()))
@@ -290,14 +308,24 @@ def make_handler(
                     return self._bad_request("choose either run for normal collaboration or battle for forced governance")
                 background = _truthy(data.get("background"))
                 assign_owner = str(data.get("assign_to", "")).strip()
+                requested_route = _optional_text(data.get("requested_route"))
                 acceptance = _acceptance_lines(data.get("acceptance"))
                 with self._runtime() as rt:
                     if assign_owner and assign_owner not in {role.id for role in rt.worker_roles}:
                         return self._bad_request(f"unknown role {assign_owner!r}")
                     task_id = rt.create_task(goal, acceptance)
-                    if _truthy(data.get("dispatch")):
+                    if requested_route is not None:
+                        try:
+                            rt.intake(
+                                task_id,
+                                requested_route=requested_route,
+                                preferred_owner=assign_owner or None,
+                            )
+                        except ValueError as exc:
+                            return self._bad_request(str(exc))
+                    elif _truthy(data.get("dispatch")):
                         rt.dispatch(task_id)
-                    if assign_owner:
+                    if assign_owner and requested_route is None:
                         rt.assign(
                             task_id,
                             assign_owner,
@@ -788,11 +816,22 @@ def task_to_dict(task: TaskSnapshot) -> dict[str, Any]:
         "decision": task.decision,
         "commands": task.commands,
         "reviews": task.reviews,
+        "interpretation": task.interpretation,
+        "route": task.route,
         "mission": task.mission,
         "plan": task.plan,
         "assignments": task.assignments,
         "deliverables": task.deliverables,
         "tokens": task.tokens,
+    }
+
+
+def _role_to_dict(role: Any) -> dict[str, str]:
+    return {
+        "id": str(role.id),
+        "name": str(role.name),
+        "role": str(role.role),
+        "charter": str(getattr(role, "charter", "")),
     }
 
 

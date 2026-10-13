@@ -22,6 +22,8 @@ class TaskSnapshot:
     decision: dict[str, Any] | None = None
     commands: list[dict[str, Any]] = field(default_factory=list)
     reviews: list[dict[str, Any]] = field(default_factory=list)
+    interpretation: dict[str, Any] | None = None
+    route: dict[str, Any] | None = None
     mission: dict[str, Any] | None = None
     plan: dict[str, Any] | None = None
     assignments: list[dict[str, Any]] = field(default_factory=list)
@@ -49,6 +51,10 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
             task.status = "running"
         elif event.type == "task.started":
             task.status = "running"
+        elif event.type == "task.interpreted":
+            task.interpretation = {"seq": event.seq, **payload}
+        elif event.type == "task.routed":
+            task.route = {"seq": event.seq, **payload}
         elif event.type == "mission.created":
             task.mission = {"seq": event.seq, **payload}
         elif event.type == "task.decomposed":
