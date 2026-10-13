@@ -229,8 +229,17 @@ def cmd_review(args: argparse.Namespace) -> int:
             print("next actions:")
             if not actions:
                 print("  - none")
-            for action in actions:
-                print(f"  - {action}")
+            steps = review.get("next_steps") or []
+            if steps:
+                for step in steps:
+                    print(
+                        "  - "
+                        f"[{step.get('priority', 'medium')}/{step.get('label', step.get('source', 'review'))}] "
+                        f"{step.get('action')}"
+                    )
+            else:
+                for action in actions:
+                    print(f"  - {action}")
             return 0
         print(json.dumps(review, ensure_ascii=False, indent=2, sort_keys=True))
     return 0

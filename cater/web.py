@@ -713,8 +713,17 @@ def _review_panel(review: dict[str, Any]) -> str:
         """
         for item in review.get("lenses", [])
     )
+    steps = review.get("next_steps") or []
     actions = review.get("next_actions", [])
-    if actions:
+    if steps:
+        action_rows = "\n".join(
+            f"<li><strong>{escape(item.get('label', item.get('source', 'Review')))}</strong>"
+            f"<span>{escape(item.get('priority', 'medium'))}</span>"
+            f"{escape(item.get('action'))}</li>"
+            for item in steps[:3]
+        )
+        next_block = f'<ul class="next-actions">{action_rows}</ul>'
+    elif actions:
         action_rows = "\n".join(f"<li>{escape(item)}</li>" for item in actions[:3])
         next_block = f'<ul class="next-actions">{action_rows}</ul>'
     else:
@@ -1219,6 +1228,13 @@ td small {
 }
 .next-actions li + li {
   margin-top: 4px;
+}
+.next-actions strong, .next-actions span {
+  display: inline-block;
+  margin-right: 8px;
+}
+.next-actions span {
+  color: var(--accent);
 }
 .review-list li, .assignment-list li, .acceptance-list li {
   border: 1px solid var(--line);

@@ -643,6 +643,8 @@ class RuntimeTests(unittest.TestCase):
             review = rt.review()
 
         self.assertEqual(review["next_actions"], ["Run cater demo to create the first replayable task."])
+        self.assertEqual(review["next_steps"][0]["source"], "product")
+        self.assertEqual(review["next_steps"][0]["priority"], "high")
         self.assertEqual(review["summary"], "No tasks yet; create a small task and run one collaboration round.")
 
     def test_review_flags_distribution_weight_and_gaps(self):
@@ -1163,6 +1165,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("health:", out)
         self.assertIn("lenses:", out)
         self.assertIn("next actions:", out)
+        self.assertIn("[medium/", out)
         self.assertNotIn('"lenses"', out)
 
 
@@ -1176,6 +1179,8 @@ class WebTests(unittest.TestCase):
         self.assertIn("POST /api/tasks", html)
         self.assertIn("GET /api/chain", html)
         self.assertIn("python examples/api_client.py", html)
+        self.assertIn("Run cater demo to create the first replayable task.", html)
+        self.assertIn(">high<", html)
 
     def test_render_task_shows_worker_reply_links_in_messages_and_timeline(self):
         driver = ReplyDriver()

@@ -38,12 +38,14 @@ def build_review(
         _reliability_lens(tasks),
         _adoption_lens(tasks, profiles),
     ]
-    next_actions = _next_actions(tasks, lenses)
+    next_steps = _next_steps(tasks, lenses)
+    next_actions = [step["action"] for step in next_steps]
     return {
         "scope": scope,
         "health": "attention" if next_actions else "steady",
         "summary": _summary(tasks, events, chain, next_actions),
         "lenses": lenses,
+        "next_steps": next_steps,
         "next_actions": next_actions,
     }
 
@@ -64,18 +66,38 @@ def _summary(
 
 
 def _next_actions(tasks: list[TaskSnapshot], lenses: list[dict[str, str]]) -> list[str]:
+    return [step["action"] for step in _next_steps(tasks, lenses)]
+
+
+def _next_steps(tasks: list[TaskSnapshot], lenses: list[dict[str, str]]) -> list[dict[str, str]]:
     if not tasks:
-        return ["Run cater demo to create the first replayable task."]
-    actions = []
+        return [
+            {
+                "source": "product",
+                "label": "Product",
+                "status": "needs_attention",
+                "priority": "high",
+                "action": "Run cater demo to create the first replayable task.",
+            }
+        ]
+    steps = []
     seen = set()
     for lens in lenses:
         if lens["status"] == "ok":
             continue
         action = lens["action"]
         if action not in seen:
-            actions.append(action)
+            steps.append(
+                {
+                    "source": lens["id"],
+                    "label": lens["label"],
+                    "status": lens["status"],
+                    "priority": "high" if lens["status"] == "needs_attention" else "medium",
+                    "action": action,
+                }
+            )
             seen.add(action)
-    return actions
+    return steps
 
 
 def _lens(lens_id: str, status: str, finding: str, action: str) -> dict[str, str]:
