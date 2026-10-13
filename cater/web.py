@@ -192,7 +192,10 @@ def make_handler(
                 with self._runtime() as rt:
                     if rt.task(task_id) is None:
                         return self._not_found()
-                    rt.decide(task_id, resolution, reason)
+                    try:
+                        rt.decide(task_id, resolution, reason)
+                    except ValueError as exc:
+                        return self._bad_request(str(exc))
                 self._redirect(f"/tasks/{task_id}")
                 return
             return self._not_found()

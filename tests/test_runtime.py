@@ -1237,6 +1237,33 @@ class WebTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, 400)
             self.assertIn("unknown role 'ghost'", raised.exception.read().decode("utf-8"))
 
+    def test_web_decide_reports_invalid_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-bad-decision.db")
+            with Runtime(db) as rt:
+                task_id = rt.create_task("Serve bad decision")
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join, 1)
+            self.addCleanup(server.shutdown)
+
+            body = urlencode({"resolution": "maybe", "reason": "invalid"}).encode("utf-8")
+            request = Request(
+                f"{base}/tasks/{task_id}/decide",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(request, timeout=5)
+
+            self.assertEqual(raised.exception.code, 400)
+            self.assertIn("resolution must be done or rework", raised.exception.read().decode("utf-8"))
+
     def test_web_can_create_task_and_run_battle(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-create.db")
