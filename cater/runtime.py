@@ -128,7 +128,7 @@ class Runtime:
             "goal": task.goal,
             "acceptance": list(task.acceptance),
             "source": "orchestrator",
-            "intent": "Turn the human command into executable organizational work.",
+            "intent": "将人类目标转化为组织可执行的工作。",
         }
         self.log.emit(
             actor=Actor.system("orchestrator"),
@@ -140,7 +140,7 @@ class Runtime:
         subtasks = self._decompose_task(task)
         decomposition = {
             "source": "cabinet",
-            "strategy": "cabinet divides mission into role-owned execution lanes",
+            "strategy": "内阁将目标拆分为各角色负责的执行线。",
             "subtasks": subtasks,
         }
         self.log.emit(
@@ -163,7 +163,7 @@ class Runtime:
             "subtasks": subtasks,
             "flow": ["orchestrator", "cabinet", "workers", "review"],
             "next_action": "run",
-            "reason": "Top layer framed the mission; cabinet assigned executable work to the worker layer.",
+            "reason": "最高层已明确目标，内阁已将可执行工作分配给执行层。",
         }
         self.log.emit(
             actor=Actor.system("cabinet"),
@@ -189,9 +189,9 @@ class Runtime:
             "id": f"{task.id}:{role.id}:direct",
             "owner": role.id,
             "role": role.role,
-            "lane": self._role_lane(role.role),
-            "objective": objective or f"{role.name} directly owns execution for: {task.goal}",
-            "acceptance": acceptance or (task.acceptance[0] if task.acceptance else "complete the requested work"),
+            "lane": self._role_lane(role.id, role.role),
+            "objective": objective or f"{role.name}直接负责执行：{task.goal}",
+            "acceptance": acceptance or (task.acceptance[0] if task.acceptance else "完成所要求的工作"),
             "depends_on": [],
             "status": "assigned",
             "source": "human",
@@ -209,7 +209,7 @@ class Runtime:
             "subtasks": [assignment],
             "flow": ["human", "worker", "review"],
             "next_action": "run",
-            "reason": "Human assigned this task directly to the worker layer.",
+            "reason": "人类将该任务直接指派给执行层。",
         }
         self.log.emit(
             actor=Actor.human("human"),
@@ -272,6 +272,13 @@ class Runtime:
                 task_id=task_id,
                 payload=payload,
             )
+            for deliverable in self._deliverables(parsed.get("deliverables")):
+                self.log.emit(
+                    actor=Actor.agent(role.id, role.role),
+                    type="deliverable.published",
+                    task_id=task_id,
+                    payload={**deliverable, "message_seq": event.seq},
+                )
             utterances.append({"event": event, "payload": payload, "role": role})
 
         governance = self._governance_trigger(utterances, force_governance=force_governance)
@@ -549,7 +556,8 @@ class Runtime:
             f"{task_memory}\n"
             f"{round_memory}\n"
             "Return JSON with stance, option_id, claim, evidence, confidence, text, "
-            "and optional target, reply_to."
+            "optional target, reply_to, and optional deliverables. Each deliverable needs title and summary; "
+            "it may also include kind and uri."
         )
 
     @staticmethod
@@ -642,12 +650,12 @@ class Runtime:
         ]
 
     def _decompose_task(self, task: TaskSnapshot) -> list[dict[str, Any]]:
-        criteria = list(task.acceptance) or ["produce a useful, verifiable next increment"]
+        criteria = list(task.acceptance) or ["产出有价值且可验证的下一步成果"]
         subtasks = []
         prior_by_lane: dict[str, list[str]] = {}
         for index, role in enumerate(self.roles):
             criterion = criteria[index % len(criteria)]
-            lane = self._role_lane(role.role)
+            lane = self._role_lane(role.id, role.role)
             subtask_id = f"{task.id}:{role.id}:{index + 1}"
             depends_on = self._lane_dependencies(lane, prior_by_lane)
             subtasks.append(
@@ -656,7 +664,7 @@ class Runtime:
                     "owner": role.id,
                     "role": role.role,
                     "lane": lane,
-                    "objective": f"{role.name} owns the {lane} lane for: {task.goal}",
+                    "objective": f"{role.name}负责“{lane}”：{task.goal}",
                     "acceptance": criterion,
                     "deliverable": self._lane_deliverable(lane),
                     "depends_on": depends_on,
@@ -667,42 +675,43 @@ class Runtime:
         return subtasks
 
     @staticmethod
-    def _role_lane(role: str) -> str:
-        normalized = role.lower()
-        if "product" in normalized:
-            return "scope and user value"
-        if "dev" in normalized or "engineer" in normalized:
-            return "implementation"
-        if "test" in normalized or "qa" in normalized:
-            return "verification and risk"
-        if "design" in normalized or "ui" in normalized:
-            return "interaction design"
-        return "execution"
+    def _role_lane(role_id: str, role_description: str) -> str:
+        """Map stable role ids and display descriptions to a user-facing work lane."""
+        normalized = f"{role_id} {role_description}".lower()
+        if "product" in normalized or "产品" in normalized:
+            return "目标与用户价值"
+        if "test" in normalized or "qa" in normalized or "测试" in normalized or "质量" in normalized:
+            return "验证与风险"
+        if "design" in normalized or "ui" in normalized or "设计" in normalized:
+            return "交互设计"
+        if "dev" in normalized or "engineer" in normalized or "开发" in normalized or "工程" in normalized:
+            return "实现"
+        return "执行"
 
     @staticmethod
     def _lane_deliverable(lane: str) -> str:
-        if lane == "scope and user value":
-            return "goal framing, user value, and acceptance clarification"
-        if lane == "implementation":
-            return "working implementation plan or code-ready change"
-        if lane == "verification and risk":
-            return "risk review, test strategy, and release confidence"
-        if lane == "interaction design":
-            return "usable interaction flow and interface constraints"
-        return "role-owned execution output"
+        if lane == "目标与用户价值":
+            return "目标界定、用户价值与验收标准澄清"
+        if lane == "实现":
+            return "可执行的实现方案或可交付代码改动"
+        if lane == "验证与风险":
+            return "风险审查、测试策略与发布信心"
+        if lane == "交互设计":
+            return "可用的交互流程与界面约束"
+        return "角色负责的执行成果"
 
     @staticmethod
     def _lane_dependencies(lane: str, prior_by_lane: dict[str, list[str]]) -> list[str]:
-        if lane == "scope and user value":
+        if lane == "目标与用户价值":
             return []
-        if lane == "implementation":
-            return list(prior_by_lane.get("scope and user value", []))
-        if lane == "interaction design":
-            return list(prior_by_lane.get("scope and user value", []))
-        if lane == "verification and risk":
+        if lane == "实现":
+            return list(prior_by_lane.get("目标与用户价值", []))
+        if lane == "交互设计":
+            return list(prior_by_lane.get("目标与用户价值", []))
+        if lane == "验证与风险":
             deps = []
             for prior_lane, ids in prior_by_lane.items():
-                if prior_lane != "verification and risk":
+                if prior_lane != "验证与风险":
                     deps.extend(ids)
             return deps
         return [ids[-1] for ids in prior_by_lane.values() if ids]
@@ -742,6 +751,26 @@ class Runtime:
         except (TypeError, ValueError):
             return None
         return seq if seq in visible_refs else None
+
+    @staticmethod
+    def _deliverables(value: Any) -> list[dict[str, str]]:
+        if not isinstance(value, list):
+            return []
+        published = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            summary = str(item.get("summary") or "").strip()
+            if not title or not summary:
+                continue
+            payload = {"title": title, "summary": summary}
+            for field in ("kind", "uri"):
+                text = str(item.get(field) or "").strip()
+                if text:
+                    payload[field] = text
+            published.append(payload)
+        return published
 
     @staticmethod
     def _parse_response(text: str) -> dict[str, Any]:

@@ -28,6 +28,7 @@ EVENT_CATEGORIES = {
     "driver.failed": "driver",
     "msg.said": "dialogue",
     "msg.challenge": "dialogue",
+    "deliverable.published": "outcome",
     "cabinet.voted": "decision",
     "decision.proposed": "decision",
     "agent.decided": "decision",

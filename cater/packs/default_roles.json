@@ -12,20 +12,20 @@
   "roles": [
     {
       "id": "product",
-      "name": "Product",
-      "role": "product",
+      "name": "产品",
+      "role": "产品负责人",
       "driver": "product"
     },
     {
       "id": "dev",
-      "name": "Developer",
-      "role": "developer",
+      "name": "开发",
+      "role": "开发工程师",
       "driver": "dev"
     },
     {
       "id": "test",
-      "name": "Tester",
-      "role": "tester",
+      "name": "测试",
+      "role": "测试工程师",
       "driver": "test"
     }
   ]

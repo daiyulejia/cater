@@ -25,6 +25,7 @@ class TaskSnapshot:
     mission: dict[str, Any] | None = None
     plan: dict[str, Any] | None = None
     assignments: list[dict[str, Any]] = field(default_factory=list)
+    deliverables: list[dict[str, Any]] = field(default_factory=list)
     tokens: int = 0
 
 
@@ -54,6 +55,8 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
             task.plan = {"seq": event.seq, **payload}
         elif event.type == "subtask.assigned":
             task.assignments.append({"seq": event.seq, **payload})
+        elif event.type == "deliverable.published":
+            task.deliverables.append({"seq": event.seq, **payload})
         elif event.type == "plan.proposed":
             task.plan = {"seq": event.seq, **payload}
         elif event.type in {"msg.said", "msg.challenge"}:

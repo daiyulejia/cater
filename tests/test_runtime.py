@@ -183,7 +183,49 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(profiles, from_events)
             self.assertEqual(profiles["product"]["supports"], 1)
             self.assertEqual(profiles["test"]["challenges"], 1)
-            self.assertIn("Ship the smallest", profiles["product"]["last_claim"])
+            self.assertIn("先交付最小", profiles["product"]["last_claim"])
+
+    def test_agent_can_publish_structured_deliverables(self):
+        response = json.dumps(
+            {
+                "stance": "assert",
+                "option_id": "result",
+                "claim": "成果已完成",
+                "evidence": ["可回放事件"],
+                "confidence": 0.9,
+                "text": "我已发布可复用成果。",
+                "deliverables": [
+                    {
+                        "title": "验收报告",
+                        "summary": "核心流程已经验证通过。",
+                        "kind": "report",
+                        "uri": "reports/acceptance.md",
+                    },
+                    {"title": "", "summary": "缺少标题的项目不应发布。"},
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                '{"roles":[{"id":"worker","name":"执行者","role":"执行","driver":"result"}]}',
+                encoding="utf-8",
+            )
+            with Runtime(
+                ":memory:",
+                roles_path=roles,
+                drivers={"result": StaticResponseDriver(response)},
+            ) as rt:
+                task_id = rt.create_task("发布成果")
+                rt.collaborate(task_id)
+                task = rt.task(task_id)
+                published = [event for event in rt.log.read(task_id=task_id) if event.type == "deliverable.published"]
+
+        self.assertEqual(len(published), 1)
+        self.assertEqual(task.deliverables[0]["title"], "验收报告")
+        self.assertEqual(task.deliverables[0]["uri"], "reports/acceptance.md")
+        self.assertEqual(task.deliverables[0]["message_seq"], task.messages[0]["seq"])
 
     def test_profile_memory_is_fed_into_later_collaboration_prompts(self):
         driver = PromptCaptureDriver()
@@ -359,11 +401,11 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(result["plan"]["flow"], ["orchestrator", "cabinet", "workers", "review"])
                 self.assertEqual(len(task.assignments), 2)
                 self.assertEqual(task.assignments[0]["owner"], "product")
-                self.assertEqual(task.assignments[1]["lane"], "implementation")
+                self.assertEqual(task.assignments[1]["lane"], "实现")
                 self.assertEqual(task.assignments[1]["depends_on"], [task.assignments[0]["id"]])
                 self.assertIn("deliverable", task.assignments[0])
                 html = render_task(task, rt.log.read(task_id=task_id))
-                self.assertIn("working implementation plan or code-ready change", html)
+                self.assertIn("可执行的实现方案或可交付代码改动", html)
                 self.assertIn("depends on:", html)
 
                 rt.collaborate(task_id)
@@ -381,7 +423,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(product["depends_on"], [])
         self.assertEqual(dev["depends_on"], [product["id"]])
         self.assertEqual(test["depends_on"], [product["id"], dev["id"]])
-        self.assertEqual(test["deliverable"], "risk review, test strategy, and release confidence")
+        self.assertEqual(test["deliverable"], "风险审查、测试策略与发布信心")
 
     def test_human_can_assign_directly_to_worker_layer(self):
         driver = PromptCaptureDriver()
@@ -1518,7 +1560,7 @@ class WebTests(unittest.TestCase):
 
             with urlopen(f"{base}/tasks/{task_id}", timeout=5) as response:
                 page = response.read().decode("utf-8")
-            self.assertIn('<option value="dev">dev / developer</option>', page)
+            self.assertIn('<option value="dev">dev / 开发工程师</option>', page)
 
             dispatch_request = Request(
                 f"{base}/tasks/{task_id}/dispatch",

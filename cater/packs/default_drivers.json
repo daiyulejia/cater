@@ -5,7 +5,7 @@
       "name": "product",
       "tokens_per_call": 200,
       "script": [
-        "{\"stance\":\"assert\",\"option_id\":\"A\",\"claim\":\"Ship the smallest user-visible loop first\",\"evidence\":[\"acceptance criteria matter more than a broad architecture\"],\"confidence\":0.78,\"text\":\"I suggest shipping the smallest loop people can inspect and decide on.\"}"
+        "{\"stance\":\"assert\",\"option_id\":\"A\",\"claim\":\"先交付最小可见闭环\",\"evidence\":[\"验收标准比大而全的架构更重要\"],\"confidence\":0.78,\"text\":\"建议先交付一个用户能看见、能判断的最小闭环。\"}"
       ]
     },
     {
@@ -13,7 +13,7 @@
       "name": "dev",
       "tokens_per_call": 200,
       "script": [
-        "{\"stance\":\"assert\",\"option_id\":\"B\",\"claim\":\"Harden the driver and event boundary first\",\"evidence\":[\"real CLI integration exposes protocol drift and crashes\"],\"confidence\":0.74,\"text\":\"I suggest connecting real drivers before expanding the UI.\"}"
+        "{\"stance\":\"assert\",\"option_id\":\"B\",\"claim\":\"先加固驱动与事件边界\",\"evidence\":[\"真实 CLI 接入会暴露协议漂移与崩溃问题\"],\"confidence\":0.74,\"text\":\"建议在扩展界面前，先接入并验证真实驱动。\"}"
       ]
     },
     {
@@ -21,7 +21,7 @@
       "name": "test",
       "tokens_per_call": 200,
       "script": [
-        "{\"stance\":\"challenge\",\"option_id\":\"C\",\"claim\":\"Do not claim collaboration works without replayable evidence\",\"evidence\":[\"running successfully is not the same as being correct\"],\"confidence\":0.82,\"text\":\"I object to declaring consensus before preserving process evidence.\"}"
+        "{\"stance\":\"challenge\",\"option_id\":\"C\",\"claim\":\"没有可回放证据，就不能宣称协作有效\",\"evidence\":[\"能够运行不等于结果正确\"],\"confidence\":0.82,\"text\":\"在保留过程证据之前，我反对宣布已经达成共识。\"}"
       ]
     }
   ]
