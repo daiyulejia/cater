@@ -78,6 +78,8 @@ function publicIdentity(actorId: string, organization: Organization | null): str
 }
 
 function conversationFor(events: Event[], identities: Record<string, OrgRole>, organization: Organization | null): ChatItem[] {
+  const hasAutonomousDecision = events.some((event) => event.type === 'agent.decided' || event.type === 'supreme.decided')
+  const hasFinishedActivity = events.some((event) => event.type === 'activity.completed' || event.type === 'activity.failed')
   return events.flatMap((event) => {
     const payload = event.payload
     const actor = event.actor
@@ -95,10 +97,14 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       : []
     if (event.type === 'task.created') return [message('新任务', String(payload.goal ?? ''), 'human')]
     if (event.type === 'activity.queued') {
+      if (hasFinishedActivity) return []
       const followUp = typeof payload.after_activity_id === 'string'
       return [message(followUp ? '新方向已收下' : '协作已排队', followUp ? '店长会在当前这一轮结束后，按你刚补充的方向继续安排。' : String(payload.action) === 'battle' ? '店长请几位铲屎官一起看看。' : '团队将开始下一轮协作。', 'system')]
     }
-    if (event.type === 'activity.completed') return [message('本轮协作完成', String(payload.action) === 'battle' ? '这轮讨论已经结束。' : '团队已完成这一轮协作。', 'system')]
+    // The header already carries live activity state. Completion, routing and
+    // plan bookkeeping remain in the audit trail but should not crowd out the
+    // conversation people actually want to read.
+    if (event.type === 'activity.completed') return []
     if (event.type === 'activity.failed') return [message('协作异常', String(payload.message ?? '后台协作未能完成。'), 'system')]
     if (event.type === 'human.commanded') return [message('方向更新', String(payload.instruction ?? ''), 'human')]
     if (event.type === 'task.interpreted') {
@@ -111,18 +117,16 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
         ...risks.map((item) => `店长会留意：${item}`),
       ])]
     }
-    if (event.type === 'task.routed') {
-      const route = ({ direct: '先请一位猫咪直接推进', collaborate: '店长先安排猫咪们协作', cabinet: '先请几位铲屎官校准安排' }[String(payload.route ?? '')] ?? '')
-      return [message('店长决定先这样推进', reasonText(String(payload.reason ?? '已选择下一步协作路径。')), 'system', 'decision', route ? [route] : undefined)]
-    }
+    if (event.type === 'task.routed') return []
     if (event.type === 'cabinet.convened') {
       const names = memberNames(payload.members)
       return [message(names.length ? `店长请 ${names.join('、')} 一起看看` : '店长请伙伴一起看看', `${reasonText(String(payload.reason ?? '任务需要更多伙伴一起确认。'))}${names.length ? `\n这次由铲屎官 ${names.join('、')} 先行商量。` : ''}`, 'system', 'decision')]
     }
-    if (event.type === 'mission.created') return [message('任务使命已发布', String(payload.goal ?? ''), 'system')]
+    if (event.type === 'mission.created') return []
     if (event.type === 'task.decomposed') {
       const names = memberNames(payload.members)
       const subtasks = Array.isArray(payload.subtasks) ? payload.subtasks.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object') : []
+      const assignees = subtasks.map((item) => identities[String(item.owner ?? '')]?.name ?? actorText(String(item.owner ?? ''))).filter(Boolean)
       const details = subtasks.map((item) => {
         const owner = String(item.owner ?? '')
         const name = identities[owner]?.name ?? actorText(owner)
@@ -130,18 +134,16 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
         const acceptance = String(item.acceptance ?? '')
         return `@${name} 负责${lane}${acceptance ? `，完成时：${acceptance}` : ''}`
       })
-      return [message(String(payload.source) === 'cabinet' ? `${names.join('、') || '几位铲屎官'}安排好任务` : '店长安排好分工', '这一单已经安排妥当，大家会依次接力推进。', 'system', 'decision', details)]
+      const isCabinetPlan = String(payload.source) === 'cabinet'
+      const planner = isCabinetPlan ? names.join('、') || '几位伙伴' : '店长'
+      const invitation = assignees.length === 1
+        ? `这次先请 @${assignees[0]} 接住这一单。`
+        : assignees.length > 1
+          ? `这次请 ${assignees.map((name) => `@${name}`).join('、')} 一起接力。`
+          : '这一单已经安排妥当，大家会依次接力推进。'
+      return [message(`${planner}把工作分好了`, invitation, 'system', 'decision', details)]
     }
-    if (event.type === 'subtask.assigned') {
-      const owner = String(payload.owner ?? '团队')
-      const name = identities[owner]?.name ?? actorText(owner)
-      const lane = String(payload.lane ?? '执行')
-      const objective = String(payload.objective ?? '')
-      const acceptance = String(payload.acceptance ?? '')
-      return [message(`已请 @${name} 接手`, `${name}接下了${lane}这一项安排。`, 'system', 'collaboration', [objective, acceptance ? `完成时需要：${acceptance}` : ''])]
-    }
-    if (event.type === 'plan.proposed') return [message('执行计划已发布', reasonText(String(payload.reason ?? '')), 'system', 'decision')]
-    if (event.type === 'agent.working') return [message('开始处理', String(payload.summary ?? '正在处理本执行线。'), 'agent')]
+    if (event.type === 'subtask.assigned' || event.type === 'plan.proposed' || event.type === 'agent.working') return []
     if (event.type === 'msg.said' || event.type === 'msg.challenge') return [message(event.type === 'msg.challenge' ? '提出质疑' : undefined, String(payload.text ?? payload.claim ?? ''), 'agent')]
     if (event.type === 'deliverable.published') return [message('发布成果', `${String(payload.title ?? '未命名成果')}\n${String(payload.summary ?? '')}`, 'agent', 'deliverable')]
     if (event.type === 'cabinet.voted') {
@@ -149,7 +151,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       return [message('伙伴们给出建议', reasonText(String(tally?.reason ?? '几位伙伴已经看过当前选项。')), 'system', 'decision')]
     }
     if (event.type === 'agent.decided' || event.type === 'supreme.decided') return [message('自治决策', reasonText(String(payload.reason ?? '')), 'system', 'decision')]
-    if (event.type === 'brief.generated') {
+    if (event.type === 'brief.generated' && !hasAutonomousDecision) {
       const brief = payload.brief as Record<string, unknown> | undefined
       return [message('本轮总结', reasonText(String(brief?.dispute ?? '团队已完成一轮协作。')), 'system')]
     }
