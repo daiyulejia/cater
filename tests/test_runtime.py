@@ -813,6 +813,23 @@ class DriverTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "tokens_per_call must be non-negative"):
                 load_drivers(drivers)
 
+    def test_cli_driver_config_rejects_invalid_recovery_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drivers = Path(tmp) / "drivers.json"
+            drivers.write_text(
+                '{"drivers":[{"kind":"cli","name":"bad","command":["python"],"timeout":0}]}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "timeout must be positive"):
+                load_drivers(drivers)
+
+            drivers.write_text(
+                '{"drivers":[{"kind":"cli","name":"bad","command":["python"],"restart_limit":-1}]}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "restart_limit must be non-negative"):
+                load_drivers(drivers)
+
     def test_example_tool_driver_speaks_ndjson(self):
         script = Path(__file__).resolve().parents[1] / "examples" / "ndjson_tool_driver.py"
         driver = CliDriver("tool", [sys.executable, str(script)], timeout=5)

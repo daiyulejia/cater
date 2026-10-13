@@ -218,12 +218,18 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
         command = data.get("command")
         if not isinstance(command, list) or not all(isinstance(item, str) for item in command):
             raise ValueError(f"CLI driver {name!r} requires a string array command")
+        timeout = float(data.get("timeout", 120.0))
+        if timeout <= 0:
+            raise ValueError(f"CLI driver {name!r} timeout must be positive")
+        restart_limit = int(data.get("restart_limit", 1))
+        if restart_limit < 0:
+            raise ValueError(f"CLI driver {name!r} restart_limit must be non-negative")
         return CliDriver(
             name,
             command,
             cwd=data.get("cwd"),
-            timeout=float(data.get("timeout", 120.0)),
-            restart_limit=int(data.get("restart_limit", 1)),
+            timeout=timeout,
+            restart_limit=restart_limit,
         )
     raise ValueError(f"unknown driver kind: {kind!r}")
 
