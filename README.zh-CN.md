@@ -34,7 +34,7 @@ cater chain --json
 cater web
 ```
 
-`cater demo` 展示治理较重的路径。`cater demo --direct` 展示轻量直派路径：没有风险时，治理层保持空闲。
+`cater demo` 展示治理较重的路径。`cater demo --direct` 展示轻量直派路径：没有风险时，治理层保持空闲。demo 命令使用确定性的内置角色和 driver。
 
 再探索组织入口：
 

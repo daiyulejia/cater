@@ -34,7 +34,7 @@ cater chain --json
 cater web
 ```
 
-`cater demo` shows the governance-heavy path. `cater demo --direct` shows a lightweight direct-worker path where governance stays idle unless risk appears.
+`cater demo` shows the governance-heavy path. `cater demo --direct` shows a lightweight direct-worker path where governance stays idle unless risk appears. Demo commands use deterministic built-in roles and drivers.
 
 Then explore the organization surface:
 
