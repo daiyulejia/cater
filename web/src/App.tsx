@@ -7,6 +7,7 @@ import {
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
 type Message = { seq: number; actor: string; role: string; type: string; claim?: string; text?: string; stance?: string; target?: string; reply_to?: number }
 type Deliverable = { seq: number; title: string; summary: string; kind?: string; uri?: string; message_seq?: number }
+type OrgRole = { id: string; name: string; role: string }
 type Task = {
   id: string; goal: string; acceptance: string[]; status: string; messages: Message[]; assignments: Assignment[]
   deliverables: Deliverable[]
@@ -82,6 +83,9 @@ function App() {
   const [detail, setDetail] = useState<TaskDetail | null>(null)
   const [draft, setDraft] = useState('')
   const [acceptance, setAcceptance] = useState('')
+  const [routing, setRouting] = useState<'dispatch' | 'direct'>('dispatch')
+  const [roles, setRoles] = useState<OrgRole[]>([])
+  const [directOwner, setDirectOwner] = useState('')
   const [message, setMessage] = useState('')
   const [isSending, setIsSending] = useState(false)
   const [showEvidence, setShowEvidence] = useState(false)
@@ -95,6 +99,12 @@ function App() {
 
   useEffect(() => { void refresh().catch((err: Error) => setError(err.message)) }, [])
   useEffect(() => {
+    void api<OrgRole[]>('/api/organization').then((nextRoles) => {
+      setRoles(nextRoles)
+      setDirectOwner((current) => current || nextRoles.find((role) => role.id === 'dev')?.id || nextRoles[0]?.id || '')
+    }).catch((err: Error) => setError(err.message))
+  }, [])
+  useEffect(() => {
     if (!selectedId) { setDetail(null); return }
     void api<TaskDetail>(`/api/tasks/${selectedId}`).then(setDetail).catch((err: Error) => setError(err.message))
   }, [selectedId])
@@ -107,7 +117,15 @@ function App() {
     if (!goal) return
     setIsSending(true); setError('')
     try {
-      const result = await api<TaskDetail>('/api/tasks', { method: 'POST', body: JSON.stringify({ goal, acceptance: acceptance.split('\n').map((item) => item.trim()).filter(Boolean), dispatch: true, run: true }) })
+      const result = await api<TaskDetail>('/api/tasks', {
+        method: 'POST',
+        body: JSON.stringify({
+          goal,
+          acceptance: acceptance.split('\n').map((item) => item.trim()).filter(Boolean),
+          run: true,
+          ...(routing === 'dispatch' ? { dispatch: true } : { assign_to: directOwner }),
+        }),
+      })
       setDraft(''); setAcceptance(''); await refresh(result.task.id); setDetail(result)
     } catch (err) { setError(err instanceof Error ? err.message : '创建任务失败') }
     finally { setIsSending(false) }
@@ -144,7 +162,7 @@ function App() {
           </> : <EmptyConversation />}
         </section>
         <aside className="bg-white p-4 lg:border-l lg:border-slate-200">
-          <section className="mb-6"><div className="mb-3 flex items-center gap-2"><Sparkles size={16} className="text-teal-700" /><h2 className="text-sm font-semibold">发起任务</h2></div><textarea id="new-task" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="希望组织完成什么任务？" rows={3} className="w-full resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-teal-600 focus:ring-2 focus:ring-teal-100" /><textarea value={acceptance} onChange={(event) => setAcceptance(event.target.value)} placeholder="验收标准，每行一项（可选）" rows={2} className="mt-2 w-full resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-teal-600 focus:ring-2 focus:ring-teal-100" /><button disabled={isSending || !draft.trim()} onClick={() => void createTask()} className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-teal-700 px-3 py-2.5 text-sm font-semibold text-white disabled:bg-slate-200"><ArrowUp size={16} /> 交给 Cater</button></section>
+          <section className="mb-6"><div className="mb-3 flex items-center gap-2"><Sparkles size={16} className="text-teal-700" /><h2 className="text-sm font-semibold">发起任务</h2></div><textarea id="new-task" value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="希望组织完成什么任务？" rows={3} className="w-full resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-teal-600 focus:ring-2 focus:ring-teal-100" /><textarea value={acceptance} onChange={(event) => setAcceptance(event.target.value)} placeholder="验收标准，每行一项（可选）" rows={2} className="mt-2 w-full resize-none rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none focus:border-teal-600 focus:ring-2 focus:ring-teal-100" /><div className="mt-3 grid grid-cols-2 rounded-lg border border-slate-200 bg-slate-50 p-1" role="group" aria-label="任务路径"><button type="button" onClick={() => setRouting('dispatch')} className={`rounded-md px-2 py-2 text-xs font-medium ${routing === 'dispatch' ? 'bg-white text-teal-800 shadow-sm' : 'text-slate-500'}`}>组织分发</button><button type="button" onClick={() => setRouting('direct')} className={`rounded-md px-2 py-2 text-xs font-medium ${routing === 'direct' ? 'bg-white text-teal-800 shadow-sm' : 'text-slate-500'}`}>轻量直派</button></div>{routing === 'direct' && <label className="mt-2 block text-xs text-slate-500">执行角色<select value={directOwner} onChange={(event) => setDirectOwner(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm text-slate-800 outline-none focus:border-teal-600">{roles.map((role) => <option key={role.id} value={role.id}>{role.name} · {role.role}</option>)}</select></label>}<button disabled={isSending || !draft.trim() || (routing === 'direct' && !directOwner)} onClick={() => void createTask()} className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-lg bg-teal-700 px-3 py-2.5 text-sm font-semibold text-white disabled:bg-slate-200"><ArrowUp size={16} /> {routing === 'direct' ? '交给执行角色' : '交给 Cater'}</button></section>
           {task && <Workboard task={task} detail={detail} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />}
           {error && <p className="mt-4 rounded-lg bg-rose-50 p-3 text-xs text-rose-700">{error}</p>}
         </aside>

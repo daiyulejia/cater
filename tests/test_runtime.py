@@ -471,9 +471,12 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(task.assignments[0]["owner"], "dev")
 
                 rt.collaborate(task_id)
+                task = rt.task(task_id)
 
-        self.assertNotIn("your_assignment=", driver.prompts[0])
-        self.assertIn("your_assignment=Implement the smallest useful path", driver.prompts[1])
+                self.assertEqual([message["actor"] for message in task.messages], ["dev"])
+
+        self.assertEqual(len(driver.prompts), 1)
+        self.assertIn("your_assignment=Implement the smallest useful path", driver.prompts[0])
         self.assertIn("assigned_work=dev:", driver.prompts[0])
 
     def test_reassignment_keeps_prompt_and_web_distribution_compact(self):
@@ -998,7 +1001,7 @@ class DriverTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("task=task_", result.stdout)
-            self.assertIn("messages=3", result.stdout)
+            self.assertIn("messages=1", result.stdout)
             self.assertIn("chain_ok=True", result.stdout)
 
 

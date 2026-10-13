@@ -90,6 +90,11 @@ def make_handler(
             if path == "/api/tasks":
                 with self._runtime() as rt:
                     return self._send_json([task_to_dict(task) for task in rt.tasks()])
+            if path == "/api/organization":
+                with self._runtime() as rt:
+                    return self._send_json(
+                        [{"id": role.id, "name": role.name, "role": role.role} for role in rt.roles]
+                    )
             if path == "/api/chain":
                 with self._runtime() as rt:
                     return self._send_json(chain_to_dict(rt.verify_chain()))

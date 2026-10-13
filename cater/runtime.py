@@ -227,7 +227,7 @@ class Runtime:
         profiles = self.profiles()
         utterances = []
         role_ids = {role.id for role in self.roles}
-        for role in self.roles:
+        for role in self._roles_for_round(task):
             driver = self.drivers[role.driver]
             prompt = self._prompt(task, role, profiles.get(role.id), utterances)
             response = self._complete_with_containment(
@@ -370,6 +370,17 @@ class Runtime:
                 payload={"brief": brief},
             )
         return {"task_id": task_id, "brief_event": brief_event.seq, "brief": brief}
+
+    def _roles_for_round(self, task: TaskSnapshot) -> list[Role]:
+        """Honor an explicit direct assignment without changing normal team collaboration."""
+        direct_owners = {
+            str(assignment.get("owner"))
+            for assignment in latest_assignments_by_owner(task.assignments)
+            if assignment.get("mode") == "direct" and assignment.get("owner")
+        }
+        if not direct_owners:
+            return self.roles
+        return [role for role in self.roles if role.id in direct_owners]
 
     def decide(self, task_id: str, resolution: str, reason: str) -> Event:
         if resolution not in {"done", "rework"}:
