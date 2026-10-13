@@ -25,7 +25,7 @@ DIRECT_DEMO_DRIVERS = {
             "name": "product",
             "tokens_per_call": 80,
             "script": [
-                '{"stance":"assert","option_id":"A","claim":"Keep the request small and inspectable","evidence":["direct assignment is enough for low-risk work"],"confidence":0.88,"text":"This can stay on the lightweight path."}'
+                '{"stance":"assert","option_id":"A","claim":"保持任务小而可检查","evidence":["低风险工作直接指派即可"],"confidence":0.88,"text":"这个任务可以走轻量直派路径。","deliverables":[{"title":"轻量路径判断","summary":"当前任务边界清晰，无需启动内阁治理。","kind":"brief"}]}'
             ],
         },
         {
@@ -33,7 +33,7 @@ DIRECT_DEMO_DRIVERS = {
             "name": "dev",
             "tokens_per_call": 80,
             "script": [
-                '{"stance":"assert","option_id":"A","claim":"Implement the smallest useful path","evidence":["the task has one clear owner and a bounded acceptance check"],"confidence":0.9,"text":"I can execute this directly and report back."}'
+                '{"stance":"assert","option_id":"A","claim":"实现最小有用路径","evidence":["任务有明确负责人和有限的验收检查"],"confidence":0.9,"text":"我可以直接执行并汇报结果。","deliverables":[{"title":"执行承诺","summary":"将按已分配目标交付最小可用实现。","kind":"plan"}]}'
             ],
         },
         {
@@ -41,7 +41,7 @@ DIRECT_DEMO_DRIVERS = {
             "name": "test",
             "tokens_per_call": 80,
             "script": [
-                '{"stance":"assert","option_id":"A","claim":"A replayable smoke check is sufficient","evidence":["no conflicting requirement or high-risk behavior is present"],"confidence":0.86,"text":"No governance escalation is needed for this pass."}'
+                '{"stance":"assert","option_id":"A","claim":"可回放的冒烟检查已足够","evidence":["当前没有冲突需求或高风险行为"],"confidence":0.86,"text":"本轮不需要升级到治理层。","deliverables":[{"title":"验证结论","summary":"以可回放冒烟检查作为本轮验收证据。","kind":"checklist"}]}'
             ],
         },
     ]

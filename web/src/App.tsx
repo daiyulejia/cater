@@ -28,7 +28,7 @@ const statusText = (value?: string) => ({
   assigned: '已指派', recommended: '已建议', vetoed: '已否决', needs_supreme: '待最高决策', needs_human: '待人工处理',
 }[value ?? ''] ?? value ?? '未知')
 
-const actorText = (value: string) => ({ human: '你', orchestrator: '总控', cabinet: '内阁', supreme: '最高决策者', reviewer: '复盘员', driver_gateway: '驱动网关' }[value] ?? value)
+const actorText = (value: string) => ({ human: '你', orchestrator: '总控', cabinet: '内阁', supreme: '最高决策者', reviewer: '复盘员', driver_gateway: '驱动网关', product: '产品', dev: '开发', test: '测试' }[value] ?? value)
 
 const roleText = (value: string) => ({ human: '人类', orchestrator: '任务编排', cabinet: '内阁', supreme: '最高决策', developer: '开发工程师', tester: '测试工程师', product: '产品负责人' }[value] ?? value)
 
@@ -61,6 +61,7 @@ function conversationFor(events: Event[]): ChatItem[] {
     if (event.type === 'subtask.assigned') return [message(`已指派给 @${String(payload.owner ?? '团队')}`, String(payload.objective ?? ''), 'system')]
     if (event.type === 'plan.proposed') return [message('执行计划已发布', reasonText(String(payload.reason ?? '')), 'system')]
     if (event.type === 'msg.said' || event.type === 'msg.challenge') return [message(event.type === 'msg.challenge' ? '提出质疑' : undefined, String(payload.text ?? payload.claim ?? ''), 'agent')]
+    if (event.type === 'deliverable.published') return [message('发布成果', `${String(payload.title ?? '未命名成果')}\n${String(payload.summary ?? '')}`, 'agent')]
     if (event.type === 'cabinet.voted') {
       const tally = payload.tally as Record<string, unknown> | undefined
       return [message('内阁审议', reasonText(String(tally?.reason ?? '内阁已审查当前选项。')), 'system')]

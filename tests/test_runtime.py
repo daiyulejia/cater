@@ -185,6 +185,20 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(profiles["test"]["challenges"], 1)
             self.assertIn("先交付最小", profiles["product"]["last_claim"])
 
+    def test_default_demo_drivers_publish_replayable_deliverables(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("验证默认成果")
+            rt.collaborate(task_id)
+            task = rt.task(task_id)
+            outcomes = [event for event in rt.log.read(task_id=task_id) if event.type == "deliverable.published"]
+
+        self.assertEqual(len(outcomes), 3)
+        self.assertEqual(
+            [item["title"] for item in task.deliverables],
+            ["任务澄清", "驱动接入检查清单", "可回放验证要求"],
+        )
+        self.assertTrue(all(item["message_seq"] for item in task.deliverables))
+
     def test_agent_can_publish_structured_deliverables(self):
         response = json.dumps(
             {
@@ -1527,7 +1541,7 @@ class WebTests(unittest.TestCase):
             html = render_task(rt.task(task_id), events, timeline_category="dialogue")
 
         self.assertIn("dialogue", html)
-        self.assertIn("3 / 8 events", html)
+        self.assertIn(f"3 / {len(events)} events", html)
         self.assertIn("msg.said", html)
         self.assertNotIn("task.created", html)
 
