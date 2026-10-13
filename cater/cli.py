@@ -82,6 +82,14 @@ def resolve_audit_key(args: argparse.Namespace) -> str | None:
     return os.environ.get("CATER_AUDIT_KEY")
 
 
+def resolve_web_access_token(args: argparse.Namespace) -> str | None:
+    if args.access_token:
+        return args.access_token
+    if args.access_token_file:
+        return Path(args.access_token_file).read_text(encoding="utf-8").strip()
+    return os.environ.get("CATER_WEB_ACCESS_TOKEN")
+
+
 def cmd_new(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         if args.run and args.battle:
@@ -603,6 +611,7 @@ def cmd_web(args: argparse.Namespace) -> int:
         audit_key=resolve_audit_key(args),
         audit_key_id=args.audit_key_id,
         allow_remote=args.allow_remote,
+        access_token=resolve_web_access_token(args),
     )
     return 0
 
@@ -715,8 +724,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_web.add_argument(
         "--allow-remote",
         action="store_true",
-        help="allow a non-loopback bind only behind an authenticated network boundary",
+        help="allow a non-loopback bind; requires an access token and TLS boundary",
     )
+    p_web.add_argument("--access-token", help="access token for a remote Cater web control plane")
+    p_web.add_argument("--access-token-file", help="file containing the Cater web access token")
     p_web.set_defaults(func=cmd_web)
     return parser
 

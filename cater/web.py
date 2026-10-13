@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import hmac
 import ipaddress
 import json
 import mimetypes
@@ -267,11 +268,20 @@ def serve(
     audit_key: str | bytes | None = None,
     audit_key_id: str = "local",
     allow_remote: bool = False,
+    access_token: str | None = None,
 ) -> None:
-    if not allow_remote and not _is_loopback_host(host):
+    if access_token is not None and not access_token.strip():
+        raise ValueError("web access token must not be empty")
+    is_loopback = _is_loopback_host(host)
+    if not allow_remote and not is_loopback:
         raise ValueError(
             "refusing to expose the unauthenticated Cater control plane beyond localhost; "
-            "use --allow-remote only behind an authenticated network boundary"
+            "use --allow-remote with an access token behind a TLS network boundary"
+        )
+    if not is_loopback and not access_token:
+        raise ValueError(
+            "refusing to expose the Cater control plane beyond localhost without an access token; "
+            "set CATER_WEB_ACCESS_TOKEN or use --access-token-file"
         )
     # Each request needs its own thread-bound SQLite connection.  CLI drivers
     # are process resources, so the server owns one pool for its full lifetime.
@@ -288,6 +298,7 @@ def serve(
         static_dir=_workroom_dist(),
         shared_drivers=driver_owner.drivers,
         shared_driver_health=driver_health,
+        access_token=access_token,
     )
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Cater web listening on http://{host}:{port}")
@@ -333,7 +344,10 @@ def make_handler(
     runtime_factory: Callable[[], Runtime] | None = None,
     shared_drivers: dict[str, Any] | None = None,
     shared_driver_health: DriverHealth | None = None,
+    access_token: str | None = None,
 ):
+    if access_token is not None and not access_token.strip():
+        raise ValueError("web access token must not be empty")
     static_root = Path(static_dir).resolve() if static_dir is not None else None
 
     def build_runtime() -> Runtime:
@@ -368,6 +382,8 @@ def make_handler(
                 if static_path.is_file():
                     return self._send_static(static_path)
                 return self._not_found()
+            if self._requires_access_token(path) and not self._has_valid_access_token():
+                return self._unauthorized()
             if path == "/":
                 return self._send_html(render_index(self._runtime()))
             if path == "/api/tasks":
@@ -449,10 +465,12 @@ def make_handler(
             return self._not_found()
 
         def do_POST(self) -> None:
-            if not self._is_same_origin_write():
-                return self._forbidden("cross-origin writes are not allowed")
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/")
+            if self._requires_access_token(path) and not self._has_valid_access_token():
+                return self._unauthorized()
+            if not self._is_same_origin_write():
+                return self._forbidden("cross-origin writes are not allowed")
             if path == "/api/tasks":
                 data = self._read_json()
                 if data is None:
@@ -752,6 +770,31 @@ def make_handler(
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
+
+        def _unauthorized(self) -> None:
+            raw = b"access token is required"
+            self.send_response(HTTPStatus.UNAUTHORIZED)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("WWW-Authenticate", 'Bearer realm="Cater"')
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _requires_access_token(self, path: str) -> bool:
+            # Static files deliberately stay readable so a remote browser can
+            # load the client.  All task data and every mutation remain behind
+            # the token; the client forwards it only from a URL fragment.
+            return access_token is not None and (path.startswith("/api/") or path.startswith("/tasks"))
+
+        def _has_valid_access_token(self) -> bool:
+            if access_token is None:
+                return True
+            supplied = self.headers.get("X-Cater-Access-Token", "")
+            authorization = self.headers.get("Authorization", "")
+            if not supplied and authorization.startswith("Bearer "):
+                supplied = authorization.removeprefix("Bearer ")
+            return hmac.compare_digest(supplied, access_token)
 
         def _is_same_origin_write(self) -> bool:
             """Reject browser cross-site form/fetch writes without breaking local scripts.

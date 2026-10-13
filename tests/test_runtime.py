@@ -2214,10 +2214,39 @@ class WebTests(unittest.TestCase):
             db = str(Path(tmp) / "remote-bind.db")
             with self.assertRaisesRegex(ValueError, "unauthenticated Cater control plane"):
                 web_module.serve(db, host="0.0.0.0", port=0)
+            with self.assertRaisesRegex(ValueError, "without an access token"):
+                web_module.serve(db, host="0.0.0.0", port=0, allow_remote=True)
         self.assertTrue(web_module._is_loopback_host("127.0.0.1"))
         self.assertTrue(web_module._is_loopback_host("::1"))
         self.assertTrue(web_module._is_loopback_host("localhost"))
         self.assertFalse(web_module._is_loopback_host("192.168.1.15"))
+
+    def test_web_access_token_protects_task_data_and_mutations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "token-protected.db")
+            base = start_test_web(self, db, access_token="test-access-token")
+
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(f"{base}/api/tasks", timeout=5)
+            self.assertEqual(raised.exception.code, 401)
+            self.assertEqual(raised.exception.headers["WWW-Authenticate"], 'Bearer realm="Cater"')
+
+            wrong = Request(f"{base}/api/tasks", headers={"X-Cater-Access-Token": "wrong"})
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(wrong, timeout=5)
+            self.assertEqual(raised.exception.code, 401)
+
+            create = Request(
+                f"{base}/api/tasks",
+                data=json.dumps({"goal": "protected task"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json", "X-Cater-Access-Token": "test-access-token"},
+            )
+            with urlopen(create, timeout=5) as response:
+                self.assertEqual(response.status, 201)
+
+            with urlopen(f"{base}/", timeout=5) as response:
+                self.assertEqual(response.status, 200)
 
     def test_web_api_rejects_an_oversized_request_body(self):
         with tempfile.TemporaryDirectory() as tmp:

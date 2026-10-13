@@ -114,7 +114,14 @@ cater --audit-key "dev-secret" chain
 cater --audit-key "dev-secret" chain --json
 ```
 
-Web 控制面默认只允许绑定 `127.0.0.1`、`::1` 或 `localhost`；它没有内置多用户认证，避免把本地任务、对话和 driver 调用意外暴露到局域网。确实需要远程访问时，必须显式加 `--allow-remote`，并在认证反向代理、VPN 或等效受控网络边界之后运行。
+Web 控制面默认只允许绑定 `127.0.0.1`、`::1` 或 `localhost`，避免把本地任务、对话和 driver 调用意外暴露到局域网。远程访问必须同时显式加 `--allow-remote` 并提供访问令牌；没有令牌会拒绝启动。令牌优先从 `CATER_WEB_ACCESS_TOKEN` 或 `--access-token-file` 读取，避免把它写进 shell 历史。Cater 自己不提供 TLS，远程部署仍应位于 HTTPS 反向代理、VPN 或等效受控网络边界之后：
+
+```powershell
+$env:CATER_WEB_ACCESS_TOKEN = "请替换为足够长的随机值"
+cater web --host 0.0.0.0 --allow-remote
+```
+
+远程打开工作台时，首次使用 `https://你的地址/#access_token=你的令牌`；前端会立即将片段保存到当前浏览器会话并从地址栏移除。令牌只随同源 API 请求通过 `X-Cater-Access-Token` 发送，不会出现在服务器请求 URL、事件链或审计导出中。不要把含令牌的链接发送给他人。
 
 `run` 是常规协作循环：记录 agent 的产出，并且只有在出现 challenge、方案分裂、低置信度或其他风险信号时才启动治理层。`battle` 是强制治理轮次，用于你明确希望内阁审查的时候。
 

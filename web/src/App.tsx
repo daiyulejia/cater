@@ -30,8 +30,26 @@ type Event = { seq: number; type: string; category: string; actor: { id: string;
 type TaskDetail = { task: Task; events: Event[]; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
 type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; targets: string[]; replyTo?: number; evidence: Event }
 
+const accessToken = (() => {
+  const fragment = new URLSearchParams(window.location.hash.slice(1))
+  const supplied = fragment.get('access_token')
+  if (supplied) {
+    window.sessionStorage.setItem('cater.access_token', supplied)
+    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
+    return supplied
+  }
+  return window.sessionStorage.getItem('cater.access_token') ?? ''
+})()
+
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) } })
+  const response = await fetch(path, {
+    ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(accessToken ? { 'X-Cater-Access-Token': accessToken } : {}),
+      ...(init?.headers ?? {}),
+    },
+  })
   if (!response.ok) throw new Error(await response.text())
   return response.json() as Promise<T>
 }
