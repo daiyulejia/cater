@@ -109,10 +109,13 @@ See [docs/organization-flow.md](docs/organization-flow.md) for when to use direc
 When `cater web` is running, local tools can read machine-friendly state from:
 
 ```text
+POST /api/tasks
 GET /api/tasks
 GET /api/tasks/<task_id>
 GET /api/chain
 ```
+
+`POST /api/tasks` accepts JSON with `goal`, optional `acceptance`, and optional booleans `dispatch`, `run`, or `battle`.
 
 ## Current Scope
 

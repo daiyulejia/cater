@@ -109,10 +109,13 @@ cater --audit-key "dev-secret" chain --json
 启动 `cater web` 后，本地工具可以通过这些入口读取机器友好的状态：
 
 ```text
+POST /api/tasks
 GET /api/tasks
 GET /api/tasks/<task_id>
 GET /api/chain
 ```
+
+`POST /api/tasks` 接收 JSON：必填 `goal`，可选 `acceptance`，以及可选布尔值 `dispatch`、`run` 或 `battle`。
 
 ## 当前范围
 

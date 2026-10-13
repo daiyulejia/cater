@@ -1235,6 +1235,66 @@ class WebTests(unittest.TestCase):
             self.assertIn("hash chain ok", data["summary"])
             self.assertIn("head_hash", data)
 
+    def test_web_api_can_create_and_run_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-api-create.db")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join, 1)
+            self.addCleanup(server.shutdown)
+
+            body = json.dumps(
+                {
+                    "goal": "Create through API",
+                    "acceptance": ["task is replayable"],
+                    "dispatch": True,
+                    "run": True,
+                }
+            ).encode("utf-8")
+            request = Request(
+                f"{base}/api/tasks",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=5) as response:
+                self.assertEqual(response.status, 201)
+                data = json.loads(response.read().decode("utf-8"))
+
+            self.assertEqual(data["task"]["goal"], "Create through API")
+            self.assertEqual(data["task"]["acceptance"], ["task is replayable"])
+            self.assertTrue(data["task"]["mission"])
+            self.assertTrue(data["task"]["messages"])
+            self.assertIn("review", data)
+            self.assertIn("decision_ladder", data)
+
+    def test_web_api_rejects_run_and_battle_conflict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-api-conflict.db")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join, 1)
+            self.addCleanup(server.shutdown)
+
+            body = json.dumps({"goal": "Bad API task", "run": True, "battle": True}).encode("utf-8")
+            request = Request(
+                f"{base}/api/tasks",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(request, timeout=5)
+
+            self.assertEqual(raised.exception.code, 400)
+            self.assertIn("choose either run", raised.exception.read().decode("utf-8"))
+
     def test_web_direct_assign_reports_unknown_role(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-bad-assign.db")

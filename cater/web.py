@@ -78,15 +78,7 @@ def make_handler(
                     task = rt.task(task_id)
                     if task is None:
                         return self._not_found()
-                    events = rt.log.read(task_id=task_id)
-                    return self._send_json(
-                        {
-                            "task": task_to_dict(task),
-                            "events": [event_to_dict(e) for e in events],
-                            "decision_ladder": decision_ladder(events),
-                            "review": rt.review(task_id),
-                        }
-                    )
+                    return self._send_json(task_api_payload(rt, task_id))
             if path.startswith("/tasks/"):
                 task_id = path.split("/", 2)[2]
                 with self._runtime() as rt:
@@ -100,6 +92,37 @@ def make_handler(
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/")
+            if path == "/api/tasks":
+                data = self._read_json()
+                if data is None:
+                    return
+                goal = str(data.get("goal", "")).strip()
+                if not goal:
+                    return self._bad_request("goal is required")
+                run_now = _truthy(data.get("run"))
+                force_battle = _truthy(data.get("battle"))
+                if run_now and force_battle:
+                    return self._bad_request("choose either run for normal collaboration or battle for forced governance")
+                assign_owner = str(data.get("assign_to", "")).strip()
+                acceptance = _acceptance_lines(data.get("acceptance"))
+                with self._runtime() as rt:
+                    if assign_owner and assign_owner not in {role.id for role in rt.roles}:
+                        return self._bad_request(f"unknown role {assign_owner!r}")
+                    task_id = rt.create_task(goal, acceptance)
+                    if _truthy(data.get("dispatch")):
+                        rt.dispatch(task_id)
+                    if assign_owner:
+                        rt.assign(
+                            task_id,
+                            assign_owner,
+                            objective=_optional_text(data.get("assign_objective")),
+                            acceptance=_optional_text(data.get("assign_acceptance")),
+                        )
+                    if run_now:
+                        rt.collaborate(task_id)
+                    elif force_battle:
+                        rt.battle(task_id)
+                    return self._send_json(task_api_payload(rt, task_id), status=HTTPStatus.CREATED)
             if path == "/tasks":
                 data = self._read_form()
                 goal = data.get("goal", [""])[0].strip()
@@ -225,9 +248,9 @@ def make_handler(
             self.end_headers()
             self.wfile.write(raw)
 
-        def _send_json(self, body: Any) -> None:
+        def _send_json(self, body: Any, *, status: HTTPStatus = HTTPStatus.OK) -> None:
             raw = json.dumps(body, ensure_ascii=False, indent=2).encode("utf-8")
-            self.send_response(HTTPStatus.OK)
+            self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
@@ -253,6 +276,19 @@ def make_handler(
             length = int(self.headers.get("Content-Length", "0") or "0")
             raw = self.rfile.read(length).decode("utf-8")
             return parse_qs(raw)
+
+        def _read_json(self) -> dict[str, Any] | None:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            raw = self.rfile.read(length).decode("utf-8")
+            try:
+                data = json.loads(raw or "{}")
+            except json.JSONDecodeError:
+                self._bad_request("invalid JSON body")
+                return None
+            if not isinstance(data, dict):
+                self._bad_request("JSON body must be an object")
+                return None
+            return data
 
         def _redirect(self, location: str) -> None:
             self.send_response(HTTPStatus.SEE_OTHER)
@@ -451,6 +487,19 @@ def task_to_dict(task: TaskSnapshot) -> dict[str, Any]:
     }
 
 
+def task_api_payload(rt: Runtime, task_id: str) -> dict[str, Any]:
+    task = rt.task(task_id)
+    if task is None:
+        raise KeyError(task_id)
+    events = rt.log.read(task_id=task_id)
+    return {
+        "task": task_to_dict(task),
+        "events": [event_to_dict(e) for e in events],
+        "decision_ladder": decision_ladder(events),
+        "review": rt.review(task_id),
+    }
+
+
 def chain_to_dict(report: Any) -> dict[str, Any]:
     return {
         "ok": report.ok,
@@ -461,6 +510,31 @@ def chain_to_dict(report: Any) -> dict[str, Any]:
         "reason": report.reason,
         "summary": report.describe(),
     }
+
+
+def _acceptance_lines(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [line.strip() for line in str(value).splitlines() if line.strip()]
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
 
 
 def _profiles_table(profiles: dict[str, dict[str, Any]]) -> str:
