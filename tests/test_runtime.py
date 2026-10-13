@@ -91,6 +91,16 @@ class ReplyDriver:
         return DriverResponse(text=json.dumps(text), tokens=4)
 
 
+def start_test_web(testcase: unittest.TestCase, db: str) -> str:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    testcase.addCleanup(server.server_close)
+    testcase.addCleanup(thread.join, 1)
+    testcase.addCleanup(server.shutdown)
+    return f"http://127.0.0.1:{server.server_port}"
+
+
 class RuntimeTests(unittest.TestCase):
     def test_message_relation_formats_optional_reply_metadata(self):
         self.assertEqual(message_relation({}), "")
@@ -784,13 +794,7 @@ class DriverTests(unittest.TestCase):
     def test_example_api_client_drives_web_api(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "api-client.db")
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            base = f"http://127.0.0.1:{server.server_port}"
-            self.addCleanup(server.server_close)
-            self.addCleanup(thread.join, 1)
-            self.addCleanup(server.shutdown)
+            base = start_test_web(self, db)
 
             script = Path(__file__).resolve().parents[1] / "examples" / "api_client.py"
             result = subprocess.run(
@@ -1237,13 +1241,7 @@ class WebTests(unittest.TestCase):
                 task_id = rt.create_task("Serve me")
                 rt.battle(task_id)
 
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            base = f"http://127.0.0.1:{server.server_port}"
-            self.addCleanup(server.server_close)
-            self.addCleanup(thread.join, 1)
-            self.addCleanup(server.shutdown)
+            base = start_test_web(self, db)
 
             with urlopen(f"{base}/api/tasks/{task_id}", timeout=5) as response:
                 data = response.read().decode("utf-8")
@@ -1303,13 +1301,7 @@ class WebTests(unittest.TestCase):
             with Runtime(db) as rt:
                 rt.create_task("Expose chain status")
 
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            base = f"http://127.0.0.1:{server.server_port}"
-            self.addCleanup(server.server_close)
-            self.addCleanup(thread.join, 1)
-            self.addCleanup(server.shutdown)
+            base = start_test_web(self, db)
 
             with urlopen(f"{base}/api/chain", timeout=5) as response:
                 data = json.loads(response.read().decode("utf-8"))
@@ -1322,13 +1314,7 @@ class WebTests(unittest.TestCase):
     def test_web_api_can_create_and_run_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-api-create.db")
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            base = f"http://127.0.0.1:{server.server_port}"
-            self.addCleanup(server.server_close)
-            self.addCleanup(thread.join, 1)
-            self.addCleanup(server.shutdown)
+            base = start_test_web(self, db)
 
             body = json.dumps(
                 {
@@ -1358,13 +1344,7 @@ class WebTests(unittest.TestCase):
     def test_web_api_rejects_run_and_battle_conflict(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-api-conflict.db")
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            base = f"http://127.0.0.1:{server.server_port}"
-            self.addCleanup(server.server_close)
-            self.addCleanup(thread.join, 1)
-            self.addCleanup(server.shutdown)
+            base = start_test_web(self, db)
 
             body = json.dumps({"goal": "Bad API task", "run": True, "battle": True}).encode("utf-8")
             request = Request(
@@ -1382,13 +1362,7 @@ class WebTests(unittest.TestCase):
     def test_web_api_rejects_bad_json_without_creating_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-api-bad-json.db")
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            base = f"http://127.0.0.1:{server.server_port}"
-            self.addCleanup(server.server_close)
-            self.addCleanup(thread.join, 1)
-            self.addCleanup(server.shutdown)
+            base = start_test_web(self, db)
 
             request = Request(
                 f"{base}/api/tasks",
@@ -1407,13 +1381,7 @@ class WebTests(unittest.TestCase):
     def test_web_api_rejects_unknown_assignee_without_creating_task(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-api-bad-assignee.db")
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            base = f"http://127.0.0.1:{server.server_port}"
-            self.addCleanup(server.server_close)
-            self.addCleanup(thread.join, 1)
-            self.addCleanup(server.shutdown)
+            base = start_test_web(self, db)
 
             body = json.dumps({"goal": "Bad assignee", "assign_to": "ghost"}).encode("utf-8")
             request = Request(
@@ -1436,13 +1404,7 @@ class WebTests(unittest.TestCase):
             with Runtime(db) as rt:
                 task_id = rt.create_task("Drive API actions")
 
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            base = f"http://127.0.0.1:{server.server_port}"
-            self.addCleanup(server.server_close)
-            self.addCleanup(thread.join, 1)
-            self.addCleanup(server.shutdown)
+            base = start_test_web(self, db)
 
             assign = Request(
                 f"{base}/api/tasks/{task_id}/assign",
@@ -1481,13 +1443,7 @@ class WebTests(unittest.TestCase):
             with Runtime(db) as rt:
                 task_id = rt.create_task("Serve bad assign")
 
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            base = f"http://127.0.0.1:{server.server_port}"
-            self.addCleanup(server.server_close)
-            self.addCleanup(thread.join, 1)
-            self.addCleanup(server.shutdown)
+            base = start_test_web(self, db)
 
             body = urlencode({"owner": "ghost"}).encode("utf-8")
             request = Request(
@@ -1508,13 +1464,7 @@ class WebTests(unittest.TestCase):
             with Runtime(db) as rt:
                 task_id = rt.create_task("Serve bad decision")
 
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            base = f"http://127.0.0.1:{server.server_port}"
-            self.addCleanup(server.server_close)
-            self.addCleanup(thread.join, 1)
-            self.addCleanup(server.shutdown)
+            base = start_test_web(self, db)
 
             body = urlencode({"resolution": "maybe", "reason": "invalid"}).encode("utf-8")
             request = Request(
@@ -1532,13 +1482,7 @@ class WebTests(unittest.TestCase):
     def test_web_can_create_task_and_run_battle(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-create.db")
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            base = f"http://127.0.0.1:{server.server_port}"
-            self.addCleanup(server.server_close)
-            self.addCleanup(thread.join, 1)
-            self.addCleanup(server.shutdown)
+            base = start_test_web(self, db)
 
             body = urlencode(
                 {
@@ -1579,3 +1523,4 @@ class WebTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
