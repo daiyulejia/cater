@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import uuid
@@ -105,6 +106,7 @@ class Runtime:
         self.cabinet_policy = config.cabinet_policy
         self.governance_policy = config.governance_policy
         self.organization = config.organization
+        self.organization_fingerprint = _organization_fingerprint(config)
         self.drivers = configured_drivers
 
     def close(self) -> None:
@@ -128,7 +130,12 @@ class Runtime:
             task_id=task_id,
             payload={"goal": goal, "acceptance": list(acceptance or [])},
         )
-        self.log.emit(actor=self._leader_actor(), type="task.started", task_id=task_id)
+        self.log.emit(
+            actor=self._leader_actor(),
+            type="task.started",
+            task_id=task_id,
+            payload={"organization_fingerprint": self.organization_fingerprint},
+        )
         return task_id
 
     def intake(
@@ -1335,6 +1342,44 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
         governance_policy=GovernancePolicy.from_dict(governance_raw),
         organization=_load_organization(organization_raw, roles),
     )
+
+
+def _organization_fingerprint(config: RuntimeConfig) -> str:
+    """Hash task-affecting organization configuration without storing it verbatim."""
+    payload = {
+        "roles": [
+            {
+                "id": role.id,
+                "name": role.name,
+                "role": role.role,
+                "driver": role.driver,
+                "charter": role.charter,
+                "voice": role.voice,
+            }
+            for role in config.roles
+        ],
+        "organization": {
+            "leader": {
+                "id": config.organization.leader.id,
+                "name": config.organization.leader.name,
+                "role": config.organization.leader.role,
+            },
+            "cabinet_members": sorted(config.organization.cabinet_members),
+            "worker_members": sorted(config.organization.worker_members),
+        },
+        "cabinet": {
+            "approval_threshold": config.cabinet_policy.approval_threshold,
+            "quorum": config.cabinet_policy.quorum,
+            "veto_roles": sorted(config.cabinet_policy.veto_roles),
+        },
+        "governance": {
+            "trigger_on_challenge": config.governance_policy.trigger_on_challenge,
+            "trigger_on_option_split": config.governance_policy.trigger_on_option_split,
+            "low_confidence_threshold": config.governance_policy.low_confidence_threshold,
+        },
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _load_organization(data: Any, roles: list[Role]) -> Organization:

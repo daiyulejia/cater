@@ -202,6 +202,26 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(first.status, again.status)
             self.assertEqual(len(first.messages), 6)
 
+    def test_task_start_records_a_stable_organization_fingerprint(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("Fingerprint the organization")
+            event = next(event for event in rt.log.read(task_id=task_id) if event.type == "task.started")
+            default_fingerprint = event.payload["organization_fingerprint"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            source = Path(__file__).resolve().parents[1] / "cater" / "packs" / "default_roles.json"
+            config = json.loads(source.read_text(encoding="utf-8"))
+            config["roles"][0]["voice"] = "改过的表达方式"
+            roles.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+            with Runtime(":memory:", roles_path=roles) as rt:
+                task_id = rt.create_task("Fingerprint the changed organization")
+                event = next(event for event in rt.log.read(task_id=task_id) if event.type == "task.started")
+                changed_fingerprint = event.payload["organization_fingerprint"]
+
+        self.assertRegex(default_fingerprint, r"^[0-9a-f]{64}$")
+        self.assertNotEqual(default_fingerprint, changed_fingerprint)
+
     def test_agent_profiles_are_projected_from_events(self):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("Profile agents")
