@@ -1152,6 +1152,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("lenses", review)
         self.assertIn("next_actions", review)
 
+        code, out = self.run_cli("review", "--record")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["scope"], "workspace")
+
         task_id = self.run_cli("show")[1].split()[0]
         code, out = self.run_cli("review", task_id, "--record")
         self.assertEqual(code, 0)
@@ -1159,6 +1163,14 @@ class CliTests(unittest.TestCase):
         code, out = self.run_cli("events", task_id)
         self.assertEqual(code, 0)
         self.assertIn("review.generated", out)
+        code, out = self.run_cli("export")
+        self.assertEqual(code, 0)
+        exported = json.loads(out)
+        workspace_reviews = [
+            event for event in exported["events"]
+            if event["type"] == "review.generated" and event["task_id"] is None
+        ]
+        self.assertEqual(workspace_reviews[-1]["payload"]["review"]["scope"], "workspace")
 
     def test_cli_review_plain_output(self):
         code, _ = self.run_cli("demo")
