@@ -401,6 +401,81 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(task.deliverables[0]["uri"], "reports/acceptance.md")
         self.assertEqual(task.deliverables[0]["message_seq"], task.messages[0]["seq"])
 
+    def test_agent_can_publish_falsifiable_diagnosis_and_teachable_handoff(self):
+        response = json.dumps(
+            {
+                "stance": "assert",
+                "option_id": "repair",
+                "claim": "已定位候选根因并准备交接",
+                "evidence": ["复现记录"],
+                "text": "先核对链路，再改动最小边界。",
+                "diagnosis": {
+                    "status": "hypothesis",
+                    "symptom": "并发请求偶发写入失败。",
+                    "cause": "两个请求可能同时读取同一份旧状态。",
+                    "observations": ["失败只发生在同时提交时"],
+                    "alternatives": ["还需排除上游超时"],
+                    "impact": ["不能只在调用点补重试"],
+                    "verification_plan": ["构造两个并发请求并检查事件顺序"],
+                },
+                "handoff": {
+                    "summary": "把状态读取和写入收在同一临界区。",
+                    "why": "避免后写入者基于过期状态继续提交。",
+                    "changed": ["写路径的事务边界"],
+                    "verification": ["并发回归测试通过"],
+                    "limits": ["尚未覆盖跨进程部署"],
+                    "teach_back": ["为什么只在调用处重试不够？"],
+                },
+            },
+            ensure_ascii=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                '{"roles":[{"id":"worker","name":"执行者","role":"执行","driver":"result"}]}',
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"result": StaticResponseDriver(response)}) as rt:
+                task_id = rt.create_task("修复并发问题")
+                rt.collaborate(task_id)
+                task = rt.task(task_id)
+                events = rt.log.read(task_id=task_id)
+
+        self.assertEqual(task.diagnoses[0]["status"], "hypothesis")
+        self.assertEqual(task.diagnoses[0]["message_seq"], task.messages[0]["seq"])
+        self.assertEqual(task.handoffs[0]["teach_back"], ["为什么只在调用处重试不够？"])
+        self.assertEqual(task.handoffs[0]["message_seq"], task.messages[0]["seq"])
+        self.assertEqual(
+            [event.type for event in events if event.type in {"diagnosis.recorded", "handoff.published"}],
+            ["diagnosis.recorded", "handoff.published"],
+        )
+
+    def test_incomplete_diagnosis_and_handoff_are_not_published(self):
+        response = json.dumps(
+            {
+                "stance": "assert",
+                "option_id": "A",
+                "claim": "信息不足",
+                "text": "先继续验证。",
+                "diagnosis": {"status": "confirmed", "symptom": "症状", "cause": "猜测原因"},
+                "handoff": {"summary": "只有摘要", "why": "但没有交接证据"},
+            },
+            ensure_ascii=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                '{"roles":[{"id":"worker","name":"执行者","role":"执行","driver":"result"}]}',
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"result": StaticResponseDriver(response)}) as rt:
+                task_id = rt.create_task("拒绝不完整自述")
+                rt.collaborate(task_id)
+                task = rt.task(task_id)
+
+        self.assertEqual(task.diagnoses, [])
+        self.assertEqual(task.handoffs, [])
+
     def test_profile_memory_is_fed_into_later_collaboration_prompts(self):
         driver = PromptCaptureDriver()
         with tempfile.TemporaryDirectory() as tmp:
@@ -425,6 +500,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(driver.calls, 2)
         self.assertIn("Profile memory: no prior activity", driver.prompts[0])
         self.assertIn("Collaboration policy", driver.prompts[1])
+        self.assertIn("diagnosis with status", driver.prompts[0])
+        self.assertIn("never hidden reasoning", driver.prompts[0])
         self.assertIn("messages=1", driver.prompts[1])
         self.assertIn("supports=1", driver.prompts[1])
         self.assertIn("last_claim=memory claim 1", driver.prompts[1])
@@ -2760,6 +2837,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("这个工作台需要访问令牌", bundle_text)
         self.assertIn("已避免重复启动", bundle_text)
         self.assertIn("这段内容太长了", bundle_text)
+        self.assertIn("自证与交接", bundle_text)
         self.assertIn("role:`alert`", bundle_text)
         self.assertNotIn("向猫咖下单", bundle_text)
 
