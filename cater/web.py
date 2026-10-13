@@ -429,6 +429,7 @@ def render_index(rt: Runtime) -> str:
           </div>
           {_policy_view(roles, cabinet_policy, governance_policy, rt.driver_attempts, rt.circuit_breaker_threshold)}
         </section>
+        {_api_panel()}
         {_review_panel(review)}
         <section class="panel">
           <div class="panel-head">
@@ -444,6 +445,24 @@ def render_index(rt: Runtime) -> str:
         </section>
         """,
     )
+
+
+def _api_panel() -> str:
+    return """
+    <section class="panel api-panel">
+      <div class="panel-head">
+        <h2>Local API</h2>
+        <span>machine access</span>
+      </div>
+      <div class="api-grid">
+        <code>GET /api/tasks</code>
+        <code>POST /api/tasks</code>
+        <code>GET /api/chain</code>
+        <code>POST /api/tasks/&lt;id&gt;/run</code>
+      </div>
+      <p class="muted"><code>python examples/api_client.py</code></p>
+    </section>
+    """
 
 
 def render_task(
@@ -1142,6 +1161,18 @@ td small {
   border-top: 1px solid var(--line);
   padding: 8px 0;
 }
+.api-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.api-grid code {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  display: block;
+  padding: 10px;
+  white-space: normal;
+}
 .policy-roles {
   list-style: none;
   padding: 0;
@@ -1381,6 +1412,7 @@ button.secondary {
   .timeline em, .timeline p { grid-column: 2; }
   .ladder { grid-template-columns: 1fr; }
   .policy-grid { grid-template-columns: 1fr; }
+  .api-grid { grid-template-columns: 1fr; }
   .review-list, .assignment-list { grid-template-columns: 1fr; }
 }
 """

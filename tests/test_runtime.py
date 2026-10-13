@@ -22,7 +22,7 @@ from cater.ladder import decision_ladder
 from cater.messages import message_relation
 from cater.profiles import agent_profiles
 from cater.runtime import Runtime
-from cater.web import make_handler, render_task
+from cater.web import make_handler, render_index, render_task
 
 
 class AlwaysFailDriver:
@@ -1133,6 +1133,16 @@ class CliTests(unittest.TestCase):
 
 
 class WebTests(unittest.TestCase):
+    def test_render_index_exposes_local_api_panel(self):
+        with Runtime(":memory:") as rt:
+            html = render_index(rt)
+
+        self.assertIn("Local API", html)
+        self.assertIn("GET /api/tasks", html)
+        self.assertIn("POST /api/tasks", html)
+        self.assertIn("GET /api/chain", html)
+        self.assertIn("python examples/api_client.py", html)
+
     def test_render_task_shows_worker_reply_links_in_messages_and_timeline(self):
         driver = ReplyDriver()
         with tempfile.TemporaryDirectory() as tmp:
