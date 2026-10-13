@@ -1416,6 +1416,8 @@ class WebTests(unittest.TestCase):
         self.assertIn("governance round forced", html)
         self.assertIn("cabinet.voted", html)
         self.assertIn("agent.decided", html)
+        self.assertIn("payload-json", html)
+        self.assertIn("human / lifecycle", html)
         self.assertEqual([step["id"] for step in ladder], ["battle", "cabinet", "supreme", "human"])
         self.assertEqual(ladder[1]["status"], "vetoed")
 

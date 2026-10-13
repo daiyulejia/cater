@@ -863,12 +863,19 @@ def _event_row(event: Event) -> str:
     )
     relation = message_relation(event.payload)
     relation_row = f"<small>{escape(relation)}</small>" if relation else ""
+    payload_json = json.dumps(event.payload, ensure_ascii=False, indent=2, sort_keys=True)
     return f"""
     <li>
       <span>#{event.seq}</span>
       <strong>{escape(event.type)}</strong>
-      <em>{escape(event.actor.id)}</em>
-      <p>{escape(text)}{relation_row}</p>
+      <em>{escape(event.actor.id)} / {escape(event.category)}</em>
+      <div>
+        <p>{escape(text)}{relation_row}</p>
+        <details class="payload-json">
+          <summary>payload</summary>
+          <pre>{escape(payload_json)}</pre>
+        </details>
+      </div>
     </li>
     """
 
@@ -1394,6 +1401,25 @@ dd {
 .timeline span, .timeline em {
   color: var(--muted);
   font-style: normal;
+}
+.payload-json {
+  margin-top: 6px;
+}
+.payload-json summary {
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+}
+.payload-json pre {
+  margin: 8px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f6f7f9;
+  padding: 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 form {
   display: grid;
