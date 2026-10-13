@@ -1,9 +1,9 @@
-# Cater Docs
+# Cater 文档
 
-These notes keep Cater's product and architecture decisions reviewable.
+这些文档用于让 Cater 的产品与架构决策保持可审查。
 
-- [Organization Flow](organization-flow.md): when to use direct worker assignment, cabinet dispatch, or governance.
-- [Architecture Review](architecture-review.md): how to review whether Cater's own mechanisms are becoming redundant, expensive, or underpowered.
-- [Integration Review](integration-review.md): how to inspect third-party tools before wrapping them behind Cater's driver boundary.
+- [组织流程](organization-flow.md)：何时直接派给执行角色、何时内阁分发、何时进入治理。
+- [架构复盘](architecture-review.md)：如何检查自身机制是否冗余、成本过高或能力不足。
+- [接入复盘](integration-review.md)：如何在把第三方工具包进 driver 边界前检查它。
 
-Keep docs short and operational. If a mechanism cannot be explained here without a large essay, the mechanism probably needs another design pass.
+文档应当简短且可操作。若一个机制无法在这里清楚说明，说明它还需要一次设计复盘。

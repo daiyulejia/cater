@@ -1,6 +1,6 @@
 # Cater
 
-**语言：** [English](README.md) | 中文
+**语言：** [English](README.en.md) | 中文
 
 > 自治多 Agent 组织运行时。
 

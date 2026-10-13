@@ -1,103 +1,50 @@
-# Cater Driver Examples
+# Cater Driver 示例
 
-Examples in this folder show how to wrap external tools without letting them leak into Cater core.
+本目录展示如何接入外部工具，同时不让它们渗入 Cater 核心。
 
-## Web API Client
+## Web API 客户端
 
-Start Cater locally:
+先启动 Cater：
 
 ```bash
 cater web
 ```
 
-Then, from another terminal:
+再在另一个终端运行：
 
 ```bash
 python examples/api_client.py
 ```
 
-The example creates a task through `POST /api/tasks`, runs one collaboration
-round through `POST /api/tasks/<task_id>/run`, and verifies `/api/chain`.
+示例会通过 `POST /api/tasks` 创建任务，通过 `POST /api/tasks/<task_id>/run` 启动一轮协作，并校验 `/api/chain`。
 
-## NDJSON Driver Contract
+## NDJSON Driver 协议
 
-A CLI driver reads one JSON request per line and writes one JSON response per line.
-
-Probe request:
+CLI driver 每行读取一个 JSON 请求，并且每行写入一个 JSON 响应。探针请求与响应如下：
 
 ```json
 {"id":"req-1","type":"ping"}
-```
-
-Probe response:
-
-```json
 {"id":"req-1","ok":true,"pong":true}
 ```
 
-Completion request:
+完成任务的请求：
 
 ```json
 {"id":"req-2","type":"complete","role":"developer","prompt":"...","context":{"task_id":"...","goal":"..."}}
 ```
 
-Completion response:
+完成任务的响应必须包含字符串 `text`、整数 `tokens` 和可选 `meta`：
 
 ```json
-{
-  "id": "req-2",
-  "ok": true,
-  "text": "{\"stance\":\"assert\",\"option_id\":\"A\",\"claim\":\"...\",\"evidence\":[],\"confidence\":0.8,\"text\":\"...\"}",
-  "tokens": 123,
-  "meta": {"adapter": "example"}
-}
+{"id":"req-2","ok":true,"text":"{\"stance\":\"assert\",\"claim\":\"...\",\"evidence\":[],\"text\":\"...\"}","tokens":123,"meta":{}}
 ```
 
-The nested `text` JSON is the agent message payload. It may include optional
-worker-to-worker reply metadata when the backend is genuinely continuing,
-correcting, or handing off another agent's output:
+嵌套在 `text` 中的 Agent 消息可选包含 `target` 与 `reply_to`，用于真实的继续、修正或交接：
 
 ```json
-{
-  "stance": "assert",
-  "option_id": "A",
-  "claim": "Continue the implementation plan from dev",
-  "evidence": ["uses prior worker output"],
-  "confidence": 0.8,
-  "text": "I will continue from the referenced implementation note.",
-  "target": "dev",
-  "reply_to": 12
-}
+{"target":"dev","reply_to":12}
 ```
 
-`target` must be a configured role id. `reply_to` must point to an event sequence
-that was visible to the agent in the prompt. Cater drops invalid reply metadata
-instead of storing speculative links.
+`target` 必须是已配置角色，`reply_to` 必须是该 Agent 在提示词里可见的事件序号；无效元数据会被丢弃。接入外部 driver 前先运行探针、核验真实 I/O 形状、明确超时和失败语义，并避免把密钥写入事件流。
 
-`examples/ndjson_tool_driver.py` includes a tiny deterministic version of this:
-when the prompt contains a visible worker line such as
-`alpha/assert: Draft the plan (#12)`, it replies with `target="alpha"` and
-`reply_to=12`. Real adapters should do this only when they are genuinely
-continuing, correcting, or handing off visible work.
-
-## Integration Rule
-
-Do not infer behavior from package names, function names, or framework marketing.
-
-Before running a configured external driver through a real task, use the
-machine-readable doctor output:
-
-```bash
-cater --drivers examples/tool_driver_config.json doctor --probe --json
-```
-
-Before wrapping a tool:
-
-- run a probe
-- inspect its real input and output shape
-- decide how timeout, crash, malformed output, auth failure, and rate limit should be represented
-- keep secrets out of events
-- normalize the result into Cater's small JSON response shape
-- add a fixture or deterministic test when possible
-
-See [../docs/integration-review.md](../docs/integration-review.md).
+详见 [接入复盘](../docs/integration-review.md)。

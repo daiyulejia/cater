@@ -1,12 +1,10 @@
-# Cater Workroom
+# Cater 对话工作台
 
-This is Cater's optional React workroom. The Python runtime remains usable with
-zero third-party runtime dependencies; this package is the richer local UI for
-people who want a conversation-first task surface.
+这是 Cater 可选的 React 对话工作台。Python 运行时继续保持零第三方运行依赖；需要使用聊天式任务空间时，再启用本目录的前端依赖。
 
-## Run locally
+## 本地运行
 
-Build the workroom once:
+首次使用先构建工作台：
 
 ```powershell
 cd web
@@ -14,23 +12,18 @@ pnpm install
 pnpm build
 ```
 
-Then start Cater normally from the repository root:
+然后回到仓库根目录，正常启动 Cater：
 
 ```powershell
 python -m cater.cli web --port 8766
 ```
 
-Open `http://127.0.0.1:8766`. Cater serves the built workroom, its API, and the
-full audit replay from one local origin.
+访问 `http://127.0.0.1:8766`。Cater 会从同一个本地地址提供工作台、API 和完整审计回放。
 
-For frontend development, run `python -m cater.cli web --port 8766` and
-`pnpm dev` in separate terminals, then open `http://127.0.0.1:5173`. Vite
-proxies development requests to Cater's API.
+开发前端时，可以分别运行 `python -m cater.cli web --port 8766` 与 `pnpm dev`，再访问 `http://127.0.0.1:5173`。Vite 会把开发请求代理给 Cater 的 API。
 
-## Product boundary
+## 产品边界
 
-- The workroom is a projection of the event log, not a second source of truth.
-- Every human direction, assignment, agent contribution, decision, and failure
-  remains an event that can be inspected from the conversation.
-- The UI defaults to mission dispatch and one collaboration round, while the
-  engine still keeps governance conditional on actual disagreement or risk.
+- 工作台只是事件流的对话投影，不是第二份事实来源。
+- 人类方向、任务指派、Agent 产出、决策与失败都会进入可检查的事件链。
+- 界面默认先分发任务并启动一轮协作；是否进入治理仍由真实分歧和风险信号决定。
