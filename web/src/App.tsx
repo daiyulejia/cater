@@ -47,7 +47,7 @@ const activityText = (activity?: Activity) => {
   return ''
 }
 
-const taskListStatus = (task: Task) => task.status === 'running' && task.activity?.state === 'completed'
+const taskListStatus = (task: Task) => task.status === 'running' && !task.activity?.active && task.brief
   ? '等待下一轮'
   : statusText(task.status)
 
@@ -220,7 +220,7 @@ function App() {
         </aside>
         <section className="flex min-h-0 flex-col border-b border-[#e5d8ca] bg-[#fffdf9] lg:border-b-0">
           {task ? <>
-            <div className="border-b border-[#eaded1] bg-[#fffaf4] px-5 py-4"><div className="flex items-start justify-between gap-4"><div className="flex items-start gap-3"><Portrait id="store_manager" /><div><p className="mb-1 text-xs font-medium tracking-[0.12em] text-teal-700">店长正在跟进</p><h1 className="text-lg font-semibold leading-snug">{task.goal}</h1></div></div><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${detail?.activity?.active ? 'bg-teal-50 text-teal-800' : 'bg-[#f1e7dc] text-stone-600'}`}>{activityText(detail?.activity) || statusText(task.status)}</span></div></div>
+            <div className="border-b border-[#eaded1] bg-[#fffaf4] px-5 py-4"><div className="flex items-start justify-between gap-4"><div className="flex items-start gap-3"><Portrait id="store_manager" /><div><p className="mb-1 text-xs font-medium tracking-[0.12em] text-teal-700">店长正在跟进</p><h1 className="text-lg font-semibold leading-snug">{task.goal}</h1></div></div><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${detail?.activity?.active ? 'bg-teal-50 text-teal-800' : 'bg-[#f1e7dc] text-stone-600'}`}>{activityText(detail?.activity) || taskListStatus(task)}</span></div></div>
             <div className="border-b border-[#eaded1] bg-[#fffaf4] px-4 py-2 sm:px-7"><div className="flex gap-1 overflow-x-auto" role="group" aria-label="对话筛选">{([{ id: 'all', label: '全部' }, { id: 'collaboration', label: '协作' }, { id: 'decision', label: '决策' }, { id: 'deliverable', label: '成果' }] as const).map((filter) => <button key={filter.id} onClick={() => setChatFilter(filter.id)} className={`shrink-0 rounded-md px-3 py-1.5 text-xs font-medium ${chatFilter === filter.id ? 'bg-[#f7dfcf] text-[#7a3f2d]' : 'text-stone-500 hover:bg-[#f5ebe1]'}`}>{filter.label}</button>)}</div></div>
             <div className="flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7">{visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={item.id} item={item} />) : <p className="py-10 text-center text-sm text-stone-400">这个筛选下暂时没有记录。</p>}</div>
             {composerMode === 'new' ? <TaskComposer draft={draft} acceptance={acceptance} routing={routing} roles={roles} directOwner={directOwner} isSending={isSending} onDraftChange={setDraft} onAcceptanceChange={setAcceptance} onRoutingChange={setRouting} onOwnerChange={setDirectOwner} onCreate={() => void createTask()} /> : <DirectionComposer message={message} isSending={isSending} onMessageChange={setMessage} onSend={() => void sendDirection()} />}
