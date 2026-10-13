@@ -218,6 +218,11 @@ Driver 返回：
 
 这个边界刻意很小。LangChain、LangGraph、Codex CLI、Claude Code、Gemini CLI 或自定义 API wrapper 都可以藏在这个进程后面，而不污染 Cater 的核心运行时。
 
+CLI driver 的 `command` 是本机执行权限，不是安全沙箱：只加载自己维护或已审阅来源的 driver
+配置。由 adapter 连接的 MCP、skills 或工具框架继承该进程的文件、网络和账号权限；按信任等级
+拆分账号、工作目录与最小权限。Cater 会限制每条 CLI 响应为 4 MiB 字符，并在超时、崩溃或协议
+错误后重启长驻进程，但这只是在限制损害范围，不能把不可信工具变成可信工具。
+
 ### 角色、团队与账号如何对应
 
 一个角色卡只引用一个 driver 名；因此同一 driver 可以被多个角色复用。默认配置中，白露和月亮共享 `product`，阿程和米寇共享 `dev`，知夏和三角共享 `test`。这让接入粒度可以按实际成本、权限和模型能力选择：

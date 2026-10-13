@@ -47,6 +47,17 @@ CLI driver 每行读取一个 JSON 请求，并且每行写入一个 JSON 响应
 
 `target` 必须是已配置角色，`reply_to` 必须是该 Agent 在提示词里可见的事件序号；无效元数据会被丢弃。接入外部 driver 前先运行探针、核验真实 I/O 形状、明确超时和失败语义，并避免把密钥写入事件流。
 
+### 信任边界
+
+`kind: "cli"` 的 `command` 会作为当前用户启动的本地进程执行；它不是模型配置字段，也不是
+沙箱。只应加载自己维护或已审阅来源的 roles / drivers JSON，不能把他人提供的 driver 配置直接
+用于本机。MCP、skills、LangChain 或其他工具框架若由 adapter 调用，也继承该 adapter 的文件、
+网络与账号权限；应为不同信任等级使用独立账号、工作目录和最小权限。
+
+Cater 会限制单条 CLI 响应为 4 MiB 字符，并在超时、崩溃或协议错误后重启长驻进程，但这些是
+运行时隔离护栏，不会把不可信工具变成安全工具。不要让 driver 将密钥、完整 stderr、私人文件或
+不必要的原始工具输出写入可回放消息。
+
 详见 [接入复盘](../docs/integration-review.md)。
 
 ## Codex CLI 适配器
