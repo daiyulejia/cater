@@ -784,8 +784,14 @@ def make_handler(
         def _requires_access_token(self, path: str) -> bool:
             # Static files deliberately stay readable so a remote browser can
             # load the client.  All task data and every mutation remain behind
-            # the token; the client forwards it only from a URL fragment.
-            return access_token is not None and (path.startswith("/api/") or path.startswith("/tasks"))
+            # the token; the client forwards it only from a URL fragment.  If
+            # no bundled client exists, ``/`` is the legacy server-rendered
+            # index and includes task data, so it must be protected as well.
+            return access_token is not None and (
+                path.startswith("/api/")
+                or path.startswith("/tasks")
+                or (path == "/" and static_root is None)
+            )
 
         def _has_valid_access_token(self) -> bool:
             if access_token is None:

@@ -2224,7 +2224,8 @@ class WebTests(unittest.TestCase):
     def test_web_access_token_protects_task_data_and_mutations(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "token-protected.db")
-            base = start_test_web(self, db, access_token="test-access-token")
+            static_dir = Path(__file__).resolve().parents[1] / "cater" / "static" / "workroom"
+            base = start_test_web(self, db, access_token="test-access-token", static_dir=static_dir)
 
             with self.assertRaises(HTTPError) as raised:
                 urlopen(f"{base}/api/tasks", timeout=5)
@@ -2246,6 +2247,18 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(response.status, 201)
 
             with urlopen(f"{base}/", timeout=5) as response:
+                self.assertEqual(response.status, 200)
+
+            legacy_base = start_test_web(self, db, access_token="test-access-token", static_dir=None)
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(f"{legacy_base}/", timeout=5)
+            self.assertEqual(raised.exception.code, 401)
+
+            legacy_index = Request(
+                f"{legacy_base}/",
+                headers={"X-Cater-Access-Token": "test-access-token"},
+            )
+            with urlopen(legacy_index, timeout=5) as response:
                 self.assertEqual(response.status, 200)
 
     def test_web_api_rejects_an_oversized_request_body(self):
