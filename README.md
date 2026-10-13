@@ -114,6 +114,8 @@ cater --audit-key "dev-secret" chain --json
 
 `dispatch` 会记录金字塔式任务分发路径：店长定义 mission，内阁把 mission 拆成执行 lane，执行猫咪在下一轮协作前拿到明确分工。它是可选能力；小任务可以用 `assign` 或 `new --assign-to dev --run` 直接派给执行层。默认四只执行猫为月亮（需求与体验）、罐头（交互与视觉）、米寇（工程实现）和三角（质量与验证）；内阁成员为白露（需求）、阿程（工程）和知夏（质量），它们与执行席位在配置上相互独立。
 
+CLI 中只执行 `new` 时，任务会保持待安排，方便脚本随后显式调用 `dispatch` 或 `assign`；一旦使用 `new --run`、`new --battle` 或 `new --assign-to`，店长也会先记录任务理解与路线选择，再进入执行层。这与对话工作台保持一致。
+
 默认编队为何保持 3 位铲屎官与 4 只猫咪、又该如何扩容，见 [docs/roster-policy.md](docs/roster-policy.md)。
 
 `path` 会汇总单个任务经过的分发、协作、治理和决策步骤。

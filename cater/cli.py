@@ -83,14 +83,20 @@ def cmd_new(args: argparse.Namespace) -> int:
         if args.dispatch:
             rt.dispatch(task_id)
             print("mission dispatched")
-        if args.assign_to:
-            rt.assign(
+        elif args.assign_to:
+            intake = rt.intake(
                 task_id,
-                args.assign_to,
-                objective=args.assign_objective,
-                acceptance=args.assign_accept,
+                requested_route="direct",
+                preferred_owner=args.assign_to,
+                preferred_objective=args.assign_objective,
+                preferred_acceptance=args.assign_accept,
             )
-            print(f"assigned to {args.assign_to}")
+            print(f"leader route: {intake['route']['route']}")
+            if intake["route"]["route"] == "direct":
+                print(f"assigned to {args.assign_to}")
+        elif args.run or args.battle:
+            intake = rt.intake(task_id)
+            print(f"leader route: {intake['route']['route']}")
         if args.run or args.battle:
             result = rt.battle(task_id) if args.battle else rt.collaborate(task_id)
             task = rt.task(task_id)
@@ -101,6 +107,12 @@ def cmd_new(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
+        task = rt.task(args.task_id)
+        if task is None:
+            raise KeyError(args.task_id)
+        if task.route is None and not task.assignments:
+            intake = rt.intake(args.task_id)
+            print(f"leader route: {intake['route']['route']}")
         result = rt.collaborate(args.task_id)
         task = rt.task(args.task_id)
         print(f"round complete: {task.status}, brief event #{result['brief_event']}")
@@ -110,6 +122,12 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_battle(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
+        task = rt.task(args.task_id)
+        if task is None:
+            raise KeyError(args.task_id)
+        if task.route is None and not task.assignments:
+            intake = rt.intake(args.task_id)
+            print(f"leader route: {intake['route']['route']}")
         result = rt.battle(args.task_id)
         task = rt.task(args.task_id)
         print(f"governance round complete: {task.status}, brief event #{result['brief_event']}")
@@ -128,12 +146,31 @@ def cmd_dispatch(args: argparse.Namespace) -> int:
 def cmd_assign(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         try:
-            result = rt.assign(
-                args.task_id,
-                args.owner,
-                objective=args.objective,
-                acceptance=args.acceptance,
-            )
+            task = rt.task(args.task_id)
+            if task is None:
+                raise KeyError(args.task_id)
+            if task.route is None and not task.assignments:
+                intake = rt.intake(
+                    args.task_id,
+                    requested_route="direct",
+                    preferred_owner=args.owner,
+                    preferred_objective=args.objective,
+                    preferred_acceptance=args.acceptance,
+                )
+                route = intake["route"]["route"]
+                if route != "direct":
+                    print(f"leader route: {route}")
+                    return 0
+                task = rt.task(args.task_id)
+                assert task is not None
+                result = {"assignment": task.assignments[-1]}
+            else:
+                result = rt.assign(
+                    args.task_id,
+                    args.owner,
+                    objective=args.objective,
+                    acceptance=args.acceptance,
+                )
         except ValueError:
             print(_unknown_role_message(args.owner, rt))
             return 1

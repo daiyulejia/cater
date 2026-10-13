@@ -1459,6 +1459,45 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("choose either --run", out)
 
+    def test_cli_new_run_uses_the_same_leader_intake_as_the_web(self):
+        code, out = self.run_cli("new", "做一个网页任务入口", "--accept", "能发起任务", "--accept", "过程可回放", "--run")
+        self.assertEqual(code, 0)
+        self.assertIn("leader route: collaborate", out)
+        task_id = next(line for line in out.splitlines() if line.startswith("created ")).split()[1]
+
+        with Runtime(self.db) as rt:
+            task = rt.task(task_id)
+
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertTrue(task.interpretation)
+        self.assertEqual(task.route["route"], "collaborate")
+        self.assertEqual([item["owner"] for item in task.assignments], ["product", "design", "dev", "test"])
+
+    def test_cli_new_complex_run_convenes_cabinet_before_execution(self):
+        code, out = self.run_cli(
+            "new",
+            "重构多 Agent 协作系统并接入安全的外部 CLI",
+            "--accept",
+            "可回放",
+            "--accept",
+            "可验证",
+            "--accept",
+            "可恢复",
+            "--run",
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("leader route: cabinet", out)
+        task_id = next(line for line in out.splitlines() if line.startswith("created ")).split()[1]
+
+        with Runtime(self.db) as rt:
+            task = rt.task(task_id)
+
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.plan["source"], "cabinet")
+        self.assertEqual(task.route["route"], "cabinet")
+
     def test_cli_probe_driver_with_external_config(self):
         driver_script = Path(__file__).resolve().parent / "fixtures" / "ndjson_driver.py"
         config = Path(self.tmp.name) / "drivers.json"
@@ -1608,6 +1647,32 @@ class CliTests(unittest.TestCase):
         code, out = self.run_cli("show", task_id)
         self.assertEqual(code, 0)
         self.assertIn("assignments=1", out)
+
+    def test_cli_assign_lets_leader_upgrade_an_unplanned_complex_task(self):
+        code, out = self.run_cli(
+            "new",
+            "重构多 Agent 协作系统并接入安全的外部 CLI",
+            "--accept",
+            "可回放",
+            "--accept",
+            "可验证",
+            "--accept",
+            "可恢复",
+        )
+        self.assertEqual(code, 0)
+        task_id = next(line for line in out.splitlines() if line.startswith("created ")).split()[1]
+
+        code, out = self.run_cli("assign", task_id, "dev", "--objective", "只做最小实现")
+        self.assertEqual(code, 0)
+        self.assertIn("leader route: cabinet", out)
+
+        with Runtime(self.db) as rt:
+            task = rt.task(task_id)
+
+        self.assertIsNotNone(task)
+        assert task is not None
+        self.assertEqual(task.route["route"], "cabinet")
+        self.assertEqual(task.plan["source"], "cabinet")
 
     def test_cli_direct_assign_reports_unknown_role_without_creating_task(self):
         code, out = self.run_cli("new", "Bad assign", "--assign-to", "nobody")
