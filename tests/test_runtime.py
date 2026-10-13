@@ -1303,6 +1303,57 @@ class WebTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, 400)
             self.assertIn("choose either run", raised.exception.read().decode("utf-8"))
 
+    def test_web_api_rejects_bad_json_without_creating_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-api-bad-json.db")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join, 1)
+            self.addCleanup(server.shutdown)
+
+            request = Request(
+                f"{base}/api/tasks",
+                data=b"{",
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(request, timeout=5)
+
+            self.assertEqual(raised.exception.code, 400)
+            self.assertIn("invalid JSON body", raised.exception.read().decode("utf-8"))
+            with Runtime(db) as rt:
+                self.assertEqual(rt.tasks(), [])
+
+    def test_web_api_rejects_unknown_assignee_without_creating_task(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-api-bad-assignee.db")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join, 1)
+            self.addCleanup(server.shutdown)
+
+            body = json.dumps({"goal": "Bad assignee", "assign_to": "ghost"}).encode("utf-8")
+            request = Request(
+                f"{base}/api/tasks",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(request, timeout=5)
+
+            self.assertEqual(raised.exception.code, 400)
+            self.assertIn("unknown role 'ghost'", raised.exception.read().decode("utf-8"))
+            with Runtime(db) as rt:
+                self.assertEqual(rt.tasks(), [])
+
     def test_web_api_task_actions_share_runtime_semantics(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-api-actions.db")
