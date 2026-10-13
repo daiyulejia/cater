@@ -125,6 +125,8 @@ cater --audit-key "dev-secret" chain --json
 
 `verify` runs only the command explicitly provided after `--`, locally, and records its exit code, duration, output digests, and Git state. Command output is not stored in the event log unless `--record-output` is set; that option keeps excerpts up to 8 KiB. Command arguments are always recorded, so do not put secrets on the command line. Cater never executes an agent-suggested command automatically, and one passing command does not prove a diagnosis or entire task. Use `--cwd` and `--timeout` to bound the check.
 
+Managed descendants are cleaned up when a check ends or times out, and command stdin is closed. Use checks for tests and builds, rather than services meant to stay running. Windows Job Objects and POSIX process groups manage process lifetimes; commands still run with your user permissions. Incomplete output capture is recorded and cannot produce a passing result. GitHub checks cover Windows, Ubuntu, and Python 3.11/3.13.
+
 See [docs/organization-flow.md](docs/organization-flow.md) for when to use direct assignment, cabinet dispatch, or governance.
 
 ## Local Web API

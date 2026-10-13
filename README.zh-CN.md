@@ -124,6 +124,8 @@ cater --audit-key "dev-secret" chain --json
 
 `verify` 仅在你显式调用时，在本机运行 `--` 后的命令，记录退出码、耗时、输出摘要与当时的 Git 状态。默认不把命令输出写入事件链；`--record-output` 才会保存最多 8 KiB 的输出摘录。命令参数本身会被记录，所以不要把令牌、密码或其他敏感值写进命令行。它不会自动执行 Agent 建议的命令，也不会因为一条命令通过就宣称诊断或整项任务已经证实。可用 `--cwd` 指定工作目录、`--timeout` 限制秒数。
 
+检查结束或超时时会清理管理范围内的派生进程，命令标准输入关闭。适合测试和构建，不适合启动常驻服务。详细行为见 [本机检查说明](docs/local-verification.zh-CN.md)。GitHub 自动检查覆盖 Windows、Ubuntu 和 Python 3.11/3.13。
+
 什么时候用直接派发、内阁分发或治理路径，见 [docs/organization-flow.md](docs/organization-flow.md)。
 
 ## 本地 Web API
