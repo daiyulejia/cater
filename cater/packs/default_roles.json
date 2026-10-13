@@ -9,6 +9,15 @@
     "trigger_on_option_split": true,
     "low_confidence_threshold": 0.5
   },
+  "organization": {
+    "leader": {
+      "id": "supreme",
+      "name": "最高决策者",
+      "role": "最高决策者"
+    },
+    "cabinet_members": ["product", "dev", "test"],
+    "worker_members": ["product", "dev", "test"]
+  },
   "roles": [
     {
       "id": "product",

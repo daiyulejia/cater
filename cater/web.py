@@ -232,7 +232,15 @@ def make_handler(
             if path == "/api/organization":
                 with self._runtime() as rt:
                     return self._send_json(
-                        [{"id": role.id, "name": role.name, "role": role.role} for role in rt.roles]
+                        [
+                            {
+                                "id": role.id,
+                                "name": role.name,
+                                "role": role.role,
+                                "cabinet_member": role.id in rt.organization.cabinet_members,
+                            }
+                            for role in rt.worker_roles
+                        ]
                     )
             if path == "/api/chain":
                 with self._runtime() as rt:
@@ -284,7 +292,7 @@ def make_handler(
                 assign_owner = str(data.get("assign_to", "")).strip()
                 acceptance = _acceptance_lines(data.get("acceptance"))
                 with self._runtime() as rt:
-                    if assign_owner and assign_owner not in {role.id for role in rt.roles}:
+                    if assign_owner and assign_owner not in {role.id for role in rt.worker_roles}:
                         return self._bad_request(f"unknown role {assign_owner!r}")
                     task_id = rt.create_task(goal, acceptance)
                     if _truthy(data.get("dispatch")):

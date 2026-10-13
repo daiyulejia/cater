@@ -28,10 +28,25 @@ class Role:
 
 
 @dataclass(frozen=True)
+class Leader:
+    id: str
+    name: str
+    role: str
+
+
+@dataclass(frozen=True)
+class Organization:
+    leader: Leader
+    cabinet_members: frozenset[str]
+    worker_members: frozenset[str]
+
+
+@dataclass(frozen=True)
 class RuntimeConfig:
     roles: list[Role]
     cabinet_policy: CabinetPolicy
     governance_policy: "GovernancePolicy"
+    organization: Organization
 
 
 @dataclass(frozen=True)
@@ -87,6 +102,7 @@ class Runtime:
         self.roles = config.roles
         self.cabinet_policy = config.cabinet_policy
         self.governance_policy = config.governance_policy
+        self.organization = config.organization
         self.drivers = configured_drivers
 
     def close(self) -> None:
@@ -110,7 +126,7 @@ class Runtime:
             task_id=task_id,
             payload={"goal": goal, "acceptance": list(acceptance or [])},
         )
-        self.log.emit(actor=Actor.system("orchestrator"), type="task.started", task_id=task_id)
+        self.log.emit(actor=self._leader_actor(), type="task.started", task_id=task_id)
         return task_id
 
     def collaborate(self, task_id: str) -> dict[str, Any]:
@@ -131,7 +147,7 @@ class Runtime:
             "intent": "将人类目标转化为组织可执行的工作。",
         }
         self.log.emit(
-            actor=Actor.system("orchestrator"),
+            actor=self._leader_actor(),
             type="mission.created",
             task_id=task_id,
             payload=mission,
@@ -184,7 +200,7 @@ class Runtime:
         task = self.task(task_id)
         if task is None:
             raise KeyError(task_id)
-        role = self._role_by_id(owner)
+        role = self._worker_by_id(owner)
         assignment = {
             "id": f"{task.id}:{role.id}:direct",
             "owner": role.id,
@@ -285,14 +301,20 @@ class Runtime:
         if governance["status"] == "not_needed":
             brief = self._build_collaboration_brief(task_id, utterances, governance)
             brief_event = self.log.emit(
-                actor=Actor.system("orchestrator"),
+                actor=self._leader_actor(),
                 type="brief.generated",
                 task_id=task_id,
                 payload={"brief": brief, "reason": "collaboration_continues", "options": brief["options"]},
             )
             return {"task_id": task_id, "brief_event": brief_event.seq, "brief": brief}
 
-        brief = self._build_brief(task_id, utterances, self.cabinet_policy, governance)
+        brief = self._build_brief(
+            task_id,
+            utterances,
+            self.cabinet_policy,
+            governance,
+            cabinet_members=self.organization.cabinet_members,
+        )
         self.log.emit(
             actor=Actor.system("cabinet"),
             type="cabinet.voted",
@@ -336,7 +358,7 @@ class Runtime:
             )
         elif brief["cabinet"]["status"] == "needs_supreme":
             self.log.emit(
-                actor=Actor.system("supreme"),
+                actor=self._leader_actor(),
                 type="supreme.decided",
                 task_id=task_id,
                 payload={
@@ -347,7 +369,7 @@ class Runtime:
                 },
             )
         self.log.emit(
-            actor=Actor.system("orchestrator"),
+            actor=self._leader_actor(),
             type="brief.generated"
             if brief["cabinet"]["status"] in {"recommended", "vetoed", "needs_supreme"}
             else "escalation.triggered",
@@ -364,7 +386,7 @@ class Runtime:
             brief_event = self.log.read(task_id=task_id)[-1]
         else:
             brief_event = self.log.emit(
-                actor=Actor.system("orchestrator"),
+                actor=self._leader_actor(),
                 type="brief.generated",
                 task_id=task_id,
                 payload={"brief": brief},
@@ -379,8 +401,8 @@ class Runtime:
             if assignment.get("mode") == "direct" and assignment.get("owner")
         }
         if not direct_owners:
-            return self.roles
-        return [role for role in self.roles if role.id in direct_owners]
+            return self.worker_roles
+        return [role for role in self.worker_roles if role.id in direct_owners]
 
     def decide(self, task_id: str, resolution: str, reason: str) -> Event:
         if resolution not in {"done", "rework"}:
@@ -652,6 +674,25 @@ class Runtime:
         known = ", ".join(role.id for role in self.roles)
         raise ValueError(f"unknown role {role_id!r}; expected one of: {known}")
 
+    @property
+    def worker_roles(self) -> list[Role]:
+        return [role for role in self.roles if role.id in self.organization.worker_members]
+
+    @property
+    def cabinet_roles(self) -> list[Role]:
+        return [role for role in self.roles if role.id in self.organization.cabinet_members]
+
+    def _leader_actor(self) -> Actor:
+        leader = self.organization.leader
+        return Actor(id=leader.id, role=leader.role, kind="system")
+
+    def _worker_by_id(self, role_id: str) -> Role:
+        role = self._role_by_id(role_id)
+        if role.id not in self.organization.worker_members:
+            known = ", ".join(item.id for item in self.worker_roles)
+            raise ValueError(f"role {role_id!r} is not an execution role; expected one of: {known}")
+        return role
+
     def _mentioned_roles(self, instruction: str) -> list[str]:
         """Return known role ids explicitly addressed by a human command."""
         return [
@@ -664,7 +705,7 @@ class Runtime:
         criteria = list(task.acceptance) or ["产出有价值且可验证的下一步成果"]
         subtasks = []
         prior_by_lane: dict[str, list[str]] = {}
-        for index, role in enumerate(self.roles):
+        for index, role in enumerate(self.worker_roles):
             criterion = criteria[index % len(criteria)]
             lane = self._role_lane(role.id, role.role)
             subtask_id = f"{task.id}:{role.id}:{index + 1}"
@@ -882,6 +923,8 @@ class Runtime:
         utterances: list[dict[str, Any]],
         cabinet_policy: CabinetPolicy,
         governance: dict[str, Any],
+        *,
+        cabinet_members: frozenset[str],
     ) -> dict[str, Any]:
         positions = []
         for item in utterances:
@@ -899,9 +942,10 @@ class Runtime:
                     "reply_to": payload.get("reply_to"),
                 }
             )
+        cabinet_positions = [item for item in positions if item["actor"] in cabinet_members]
         cabinet = tally_votes(
-            positions,
-            electorate_size=len(positions),
+            cabinet_positions,
+            electorate_size=len(cabinet_members),
             approval_threshold=cabinet_policy.approval_threshold,
             quorum=cabinet_policy.quorum,
             veto_roles=cabinet_policy.veto_roles,
@@ -926,10 +970,12 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
         roles_raw = raw.get("roles")
         cabinet_raw = raw.get("cabinet")
         governance_raw = raw.get("governance")
+        organization_raw = raw.get("organization")
     else:
         roles_raw = raw
         cabinet_raw = None
         governance_raw = None
+        organization_raw = None
     if not isinstance(roles_raw, list):
         raise ValueError("roles config must be a list or an object with roles")
     if not roles_raw:
@@ -967,7 +1013,54 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
         roles=roles,
         cabinet_policy=CabinetPolicy.from_dict(cabinet_raw),
         governance_policy=GovernancePolicy.from_dict(governance_raw),
+        organization=_load_organization(organization_raw, roles),
     )
+
+
+def _load_organization(data: Any, roles: list[Role]) -> Organization:
+    role_ids = {role.id for role in roles}
+    if data is None:
+        return Organization(
+            leader=Leader(id="supreme", name="最高决策者", role="最高决策者"),
+            cabinet_members=frozenset(role_ids),
+            worker_members=frozenset(role_ids),
+        )
+    if not isinstance(data, dict):
+        raise ValueError("organization config must be an object")
+
+    leader_raw = data.get("leader")
+    if not isinstance(leader_raw, dict):
+        raise ValueError("organization.leader must be an object")
+    leader_values = {
+        key: leader_raw.get(key)
+        for key in ("id", "name", "role")
+    }
+    if not all(isinstance(value, str) and value.strip() for value in leader_values.values()):
+        raise ValueError("organization.leader requires non-empty id, name, and role")
+
+    cabinet_members = _organization_members(data.get("cabinet_members"), "cabinet_members", role_ids)
+    worker_members = _organization_members(data.get("worker_members"), "worker_members", role_ids)
+    if len(cabinet_members) < 2:
+        raise ValueError("organization.cabinet_members requires at least two roles")
+    if not cabinet_members.issubset(worker_members):
+        raise ValueError("organization.cabinet_members must also be execution roles")
+    return Organization(
+        leader=Leader(**{key: value.strip() for key, value in leader_values.items()}),
+        cabinet_members=frozenset(cabinet_members),
+        worker_members=frozenset(worker_members),
+    )
+
+
+def _organization_members(value: Any, label: str, known_roles: set[str]) -> set[str]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"organization.{label} requires a non-empty role id list")
+    members = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    if len(members) != len(value) or len(set(members)) != len(members):
+        raise ValueError(f"organization.{label} requires unique non-empty role ids")
+    unknown = sorted(set(members) - known_roles)
+    if unknown:
+        raise ValueError(f"organization.{label} names unknown role(s): {', '.join(unknown)}")
+    return set(members)
 
 
 def load_roles(path: str | Path | None = None) -> list[Role]:

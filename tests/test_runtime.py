@@ -679,6 +679,41 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "at least one role"):
                 Runtime(":memory:", roles_path=roles)
 
+    def test_explicit_organization_keeps_leadership_cabinet_and_workers_distinct(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                json.dumps(
+                    {
+                        "cabinet": {"approval_threshold": 2, "quorum": 2, "veto_roles": []},
+                        "organization": {
+                            "leader": {"id": "chief", "name": "总负责人", "role": "最高决策者"},
+                            "cabinet_members": ["product", "dev"],
+                            "worker_members": ["product", "dev", "test"],
+                        },
+                        "roles": [
+                            {"id": "product", "name": "产品", "role": "产品负责人", "driver": "product"},
+                            {"id": "dev", "name": "开发", "role": "开发工程师", "driver": "dev"},
+                            {"id": "test", "name": "测试", "role": "测试工程师", "driver": "test"},
+                            {"id": "observer", "name": "观察", "role": "观察员", "driver": "product"},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles) as rt:
+                self.assertEqual(rt.organization.leader.id, "chief")
+                self.assertEqual([role.id for role in rt.cabinet_roles], ["product", "dev"])
+                self.assertEqual([role.id for role in rt.worker_roles], ["product", "dev", "test"])
+                task_id = rt.create_task("Respect organization seats")
+                with self.assertRaisesRegex(ValueError, "not an execution role"):
+                    rt.assign(task_id, "observer")
+                rt.battle(task_id)
+                task = rt.task(task_id)
+
+        self.assertEqual(len(task.cabinet["votes"]), 2)
+        self.assertEqual(task.decision["source"], "cabinet")
+
     def test_supreme_decides_when_cabinet_has_no_consensus(self):
         with tempfile.TemporaryDirectory() as tmp:
             roles = Path(tmp) / "roles.json"

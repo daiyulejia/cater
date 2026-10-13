@@ -75,7 +75,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         if args.run and args.battle:
             print("choose either --run for normal collaboration or --battle for forced governance")
             return 1
-        if args.assign_to and args.assign_to not in {role.id for role in rt.roles}:
+        if args.assign_to and args.assign_to not in {role.id for role in rt.worker_roles}:
             print(_unknown_role_message(args.assign_to, rt))
             return 1
         task_id = rt.create_task(args.goal, args.accept or [])
@@ -450,8 +450,8 @@ def cmd_probe_driver(args: argparse.Namespace) -> int:
 
 
 def _unknown_role_message(role_id: str, rt: Runtime) -> str:
-    known = ", ".join(role.id for role in rt.roles)
-    return f"unknown role {role_id!r}; expected one of: {known}"
+    known = ", ".join(role.id for role in rt.worker_roles)
+    return f"unknown role {role_id!r}; expected one of: {known} (execution roles)"
 
 
 def _message_summary(message: dict) -> str:

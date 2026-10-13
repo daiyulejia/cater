@@ -118,8 +118,6 @@ class EventLog:
         self.db = sqlite3.connect(self.path, timeout=5)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA busy_timeout = 5000")
-        if self.path != ":memory:":
-            self.db.execute("PRAGMA journal_mode = WAL")
         self._init_schema()
 
     def close(self) -> None:
