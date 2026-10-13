@@ -571,6 +571,17 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(rt.task(task_id).cabinet["status"], "recommended")
                 self.assertEqual(rt.task(task_id).status, "decided")
 
+    def test_runtime_reports_invalid_role_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text('{"roles":[{"name":"Missing id"}]}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "non-empty string id"):
+                Runtime(":memory:", roles_path=roles)
+
+            roles.write_text('{"roles":[{"id":"  "}]}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "non-empty string id"):
+                Runtime(":memory:", roles_path=roles)
+
     def test_supreme_decides_when_cabinet_has_no_consensus(self):
         with tempfile.TemporaryDirectory() as tmp:
             roles = Path(tmp) / "roles.json"

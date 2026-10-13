@@ -884,12 +884,16 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
     for item in roles_raw:
         if not isinstance(item, dict):
             raise ValueError("each role must be an object")
+        role_id = item.get("id")
+        if not isinstance(role_id, str) or not role_id.strip():
+            raise ValueError("each role requires a non-empty string id")
+        role_id = role_id.strip()
         roles.append(
             Role(
-                id=str(item["id"]),
-                name=str(item.get("name") or item["id"]),
-                role=str(item.get("role") or item["id"]),
-                driver=str(item.get("driver") or item["id"]),
+                id=role_id,
+                name=str(item.get("name") or role_id),
+                role=str(item.get("role") or role_id),
+                driver=str(item.get("driver") or role_id),
             )
         )
     return RuntimeConfig(
