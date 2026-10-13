@@ -83,6 +83,7 @@ cater export [task_id] --format json
 cater export [task_id] --format jsonl
 cater review [task_id] --record
 cater review [task_id] --plain
+cater review [task_id] --next
 cater inbox
 cater profiles
 cater policy
