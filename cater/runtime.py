@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import uuid
 from dataclasses import dataclass
 from importlib import resources
@@ -77,6 +78,28 @@ class GovernancePolicy:
         )
 
 
+class DriverHealth:
+    """Thread-safe failure state that can outlive a single Runtime instance."""
+
+    def __init__(self) -> None:
+        self._failures: dict[str, int] = {}
+        self._lock = threading.Lock()
+
+    def record_success(self, driver_name: str) -> None:
+        with self._lock:
+            self._failures[driver_name] = 0
+
+    def record_failure(self, driver_name: str) -> int:
+        with self._lock:
+            failures = self._failures.get(driver_name, 0) + 1
+            self._failures[driver_name] = failures
+            return failures
+
+    def is_circuit_open(self, driver_name: str, threshold: int) -> bool:
+        with self._lock:
+            return self._failures.get(driver_name, 0) >= threshold
+
+
 class Runtime:
     def __init__(
         self,
@@ -90,6 +113,7 @@ class Runtime:
         audit_key: str | bytes | None = None,
         audit_key_id: str = "local",
         close_drivers_on_close: bool = True,
+        driver_health: "DriverHealth | None" = None,
     ):
         config = load_runtime_config(roles_path)
         configured_drivers = load_drivers(_pack_path("default_drivers.json"))
@@ -103,7 +127,7 @@ class Runtime:
         self.log = EventLog(db_path, audit_key=audit_key, key_id=audit_key_id)
         self.driver_attempts = max(1, driver_attempts)
         self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
-        self._driver_failures: dict[str, int] = {}
+        self._driver_health = driver_health or DriverHealth()
         self.roles = config.roles
         self.cabinet_policy = config.cabinet_policy
         self.governance_policy = config.governance_policy
@@ -965,17 +989,17 @@ class Runtime:
         for attempt in range(1, self.driver_attempts + 1):
             try:
                 response = driver.complete(role=role.role, prompt=prompt, context=context)
-                self._driver_failures[role.driver] = 0
+                self._driver_health.record_success(role.driver)
                 return response
             except Exception as exc:
                 last_error = exc
-                self._driver_failures[role.driver] = self._driver_failures.get(role.driver, 0) + 1
+                failures = self._driver_health.record_failure(role.driver)
                 self._emit_driver_failure(
                     task_id=task_id,
                     role=role,
                     attempt=attempt,
                     exc=exc,
-                    circuit_open=self._is_circuit_open(role.driver),
+                    circuit_open=failures >= self.circuit_breaker_threshold,
                 )
         assert last_error is not None
         return self._contained_driver_failure(role, str(last_error))
@@ -1015,7 +1039,7 @@ class Runtime:
         )
 
     def _is_circuit_open(self, driver_name: str) -> bool:
-        return self._driver_failures.get(driver_name, 0) >= self.circuit_breaker_threshold
+        return self._driver_health.is_circuit_open(driver_name, self.circuit_breaker_threshold)
 
     @staticmethod
     def _contained_driver_failure(role: Role, reason: str) -> DriverResponse:

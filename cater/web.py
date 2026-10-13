@@ -22,7 +22,7 @@ from .ladder import decision_ladder
 from .messages import message_relation
 from .path import organization_path
 from .review import build_review
-from .runtime import Runtime
+from .runtime import DriverHealth, Runtime
 
 
 MAX_REQUEST_BYTES = 1_048_576
@@ -276,6 +276,7 @@ def serve(
     # Each request needs its own thread-bound SQLite connection.  CLI drivers
     # are process resources, so the server owns one pool for its full lifetime.
     driver_owner = Runtime(":memory:", drivers_path=drivers_path, roles_path=roles_path)
+    driver_health = DriverHealth()
     handler = make_handler(
         db_path,
         drivers_path=drivers_path,
@@ -286,6 +287,7 @@ def serve(
         audit_key_id=audit_key_id,
         static_dir=_workroom_dist(),
         shared_drivers=driver_owner.drivers,
+        shared_driver_health=driver_health,
     )
     server = ThreadingHTTPServer((host, port), handler)
     print(f"Cater web listening on http://{host}:{port}")
@@ -330,6 +332,7 @@ def make_handler(
     static_dir: str | Path | None = None,
     runtime_factory: Callable[[], Runtime] | None = None,
     shared_drivers: dict[str, Any] | None = None,
+    shared_driver_health: DriverHealth | None = None,
 ):
     static_root = Path(static_dir).resolve() if static_dir is not None else None
 
@@ -346,6 +349,7 @@ def make_handler(
             audit_key_id=audit_key_id,
             drivers=shared_drivers,
             close_drivers_on_close=shared_drivers is None,
+            driver_health=shared_driver_health,
         )
 
     activities = ActivityRunner(build_runtime)

@@ -122,7 +122,7 @@ CLI 中只执行 `new` 时，任务会保持待安排，方便脚本随后显式
 
 `path` 会汇总单个任务经过的分发、协作、治理和决策步骤。
 
-`--driver-attempts` 和 `--circuit-breaker-threshold` 可以调节 driver 重试与熔断策略，不需要改 driver 代码。
+`--driver-attempts` 和 `--circuit-breaker-threshold` 可以调节 driver 重试与熔断策略，不需要改 driver 代码。通过 `cater web` 运行时，熔断计数会随服务存活而保留，不会因为一次浏览器请求结束而重置；重启服务后再重新探测通道。
 
 `doctor --json` 会输出同一套机器可读健康检查，适合 CI、定时自审和接入新 driver 前的探针。
 

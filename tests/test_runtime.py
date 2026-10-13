@@ -25,7 +25,7 @@ from cater.drivers import CliDriver, DriverProtocolError, DriverResponse, Driver
 from cater.ladder import decision_ladder
 from cater.messages import message_relation
 from cater.profiles import agent_profiles
-from cater.runtime import Runtime
+from cater.runtime import DriverHealth, Runtime
 from cater.web import make_handler, render_index, render_task
 
 
@@ -1088,6 +1088,34 @@ class RuntimeTests(unittest.TestCase):
             task = rt.task(task_id)
             self.assertEqual(driver.calls, 2)
             self.assertTrue(any(item["attempt"] == 0 for item in task.driver_failures))
+
+    def test_driver_health_can_keep_a_circuit_open_across_runtime_instances(self):
+        driver = AlwaysFailDriver()
+        health = DriverHealth()
+        with Runtime(
+            ":memory:",
+            drivers={"product": driver},
+            driver_attempts=1,
+            circuit_breaker_threshold=1,
+            driver_health=health,
+        ) as first:
+            task_id = first.create_task("Open a shared circuit")
+            first.battle(task_id)
+        self.assertEqual(driver.calls, 1)
+
+        with Runtime(
+            ":memory:",
+            drivers={"product": driver},
+            driver_attempts=1,
+            circuit_breaker_threshold=1,
+            driver_health=health,
+        ) as second:
+            task_id = second.create_task("Keep the shared circuit open")
+            second.battle(task_id)
+            task = second.task(task_id)
+        self.assertEqual(driver.calls, 1)
+        assert task is not None
+        self.assertTrue(any(item["attempt"] == 0 for item in task.driver_failures))
 
     def test_review_can_be_projected_and_recorded(self):
         with Runtime(":memory:") as rt:
