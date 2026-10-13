@@ -13,12 +13,24 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_CLI_RESPONSE_CHARS = 4 * 1024 * 1024
 MAX_CLI_REQUEST_BYTES = 4 * 1024 * 1024
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    """Keep an API key bound to the configured endpoint."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        raise HTTPError(req.full_url, code, "API redirects are not permitted", headers, fp)
+
+
+def _open_api_request(request: Request, *, timeout: float):
+    """Open a configured model endpoint without implicit cross-host redirects."""
+    return build_opener(_RejectRedirects()).open(request, timeout=timeout)
 
 
 @dataclass(frozen=True)
@@ -420,7 +432,7 @@ class OpenAICompatibleDriver:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=self.timeout) as response:
+            with _open_api_request(request, timeout=self.timeout) as response:
                 raw = response.read(MAX_API_RESPONSE_BYTES + 1)
         except HTTPError as exc:
             raise DriverUnavailable(f"{self.name} API request failed with HTTP {exc.code}") from exc

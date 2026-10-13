@@ -23,7 +23,7 @@ from cater.cabinet import majority_threshold, tally_votes
 from cater import __version__, web as web_module
 from cater import cli as cli_module
 from cater.cli import main
-from cater.drivers import CliDriver, DriverProtocolError, DriverResponse, DriverUnavailable, OpenAICompatibleDriver, load_drivers
+from cater.drivers import CliDriver, DriverProtocolError, DriverResponse, DriverUnavailable, OpenAICompatibleDriver, _RejectRedirects, load_drivers
 from cater.ladder import decision_ladder
 from cater.messages import message_relation
 from cater.profiles import agent_profiles
@@ -1501,7 +1501,7 @@ class DriverTests(unittest.TestCase):
             temperature=0.2,
         )
         with patch.dict("cater.drivers.os.environ", {"CATER_TEST_API_KEY": "secret-value"}, clear=False), patch(
-            "cater.drivers.urlopen", side_effect=fake_open
+            "cater.drivers._open_api_request", side_effect=fake_open
         ):
             response = driver.complete(role="worker", prompt="Return JSON", context={})
 
@@ -1536,7 +1536,7 @@ class DriverTests(unittest.TestCase):
             api_key_env="CATER_TEST_API_KEY",
         )
         with patch.dict("cater.drivers.os.environ", {"CATER_TEST_API_KEY": "secret-value"}, clear=False), patch(
-            "cater.drivers.urlopen", return_value=FakeResponse()
+            "cater.drivers._open_api_request", return_value=FakeResponse()
         ):
             with self.assertRaisesRegex(DriverProtocolError, "response exceeds"):
                 driver.complete(role="worker", prompt="Return JSON", context={})
@@ -1548,10 +1548,17 @@ class DriverTests(unittest.TestCase):
             model="test-model",
             api_key_env="CATER_MISSING_KEY",
         )
-        with patch.dict("cater.drivers.os.environ", {}, clear=True), patch("cater.drivers.urlopen") as open_request:
+        with patch.dict("cater.drivers.os.environ", {}, clear=True), patch("cater.drivers._open_api_request") as open_request:
             with self.assertRaisesRegex(DriverUnavailable, "CATER_MISSING_KEY"):
                 driver.complete(role="worker", prompt="Return JSON", context={})
         open_request.assert_not_called()
+
+    def test_openai_compatible_driver_rejects_redirects_before_sending_to_a_new_host(self):
+        handler = _RejectRedirects()
+        request = Request("https://models.example.test/v1/chat/completions")
+
+        with self.assertRaisesRegex(HTTPError, "API redirects are not permitted"):
+            handler.redirect_request(request, None, 302, "Found", {}, "https://elsewhere.example.test/")
 
     def test_scripted_driver_config_rejects_string_script(self):
         with tempfile.TemporaryDirectory() as tmp:
