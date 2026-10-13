@@ -523,8 +523,8 @@ def cmd_demo(args: argparse.Namespace) -> int:
         return cmd_demo_direct(args)
     with open_runtime(args) as rt:
         task_id = rt.create_task(
-            "Build a first Cater demo that proves agents can collaborate and decide autonomously",
-            ["three roles contribute", "cabinet policy records the next action"],
+            "完成一场可回放的 Cater 协作演示，证明团队能够自主协作并形成决策",
+            ["至少三位伙伴参与", "内阁策略记录下一步行动"],
         )
         rt.dispatch(task_id)
         result = rt.battle(task_id)
@@ -568,10 +568,10 @@ def cmd_demo_direct(args: argparse.Namespace) -> int:
             audit_key_id=args.audit_key_id,
         ) as rt:
             task_id = rt.create_task(
-                "Run a low-risk direct worker task without governance ceremony",
-                ["direct owner is visible", "governance stays idle unless risk appears"],
+                "完成一项低风险直派任务，不需要额外治理仪式",
+                ["直接负责人清晰可见", "除非出现风险，治理层保持空闲"],
             )
-            rt.assign(task_id, "dev", objective="Execute the smallest useful direct path")
+            rt.assign(task_id, "dev", objective="完成最小但有用的直派执行路径")
             result = rt.collaborate(task_id)
             task = rt.task(task_id)
         print(f"任务：{task_id}")

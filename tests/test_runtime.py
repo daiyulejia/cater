@@ -1704,6 +1704,12 @@ class CliTests(unittest.TestCase):
         self.assertIn("cater review", out)
         self.assertIn("cater chain --json", out)
         self.assertIn("/api/tasks/", out)
+        task_id = next(line for line in out.splitlines() if line.startswith("任务：")).split("：", 1)[1]
+        with Runtime(self.db) as rt:
+            task = rt.task(task_id)
+        assert task is not None
+        self.assertIn("可回放的 Cater 协作演示", task.goal)
+        self.assertEqual(task.acceptance, ["至少三位伙伴参与", "内阁策略记录下一步行动"])
         code, out = self.run_cli("chain")
         self.assertEqual(code, 0)
         self.assertIn("hash chain ok", out)
