@@ -34,3 +34,29 @@ jobs:
         run: python scripts/check.py
       - name: Check whitespace
         run: git diff --check
+
+  workroom:
+    name: Conversation UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install pinned package manager
+        run: npm install --global pnpm@11.25.0
+      - name: Install frontend development dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check conversation interactions
+        run: pnpm test
+      - name: Lint and build workroom
+        run: |
+          pnpm lint
+          pnpm build

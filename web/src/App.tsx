@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
-  Cat, CheckCircle2, ChevronDown, CircleDot,
-  Coffee, CornerDownRight, FileText, PawPrint, Plus, ShieldCheck, X,
+  ArrowDown, Cat, CheckCircle2, ChevronDown, CircleDot,
+  Coffee, CornerDownRight, FilePenLine, FileText, LoaderCircle, PawPrint, Plus, RefreshCw, ShieldCheck, X,
 } from 'lucide-react'
 import catPortraits from './assets/cat-portraits.jpg'
 import staffPortraits from './assets/staff-portraits.jpg'
@@ -287,36 +287,73 @@ function App() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<TaskDetail | null>(null)
-  const [draft, setDraft] = useState('')
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [roles, setRoles] = useState<OrgRole[]>([])
   const [organization, setOrganization] = useState<Organization | null>(null)
-  const [composerMode, setComposerMode] = useState<'new' | 'message'>('message')
-  const [message, setMessage] = useState('')
-  const [isSending, setIsSending] = useState(false)
+  const [pending, setPending] = useState<Set<string>>(new Set())
   const [showEvidence, setShowEvidence] = useState(false)
   const [showMobileBoard, setShowMobileBoard] = useState(false)
   const [chainStatus, setChainStatus] = useState<ChainStatus | null>(null)
   const [checkingChain, setCheckingChain] = useState(false)
   const [chatFilter, setChatFilter] = useState<'all' | ChatItem['category']>('all')
   const [error, setError] = useState('')
+  const [sendErrors, setSendErrors] = useState<Record<string, string>>({})
+  const [loadErrors, setLoadErrors] = useState<Record<string, string>>({})
+  const [reloadToken, setReloadToken] = useState(0)
+  const [unread, setUnread] = useState(0)
+  const streamRef = useRef<HTMLDivElement>(null)
+  const followRef = useRef(true)
+  const seenRef = useRef({ view: '', latest: 0, count: 0 })
+  const selectedRef = useRef<string | null>(null)
+  const navigationRef = useRef(0)
+  const pendingRef = useRef(new Set<string>())
+  const versionsRef = useRef<Record<string, number>>({})
+  const newKey = '$new'
+  const composerKey = selectedId ?? newKey
+  const draft = drafts[newKey] ?? ''
+  const message = selectedId ? drafts[selectedId] ?? '' : ''
+  const isSending = pending.has(composerKey)
 
-  const refresh = async (preferredId?: string) => {
-    const nextTasks = await api<Task[]>('/api/tasks')
-    setTasks(nextTasks)
-    setSelectedId((current) => preferredId ?? current ?? nextTasks.at(-1)?.id ?? null)
+  const updateDraft = (key: string, value: string | ((current: string) => string)) => {
+    setDrafts((current) => ({ ...current, [key]: typeof value === 'function' ? value(current[key] ?? '') : value }))
   }
+  const setDraft = (value: string | ((current: string) => string)) => updateDraft(newKey, value)
+  const setMessage = (value: string) => { if (selectedId) updateDraft(selectedId, value) }
+
+  const chooseTask = useCallback((id: string | null) => {
+    selectedRef.current = id
+    navigationRef.current += 1
+    followRef.current = true
+    seenRef.current = { view: '', latest: 0, count: 0 }
+    setUnread(0)
+    setSelectedId(id)
+    setChatFilter('all')
+    setShowMobileBoard(false)
+  }, [])
+
+  const acceptDetail = useCallback((next: TaskDetail) => {
+    const id = next.task.id
+    const seq = next.events.at(-1)?.seq ?? 0
+    if (seq < (versionsRef.current[id] ?? 0)) return
+    versionsRef.current[id] = seq
+    setTasks((current) => {
+      const item = { ...next.task, activity: next.activity }
+      return current.some((task) => task.id === id) ? current.map((task) => task.id === id ? item : task) : [...current, item]
+    })
+    if (selectedRef.current === id) setDetail(next)
+  }, [])
 
   useEffect(() => {
     let cancelled = false
     void api<Task[]>('/api/tasks').then((nextTasks) => {
       if (cancelled) return
-      setTasks(nextTasks)
-      setSelectedId((current) => current ?? nextTasks.at(-1)?.id ?? null)
+      setTasks((current) => [...nextTasks.filter((task) => !current.some((item) => item.id === task.id)), ...current])
+      if (navigationRef.current === 0) chooseTask(nextTasks.at(-1)?.id ?? null)
     }).catch((err: unknown) => {
       if (!cancelled) setError(userFacingError(err, '暂时无法读取任务。'))
     })
     return () => { cancelled = true }
-  }, [])
+  }, [chooseTask])
   useEffect(() => {
     void api<OrgRole[]>('/api/organization').then((nextRoles) => {
       setRoles(nextRoles)
@@ -326,35 +363,76 @@ function App() {
   useEffect(() => {
     if (!selectedId) return
     let cancelled = false
-    void api<TaskDetail>(`/api/tasks/${selectedId}`).then((next) => {
-      if (!cancelled) setDetail(next)
-    }).catch((err: unknown) => {
-      if (!cancelled) setError(userFacingError(err, '暂时无法读取任务详情。'))
-    })
-    return () => { cancelled = true }
-  }, [selectedId])
-  useEffect(() => {
-    if (!selectedId || !detail?.activity?.active) return
-    let cancelled = false
-    const poll = () => void api<TaskDetail>(`/api/tasks/${selectedId}`).then((next) => {
-      if (cancelled) return
-      setDetail(next)
-      setTasks((current) => current.map((item) => item.id === next.task.id ? { ...next.task, activity: next.activity } : item))
-    }).catch((err: unknown) => {
-      if (!cancelled) setError(userFacingError(err, '暂时无法刷新协作进度。'))
-    })
-    poll()
-    const timer = window.setInterval(poll, 800)
-    return () => { cancelled = true; window.clearInterval(timer) }
-  }, [selectedId, detail?.activity?.active])
+    let fetching = false
+    let timer: number | undefined
+    let controller: AbortController | undefined
+    const pageVisible = () => document.visibilityState !== 'hidden'
+    const poll = async () => {
+      if (cancelled || fetching || !pageVisible()) return
+      fetching = true
+      controller = new AbortController()
+      let delay = 4000
+      try {
+        const next = await api<TaskDetail>(`/api/tasks/${selectedId}`, { signal: controller.signal })
+        if (cancelled) return
+        acceptDetail(next)
+        setLoadErrors((current) => ({ ...current, [selectedId]: '' }))
+        delay = next.activity?.active ? 800 : 4000
+      } catch (err) {
+        if (!cancelled) setLoadErrors((current) => ({ ...current, [selectedId]: userFacingError(err, '暂时无法读取任务详情。') }))
+      } finally {
+        fetching = false
+        if (!cancelled && pageVisible()) timer = window.setTimeout(() => void poll(), delay)
+      }
+    }
+    const visibilityChanged = () => {
+      window.clearTimeout(timer)
+      if (pageVisible()) void poll()
+    }
+    void poll()
+    document.addEventListener('visibilitychange', visibilityChanged)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+      controller?.abort()
+      document.removeEventListener('visibilitychange', visibilityChanged)
+    }
+  }, [selectedId, reloadToken, acceptDetail])
 
   const identities = useMemo(() => {
     const members = organization ? [organization.leader, ...organization.cabinet, ...organization.workers] : roles
     return Object.fromEntries(members.map((member) => [member.id, member]))
   }, [organization, roles])
-  const conversation = useMemo(() => detail ? conversationFor(detail.events, identities, organization) : [], [detail, identities, organization])
+  const currentDetail = detail?.task.id === selectedId ? detail : null
+  const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization) : [], [currentDetail, identities, organization])
   const visibleConversation = useMemo(() => chatFilter === 'all' ? conversation : conversation.filter((item) => item.category === chatFilter), [chatFilter, conversation])
-  const task = selectedId ? detail?.task : undefined
+  const task = selectedId ? currentDetail?.task ?? tasks.find((item) => item.id === selectedId) : undefined
+  const loading = selectedId !== null && currentDetail === null
+  const loadError = selectedId ? loadErrors[selectedId] ?? '' : ''
+  const visibleError = sendErrors[composerKey] || error
+
+  const jumpToLatest = () => {
+    const stream = streamRef.current
+    if (stream) stream.scrollTop = stream.scrollHeight
+    followRef.current = true
+    setUnread(0)
+  }
+
+  useLayoutEffect(() => {
+    const stream = streamRef.current
+    if (!stream || loading) return
+    const view = `${selectedId}:${chatFilter}`
+    const latest = visibleConversation.at(-1)?.id ?? 0
+    const previous = seenRef.current
+    if (previous.view !== view || followRef.current) {
+      stream.scrollTop = stream.scrollHeight
+      followRef.current = true
+      setUnread(0)
+    } else if (latest > previous.latest) {
+      setUnread((current) => current + Math.max(1, visibleConversation.length - previous.count))
+    }
+    seenRef.current = { view, latest, count: visibleConversation.length }
+  }, [selectedId, chatFilter, visibleConversation, loading])
 
   const verifyChain = async () => {
     setCheckingChain(true)
@@ -364,9 +442,12 @@ function App() {
   }
 
   const createTask = async () => {
-    const goal = draft.trim()
-    if (!goal) return
-    setIsSending(true); setError('')
+    const submitted = draft
+    const goal = submitted.trim()
+    if (!goal || selectedRef.current !== null || pendingRef.current.has(newKey)) return
+    const navigation = navigationRef.current
+    pendingRef.current.add(newKey); setPending(new Set(pendingRef.current))
+    setSendErrors((current) => ({ ...current, [newKey]: '' }))
     try {
       const result = await api<TaskDetail>('/api/tasks', {
         method: 'POST',
@@ -375,19 +456,25 @@ function App() {
           run: true, background: true,
         }),
       })
-      setDraft(''); setComposerMode('message'); setChatFilter('all'); await refresh(result.task.id); setDetail(result)
-    } catch (err) { setError(userFacingError(err, '创建任务失败')) }
-    finally { setIsSending(false) }
+      setDrafts((current) => current[newKey] === submitted ? { ...current, [newKey]: '' } : current)
+      if (navigationRef.current === navigation && selectedRef.current === null) chooseTask(result.task.id)
+      acceptDetail(result)
+    } catch (err) { setSendErrors((current) => ({ ...current, [newKey]: userFacingError(err, '创建任务失败') })) }
+    finally { pendingRef.current.delete(newKey); setPending(new Set(pendingRef.current)) }
   }
 
   const sendDirection = async () => {
-    if (!selectedId || !message.trim()) return
-    setIsSending(true); setError('')
+    const id = selectedId
+    const submitted = message
+    if (!id || selectedRef.current !== id || loading || !submitted.trim() || pendingRef.current.has(id)) return
+    pendingRef.current.add(id); setPending(new Set(pendingRef.current))
+    setSendErrors((current) => ({ ...current, [id]: '' }))
     try {
-      const result = await api<TaskDetail>(`/api/tasks/${selectedId}/command`, { method: 'POST', body: JSON.stringify({ instruction: message.trim(), continue: true }) })
-      setMessage(''); setDetail(result); await refresh(selectedId)
-    } catch (err) { setError(userFacingError(err, '发送指令失败')) }
-    finally { setIsSending(false) }
+      const result = await api<TaskDetail>(`/api/tasks/${id}/command`, { method: 'POST', body: JSON.stringify({ instruction: submitted.trim(), continue: true }) })
+      setDrafts((current) => current[id] === submitted ? { ...current, [id]: '' } : current)
+      acceptDetail(result)
+    } catch (err) { setSendErrors((current) => ({ ...current, [id]: userFacingError(err, '发送指令失败') })) }
+    finally { pendingRef.current.delete(id); setPending(new Set(pendingRef.current)) }
   }
 
   const team = organization ? [organization.leader, ...organization.cabinet, ...organization.workers] : roles
@@ -406,34 +493,41 @@ function App() {
       </header>
       <main className={`app-layout grid grid-cols-1 ${task ? 'lg:grid-cols-[252px_minmax(0,1fr)_318px]' : 'lg:grid-cols-[252px_minmax(0,1fr)]'}`}>
         <aside className="task-sidebar min-h-0 lg:flex lg:flex-col lg:overflow-y-auto">
-          <div className="flex items-center justify-between px-4 pb-2 pt-4"><div><span className="text-[11px] font-semibold text-[#a56b56]">正在聊</span><h2 className="flex items-center gap-1.5 text-base font-bold"><PawPrint size={17} className="text-[#c36550]" /> 我的任务 <span className="text-xs font-medium text-[#a98e81]">{tasks.length}</span></h2></div><button className="grid size-9 place-items-center rounded-md border border-[#ead2c5] bg-white text-[#b15342] shadow-sm hover:bg-[#fff0e9]" title="新建任务" aria-label="新建任务" onClick={() => { setComposerMode('new'); setSelectedId(null) }}><Plus size={18} /></button></div>
-          <nav className={`flex gap-2 overflow-x-auto px-3 pb-3 lg:block lg:space-y-2 ${task ? 'lg:min-h-0 lg:flex-1 lg:overflow-x-hidden lg:overflow-y-auto' : 'lg:overflow-visible'}`} aria-label="任务列表">{tasks.slice().reverse().map((item) => <button key={item.id} onClick={() => { setSelectedId(item.id); setComposerMode('message'); setChatFilter('all'); setShowMobileBoard(false) }} className={`task-item min-w-52 px-3 py-3 text-left lg:min-w-0 lg:w-full ${item.id === selectedId ? 'is-active' : ''}`}><div className="flex items-start gap-2"><CircleDot size={15} className={`mt-0.5 shrink-0 ${item.status === 'done' ? 'text-emerald-600' : 'text-[#c2634d]'}`} /><span className="line-clamp-2 text-[13px] font-semibold leading-5">{item.goal}</span></div><div className="mt-2 pl-[23px] text-[11px] text-[#7c918b]">{item.messages.length} 条对话 · {taskListStatus(item)}</div></button>)}</nav>
+          <div className="flex items-center justify-between px-4 pb-2 pt-4"><div><span className="text-[11px] font-semibold text-[#a56b56]">正在聊</span><h2 className="flex items-center gap-1.5 text-base font-bold"><PawPrint size={17} className="text-[#c36550]" /> 我的任务 <span className="text-xs font-medium text-[#a98e81]">{tasks.length}</span></h2></div><button className="grid size-9 place-items-center rounded-md border border-[#ead2c5] bg-white text-[#b15342] shadow-sm hover:bg-[#fff0e9]" title="新建任务" aria-label="新建任务" onClick={() => chooseTask(null)}><Plus size={18} /></button></div>
+          <nav className={`flex gap-2 overflow-x-auto px-3 pb-3 lg:block lg:space-y-2 ${task ? 'lg:min-h-0 lg:flex-1 lg:overflow-x-hidden lg:overflow-y-auto' : 'lg:overflow-visible'}`} aria-label="任务列表">{tasks.slice().reverse().map((item) => <button key={item.id} onClick={() => chooseTask(item.id)} aria-current={item.id === selectedId ? 'page' : undefined} className={`task-item min-w-52 px-3 py-3 text-left lg:min-w-0 lg:w-full ${item.id === selectedId ? 'is-active' : ''}`}><div className="flex items-start gap-2"><CircleDot size={15} className={`mt-0.5 shrink-0 ${item.status === 'done' ? 'text-emerald-600' : 'text-[#c2634d]'}`} /><span className="line-clamp-2 text-[13px] font-semibold leading-5">{item.goal}</span></div><div className="mt-2 flex items-center gap-2 pl-[23px] text-[11px] text-[#7c918b]"><span>{item.messages.length} 条对话 · {taskListStatus(item)}</span>{drafts[item.id]?.trim() && <span title="有未发送内容" role="img" aria-label="有未发送内容" className="text-[#b65f49]"><FilePenLine size={13} /></span>}</div></button>)}</nav>
           <div className="hidden lg:block">{task ? <TeamRoster members={team} compact /> : <TeamRoster members={team} onMention={(name) => { setDraft((current) => `${current.trim()}${current.trim() ? ' ' : ''}@${name} `); document.getElementById('new-task')?.focus() }} />}</div>
         </aside>
         <section className="chat-pane flex min-h-0 flex-col">
           {task ? <>
-            <div className="chat-heading flex items-start justify-between gap-3 px-4 py-3 sm:px-7 sm:py-4" style={{ backgroundImage: `linear-gradient(90deg, #fffaf5 0%, rgba(255,250,245,.98) 55%, rgba(255,250,245,.78) 100%), url(${cafeWelcome})` }}><div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div><div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${detail?.activity?.active ? 'is-running' : ''}`}>{activityText(detail?.activity) || taskListStatus(task)}</span><button onClick={() => setShowMobileBoard(true)} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div></div>
+            <div className="chat-heading flex items-start justify-between gap-3 px-4 py-3 sm:px-7 sm:py-4" style={{ backgroundImage: `linear-gradient(90deg, #fffaf5 0%, rgba(255,250,245,.98) 55%, rgba(255,250,245,.78) 100%), url(${cafeWelcome})` }}><div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div><div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${currentDetail?.activity?.active ? 'is-running' : ''}`}>{loading ? '接入对话中' : activityText(currentDetail?.activity) || taskListStatus(task)}</span><button onClick={() => setShowMobileBoard(true)} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div></div>
             <div className="filter-strip px-4 py-2 sm:px-7"><div className="flex gap-1 overflow-x-auto" role="group" aria-label="对话筛选">{([{ id: 'all', label: '全部' }, { id: 'collaboration', label: '协作' }, { id: 'decision', label: '决策' }, { id: 'deliverable', label: '成果' }] as const).map((filter) => <button key={filter.id} onClick={() => setChatFilter(filter.id)} className={`filter-button shrink-0 px-3 py-1.5 text-xs font-semibold ${chatFilter === filter.id ? 'is-active' : ''}`}>{filter.label}</button>)}</div></div>
-            <div className="chat-stream flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7">{visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={item.id} item={item} />) : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
-            {composerMode === 'new' ? <TaskComposer draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /> : <DirectionComposer message={message} isSending={isSending} onMessageChange={setMessage} onSend={() => void sendDirection()} />}
+            <div className="relative flex min-h-0 flex-1 flex-col">
+              <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>{loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={item.id} item={item} />) : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
+              {!loading && unread > 0 && <button onClick={jumpToLatest} className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-md border border-[#d9b9a5] bg-[#fff7eb] px-3 py-2 text-xs font-semibold text-[#915340] shadow-md" title="返回最新消息"><ArrowDown size={15} /> 查看新消息 · {unread}</button>}
+            </div>
+            <DirectionComposer message={message} isSending={isSending} isLoading={loading} onMessageChange={setMessage} onSend={() => void sendDirection()} />
           </> : <><EmptyConversation onChoose={setDraft} members={team} /><TaskComposer draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
-          {error && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{error}</p>}
+          {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
         {task && <aside className={`workboard-panel overflow-y-auto p-5 ${showMobileBoard ? 'fixed inset-0 z-50 block' : 'hidden'} lg:static lg:block`} aria-label="成果与过程">
           <div className="mb-5 flex items-center justify-between"><div><p className="flex items-center gap-1.5 text-[11px] font-semibold text-[#ac6c56]"><Coffee size={14} /> 猫咖记事板</p><h2 className="mt-1 text-[16px] font-bold">成果与过程</h2></div><button onClick={() => setShowMobileBoard(false)} className="grid size-9 place-items-center rounded-md border border-[#d5e2db] bg-white text-[#4a736b] lg:hidden" aria-label="关闭成果面板"><X size={18} /></button></div>
-          {detail?.organization_memory && <MemoryBoard items={detail.organization_memory} names={names} />}<VerificationBoard items={task.verifications ?? []} /><Workboard task={task} detail={detail} names={names} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />
+          {currentDetail ? <>{currentDetail.organization_memory && <MemoryBoard items={currentDetail.organization_memory} names={names} />}<VerificationBoard items={task.verifications ?? []} /><Workboard task={task} detail={currentDetail} names={names} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} /></> : <p className="text-xs leading-6 text-[#74897d]">正在读取这件事的成果与过程。</p>}
         </aside>}
       </main>
     </div>
   )
 }
 
-function DirectionComposer({ message, isSending, onMessageChange, onSend }: { message: string; isSending: boolean; onMessageChange: (value: string) => void; onSend: () => void }) {
-  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><textarea value={message} onChange={(event) => onMessageChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onSend() } }} placeholder="继续说吧，补充想法、改目标，或直接 @一位伙伴" aria-label="向团队发送消息" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm leading-6 outline-none placeholder:text-[#a8958d]" /><button disabled={isSending || !message.trim()} onClick={onSend} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title="发送消息并安排下一轮协作" aria-label="发送消息"><PawPrint size={20} fill="currentColor" strokeWidth={1.8} /></button></div></div>
+function ChatWaiting({ error, onRetry }: { error: string; onRetry: () => void }) {
+  return <div className="flex items-start gap-3 py-5"><Portrait id="store_manager" /><div className="min-w-0 text-sm leading-6 text-[#6e8175]"><p role={error ? 'alert' : 'status'} className="flex items-center gap-2">{!error && <LoaderCircle size={16} className="shrink-0 motion-safe:animate-spin" />}{error || '正在接上这段对话'}</p>{error && <button onClick={onRetry} className="mt-3 inline-flex items-center gap-2 rounded-md border border-[#dec8b8] bg-white px-3 py-1.5 text-xs text-[#9e5946]"><RefreshCw size={14} /> 重新连接</button>}</div></div>
+}
+
+function DirectionComposer({ message, isSending, isLoading, onMessageChange, onSend }: { message: string; isSending: boolean; isLoading: boolean; onMessageChange: (value: string) => void; onSend: () => void }) {
+  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><textarea value={message} onChange={(event) => onMessageChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onSend() } }} placeholder="继续说吧，补充想法、改目标，或直接 @一位伙伴" aria-label="向团队发送消息" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm leading-6 outline-none placeholder:text-[#a8958d]" /><button disabled={isSending || isLoading || !message.trim()} onClick={onSend} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isLoading ? '正在接上对话' : isSending ? '正在发送消息' : '发送消息并安排下一轮协作'} aria-label="发送消息" aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
 }
 
 function TaskComposer({ draft, isSending, onDraftChange, onCreate }: { draft: string; isSending: boolean; onDraftChange: (value: string) => void; onCreate: () => void }) {
-  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><textarea id="new-task" value={draft} onChange={(event) => onDraftChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onCreate() } }} placeholder="和店长说说，今天想做什么？" aria-label="发起任务对话" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm leading-6 outline-none placeholder:text-[#a8958d]" /><button disabled={isSending || !draft.trim()} onClick={onCreate} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title="发送新任务" aria-label="发送新任务"><PawPrint size={20} fill="currentColor" strokeWidth={1.8} /></button></div></div>
+  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><textarea id="new-task" value={draft} onChange={(event) => onDraftChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onCreate() } }} placeholder="和店长说说，今天想做什么？" aria-label="发起任务对话" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm leading-6 outline-none placeholder:text-[#a8958d]" /><button disabled={isSending || !draft.trim()} onClick={onCreate} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isSending ? '正在发送新任务' : '发送新任务'} aria-label="发送新任务" aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
 }
 
 function ChatBubble({ item }: { item: ChatItem }) {

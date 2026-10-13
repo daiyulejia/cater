@@ -14,6 +14,17 @@
 
 首次执行前请先在 `web/` 目录运行一次 `pnpm install`。
 
+前端开发推荐 Node.js 24 与 pnpm 11。交互测试使用 Vitest 和 React Testing Library，仅属于前端开发依赖；Python 运行时依然零第三方依赖。
+
+```powershell
+pnpm --dir web test
+pnpm --dir web lint
+```
+
+测试会模拟延迟响应，检查任务切换、草稿归属、重复发送、后台刷新和阅读历史时的新消息提示。GitHub 自动检查也会运行这些测试和前端构建。
+
+手动检查慢加载状态时，可在仓库根目录运行 `python tests/fixtures/workroom_latency.py`，访问 `http://127.0.0.1:8774/`。这个专用验证服务使用独立的 `.cater/qa/workroom.db`，故意延迟响应，结束检查后关闭即可。
+
 然后回到仓库根目录，正常启动 Cater：
 
 ```powershell
@@ -35,5 +46,6 @@ python -m cater.cli web --port 8766
 - 人类方向、任务指派、Agent 产出、决策与失败都会进入可检查的事件链。
 - 界面默认先分发任务并启动一轮协作；是否进入治理仍由真实分歧和风险信号决定。
 - 本机检查来自显式 `cater verify`，和成员自报分开显示；通过只说明那条命令在当时成功。
+- 每个任务与新对话各自保留内存草稿；刷新或关闭页面后草稿不保留。迟到的请求不会切换用户当前对话，发送期间的新输入不会被清空。
 
 界面视觉与交互的设计基线见 [DESIGN.zh-CN.md](DESIGN.zh-CN.md)。每轮 UI 改动先更新设计判断，再检查手机、平板和桌面的真实画面。

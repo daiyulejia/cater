@@ -38,6 +38,7 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible { outline: 2
 }
 .app-layout { height: calc(100dvh - 72px); min-height: 0; grid-template-rows: auto minmax(0, 1fr); }
 .task-sidebar { background: #fbece3; border-bottom: 1px solid #ead5c7; }
+.task-sidebar nav { scrollbar-color: #d6bfae transparent; scrollbar-width: thin; }
 .task-item {
   border: 1px solid transparent;
   border-radius: 8px;
