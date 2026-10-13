@@ -28,10 +28,13 @@ Run a replayable demo first:
 
 ```bash
 cater demo
+cater demo --direct
 cater review <task_id> --plain
 cater chain --json
 cater web
 ```
+
+`cater demo` shows the governance-heavy path. `cater demo --direct` shows a lightweight direct-worker path where governance stays idle unless risk appears.
 
 Then explore the organization surface:
 

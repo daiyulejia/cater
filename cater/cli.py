@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from . import __version__
@@ -14,6 +15,35 @@ from .runtime import Runtime
 from .web import event_to_dict, serve, task_to_dict
 
 DEFAULT_DB = Path.cwd() / ".cater" / "cater.db"
+
+DIRECT_DEMO_DRIVERS = {
+    "drivers": [
+        {
+            "kind": "scripted",
+            "name": "product",
+            "tokens_per_call": 80,
+            "script": [
+                '{"stance":"assert","option_id":"A","claim":"Keep the request small and inspectable","evidence":["direct assignment is enough for low-risk work"],"confidence":0.88,"text":"This can stay on the lightweight path."}'
+            ],
+        },
+        {
+            "kind": "scripted",
+            "name": "dev",
+            "tokens_per_call": 80,
+            "script": [
+                '{"stance":"assert","option_id":"A","claim":"Implement the smallest useful path","evidence":["the task has one clear owner and a bounded acceptance check"],"confidence":0.9,"text":"I can execute this directly and report back."}'
+            ],
+        },
+        {
+            "kind": "scripted",
+            "name": "test",
+            "tokens_per_call": 80,
+            "script": [
+                '{"stance":"assert","option_id":"A","claim":"A replayable smoke check is sufficient","evidence":["no conflicting requirement or high-risk behavior is present"],"confidence":0.86,"text":"No governance escalation is needed for this pass."}'
+            ],
+        },
+    ]
+}
 
 
 def open_runtime(args: argparse.Namespace) -> Runtime:
@@ -360,6 +390,8 @@ def _message_summary(message: dict) -> str:
 
 
 def cmd_demo(args: argparse.Namespace) -> int:
+    if args.direct:
+        return cmd_demo_direct(args)
     with open_runtime(args) as rt:
         task_id = rt.create_task(
             "Build a first Cater demo that proves agents can collaborate and decide autonomously",
@@ -388,6 +420,43 @@ def cmd_demo(args: argparse.Namespace) -> int:
         print("- cater chain --json")
         print("- cater web")
         print(f"- open http://127.0.0.1:8765/api/tasks/{task_id} after starting the web UI")
+    return 0
+
+
+def cmd_demo_direct(args: argparse.Namespace) -> int:
+    db = Path(args.db or DEFAULT_DB)
+    db.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        drivers_path = Path(tmp) / "direct-demo-drivers.json"
+        drivers_path.write_text(json.dumps(DIRECT_DEMO_DRIVERS), encoding="utf-8")
+        with Runtime(
+            db,
+            drivers_path=drivers_path,
+            roles_path=args.roles,
+            driver_attempts=args.driver_attempts,
+            circuit_breaker_threshold=args.circuit_breaker_threshold,
+            audit_key=resolve_audit_key(args),
+            audit_key_id=args.audit_key_id,
+        ) as rt:
+            task_id = rt.create_task(
+                "Run a low-risk direct worker task without governance ceremony",
+                ["direct owner is visible", "governance stays idle unless risk appears"],
+            )
+            rt.assign(task_id, "dev", objective="Execute the smallest useful direct path")
+            result = rt.collaborate(task_id)
+            task = rt.task(task_id)
+            print(f"task: {task_id}")
+            print("mode: direct worker collaboration")
+            print("assigned: dev")
+            print(f"brief: {result['brief']['dispute']}")
+            print(f"governance: {result['brief']['governance']['status']}")
+            print("recent messages:")
+            for message in task.messages[-5:]:
+                print("  - " + _message_summary(message))
+            print("\nnext:")
+            print(f"- cater show {task_id}")
+            print(f"- cater review {task_id} --plain")
+            print("- cater web")
     return 0
 
 
@@ -499,7 +568,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_probe.add_argument("name")
     p_probe.set_defaults(func=cmd_probe_driver)
 
-    sub.add_parser("demo", help="run a deterministic demo").set_defaults(func=cmd_demo)
+    p_demo = sub.add_parser("demo", help="run a deterministic demo")
+    p_demo.add_argument("--direct", action="store_true", help="show lightweight direct collaboration without governance")
+    p_demo.set_defaults(func=cmd_demo)
 
     p_web = sub.add_parser("web", help="run local replay web UI")
     p_web.add_argument("--host", default="127.0.0.1")

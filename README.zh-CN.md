@@ -28,10 +28,13 @@ LangChain / LangGraph 可以作为某个 driver 或复杂执行后端的内部�
 
 ```bash
 cater demo
+cater demo --direct
 cater review <task_id> --plain
 cater chain --json
 cater web
 ```
+
+`cater demo` 展示治理较重的路径。`cater demo --direct` 展示轻量直派路径：没有风险时，治理层保持空闲。
 
 再探索组织入口：
 

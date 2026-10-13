@@ -785,6 +785,14 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("hash chain ok", out)
 
+    def test_cli_direct_demo_shows_lightweight_path(self):
+        code, out = self.run_cli("demo", "--direct")
+        self.assertEqual(code, 0)
+        self.assertIn("mode: direct worker collaboration", out)
+        self.assertIn("assigned: dev", out)
+        self.assertIn("governance: not_needed", out)
+        self.assertIn("cater review", out)
+
     def test_cli_version(self):
         with self.assertRaises(SystemExit) as raised:
             main(["--version"])
