@@ -491,7 +491,7 @@ def make_handler(
                             )
                         elif action == "command":
                             instruction = _optional_text(data.get("instruction")) or "Updated from Cater API"
-                            rt.command(
+                            command = rt.command(
                                 task_id,
                                 instruction,
                                 goal=_optional_text(data.get("goal")),
@@ -502,7 +502,7 @@ def make_handler(
                                 ),
                             )
                             if _truthy(data.get("continue")):
-                                background_action = "run"
+                                background_action = str(command.payload.get("next_action") or "run")
                         elif action == "decide":
                             rt.decide(
                                 task_id,
@@ -601,14 +601,17 @@ def make_handler(
                 with self._runtime() as rt:
                     if rt.task(task_id) is None:
                         return self._not_found()
-                    rt.command(
+                    command = rt.command(
                         task_id,
                         instruction or "Updated from Cater web",
                         goal=goal,
                         acceptance=acceptance if acceptance_raw.strip() else None,
                     )
                     if data.get("run_now", [""])[0] == "on":
-                        rt.collaborate(task_id)
+                        if command.payload.get("next_action") == "battle":
+                            rt.battle(task_id)
+                        else:
+                            rt.collaborate(task_id)
                 self._redirect(f"/tasks/{task_id}")
                 return
             if path.startswith("/tasks/") and path.endswith("/decide"):
@@ -972,6 +975,7 @@ def task_api_payload(
     payload = {
         "task": task_to_dict(task),
         "events": [event_to_dict(e) for e in events],
+        "organization_memory": rt.shared_memory(exclude_task_id=task_id),
         "decision_ladder": decision_ladder(events),
         "organization_path": organization_path(task, events),
         "review": rt.review(task_id),

@@ -66,7 +66,7 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
             task.assignments.append({"seq": event.seq, **payload})
         elif event.type == "deliverable.published":
             task.deliverables.append({"seq": event.seq, **payload})
-        elif event.type == "plan.proposed":
+        elif event.type in {"plan.proposed", "plan.amended"}:
             task.plan = {"seq": event.seq, **payload}
         elif event.type in {"msg.said", "msg.challenge"}:
             task.messages.append(

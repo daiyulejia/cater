@@ -670,6 +670,60 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(task.assignments[0]["owner"], "product")
         self.assertIn("做到什么算完成", task.interpretation["summary"])
 
+    def test_in_chat_direction_amends_the_next_round_roster_and_strategy(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("整理一个页面说明")
+            rt.assign(task_id, "product")
+
+            command = rt.command(task_id, "请 @罐头 加入，并请内阁一起审查交互取舍")
+            task = rt.task(task_id)
+            plan_events = [event for event in rt.log.read(task_id=task_id) if event.type == "plan.amended"]
+
+            self.assertEqual(command.payload["mentioned_workers"], ["design"])
+            self.assertEqual(command.payload["next_action"], "battle")
+            self.assertEqual([role.id for role in rt._roles_for_round(task)], ["product", "design"])
+            self.assertEqual(task.plan["participants"], ["product", "design"])
+            self.assertEqual(task.plan["next_action"], "battle")
+            self.assertEqual(plan_events[-1].payload["added"], ["design"])
+
+    def test_in_chat_direction_can_replace_the_next_round_roster(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("做一个网页任务入口")
+            rt.intake(task_id)
+
+            rt.command(task_id, "这一步只让 @罐头 先处理界面，其他伙伴先不用参与")
+            task = rt.task(task_id)
+
+            self.assertEqual([role.id for role in rt._roles_for_round(task)], ["design"])
+            self.assertEqual(task.plan["participants"], ["design"])
+            latest = {item["owner"]: item for item in task.assignments}
+            self.assertEqual(latest["product"]["status"], "deferred")
+            self.assertEqual(latest["design"]["status"], "assigned")
+
+    def test_explicit_goal_rewrite_updates_the_task_and_next_plan(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("先做一个完整网页")
+            rt.intake(task_id)
+
+            rt.command(task_id, "需求改为：只完成可用的任务输入框")
+            task = rt.task(task_id)
+
+            self.assertEqual(task.goal, "只完成可用的任务输入框")
+            self.assertIn("任务输入框", task.interpretation["objective"])
+            self.assertEqual(task.plan["source"], "human_command")
+
+    def test_goal_rewrite_keeps_an_adequate_existing_roster_until_replanning_is_explicit(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("做一个网页任务入口")
+            rt.intake(task_id)
+            before = [role.id for role in rt._roles_for_round(rt.task(task_id))]
+
+            rt.command(task_id, "目标改为：把现有入口文案再简洁一点")
+            task = rt.task(task_id)
+
+            self.assertEqual([role.id for role in rt._roles_for_round(task)], before)
+            self.assertFalse(task.plan["replanned"])
+
     def test_intake_records_task_understanding_before_lightweight_collaboration(self):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("为团队做一个网页任务入口", ["用户能发起并查看任务", "过程可回放"])
@@ -2160,7 +2214,7 @@ class WebTests(unittest.TestCase):
 
             command = Request(
                 f"{base}/api/tasks/{task_id}/command",
-                data=json.dumps({"instruction": "Use the updated direction", "continue": True}).encode("utf-8"),
+                data=json.dumps({"instruction": "请内阁一起审查更新后的方向", "continue": True}).encode("utf-8"),
                 method="POST",
                 headers={"Content-Type": "application/json"},
             )
@@ -2168,9 +2222,10 @@ class WebTests(unittest.TestCase):
                 queued = json.loads(response.read().decode("utf-8"))
 
             self.assertTrue(queued["activity"]["active"])
-            self.assertEqual(queued["activity"]["follow_up"]["action"], "run")
+            self.assertEqual(queued["activity"]["follow_up"]["action"], "battle")
             self.assertIn("activity.queued", [event["type"] for event in queued["events"]])
             self.assertIn("human.commanded", [event["type"] for event in queued["events"]])
+            self.assertIn("plan.amended", [event["type"] for event in queued["events"]])
 
             driver.release.set()
             deadline = time.monotonic() + 3
@@ -2747,7 +2802,8 @@ class WebTests(unittest.TestCase):
                 task = rt.task(task_id)
                 self.assertEqual(task.commands[-1]["instruction"], "@dev propose the smallest next step")
                 self.assertEqual(task.commands[-1]["mentions"], ["dev"])
-                self.assertEqual(len(task.messages), 4)
+                self.assertEqual(len(task.messages), 1)
+                self.assertEqual(task.messages[0]["actor"], "dev")
 
 
 if __name__ == "__main__":

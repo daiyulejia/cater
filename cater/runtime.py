@@ -615,12 +615,13 @@ class Runtime:
         Older tasks without assignments keep the historical all-worker behavior;
         new leader plans intentionally select the smallest useful set.
         """
+        latest_assignments = latest_assignments_by_owner(task.assignments)
         assigned_owners = {
             str(assignment.get("owner"))
-            for assignment in latest_assignments_by_owner(task.assignments)
-            if assignment.get("owner")
+            for assignment in latest_assignments
+            if assignment.get("owner") and assignment.get("status", "assigned") == "assigned"
         }
-        if not assigned_owners:
+        if not latest_assignments:
             return self.worker_roles
         return [role for role in self.worker_roles if role.id in assigned_owners]
 
@@ -644,20 +645,209 @@ class Runtime:
     ) -> Event:
         if self.task(task_id) is None:
             raise KeyError(task_id)
+        inferred_goal = self._command_goal(instruction) if goal is None else None
+        effective_goal = goal if goal is not None else inferred_goal
         payload: dict[str, Any] = {"instruction": instruction}
         mentions = self._mentioned_roles(instruction)
+        mentioned_workers = self.mentioned_workers(instruction)
+        roster_mode = self._command_roster_mode(instruction, mentioned_workers)
+        next_action = self._command_next_action(instruction)
         if mentions:
             payload["mentions"] = mentions
-        if goal is not None:
-            payload["goal"] = goal
+        if mentioned_workers:
+            payload["mentioned_workers"] = mentioned_workers
+        if roster_mode:
+            payload["roster_mode"] = roster_mode
+        if next_action == "battle":
+            payload["requested_strategy"] = "cabinet_review"
+        payload["next_action"] = next_action
+        if effective_goal is not None:
+            payload["goal"] = effective_goal
         if acceptance is not None:
             payload["acceptance"] = list(acceptance)
-        return self.log.emit(
+        command = self.log.emit(
             actor=Actor.human("human"),
             type="human.commanded",
             task_id=task_id,
             payload=payload,
         )
+        if effective_goal is not None:
+            updated_task = self.task(task_id)
+            if updated_task is not None:
+                self.log.emit(
+                    actor=self._leader_actor(),
+                    type="task.interpreted",
+                    task_id=task_id,
+                    payload=self._interpret_task(updated_task),
+                )
+        self._amend_plan_from_command(
+            task_id,
+            command_seq=command.seq,
+            instruction=instruction,
+            mentioned_workers=mentioned_workers,
+            roster_mode=roster_mode,
+            next_action=next_action,
+            context_changed=effective_goal is not None or acceptance is not None,
+            replan=self._command_requires_replan(instruction, effective_goal is not None),
+        )
+        return command
+
+    @staticmethod
+    def _command_next_action(instruction: str) -> str:
+        """Choose an explicit next-round policy without pretending to parse intent perfectly."""
+        text = instruction.lower()
+        asks_for_governance = any(term in text for term in ("内阁", "开会", "一起审查", "一起评审", "讨论后", "投票", "battle"))
+        avoids_governance = any(term in text for term in ("不用内阁", "不要内阁", "别开会", "不必开会", "直接做", "直接推进"))
+        return "battle" if asks_for_governance and not avoids_governance else "run"
+
+    @staticmethod
+    def _command_roster_mode(instruction: str, mentioned_workers: list[str]) -> str | None:
+        if not mentioned_workers:
+            return None
+        text = instruction.lower()
+        if any(term in text for term in ("只让", "仅让", "只需", "只要")):
+            return "replace"
+        if any(term in text for term in ("不需要", "不要让", "别让", "移除")):
+            return "remove"
+        return "append"
+
+    @staticmethod
+    def _command_goal(instruction: str) -> str | None:
+        """Accept an explicit goal rewrite, while leaving ordinary discussion untouched."""
+        match = re.search(
+            r"(?:任务|需求|目标)\s*(?:调整为|改为|改成)\s*[:：，,]?\s*(.+)",
+            instruction.strip(),
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None
+        goal = match.group(1).strip(" 。！？!?；;")
+        return goal or None
+
+    @staticmethod
+    def _command_requires_replan(instruction: str, goal_changed: bool) -> bool:
+        """Keep an ordinary goal clarification from needlessly restarting the team."""
+        if not goal_changed:
+            return False
+        text = instruction.lower()
+        return any(
+            term in text
+            for term in ("重新规划", "重新分配", "重新划分", "大改", "大幅调整", "整体调整", "推倒重来", "彻底重做")
+        )
+
+    def _amend_plan_from_command(
+        self,
+        task_id: str,
+        *,
+        command_seq: int,
+        instruction: str,
+        mentioned_workers: list[str],
+        roster_mode: str | None,
+        next_action: str,
+        context_changed: bool,
+        replan: bool,
+    ) -> None:
+        """Turn an explicit in-chat scheduling request into replayable plan changes.
+
+        Every command already becomes prompt context.  This additional step is
+        deliberately narrow: only named execution roles change the roster, and
+        only clear governance language changes the next collaboration mode.
+        """
+        task = self.task(task_id)
+        if task is None:
+            raise KeyError(task_id)
+        latest = latest_assignments_by_owner(task.assignments)
+        previous = [
+            role.id
+            for role in self.worker_roles
+            if any(item.get("owner") == role.id and item.get("status", "assigned") == "assigned" for item in latest)
+        ]
+        if replan:
+            participants = [role.id for role in self._workers_for_plan(task, source="leader")]
+            for role_id in mentioned_workers:
+                if role_id not in participants:
+                    participants.append(role_id)
+        elif roster_mode == "replace":
+            participants = list(mentioned_workers)
+        elif roster_mode == "remove":
+            participants = [role_id for role_id in previous if role_id not in mentioned_workers]
+        elif mentioned_workers:
+            participants = [*previous, *[role_id for role_id in mentioned_workers if role_id not in previous]]
+        else:
+            participants = previous
+
+        changed_roles = set(previous).symmetric_difference(participants)
+        if replan or roster_mode in {"replace", "remove"}:
+            for assignment in latest:
+                owner = str(assignment.get("owner") or "")
+                if owner and owner in changed_roles and owner not in participants:
+                    self.log.emit(
+                        actor=self._leader_actor(),
+                        type="subtask.assigned",
+                        task_id=task_id,
+                        payload={**assignment, "status": "deferred", "source": "human_command", "mode": "command"},
+                    )
+
+        summary = self._command_summary(instruction)
+        for role_id in participants:
+            if role_id in previous and not replan:
+                continue
+            role = self._worker_by_id(role_id)
+            self.log.emit(
+                actor=self._leader_actor(),
+                type="subtask.assigned",
+                task_id=task_id,
+                payload={
+                    "id": f"{task_id}:{role.id}:command:{command_seq}",
+                    "owner": role.id,
+                    "role": role.role,
+                    "lane": self._role_lane(role.id, role.role),
+                    "objective": f"根据顾客刚补充的方向，{role.name}重点跟进：{summary}",
+                    "acceptance": task.acceptance[0] if task.acceptance else "交付可检查的阶段性结果",
+                    "depends_on": [],
+                    "status": "assigned",
+                    "source": "human_command",
+                    "mode": "command",
+                },
+            )
+
+        # Do not manufacture a scheduling update for ordinary chat.  A named
+        # role, roster edit, or request for cabinet review is a real plan edit.
+        if not mentioned_workers and next_action == "run" and not context_changed:
+            return
+        latest_after = latest_assignments_by_owner(self.task(task_id).assignments)
+        subtasks = [
+            item for item in latest_after
+            if item.get("status", "assigned") == "assigned" and item.get("owner") in participants
+        ]
+        added = [role_id for role_id in participants if role_id not in previous]
+        removed = [role_id for role_id in previous if role_id not in participants]
+        if replan:
+            strategy = "店长已按新目标重新核对范围和分工"
+        else:
+            strategy = "请内阁在下一轮复核取舍" if next_action == "battle" else "按更新后的编队继续协作"
+        self.log.emit(
+            actor=self._leader_actor(),
+            type="plan.amended",
+            task_id=task_id,
+            payload={
+                "source": "human_command",
+                "command_seq": command_seq,
+                "participants": participants,
+                "subtasks": subtasks,
+                "roster_mode": roster_mode or "unchanged",
+                "added": added,
+                "removed": removed,
+                "replanned": replan,
+                "next_action": next_action,
+                "reason": strategy,
+            },
+        )
+
+    @staticmethod
+    def _command_summary(instruction: str) -> str:
+        compact = " ".join(instruction.split()).strip()
+        return compact[:140] + ("…" if len(compact) > 140 else "") if compact else "顾客补充的最新方向"
 
     def task(self, task_id: str) -> TaskSnapshot | None:
         return fold(self.log.read()).get(task_id)

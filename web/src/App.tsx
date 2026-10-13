@@ -10,6 +10,7 @@ type Assignment = { id: string; owner: string; role: string; lane: string; objec
 type Message = { seq: number; actor: string; role: string; type: string; claim?: string; text?: string; stance?: string; target?: string; reply_to?: number }
 type Deliverable = { seq: number; title: string; summary: string; kind?: string; uri?: string; message_seq?: number }
 type DisciplineFlag = { seq: number; role?: string; message_seq?: number; issues?: string[]; action?: string }
+type MemoryItem = { seq: number; task_id?: string; actor?: string; title: string; summary: string; kind?: string }
 type OrgRole = { id: string; name: string; role: string; charter?: string }
 type DriverCoverage = { role_id: string; name: string; driver: string; mode: 'local_demo' | 'external' }
 type Organization = { leader: OrgRole; cabinet: OrgRole[]; workers: OrgRole[]; mode?: 'local_demo' | 'mixed_driver' | 'external_driver'; worker_drivers?: DriverCoverage[] }
@@ -26,7 +27,7 @@ type Task = {
   route?: { route?: string; reason?: string }
 }
 type Event = { seq: number; type: string; category: string; actor: { id: string; role: string; kind: string }; payload: Record<string, unknown> }
-type TaskDetail = { task: Task; events: Event[]; review: { health?: string; summary?: string }; activity?: Activity }
+type TaskDetail = { task: Task; events: Event[]; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
 type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; targets: string[]; replyTo?: number; evidence: Event }
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
@@ -161,6 +162,18 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
           : '这一单已经安排妥当，大家会依次接力推进。'
       return [message(`${planner}把工作分好了`, invitation, 'system', 'decision', details)]
     }
+    if (event.type === 'plan.amended') {
+      const participants = memberNames(payload.participants)
+      const added = memberNames(payload.added)
+      const removed = memberNames(payload.removed)
+      const changes = [
+        added.length ? `新加入：${added.map((name) => `@${name}`).join('、')}` : '',
+        removed.length ? `暂缓：${removed.map((name) => `@${name}`).join('、')}` : '',
+        String(payload.next_action) === 'battle' ? '下一轮会先请伙伴一起复核关键取舍。' : '下一轮会带着这条新方向继续推进。',
+      ].filter(Boolean)
+      const roster = participants.length ? `下一轮由 ${participants.map((name) => `@${name}`).join('、')} 跟进。` : '店长会先根据这条新方向重新安排。'
+      return [message('店长更新了下一轮安排', `${roster}\n${reasonText(String(payload.reason ?? '已记录最新方向。'))}`, 'system', 'decision', changes)]
+    }
     if (event.type === 'subtask.assigned' || event.type === 'plan.proposed' || event.type === 'agent.working') return []
     if (event.type === 'msg.said' || event.type === 'msg.challenge') return [message(event.type === 'msg.challenge' ? '提出质疑' : undefined, String(payload.text ?? payload.claim ?? ''), 'agent')]
     if (event.type === 'deliverable.published') return [message('发布成果', `${String(payload.title ?? '未命名成果')}\n${String(payload.summary ?? '')}`, 'agent', 'deliverable')]
@@ -281,7 +294,7 @@ function App() {
           </> : <><EmptyConversation /><TaskComposer draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
         </section>
         <aside className="bg-[#fffaf4] p-4 lg:border-l lg:border-[#e5d8ca]">
-          {task && <Workboard task={task} detail={detail} names={Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />}
+          {task && <>{detail?.organization_memory && <MemoryBoard items={detail.organization_memory} names={Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))} />}<Workboard task={task} detail={detail} names={Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} /></>}
           {error && <p className="mt-4 rounded-lg bg-rose-50 p-3 text-xs text-rose-700">{error}</p>}
         </aside>
       </main>
@@ -290,7 +303,7 @@ function App() {
 }
 
 function DirectionComposer({ message, isSending, onMessageChange, onSend }: { message: string; isSending: boolean; onMessageChange: (value: string) => void; onSend: () => void }) {
-  return <div className="border-t border-[#e5d8ca] bg-[#fffaf4] p-3 sm:p-4"><div className="mx-auto flex max-w-3xl gap-2 rounded-xl border border-[#ddccbc] bg-white p-2 shadow-sm focus-within:border-[#cb6e4e] focus-within:ring-2 focus-within:ring-[#f7dfcf]"><textarea value={message} onChange={(event) => onMessageChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onSend() } }} placeholder="向店长和猫咪们补充方向" aria-label="向团队发送消息" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm outline-none placeholder:text-stone-400" /><button disabled={isSending || !message.trim()} onClick={onSend} className="grid size-10 shrink-0 place-items-center self-end rounded-lg bg-[#cb6e4e] text-white disabled:bg-stone-200" title="发送指令并启动下一轮协作"><Send size={17} /></button></div></div>
+  return <div className="border-t border-[#e5d8ca] bg-[#fffaf4] p-3 sm:p-4"><div className="mx-auto flex max-w-3xl gap-2 rounded-xl border border-[#ddccbc] bg-white p-2 shadow-sm focus-within:border-[#cb6e4e] focus-within:ring-2 focus-within:ring-[#f7dfcf]"><textarea value={message} onChange={(event) => onMessageChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onSend() } }} placeholder="随时补充、改目标，或 @罐头 加入；请内阁复核也可以直接说" aria-label="向团队发送消息" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm outline-none placeholder:text-stone-400" /><button disabled={isSending || !message.trim()} onClick={onSend} className="grid size-10 shrink-0 place-items-center self-end rounded-lg bg-[#cb6e4e] text-white disabled:bg-stone-200" title="发送消息并安排下一轮协作"><Send size={17} /></button></div></div>
 }
 
 function TaskComposer({ draft, isSending, onDraftChange, onCreate }: { draft: string; isSending: boolean; onDraftChange: (value: string) => void; onCreate: () => void }) {
@@ -311,8 +324,13 @@ function ChatBubble({ item }: { item: ChatItem }) {
   </article>
 }
 
+function MemoryBoard({ items, names }: { items: MemoryItem[]; names: Record<string, string> }) {
+  if (!items.length) return null
+  return <section className="mb-5 border-b border-[#eaded1] pb-5"><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">猫咖记忆</h2><span className="text-xs text-stone-400">已发布成果</span></div><div className="space-y-2">{items.map((item) => <div key={item.seq} className="border-l-2 border-sky-600 pl-3 py-1"><strong className="block text-xs text-stone-800">{item.title}</strong><p className="mt-1 text-xs leading-5 text-stone-600">{item.summary}</p><span className="mt-1 block text-[11px] text-stone-400">{names[item.actor ?? ''] ?? actorText(item.actor ?? '猫咖')} · 事件 #{item.seq}</span></div>)}</div></section>
+}
+
 function Workboard({ task, detail, names, driverCoverage, showEvidence, onToggleEvidence }: { task: Task; detail: TaskDetail | null; names: Record<string, string>; driverCoverage?: DriverCoverage[]; showEvidence: boolean; onToggleEvidence: () => void }) {
-  const assignments = [...task.assignments].reverse().filter((item, index, all) => all.findIndex((other) => other.owner === item.owner) === index)
+  const assignments = [...task.assignments].reverse().filter((item, index, all) => all.findIndex((other) => other.owner === item.owner) === index).filter((item) => item.status === undefined || item.status === 'assigned')
   const participants = assignments.length
     ? assignments.map((item) => item.owner)
     : [...new Set(task.messages.map((item) => item.actor).filter((actor) => actor !== 'human'))]

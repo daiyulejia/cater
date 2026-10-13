@@ -31,6 +31,7 @@ EVENT_CATEGORIES = {
     "task.decomposed": "planning",
     "subtask.assigned": "planning",
     "plan.proposed": "planning",
+    "plan.amended": "planning",
     "driver.failed": "driver",
     "driver.budget_exhausted": "driver",
     "agent.working": "dialogue",
