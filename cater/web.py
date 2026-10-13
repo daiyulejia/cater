@@ -82,12 +82,22 @@ def make_handler(
                     return self._send_json(task_api_payload(rt, task_id))
             if path.startswith("/tasks/"):
                 task_id = path.split("/", 2)[2]
+                query = parse_qs(parsed.query)
+                timeline_category = query.get("category", [""])[0].strip() or None
                 with self._runtime() as rt:
                     task = rt.task(task_id)
                     if task is None:
                         return self._not_found()
                     events = rt.log.read(task_id=task_id)
-                    return self._send_html(render_task(task, events, rt.review(task_id), roles=rt.roles))
+                    return self._send_html(
+                        render_task(
+                            task,
+                            events,
+                            rt.review(task_id),
+                            roles=rt.roles,
+                            timeline_category=timeline_category,
+                        )
+                    )
             return self._not_found()
 
         def do_POST(self) -> None:
@@ -472,9 +482,14 @@ def render_task(
     review: dict[str, Any] | None = None,
     *,
     roles: list[Any] | None = None,
+    timeline_category: str | None = None,
 ) -> str:
     message_cards = "\n".join(_message_card(item) for item in task.messages)
-    timeline = "\n".join(_event_row(event) for event in events)
+    timeline_events = _filtered_timeline_events(events, timeline_category)
+    timeline = "\n".join(_event_row(event) for event in timeline_events)
+    if not timeline:
+        timeline = '<li class="empty-event">No events match this filter.</li>'
+    filters = _timeline_filters(task.id, events, timeline_category)
     ladder = "\n".join(_ladder_step(step) for step in decision_ladder(events))
     path = "\n".join(_path_step(step) for step in organization_path(task, events))
     governance = _governance_panel(task)
@@ -521,7 +536,8 @@ def render_task(
           <div class="messages">{message_cards}</div>
         </section>
         <section class="panel">
-          <div class="panel-head"><h2>Timeline</h2><span>{len(events)} events</span></div>
+          <div class="panel-head"><h2>Timeline</h2><span>{len(timeline_events)} / {len(events)} events</span></div>
+          {filters}
           <ol class="timeline">{timeline}</ol>
         </section>
         """,
@@ -878,6 +894,46 @@ def _event_row(event: Event) -> str:
       </div>
     </li>
     """
+
+
+def _filtered_timeline_events(events: list[Event], category: str | None) -> list[Event]:
+    if not category:
+        return events
+    return [event for event in events if event.category == category]
+
+
+def _timeline_filters(task_id: str, events: list[Event], current: str | None) -> str:
+    counts: dict[str, int] = {}
+    for event in events:
+        counts[event.category] = counts.get(event.category, 0) + 1
+    links = [
+        _timeline_filter_link(task_id, "all", len(events), None, current is None),
+    ]
+    for category in sorted(counts):
+        links.append(
+            _timeline_filter_link(
+                task_id,
+                category,
+                counts[category],
+                category,
+                current == category,
+            )
+        )
+    return '<nav class="filter-row" aria-label="Timeline filters">' + "\n".join(links) + "</nav>"
+
+
+def _timeline_filter_link(
+    task_id: str,
+    label: str,
+    count: int,
+    category: str | None,
+    active: bool,
+) -> str:
+    href = f"/tasks/{escape(task_id)}"
+    if category:
+        href += f"?category={escape(category)}"
+    active_class = " active" if active else ""
+    return f'<a class="filter-pill{active_class}" href="{href}">{escape(label)} <span>{count}</span></a>'
 
 
 def _ladder_step(step: dict[str, Any]) -> str:
@@ -1364,6 +1420,26 @@ dd {
   padding: 0;
   margin: 0;
 }
+.filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.filter-pill {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 13px;
+  padding: 6px 9px;
+}
+.filter-pill.active {
+  background: var(--accent-weak);
+  color: var(--accent);
+}
+.filter-pill span {
+  margin-left: 4px;
+}
 .ladder {
   list-style: none;
   padding: 0;
@@ -1397,6 +1473,10 @@ dd {
   gap: 12px;
   padding: 10px 0;
   border-top: 1px solid var(--line);
+}
+.timeline .empty-event {
+  display: block;
+  color: var(--muted);
 }
 .timeline span, .timeline em {
   color: var(--muted);
@@ -1485,7 +1565,7 @@ button.secondary {
   tr { border-top: 1px solid var(--line); padding: 10px 0; }
   td { border: 0; padding: 6px 0; }
   .timeline li { grid-template-columns: 48px minmax(0, 1fr); }
-  .timeline em, .timeline p { grid-column: 2; }
+  .timeline strong, .timeline em, .timeline li > div { grid-column: 2; }
   .ladder { grid-template-columns: 1fr; }
   .policy-grid { grid-template-columns: 1fr; }
   .api-grid { grid-template-columns: 1fr; }

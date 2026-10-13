@@ -1422,8 +1422,21 @@ class WebTests(unittest.TestCase):
         self.assertIn("agent.decided", html)
         self.assertIn("payload-json", html)
         self.assertIn("human / lifecycle", html)
+        self.assertIn("filter-pill active", html)
         self.assertEqual([step["id"] for step in ladder], ["battle", "cabinet", "supreme", "human"])
         self.assertEqual(ladder[1]["status"], "vetoed")
+
+    def test_render_task_can_filter_timeline_by_category(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("Filter timeline")
+            rt.battle(task_id)
+            events = rt.log.read(task_id=task_id)
+            html = render_task(rt.task(task_id), events, timeline_category="dialogue")
+
+        self.assertIn("dialogue", html)
+        self.assertIn("3 / 8 events", html)
+        self.assertIn("msg.said", html)
+        self.assertNotIn("task.created", html)
 
     def test_render_task_shows_current_acceptance(self):
         with Runtime(":memory:") as rt:
