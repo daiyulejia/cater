@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,17 @@ from .runtime import Runtime
 from .web import event_to_dict, serve, task_to_dict
 
 DEFAULT_DB = Path.cwd() / ".cater" / "cater.db"
+
+
+def _configure_utf8_output(*streams: Any) -> None:
+    """Prefer one predictable encoding for the Chinese-first command surface."""
+    for stream in streams:
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8")
+            except (OSError, ValueError):
+                pass
 
 DIRECT_DEMO_DRIVERS = {
     "drivers": [
@@ -710,6 +722,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _configure_utf8_output(sys.stdout, sys.stderr)
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

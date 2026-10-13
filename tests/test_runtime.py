@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 
 from cater.cabinet import majority_threshold, tally_votes
 from cater import __version__, web as web_module
+from cater import cli as cli_module
 from cater.cli import main
 from cater.drivers import CliDriver, DriverProtocolError, DriverResponse, DriverUnavailable, OpenAICompatibleDriver, load_drivers
 from cater.ladder import decision_ladder
@@ -1737,6 +1738,20 @@ class CliTests(unittest.TestCase):
             main(["--version"])
         self.assertEqual(raised.exception.code, 0)
         self.assertIn("cater 0.1.0", self.out.getvalue())
+
+    def test_cli_configures_utf8_when_output_stream_supports_it(self):
+        class ReconfigurableStream:
+            def __init__(self):
+                self.calls: list[dict[str, str]] = []
+
+            def reconfigure(self, **kwargs: str) -> None:
+                self.calls.append(kwargs)
+
+        stdout = ReconfigurableStream()
+        stderr = ReconfigurableStream()
+        cli_module._configure_utf8_output(stdout, stderr)
+        self.assertEqual(stdout.calls, [{"encoding": "utf-8"}])
+        self.assertEqual(stderr.calls, [{"encoding": "utf-8"}])
 
     def test_cli_chain_reports_signed_events(self):
         code = main(["--db", self.db, "--audit-key", "secret", "demo"])

@@ -37,6 +37,8 @@ cater web
 
 `cater demo` 展示治理较重的路径。`cater demo --direct` 展示轻量直派路径：没有风险时，治理层保持空闲。demo 命令使用确定性的内置角色和 driver。
 
+Windows 上 CLI 会以 UTF-8 输出中文；若使用旧式终端仍显示异常，请先执行 `chcp 65001`，或改用 Windows Terminal / PowerShell 7。
+
 发布包会直接携带对话优先的本地工作台；运行 `cater web --port 8766` 即可打开它。
 从源码修改前端时，再按 [`web/`](web/README.md) 构建 React 工作台。Python 运行时会从
 同一个本地地址托管工作台与 API，同时保持零第三方运行依赖；前端依赖独立管理。
