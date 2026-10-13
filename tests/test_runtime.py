@@ -1133,6 +1133,13 @@ class CliTests(unittest.TestCase):
         self.assertIn("error: each role requires a non-empty string id", out)
         self.assertNotIn("Traceback", out)
 
+    def test_cli_reports_missing_task_without_traceback(self):
+        code, out = self.run_cli("path", "missing-task")
+
+        self.assertEqual(code, 1)
+        self.assertIn("error: not found: missing-task", out)
+        self.assertNotIn("Traceback", out)
+
     def test_cli_doctor_can_probe_cli_drivers(self):
         driver_script = Path(__file__).resolve().parent / "fixtures" / "ndjson_driver.py"
         config = Path(self.tmp.name) / "drivers.json"

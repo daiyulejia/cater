@@ -670,6 +670,10 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
+    except KeyError as exc:
+        missing = exc.args[0] if exc.args else "requested item"
+        print(f"error: not found: {missing}")
+        return 1
     except ValueError as exc:
         print(f"error: {exc}")
         return 1
