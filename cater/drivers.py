@@ -203,9 +203,12 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
     if not isinstance(name, str) or not name:
         raise ValueError("driver config requires a non-empty name")
     if kind == "scripted":
+        script = data.get("script") or []
+        if not isinstance(script, list) or not all(isinstance(item, str) for item in script):
+            raise ValueError(f"scripted driver {name!r} requires a string array script")
         return ScriptedDriver(
             name,
-            list(data.get("script") or []),
+            list(script),
             tokens_per_call=int(data.get("tokens_per_call", 200)),
         )
     if kind == "cli":

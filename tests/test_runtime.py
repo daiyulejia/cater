@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 from cater.cabinet import majority_threshold, tally_votes
 from cater import __version__
 from cater.cli import main
-from cater.drivers import CliDriver, DriverResponse
+from cater.drivers import CliDriver, DriverResponse, load_drivers
 from cater.ladder import decision_ladder
 from cater.messages import message_relation
 from cater.profiles import agent_profiles
@@ -792,6 +792,16 @@ class DriverTests(unittest.TestCase):
             driver.complete(role="tester", prompt="crash", context={"crash": True})
         response = driver.complete(role="tester", prompt="after", context={})
         self.assertIn("Fixture driver responded", response.text)
+
+    def test_scripted_driver_config_rejects_string_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drivers = Path(tmp) / "drivers.json"
+            drivers.write_text(
+                '{"drivers":[{"kind":"scripted","name":"bad","script":"not a list"}]}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "string array script"):
+                load_drivers(drivers)
 
     def test_example_tool_driver_speaks_ndjson(self):
         script = Path(__file__).resolve().parents[1] / "examples" / "ndjson_tool_driver.py"
