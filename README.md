@@ -157,7 +157,7 @@ GET /api/chain
 - JSON 配置角色与 driver
 - 长驻 NDJSON CLI driver，支持存活探针与崩溃自愈
 - 可配置内阁投票 tally，包含通过阈值、quorum、否决角色、推荐项与开放疑虑
-- 本地 Web 工作台，支持任务创建、启动协作轮次、可视化决策阶梯、极少数人类输入、回放、内阁 tally 和命令覆盖
+- 本地 Web 工作台，支持任务创建、启动协作轮次、在同一对话中筛选协作 / 决策 / 成果、可视化决策阶梯、极少数人类输入、回放、内阁 tally 和命令覆盖
 - 从事件流投影出的 agent profile、任务内协作记忆，以及同一轮内的产出共享
 - driver 失败 containment，包含重试、失败事件和进程内 circuit breaker
 - 在事件哈希链之上的可选 HMAC 审计签名

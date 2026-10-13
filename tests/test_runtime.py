@@ -1678,8 +1678,10 @@ class WebTests(unittest.TestCase):
         self.assertIn('lang="zh-CN"', shell)
         self.assertIn("Cater 自治工作台", shell)
         self.assertTrue((root / "favicon.svg").is_file())
-        self.assertTrue(list((root / "assets").glob("*.js")))
+        bundles = list((root / "assets").glob("*.js"))
+        self.assertTrue(bundles)
         self.assertTrue(list((root / "assets").glob("*.css")))
+        self.assertIn("对话筛选", "\n".join(bundle.read_text(encoding="utf-8") for bundle in bundles))
 
     def test_web_serves_optional_built_workroom_from_same_origin(self):
         with tempfile.TemporaryDirectory() as tmp:

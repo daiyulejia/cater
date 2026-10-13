@@ -22,7 +22,7 @@ type Task = {
 }
 type Event = { seq: number; type: string; category: string; actor: { id: string; role: string; kind: string }; payload: Record<string, unknown> }
 type TaskDetail = { task: Task; events: Event[]; review: { health?: string; summary?: string }; activity?: Activity }
-type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; title?: string; text: string; targets: string[]; replyTo?: number; evidence: Event }
+type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; targets: string[]; replyTo?: number; evidence: Event }
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) } })
@@ -47,6 +47,10 @@ const activityText = (activity?: Activity) => {
   return ''
 }
 
+const taskListStatus = (task: Task) => task.status === 'running' && task.activity?.state === 'completed'
+  ? '等待下一轮'
+  : statusText(task.status)
+
 function reasonText(value: string): string {
   const veto = /^Veto role\(s\) raised concern: (.+)\.$/.exec(value)
   if (veto) return `否决角色提出了风险异议：${veto[1].split(', ').map((role) => `@${role}`).join('、')}。`
@@ -68,8 +72,8 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>): 
   return events.flatMap((event) => {
     const payload = event.payload
     const actor = event.actor
-    const message = (title: string | undefined, text: string, kind: ChatItem['kind']): ChatItem => ({
-      id: event.seq, actor: actor.id, display: identities[actor.id]?.name ?? actorText(actor.id), role: actor.role, kind, title, text, evidence: event,
+    const message = (title: string | undefined, text: string, kind: ChatItem['kind'], category: ChatItem['category'] = kind === 'agent' || kind === 'human' ? 'collaboration' : 'system'): ChatItem => ({
+      id: event.seq, actor: actor.id, display: identities[actor.id]?.name ?? actorText(actor.id), role: actor.role, kind, category, title, text, evidence: event,
       targets: [
         ...(typeof payload.target === 'string' ? [payload.target] : []),
         ...(Array.isArray(payload.mentions) ? payload.mentions.filter((item): item is string => typeof item === 'string') : []),
@@ -84,26 +88,26 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>): 
     if (event.type === 'activity.completed') return [message('本轮协作完成', String(payload.action) === 'battle' ? '内阁审议已结束。' : '团队已完成这一轮协作。', 'system')]
     if (event.type === 'activity.failed') return [message('协作异常', String(payload.message ?? '后台协作未能完成。'), 'system')]
     if (event.type === 'human.commanded') return [message('方向更新', String(payload.instruction ?? ''), 'human')]
-    if (event.type === 'task.interpreted') return [message('总控任务理解', `${String(payload.summary ?? '')}\n${String(payload.objective ?? '')}`, 'system')]
-    if (event.type === 'task.routed') return [message('总控路由判断', reasonText(String(payload.reason ?? '已选择下一步协作路径。')), 'system')]
+    if (event.type === 'task.interpreted') return [message('总控任务理解', `${String(payload.summary ?? '')}\n${String(payload.objective ?? '')}`, 'system', 'decision')]
+    if (event.type === 'task.routed') return [message('总控路由判断', reasonText(String(payload.reason ?? '已选择下一步协作路径。')), 'system', 'decision')]
     if (event.type === 'cabinet.convened') {
       const names = memberNames(payload.members)
-      return [message(names.length ? `店长召集 ${names.join('、')}` : '召集内阁', `${reasonText(String(payload.reason ?? '任务需要内阁校准。'))}${names.length ? `\n本次由 ${names.join('、')} 先行校准。` : ''}`, 'system')]
+      return [message(names.length ? `店长召集 ${names.join('、')}` : '召集内阁', `${reasonText(String(payload.reason ?? '任务需要内阁校准。'))}${names.length ? `\n本次由 ${names.join('、')} 先行校准。` : ''}`, 'system', 'decision')]
     }
     if (event.type === 'mission.created') return [message('任务使命已发布', String(payload.goal ?? ''), 'system')]
     if (event.type === 'task.decomposed') {
       const names = memberNames(payload.members)
-      return [message(String(payload.source) === 'cabinet' ? `${names.join('、') || '内阁'}完成任务拆解` : '总控完成任务拆解', String(payload.strategy ?? '执行计划已就绪。'), 'system')]
+      return [message(String(payload.source) === 'cabinet' ? `${names.join('、') || '内阁'}完成任务拆解` : '总控完成任务拆解', String(payload.strategy ?? '执行计划已就绪。'), 'system', 'decision')]
     }
     if (event.type === 'subtask.assigned') return [message(`已指派给 @${String(payload.owner ?? '团队')}`, String(payload.objective ?? ''), 'system')]
-    if (event.type === 'plan.proposed') return [message('执行计划已发布', reasonText(String(payload.reason ?? '')), 'system')]
+    if (event.type === 'plan.proposed') return [message('执行计划已发布', reasonText(String(payload.reason ?? '')), 'system', 'decision')]
     if (event.type === 'msg.said' || event.type === 'msg.challenge') return [message(event.type === 'msg.challenge' ? '提出质疑' : undefined, String(payload.text ?? payload.claim ?? ''), 'agent')]
-    if (event.type === 'deliverable.published') return [message('发布成果', `${String(payload.title ?? '未命名成果')}\n${String(payload.summary ?? '')}`, 'agent')]
+    if (event.type === 'deliverable.published') return [message('发布成果', `${String(payload.title ?? '未命名成果')}\n${String(payload.summary ?? '')}`, 'agent', 'deliverable')]
     if (event.type === 'cabinet.voted') {
       const tally = payload.tally as Record<string, unknown> | undefined
-      return [message('内阁审议', reasonText(String(tally?.reason ?? '内阁已审查当前选项。')), 'system')]
+      return [message('内阁审议', reasonText(String(tally?.reason ?? '内阁已审查当前选项。')), 'system', 'decision')]
     }
-    if (event.type === 'agent.decided' || event.type === 'supreme.decided') return [message('自治决策', reasonText(String(payload.reason ?? '')), 'system')]
+    if (event.type === 'agent.decided' || event.type === 'supreme.decided') return [message('自治决策', reasonText(String(payload.reason ?? '')), 'system', 'decision')]
     if (event.type === 'brief.generated') {
       const brief = payload.brief as Record<string, unknown> | undefined
       return [message('本轮总结', reasonText(String(brief?.dispute ?? '团队已完成一轮协作。')), 'system')]
@@ -127,6 +131,7 @@ function App() {
   const [message, setMessage] = useState('')
   const [isSending, setIsSending] = useState(false)
   const [showEvidence, setShowEvidence] = useState(false)
+  const [chatFilter, setChatFilter] = useState<'all' | ChatItem['category']>('all')
   const [error, setError] = useState('')
 
   const refresh = async (preferredId?: string) => {
@@ -163,6 +168,7 @@ function App() {
     return Object.fromEntries(members.map((member) => [member.id, member]))
   }, [organization, roles])
   const conversation = useMemo(() => detail ? conversationFor(detail.events, identities) : [], [detail, identities])
+  const visibleConversation = useMemo(() => chatFilter === 'all' ? conversation : conversation.filter((item) => item.category === chatFilter), [chatFilter, conversation])
   const task = detail?.task
 
   const createTask = async () => {
@@ -180,7 +186,7 @@ function App() {
           ...(routing === 'direct' ? { assign_to: directOwner } : {}),
         }),
       })
-      setDraft(''); setAcceptance(''); setComposerMode('message'); await refresh(result.task.id); setDetail(result)
+      setDraft(''); setAcceptance(''); setComposerMode('message'); setChatFilter('all'); await refresh(result.task.id); setDetail(result)
     } catch (err) { setError(err instanceof Error ? err.message : '创建任务失败') }
     finally { setIsSending(false) }
   }
@@ -205,13 +211,14 @@ function App() {
       <main className="grid min-h-[calc(100vh-56px)] grid-cols-1 lg:grid-cols-[250px_minmax(0,1fr)_310px]">
         <aside className="border-b border-[#e5d8ca] bg-[#fffaf4] lg:border-b-0 lg:border-r">
           <div className="flex items-center justify-between px-4 pb-2 pt-4"><span className="text-xs font-semibold tracking-[0.12em] text-stone-500">顾客任务</span><button className="grid size-7 place-items-center rounded-md text-stone-500 hover:bg-[#f3e7da]" title="新建任务" onClick={() => setComposerMode('new')}><Plus size={17} /></button></div>
-          <nav className="flex gap-1 overflow-x-auto px-2 pb-3 lg:block lg:space-y-1">{tasks.slice().reverse().map((item) => <button key={item.id} onClick={() => { setSelectedId(item.id); setComposerMode('message') }} className={`min-w-52 rounded-lg px-3 py-3 text-left transition lg:min-w-0 lg:w-full ${item.id === selectedId ? 'bg-[#f7dfcf] text-[#6b3424]' : 'hover:bg-[#f8f0e8]'}`}><div className="flex items-center gap-2"><CircleDot size={14} className={item.status === 'done' ? 'text-emerald-600' : 'text-[#cb6e4e]'} /><span className="truncate text-sm font-medium">{item.goal}</span></div><div className="mt-1 pl-5 text-xs text-stone-500">{item.messages.length} 条消息 · {statusText(item.status)}</div></button>)}</nav>
+          <nav className="flex gap-1 overflow-x-auto px-2 pb-3 lg:block lg:space-y-1">{tasks.slice().reverse().map((item) => <button key={item.id} onClick={() => { setSelectedId(item.id); setComposerMode('message'); setChatFilter('all') }} className={`min-w-52 rounded-lg px-3 py-3 text-left transition lg:min-w-0 lg:w-full ${item.id === selectedId ? 'bg-[#f7dfcf] text-[#6b3424]' : 'hover:bg-[#f8f0e8]'}`}><div className="flex items-center gap-2"><CircleDot size={14} className={item.status === 'done' ? 'text-emerald-600' : 'text-[#cb6e4e]'} /><span className="truncate text-sm font-medium">{item.goal}</span></div><div className="mt-1 pl-5 text-xs text-stone-500">{item.messages.length} 条协作发言 · {taskListStatus(item)}</div></button>)}</nav>
           <div className="hidden border-t border-[#eee2d6] px-4 py-4 lg:block"><div className="flex -space-x-1">{roles.map((role) => <Portrait key={role.id} id={role.id} size="sm" />)}</div><div className="mt-2 flex items-center gap-2 text-xs text-stone-500"><Users size={15} /> {roles.map((role) => role.name).join(' · ') || '执行猫咪'}</div></div>
         </aside>
         <section className="flex min-h-0 flex-col border-b border-[#e5d8ca] bg-[#fffdf9] lg:border-b-0">
           {task ? <>
             <div className="border-b border-[#eaded1] bg-[#fffaf4] px-5 py-4"><div className="flex items-start justify-between gap-4"><div className="flex items-start gap-3"><Portrait id="store_manager" /><div><p className="mb-1 text-xs font-medium tracking-[0.12em] text-teal-700">店长正在跟进</p><h1 className="text-lg font-semibold leading-snug">{task.goal}</h1></div></div><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${detail?.activity?.active ? 'bg-teal-50 text-teal-800' : 'bg-[#f1e7dc] text-stone-600'}`}>{activityText(detail?.activity) || statusText(task.status)}</span></div></div>
-            <div className="flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7">{conversation.map((item) => <ChatBubble key={item.id} item={item} />)}</div>
+            <div className="border-b border-[#eaded1] bg-[#fffaf4] px-4 py-2 sm:px-7"><div className="flex gap-1 overflow-x-auto" role="group" aria-label="对话筛选">{([{ id: 'all', label: '全部' }, { id: 'collaboration', label: '协作' }, { id: 'decision', label: '决策' }, { id: 'deliverable', label: '成果' }] as const).map((filter) => <button key={filter.id} onClick={() => setChatFilter(filter.id)} className={`shrink-0 rounded-md px-3 py-1.5 text-xs font-medium ${chatFilter === filter.id ? 'bg-[#f7dfcf] text-[#7a3f2d]' : 'text-stone-500 hover:bg-[#f5ebe1]'}`}>{filter.label}</button>)}</div></div>
+            <div className="flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7">{visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={item.id} item={item} />) : <p className="py-10 text-center text-sm text-stone-400">这个筛选下暂时没有记录。</p>}</div>
             {composerMode === 'new' ? <TaskComposer draft={draft} acceptance={acceptance} routing={routing} roles={roles} directOwner={directOwner} isSending={isSending} onDraftChange={setDraft} onAcceptanceChange={setAcceptance} onRoutingChange={setRouting} onOwnerChange={setDirectOwner} onCreate={() => void createTask()} /> : <DirectionComposer message={message} isSending={isSending} onMessageChange={setMessage} onSend={() => void sendDirection()} />}
           </> : <><EmptyConversation /><TaskComposer draft={draft} acceptance={acceptance} routing={routing} roles={roles} directOwner={directOwner} isSending={isSending} onDraftChange={setDraft} onAcceptanceChange={setAcceptance} onRoutingChange={setRouting} onOwnerChange={setDirectOwner} onCreate={() => void createTask()} /></>}
         </section>
