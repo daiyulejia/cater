@@ -1204,6 +1204,20 @@ class DriverTests(unittest.TestCase):
 
         self.assertEqual(command, ["C:\\Program Files\\Codex\\codex.exe", "--profile", "local"])
 
+    def test_codex_cli_adapter_preserves_an_unquoted_existing_windows_path(self):
+        script = Path(__file__).resolve().parents[1] / "examples" / "codex_cli_driver.py"
+        spec = importlib.util.spec_from_file_location("test_codex_cli_path", script)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        with tempfile.TemporaryDirectory() as tmp:
+            executable = Path(tmp) / "codex.exe"
+            executable.write_text("fixture", encoding="utf-8")
+            with patch.dict(module.os.environ, {"CATER_CODEX_COMMAND": str(executable)}):
+                command = module._codex_command()
+
+        self.assertEqual(command, [str(executable)])
+
     def test_example_api_client_drives_web_api(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "api-client.db")

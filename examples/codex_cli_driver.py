@@ -171,10 +171,16 @@ def _codex_command() -> list[str]:
     configured = os.environ.get("CATER_CODEX_COMMAND", "codex").strip()
     if not configured:
         raise AdapterError("CATER_CODEX_COMMAND must not be empty")
+    executable = configured[1:-1] if len(configured) >= 2 and configured[0] == configured[-1] == '"' else configured
+    # A Windows absolute executable path normally contains backslashes. Treat a
+    # real path as one argument before generic command-line tokenization, or
+    # unquoted paths such as C:\\Tools\\codex.exe would lose their separators.
+    if Path(executable).is_file():
+        return [executable]
     try:
-        # POSIX-style tokenization correctly unwraps a quoted Windows path such
-        # as "C:\\Program Files\\Codex\\codex.exe" while still producing an
-        # argument list for subprocess (never a shell command).
+        # A quoted command line remains useful for callers that deliberately
+        # include Codex CLI arguments. subprocess still receives an argument
+        # list and never invokes a shell.
         command = shlex.split(configured, posix=True)
     except ValueError as exc:
         raise AdapterError("CATER_CODEX_COMMAND is not a valid command line") from exc
