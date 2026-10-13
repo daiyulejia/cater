@@ -138,6 +138,13 @@ def _is_cabinet_member(context: dict[str, Any]) -> bool:
 
 
 def _cat_response(role: str, focus: str, name: str) -> tuple[str, str, list[str], dict[str, str]]:
+    if "交互" in role or "视觉" in role or "设计" in role:
+        return (
+            f"{name}来把体验理顺：围绕“{focus}”，我会先排清用户看到什么、下一步点哪里，再让界面有清楚的轻重。",
+            "先把交互路径和视觉重点理顺",
+            ["每一步都要让用户知道接下来能做什么", "视觉重点应服务于任务，而不是只做装饰"],
+            {"title": f"{name}的交互草图", "summary": "已整理关键状态、操作路径和界面重点。", "kind": "design"},
+        )
     if "工程" in role or "实现" in role:
         return (
             f"{name}接着往下做：我会先把“{focus}”收成一个能跑、能验证的最小路径，再把依赖和风险写清楚。",

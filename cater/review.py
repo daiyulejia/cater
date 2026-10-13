@@ -144,7 +144,11 @@ def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     ]
     overloaded = [
         task for task in tasks
-        if len(task.assignments) > max(3, len(task.messages) + 2)
+        if len(task.assignments) > max(
+            3,
+            len({str(item.get("owner")) for item in task.assignments if item.get("owner")}) + 1,
+            len(task.messages) + 2,
+        )
     ]
     if overloaded:
         return _lens("design", "watch", "Some tasks may be carrying more assignment structure than useful output.", "Review whether dispatch is adding ceremony, extra agents, or token cost instead of clarity.")

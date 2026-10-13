@@ -144,6 +144,8 @@ class Runtime:
         *,
         requested_route: str = "auto",
         preferred_owner: str | None = None,
+        preferred_objective: str | None = None,
+        preferred_acceptance: str | None = None,
     ) -> dict[str, Any]:
         """Turn a human request into an inspectable execution route.
 
@@ -191,8 +193,8 @@ class Runtime:
             self.assign(
                 task_id,
                 preferred_owner,
-                objective=f"{role.name}优先完成：{interpretation['objective']}",
-                acceptance=(task.acceptance[0] if task.acceptance else "交付可验证的最小结果"),
+                objective=preferred_objective or f"{role.name}优先完成：{interpretation['objective']}",
+                acceptance=preferred_acceptance or (task.acceptance[0] if task.acceptance else "交付可验证的最小结果"),
                 source="leader",
                 route_reason=reason,
             )
@@ -253,11 +255,13 @@ class Runtime:
             payload=mission,
         )
 
-        subtasks = self._decompose_task(task, objective=objective)
+        workers = self._workers_for_plan(task, source=source)
+        subtasks = self._decompose_task(task, objective=objective, workers=workers)
         decomposition = {
             "source": source,
             "members": [role.id for role in cabinet_members],
             "strategy": f"{planner_label}依据任务理解，将目标拆分为各角色负责的执行线。",
+            "participants": [role.id for role in workers],
             "subtasks": subtasks,
         }
         self.log.emit(
@@ -277,6 +281,7 @@ class Runtime:
         plan = {
             "source": source,
             "members": [role.id for role in cabinet_members],
+            "participants": [role.id for role in workers],
             "mission": mission,
             "subtasks": subtasks,
             "flow": (["orchestrator", "cabinet", "workers", "review"] if source == "cabinet" else ["leader", "workers", "review"]),
@@ -571,6 +576,8 @@ class Runtime:
         lane = self._role_lane(role.id, role.role)
         if lane == "目标与用户价值":
             summary = f"{role.name}正在梳理用户路径和验收边界。"
+        elif lane == "交互设计":
+            summary = f"{role.name}正在安排关键界面状态和操作路径。"
         elif lane == "实现":
             summary = f"{role.name}正在把这件事整理成可验证的推进路径。"
         elif lane == "验证与风险":
@@ -585,15 +592,19 @@ class Runtime:
         return [role for role in self.cabinet_roles if role.id not in already_spoke]
 
     def _roles_for_round(self, task: TaskSnapshot) -> list[Role]:
-        """Honor an explicit direct assignment without changing normal team collaboration."""
-        direct_owners = {
+        """Run only the workers selected by the latest recorded plan.
+
+        Older tasks without assignments keep the historical all-worker behavior;
+        new leader plans intentionally select the smallest useful set.
+        """
+        assigned_owners = {
             str(assignment.get("owner"))
             for assignment in latest_assignments_by_owner(task.assignments)
-            if assignment.get("mode") == "direct" and assignment.get("owner")
+            if assignment.get("owner")
         }
-        if not direct_owners:
+        if not assigned_owners:
             return self.worker_roles
-        return [role for role in self.worker_roles if role.id in direct_owners]
+        return [role for role in self.worker_roles if role.id in assigned_owners]
 
     def decide(self, task_id: str, resolution: str, reason: str) -> Event:
         if resolution not in {"done", "rework"}:
@@ -1042,12 +1053,65 @@ class Runtime:
             return str(task.interpretation["objective"])
         return "把需求转化为可执行、可验证的最小成果闭环。"
 
-    def _decompose_task(self, task: TaskSnapshot, *, objective: str | None = None) -> list[dict[str, Any]]:
+    def _workers_for_plan(self, task: TaskSnapshot, *, source: str) -> list[Role]:
+        """Choose the smallest role set that can own the visible deliverable.
+
+        Cabinet dispatch deliberately keeps every execution lane: it is the
+        explicit heavyweight path.  The leader's ordinary route starts from
+        product understanding, adds specialist lanes only when the request
+        calls for them, and always falls back to the configured workers.
+        """
+        workers = self.worker_roles
+        if source == "cabinet" or not workers:
+            return workers
+
+        interpretation = task.interpretation or self._interpret_task(task)
+        if interpretation.get("complexity") == "complex":
+            return workers
+
+        text = task.goal.lower()
+        content_terms = ("文案", "说明", "文档", "readme", "介绍", "总结", "整理")
+        design_terms = ("网页", "页面", "ui", "交互", "界面", "视觉", "原型")
+        implementation_terms = ("代码", "接口", "cli", "api", "实现", "开发", "python", "java", "搭建", "修复", "重构")
+        verification_terms = ("测试", "验证", "风险", "发布", "上线", "安全")
+        selected_lanes = {"目标与用户价值"}
+        is_content_request = any(term in text for term in content_terms)
+        if any(term in text for term in design_terms):
+            selected_lanes.add("交互设计")
+        if any(term in text for term in implementation_terms):
+            selected_lanes.add("实现")
+        if any(term in text for term in verification_terms):
+            selected_lanes.add("验证与风险")
+
+        # A request to make a screen is implementation work unless it is
+        # explicitly framed as content or visual exploration only.
+        if (
+            any(term in text for term in ("做", "创建", "build", "create"))
+            and any(term in text for term in design_terms)
+            and not is_content_request
+        ):
+            selected_lanes.update({"实现", "验证与风险"})
+        elif len(task.acceptance) >= 2 and not is_content_request:
+            selected_lanes.add("验证与风险")
+
+        selected = [
+            role for role in workers
+            if self._role_lane(role.id, role.role) in selected_lanes
+        ]
+        return selected or workers[:1]
+
+    def _decompose_task(
+        self,
+        task: TaskSnapshot,
+        *,
+        objective: str | None = None,
+        workers: list[Role] | None = None,
+    ) -> list[dict[str, Any]]:
         objective = objective or self._task_objective(task)
         criteria = list(task.acceptance) or ["产出有价值且可验证的下一步成果"]
         subtasks = []
         prior_by_lane: dict[str, list[str]] = {}
-        for index, role in enumerate(self.worker_roles):
+        for index, role in enumerate(workers if workers is not None else self.worker_roles):
             criterion = criteria[index % len(criteria)]
             lane = self._role_lane(role.id, role.role)
             subtask_id = f"{task.id}:{role.id}:{index + 1}"

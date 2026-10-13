@@ -201,7 +201,7 @@ class RuntimeTests(unittest.TestCase):
             first = rt.task(task_id)
             again = rt.task(task_id)
             self.assertEqual(first.status, again.status)
-            self.assertEqual(len(first.messages), 6)
+            self.assertEqual(len(first.messages), 7)
 
     def test_task_start_records_a_stable_organization_fingerprint(self):
         with Runtime(":memory:") as rt:
@@ -245,12 +245,12 @@ class RuntimeTests(unittest.TestCase):
             outcomes = [event for event in events if event.type == "deliverable.published"]
             working = [event for event in events if event.type == "agent.working"]
 
-        self.assertEqual(len(outcomes), 3)
-        self.assertEqual([event.actor.id for event in working], ["product", "dev", "test"])
+        self.assertEqual(len(outcomes), 4)
+        self.assertEqual([event.actor.id for event in working], ["product", "design", "dev", "test"])
         self.assertIn("用户路径", working[0].payload["summary"])
         self.assertEqual(
             [item["title"] for item in task.deliverables],
-            ["月亮的任务收束", "米寇的实现路径", "三角的验证清单"],
+            ["月亮的任务收束", "罐头的交互草图", "米寇的实现路径", "三角的验证清单"],
         )
         self.assertTrue(all(item["message_seq"] for item in task.deliverables))
 
@@ -503,10 +503,11 @@ class RuntimeTests(unittest.TestCase):
             rt.dispatch(task_id)
             task = rt.task(task_id)
 
-        product, dev, test = task.assignments
+        product, design, dev, test = task.assignments
         self.assertEqual(product["depends_on"], [])
+        self.assertEqual(design["depends_on"], [product["id"]])
         self.assertEqual(dev["depends_on"], [product["id"]])
-        self.assertEqual(test["depends_on"], [product["id"], dev["id"]])
+        self.assertEqual(test["depends_on"], [product["id"], design["id"], dev["id"]])
         self.assertEqual(test["deliverable"], "风险审查、测试策略与发布信心")
 
     def test_human_can_assign_directly_to_worker_layer(self):
@@ -551,11 +552,13 @@ class RuntimeTests(unittest.TestCase):
     def test_display_name_mention_can_prefer_a_single_worker(self):
         with Runtime(":memory:") as rt:
             mentions = rt.mentioned_workers("@月亮 帮我整理一个短页面文案")
+            design_mentions = rt.mentioned_workers("@罐头 帮我看看这个页面怎么更好用")
             task_id = rt.create_task("@月亮 帮我整理一个短页面文案")
             result = rt.intake(task_id, requested_route="direct", preferred_owner=mentions[0])
             task = rt.task(task_id)
 
         self.assertEqual(mentions, ["product"])
+        self.assertEqual(design_mentions, ["design"])
         self.assertEqual(result["route"]["route"], "direct")
         self.assertEqual(task.assignments[0]["owner"], "product")
         self.assertIn("做到什么算完成", task.interpretation["summary"])
@@ -577,7 +580,30 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("task.interpreted", event_types)
         self.assertIn("task.routed", event_types)
         self.assertIn("task.decomposed", event_types)
-        self.assertEqual(len(task.assignments), 3)
+        self.assertEqual(len(task.assignments), 4)
+
+    def test_leader_intake_selects_smallest_useful_worker_set(self):
+        with Runtime(":memory:") as rt:
+            content_task_id = rt.create_task("帮我整理一页活动说明")
+            rt.intake(content_task_id)
+            rt.collaborate(content_task_id)
+            content_task = rt.task(content_task_id)
+
+            screen_task_id = rt.create_task("做一个网页任务入口", ["能发起任务", "过程可回放"])
+            rt.intake(screen_task_id)
+            screen_task = rt.task(screen_task_id)
+
+        self.assertEqual([item["owner"] for item in content_task.assignments], ["product"])
+        self.assertEqual([message["actor"] for message in content_task.messages], ["product"])
+        self.assertEqual(screen_task.plan["participants"], ["product", "design", "dev", "test"])
+
+    def test_explicit_cabinet_dispatch_keeps_full_default_team(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("整理一页活动说明")
+            rt.dispatch(task_id)
+            task = rt.task(task_id)
+
+        self.assertEqual(task.plan["participants"], ["product", "design", "dev", "test"])
 
     def test_intake_can_override_direct_preference_and_convene_cabinet(self):
         with Runtime(":memory:") as rt:
@@ -818,7 +844,7 @@ class RuntimeTests(unittest.TestCase):
     def test_default_cat_cafe_keeps_cabinet_seats_separate_from_execution_cats(self):
         with Runtime(":memory:") as rt:
             self.assertTrue(rt.organization.cabinet_members.isdisjoint(rt.organization.worker_members))
-            self.assertEqual([role.name for role in rt.worker_roles], ["月亮", "米寇", "三角"])
+            self.assertEqual([role.name for role in rt.worker_roles], ["月亮", "罐头", "米寇", "三角"])
             self.assertEqual([role.name for role in rt.cabinet_roles], ["白露", "阿程", "知夏"])
             self.assertTrue(all(role.charter for role in rt.roles))
             self.assertTrue(all(role.voice for role in rt.roles))
@@ -827,8 +853,8 @@ class RuntimeTests(unittest.TestCase):
             task = rt.task(task_id)
 
         actors = [message["actor"] for message in task.messages]
-        self.assertEqual(actors[:3], ["product", "dev", "test"])
-        self.assertEqual(set(actors[3:]), {"cabinet_product", "cabinet_engineering", "cabinet_quality"})
+        self.assertEqual(actors[:4], ["product", "design", "dev", "test"])
+        self.assertEqual(set(actors[4:]), {"cabinet_product", "cabinet_engineering", "cabinet_quality"})
         self.assertEqual({vote["actor"] for vote in task.cabinet["votes"]}, {
             "cabinet_product", "cabinet_engineering", "cabinet_quality",
         })
@@ -1396,7 +1422,7 @@ class CliTests(unittest.TestCase):
         code, out = self.run_cli("show", task_id)
         self.assertEqual(code, 0)
         self.assertNotIn("cabinet=", out)
-        self.assertIn("assignments=3", out)
+        self.assertIn("assignments=4", out)
         self.assertIn("ladder:", out)
         self.assertIn("Cabinet: skipped", out)
 
@@ -1510,7 +1536,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 0)
         data = json.loads(out)
         self.assertTrue(data["ok"])
-        self.assertEqual(data["roles"], 6)
+        self.assertEqual(data["roles"], 7)
         self.assertEqual(data["chain"]["summary"], "hash chain ok, checked 0 event(s)")
         self.assertEqual(data["role_checks"][0]["status"], "configured")
 
@@ -1567,7 +1593,7 @@ class CliTests(unittest.TestCase):
 
         code, out = self.run_cli("show", task_id)
         self.assertEqual(code, 0)
-        self.assertIn("assignments=3", out)
+        self.assertIn("assignments=4", out)
 
     def test_cli_direct_assign_command(self):
         code, out = self.run_cli("new", "Assign only")
@@ -1597,7 +1623,7 @@ class CliTests(unittest.TestCase):
         task_id = next(line for line in out.splitlines() if line.startswith("created ")).split()[1]
         code, out = self.run_cli("assign", task_id, "nobody")
         self.assertEqual(code, 1)
-        self.assertIn("expected one of: product, dev, test", out)
+        self.assertIn("expected one of: product, design, dev, test", out)
 
     def test_cli_show_includes_recent_messages(self):
         code, out = self.run_cli("new", "Show message links", "--run")
@@ -2122,7 +2148,7 @@ class WebTests(unittest.TestCase):
                 profile = json.loads(response.read().decode("utf-8"))
 
         self.assertEqual(profile["leader"]["name"], "店长")
-        self.assertEqual([member["name"] for member in profile["workers"]], ["月亮", "米寇", "三角"])
+        self.assertEqual([member["name"] for member in profile["workers"]], ["月亮", "罐头", "米寇", "三角"])
         self.assertEqual(len(profile["cabinet"]), 3)
         self.assertTrue(profile["workers"][0]["charter"])
         self.assertEqual(profile["mode"], "local_demo")
@@ -2173,6 +2199,48 @@ class WebTests(unittest.TestCase):
 
         self.assertEqual(data["task"]["route"]["route"], "direct")
         self.assertEqual(data["task"]["assignments"][0]["owner"], "product")
+
+    def test_web_api_direct_preference_preserves_custom_assignment_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-direct-preference.db")
+            base = start_test_web(self, db)
+            request = Request(
+                f"{base}/api/tasks",
+                data=json.dumps(
+                    {
+                        "goal": "给接口补一条最小路径",
+                        "assign_to": "dev",
+                        "assign_objective": "只实现健康检查接口",
+                        "assign_acceptance": "接口返回正常状态",
+                    }
+                ).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+
+        assignment = data["task"]["assignments"][0]
+        self.assertEqual(data["task"]["route"]["route"], "direct")
+        self.assertEqual(assignment["objective"], "只实现健康检查接口")
+        self.assertEqual(assignment["acceptance"], "接口返回正常状态")
+
+    def test_web_api_runs_every_new_conversation_through_leader_intake(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-default-intake.db")
+            base = start_test_web(self, db)
+            request = Request(
+                f"{base}/api/tasks",
+                data=json.dumps({"goal": "帮我整理一页活动说明"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(data["task"]["route"]["route"], "collaborate")
+        self.assertTrue(data["task"]["interpretation"])
+        self.assertTrue(data["task"]["assignments"])
 
     def test_web_api_intake_exposes_interpretation_and_can_upgrade_route(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2368,7 +2436,7 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(tasks[0].status, "decided")
                 self.assertEqual(tasks[0].decision["source"], "leader")
                 self.assertEqual(tasks[0].acceptance, ["battle runs", "inbox updates"])
-                self.assertEqual(len(tasks[0].assignments), 3)
+                self.assertEqual(len(tasks[0].assignments), 4)
 
             with urlopen(f"{base}/", timeout=5) as response:
                 index = response.read().decode("utf-8")
@@ -2402,7 +2470,7 @@ class WebTests(unittest.TestCase):
                 task = rt.task(task_id)
                 self.assertEqual(task.commands[-1]["instruction"], "@dev propose the smallest next step")
                 self.assertEqual(task.commands[-1]["mentions"], ["dev"])
-                self.assertEqual(len(task.messages), 3)
+                self.assertEqual(len(task.messages), 4)
 
 
 if __name__ == "__main__":

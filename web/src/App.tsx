@@ -35,7 +35,7 @@ const statusText = (value?: string) => ({
   assigned: '已指派', accepted: '已定下', rejected: '未通过', recommended: '已建议', vetoed: '已否决', needs_supreme: '待最高决策', needs_human: '待人工处理',
 }[value ?? ''] ?? value ?? '未知')
 
-const actorText = (value: string) => ({ human: '你', orchestrator: '店长', leader: '店长', cabinet: '铲屎官们', supreme: '最高决策者', store_manager: '店长', reviewer: '复盘员', driver_gateway: '驱动网关', cabinet_product: '白露', cabinet_engineering: '阿程', cabinet_quality: '知夏', caretaker_product: '白露', caretaker_engineering: '阿程', caretaker_quality: '知夏', product: '月亮', dev: '米寇', test: '三角' }[value] ?? value)
+const actorText = (value: string) => ({ human: '你', orchestrator: '店长', leader: '店长', cabinet: '铲屎官们', supreme: '最高决策者', store_manager: '店长', reviewer: '复盘员', driver_gateway: '驱动网关', cabinet_product: '白露', cabinet_engineering: '阿程', cabinet_quality: '知夏', caretaker_product: '白露', caretaker_engineering: '阿程', caretaker_quality: '知夏', product: '月亮', design: '罐头', dev: '米寇', test: '三角' }[value] ?? value)
 
 const activityText = (activity?: Activity) => {
   if (activity?.active && activity.follow_up?.action === 'run') return '已收下新方向，当前轮结束后继续'
@@ -269,7 +269,7 @@ function DirectionComposer({ message, isSending, onMessageChange, onSend }: { me
 }
 
 function TaskComposer({ draft, isSending, onDraftChange, onCreate }: { draft: string; isSending: boolean; onDraftChange: (value: string) => void; onCreate: () => void }) {
-  return <div className="border-t border-[#e5d8ca] bg-[#fffaf4] p-3 sm:p-4"><div className="mx-auto flex max-w-3xl gap-2 rounded-xl border border-[#ddccbc] bg-white p-2 shadow-sm focus-within:border-[#cb6e4e] focus-within:ring-2 focus-within:ring-[#f7dfcf]"><textarea id="new-task" value={draft} onChange={(event) => onDraftChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onCreate() } }} placeholder="和店长聊聊，或 @月亮、@米寇、@三角 直接点名" aria-label="发起任务对话" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm outline-none placeholder:text-stone-400" /><button disabled={isSending || !draft.trim()} onClick={onCreate} className="grid size-10 shrink-0 place-items-center self-end rounded-lg bg-[#cb6e4e] text-white disabled:bg-stone-200" title="发送新任务"><ArrowUp size={17} /></button></div></div>
+  return <div className="border-t border-[#e5d8ca] bg-[#fffaf4] p-3 sm:p-4"><div className="mx-auto flex max-w-3xl gap-2 rounded-xl border border-[#ddccbc] bg-white p-2 shadow-sm focus-within:border-[#cb6e4e] focus-within:ring-2 focus-within:ring-[#f7dfcf]"><textarea id="new-task" value={draft} onChange={(event) => onDraftChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onCreate() } }} placeholder="和店长聊聊，或 @月亮、@罐头、@米寇、@三角 直接点名" aria-label="发起任务对话" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm outline-none placeholder:text-stone-400" /><button disabled={isSending || !draft.trim()} onClick={onCreate} className="grid size-10 shrink-0 place-items-center self-end rounded-lg bg-[#cb6e4e] text-white disabled:bg-stone-200" title="发送新任务"><ArrowUp size={17} /></button></div></div>
 }
 
 function ChatBubble({ item }: { item: ChatItem }) {

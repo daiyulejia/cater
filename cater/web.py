@@ -408,27 +408,27 @@ def make_handler(
                         if len(mentioned_workers) == 1:
                             assign_owner = mentioned_workers[0]
                             requested_route = "direct"
+                    elif assign_owner and requested_route is None:
+                        # API callers that name a worker are expressing the
+                        # same lightweight preference as an @ mention.  Intake
+                        # still records the leader's check before direct work.
+                        requested_route = "direct"
                     if assign_owner and assign_owner not in {role.id for role in rt.worker_roles}:
                         return self._bad_request(f"unknown role {assign_owner!r}")
                     task_id = rt.create_task(goal, acceptance)
-                    if requested_route is not None:
+                    if requested_route is not None or not _truthy(data.get("dispatch")):
                         try:
                             rt.intake(
                                 task_id,
-                                requested_route=requested_route,
+                                requested_route=requested_route or "auto",
                                 preferred_owner=assign_owner or None,
+                                preferred_objective=_optional_text(data.get("assign_objective")),
+                                preferred_acceptance=_optional_text(data.get("assign_acceptance")),
                             )
                         except ValueError as exc:
                             return self._bad_request(str(exc))
                     elif _truthy(data.get("dispatch")):
                         rt.dispatch(task_id)
-                    if assign_owner and requested_route is None:
-                        rt.assign(
-                            task_id,
-                            assign_owner,
-                            objective=_optional_text(data.get("assign_objective")),
-                            acceptance=_optional_text(data.get("assign_acceptance")),
-                        )
                     if run_now and not background:
                         rt.collaborate(task_id)
                     elif force_battle and not background:
@@ -1323,7 +1323,7 @@ def _distribution_panel(task: TaskSnapshot, roles: list[Any]) -> str:
         </select>
         """
     else:
-        owner_control = '<input name="owner" placeholder="product, dev, test">'
+        owner_control = '<input name="owner" placeholder="product, design, dev, test">'
     direct_form = f"""
     <form method="post" action="/tasks/{escape(task.id)}/assign" class="compact-form">
       <label>Direct worker role

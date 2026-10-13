@@ -7,6 +7,11 @@
     },
     {
       "kind": "guided",
+      "name": "design",
+      "tokens_per_call": 80
+    },
+    {
+      "kind": "guided",
       "name": "dev",
       "tokens_per_call": 80
     },
