@@ -18,6 +18,10 @@ python examples/api_client.py
 
 示例会通过 `POST /api/tasks` 创建任务，通过 `POST /api/tasks/<task_id>/run` 启动一轮协作，并校验 `/api/chain`。
 
+访问受令牌保护的远程工作台时，示例会自动从 `CATER_WEB_ACCESS_TOKEN` 读取令牌并发送
+`X-Cater-Access-Token`；令牌不需要也不应出现在命令行参数中。需要使用不同环境变量名时，可传入
+`--access-token-env YOUR_TOKEN_ENV`。
+
 ## NDJSON Driver 协议
 
 CLI driver 每行读取一个 JSON 请求，并且每行写入一个 JSON 响应。探针请求与响应如下：

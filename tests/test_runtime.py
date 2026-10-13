@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -1657,7 +1658,7 @@ class DriverTests(unittest.TestCase):
     def test_example_api_client_drives_web_api(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "api-client.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, access_token="api-client-token")
 
             script = Path(__file__).resolve().parents[1] / "examples" / "api_client.py"
             result = subprocess.run(
@@ -1666,6 +1667,7 @@ class DriverTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env={**os.environ, "CATER_WEB_ACCESS_TOKEN": "api-client-token"},
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
