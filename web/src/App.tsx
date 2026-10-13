@@ -56,9 +56,14 @@ const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
 
 function userFacingError(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message.trim() : ''
-  if (message === 'access token is required') {
-    return '这个工作台需要访问令牌。请使用带 #access_token=… 的地址重新打开。'
+  const known: Record<string, string> = {
+    'access token is required': '这个工作台需要访问令牌。请使用带 #access_token=… 的地址重新打开。',
+    'goal is required': '先告诉店长这次想完成什么，再发送。',
+    'a collaboration activity is already running for this task': '这项任务正在协作中，已避免重复启动；可以继续补充方向。',
+    'choose either run for normal collaboration or battle for forced governance': '一次只能选择正常协作或请伙伴复核其中一种方式。',
   }
+  if (known[message]) return known[message]
+  if (message.startsWith('unknown role ')) return '点名的伙伴不存在，请从当前猫咖成员中选择。'
   return message || fallback
 }
 
@@ -322,7 +327,7 @@ function App() {
         </section>
         <aside className="bg-[#fffaf4] p-4 lg:border-l lg:border-[#e5d8ca]">
           {task && <>{detail?.organization_memory && <MemoryBoard items={detail.organization_memory} names={Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))} />}<Workboard task={task} detail={detail} names={Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} /></>}
-          {error && <p className="mt-4 rounded-lg bg-rose-50 p-3 text-xs text-rose-700">{error}</p>}
+          {error && <p role="alert" className="mt-4 rounded-lg bg-rose-50 p-3 text-xs text-rose-700">{error}</p>}
         </aside>
       </main>
     </div>
