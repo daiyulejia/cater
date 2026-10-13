@@ -9,6 +9,7 @@ guessing from names alone.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from typing import Any
 
@@ -46,9 +47,7 @@ def handle(request: dict[str, Any]) -> dict[str, Any]:
 
 def build_response(*, role: str, prompt: str, context: dict[str, Any]) -> dict[str, Any]:
     goal = str(context.get("goal") or "the task")
-    # Real adapters may add target/reply_to when they are intentionally
-    # continuing or correcting a visible prior event from the prompt.
-    return {
+    payload = {
         "stance": "assert",
         "option_id": "external-tool",
         "claim": f"{role} can call an external tool for {goal}",
@@ -56,6 +55,23 @@ def build_response(*, role: str, prompt: str, context: dict[str, Any]) -> dict[s
         "confidence": 0.7,
         "text": "Replace build_response with an MCP, skill, CLI, or API call.",
     }
+    reply = visible_reply_target(prompt)
+    if reply:
+        target, seq = reply
+        payload["target"] = target
+        payload["reply_to"] = seq
+        payload["claim"] = f"{role} continues {target}'s visible work for {goal}"
+        payload["evidence"].append(f"reply_to=#{seq}")
+    return payload
+
+
+def visible_reply_target(prompt: str) -> tuple[str, int] | None:
+    """Return the latest visible worker event reference from a Cater prompt."""
+    matches = re.findall(r"\b([A-Za-z0-9_-]+)/[A-Za-z0-9_-]+:[^#]*\(#(\d+)\)", prompt)
+    if not matches:
+        return None
+    target, seq = matches[-1]
+    return target, int(seq)
 
 
 def estimate_tokens(prompt: str, payload: dict[str, Any]) -> int:

@@ -874,6 +874,22 @@ class DriverTests(unittest.TestCase):
         self.assertIn("external tool", response.text)
         self.assertGreater(response.tokens, 0)
 
+    def test_example_tool_driver_can_reply_to_visible_worker_output(self):
+        script = Path(__file__).resolve().parents[1] / "examples" / "ndjson_tool_driver.py"
+        driver = CliDriver("tool", [sys.executable, str(script)], timeout=5)
+        self.addCleanup(driver.close)
+
+        response = driver.complete(
+            role="builder",
+            prompt="Current round memory: alpha/assert: Draft the plan (#12).",
+            context={"goal": "continue the plan"},
+        )
+        payload = json.loads(response.text)
+
+        self.assertEqual(payload["target"], "alpha")
+        self.assertEqual(payload["reply_to"], 12)
+        self.assertIn("continues alpha", payload["claim"])
+
     def test_example_api_client_drives_web_api(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "api-client.db")

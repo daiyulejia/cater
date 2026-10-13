@@ -74,6 +74,12 @@ correcting, or handing off another agent's output:
 that was visible to the agent in the prompt. Cater drops invalid reply metadata
 instead of storing speculative links.
 
+`examples/ndjson_tool_driver.py` includes a tiny deterministic version of this:
+when the prompt contains a visible worker line such as
+`alpha/assert: Draft the plan (#12)`, it replies with `target="alpha"` and
+`reply_to=12`. Real adapters should do this only when they are genuinely
+continuing, correcting, or handing off visible work.
+
 ## Integration Rule
 
 Do not infer behavior from package names, function names, or framework marketing.
