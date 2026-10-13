@@ -10,7 +10,7 @@ type Message = { seq: number; actor: string; role: string; type: string; claim?:
 type Deliverable = { seq: number; title: string; summary: string; kind?: string; uri?: string; message_seq?: number }
 type OrgRole = { id: string; name: string; role: string; charter?: string }
 type Organization = { leader: OrgRole; cabinet: OrgRole[]; workers: OrgRole[]; mode?: 'local_demo' | 'external_driver' }
-type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'; active: boolean; error?: string }
+type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'; active: boolean; error?: string; follow_up?: { action?: string } }
 type Task = {
   id: string; goal: string; acceptance: string[]; status: string; messages: Message[]; assignments: Assignment[]
   deliverables: Deliverable[]
@@ -38,6 +38,7 @@ const statusText = (value?: string) => ({
 const actorText = (value: string) => ({ human: '你', orchestrator: '店长', cabinet: '铲屎官们', supreme: '最高决策者', store_manager: '店长', reviewer: '复盘员', driver_gateway: '驱动网关', cabinet_product: '白露', cabinet_engineering: '阿程', cabinet_quality: '知夏', caretaker_product: '白露', caretaker_engineering: '阿程', caretaker_quality: '知夏', product: '月亮', dev: '米寇', test: '三角' }[value] ?? value)
 
 const activityText = (activity?: Activity) => {
+  if (activity?.active && activity.follow_up?.action === 'run') return '已收下新方向，当前轮结束后继续'
   if (activity?.state === 'queued') return '协作已排队'
   if (activity?.state === 'running') return '正在协作'
   if (activity?.state === 'completed') return '协作完成'
@@ -92,7 +93,10 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       ? value.filter((id): id is string => typeof id === 'string').map((id) => identities[id]?.name ?? actorText(id))
       : []
     if (event.type === 'task.created') return [message('新任务', String(payload.goal ?? ''), 'human')]
-    if (event.type === 'activity.queued') return [message('协作已排队', String(payload.action) === 'battle' ? '店长请几位铲屎官一起看看。' : '团队将开始下一轮协作。', 'system')]
+    if (event.type === 'activity.queued') {
+      const followUp = typeof payload.after_activity_id === 'string'
+      return [message(followUp ? '新方向已收下' : '协作已排队', followUp ? '店长会在当前这一轮结束后，按你刚补充的方向继续安排。' : String(payload.action) === 'battle' ? '店长请几位铲屎官一起看看。' : '团队将开始下一轮协作。', 'system')]
+    }
     if (event.type === 'activity.completed') return [message('本轮协作完成', String(payload.action) === 'battle' ? '这轮讨论已经结束。' : '团队已完成这一轮协作。', 'system')]
     if (event.type === 'activity.failed') return [message('协作异常', String(payload.message ?? '后台协作未能完成。'), 'system')]
     if (event.type === 'human.commanded') return [message('方向更新', String(payload.instruction ?? ''), 'human')]
@@ -208,8 +212,7 @@ function App() {
     if (!selectedId || !message.trim()) return
     setIsSending(true); setError('')
     try {
-      await api(`/api/tasks/${selectedId}/command`, { method: 'POST', body: JSON.stringify({ instruction: message.trim() }) })
-      const result = await api<TaskDetail>(`/api/tasks/${selectedId}/run`, { method: 'POST', body: JSON.stringify({ background: true }) })
+      const result = await api<TaskDetail>(`/api/tasks/${selectedId}/command`, { method: 'POST', body: JSON.stringify({ instruction: message.trim(), continue: true }) })
       setMessage(''); setDetail(result); await refresh(selectedId)
     } catch (err) { setError(err instanceof Error ? err.message : '发送指令失败') }
     finally { setIsSending(false) }

@@ -41,9 +41,36 @@ class ActivityRunner:
         return activity
 
     def submit(self, task_id: str, action: str) -> dict[str, Any]:
+        return self._submit(task_id, action, queue_after_current=False)
+
+    def continue_after_current(self, task_id: str, action: str) -> dict[str, Any]:
+        """Queue one follow-up round without racing the active one.
+
+        A human direction is already durable in the event log when this method
+        runs.  Keeping the current round intact avoids force-killing a local
+        CLI process, while the queued follow-up makes the new direction visible
+        to a freshly assembled runtime context.
+        """
+        return self._submit(task_id, action, queue_after_current=True)
+
+    def _submit(self, task_id: str, action: str, *, queue_after_current: bool) -> dict[str, Any]:
         with self._lock:
             current = self._activities.get(task_id)
             if current and current["state"] in {"queued", "running"}:
+                if queue_after_current:
+                    queued = current.get("follow_up")
+                    if not queued:
+                        queued = {
+                            "id": "activity_" + uuid.uuid4().hex[:10],
+                            "action": action,
+                            "queued_at": _now_iso(),
+                        }
+                        current["follow_up"] = queued
+                        try:
+                            self._record_queued(task_id, queued, after_activity_id=current["id"])
+                        except Exception:
+                            current.pop("follow_up", None)
+                            raise
                 return self.status(task_id)
             activity = {
                 "id": "activity_" + uuid.uuid4().hex[:10],
@@ -54,27 +81,42 @@ class ActivityRunner:
             self._activities[task_id] = activity
 
         try:
-            with self._runtime_factory() as runtime:
-                if runtime.task(task_id) is None:
-                    raise KeyError(task_id)
-                runtime.log.emit(
-                    actor=EventActor.system("orchestrator"),
-                    type="activity.queued",
-                    task_id=task_id,
-                    payload={"activity_id": activity["id"], "action": action},
-                )
+            self._record_queued(task_id, activity)
         except Exception as exc:
             self._finish(task_id, activity["id"], "failed", error=str(exc))
             raise
 
+        self._start(task_id, activity)
+        return self.status(task_id)
+
+    def _record_queued(
+        self,
+        task_id: str,
+        activity: dict[str, Any],
+        *,
+        after_activity_id: str | None = None,
+    ) -> None:
+        with self._runtime_factory() as runtime:
+            if runtime.task(task_id) is None:
+                raise KeyError(task_id)
+            payload: dict[str, Any] = {"activity_id": activity["id"], "action": activity["action"]}
+            if after_activity_id:
+                payload["after_activity_id"] = after_activity_id
+            runtime.log.emit(
+                actor=EventActor.system("orchestrator"),
+                type="activity.queued",
+                task_id=task_id,
+                payload=payload,
+            )
+
+    def _start(self, task_id: str, activity: dict[str, Any]) -> None:
         thread = threading.Thread(
             target=self._run,
-            args=(task_id, activity["id"], action),
-            name=f"cater-{action}-{task_id}",
+            args=(task_id, activity["id"], activity["action"]),
+            name=f"cater-{activity['action']}-{task_id}",
             daemon=True,
         )
         thread.start()
-        return self.status(task_id)
 
     def _run(self, task_id: str, activity_id: str, action: str) -> None:
         self._mark_running(task_id, activity_id)
@@ -121,6 +163,7 @@ class ActivityRunner:
                 activity["started_at"] = _now_iso()
 
     def _finish(self, task_id: str, activity_id: str, state: str, *, error: str | None = None) -> None:
+        follow_up: dict[str, Any] | None = None
         with self._lock:
             activity = self._activities.get(task_id)
             if not activity or activity["id"] != activity_id:
@@ -129,6 +172,12 @@ class ActivityRunner:
             activity["finished_at"] = _now_iso()
             if error:
                 activity["error"] = error
+            queued = activity.pop("follow_up", None)
+            if state == "completed" and isinstance(queued, dict):
+                follow_up = {**queued, "state": "queued"}
+                self._activities[task_id] = follow_up
+        if follow_up is not None:
+            self._start(task_id, follow_up)
 
 
 def _now_iso() -> str:
@@ -392,6 +441,8 @@ def make_handler(
                                     else None
                                 ),
                             )
+                            if _truthy(data.get("continue")):
+                                background_action = "run"
                         elif action == "decide":
                             rt.decide(
                                 task_id,
@@ -403,7 +454,10 @@ def make_handler(
                     except ValueError as exc:
                         return self._bad_request(str(exc))
                 if background_action:
-                    activities.submit(task_id, background_action)
+                    if action == "command":
+                        activities.continue_after_current(task_id, background_action)
+                    else:
+                        activities.submit(task_id, background_action)
                 return self._send_json(
                     self._task_payload(task_id, activities),
                     status=HTTPStatus.ACCEPTED if background_action else HTTPStatus.OK,

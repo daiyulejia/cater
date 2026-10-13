@@ -143,6 +143,10 @@ GET /api/chain
 在 `run` 或 `battle` 同时传入 `background: true` 时，接口会以 `202 Accepted` 立即返回；响应中的
 `activity` 描述排队或执行状态，事件链会记录排队、完成或失败。对话工作台默认使用这个模式，只有任务
 活跃时才轮询回放。
+
+`POST /api/tasks/<task_id>/command` 传入 `{ "instruction": "...", "continue": true }` 时，
+店长会先记录新方向；若当前轮仍在执行，则把一轮新的协作排在它之后。这样不会粗暴中断本地 CLI，
+也不会让刚补充的意图被正在处理的旧上下文吞掉。
 零依赖客户端示例见 [examples/api_client.py](examples/api_client.py)。
 
 ## 当前范围
