@@ -478,7 +478,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
             ["three roles contribute", "cabinet policy records the next action"],
         )
         rt.dispatch(task_id)
-        result = rt.collaborate(task_id)
+        result = rt.battle(task_id)
         print(f"task: {task_id}")
         print("mission: dispatched")
         print(f"brief: {result['brief']['dispute']}")

@@ -121,8 +121,8 @@ class RuntimeTests(unittest.TestCase):
             result = rt.battle(task_id)
             task = rt.task(task_id)
 
-            self.assertEqual(task.status, "rework")
-            self.assertEqual(task.decision["resolution"], "rework")
+            self.assertEqual(task.status, "decided")
+            self.assertEqual(task.decision["resolution"], "accepted")
             self.assertIn("positions", result["brief"])
             self.assertEqual(rt.inbox(), [])
 
@@ -182,7 +182,8 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertEqual(profiles, from_events)
             self.assertEqual(profiles["product"]["supports"], 1)
-            self.assertEqual(profiles["test"]["challenges"], 1)
+            self.assertEqual(profiles["test"]["challenges"], 0)
+            self.assertEqual(profiles["test"]["supports"], 1)
             self.assertIn("先交付最小", profiles["product"]["last_claim"])
 
     def test_default_demo_drivers_publish_replayable_deliverables(self):
@@ -591,21 +592,20 @@ class RuntimeTests(unittest.TestCase):
             self.assertIn("agent.decided", event_types)
             self.assertEqual(task.cabinet["approval_threshold"], 2)
             self.assertEqual(task.cabinet["quorum"], 3)
-            self.assertEqual(task.cabinet["status"], "vetoed")
-            self.assertEqual(task.cabinet["vetoed_by"], ["test"])
+            self.assertEqual(task.cabinet["status"], "recommended")
+            self.assertEqual(task.cabinet["vetoed_by"], [])
             self.assertEqual(len(task.cabinet["votes"]), 3)
             self.assertEqual(result["brief"]["cabinet"], task.cabinet)
             self.assertEqual(result["brief"]["governance"]["status"], "forced")
 
-    def test_collaboration_records_governance_trigger_reason(self):
+    def test_default_collaboration_skips_governance_when_roles_converge(self):
         with Runtime(":memory:") as rt:
-            task_id = rt.create_task("Trigger governance")
+            task_id = rt.create_task("Default collaboration")
             result = rt.collaborate(task_id)
             governance = result["brief"]["governance"]
 
-            self.assertEqual(governance["status"], "triggered")
-            self.assertIn("challenge:test", governance["signals"])
-            self.assertTrue(any(signal.startswith("option_split:") for signal in governance["signals"]))
+            self.assertEqual(governance["status"], "not_needed")
+            self.assertEqual(governance["signals"], [])
 
     def test_runtime_accepts_external_role_and_driver_configs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -667,7 +667,12 @@ class RuntimeTests(unittest.TestCase):
                 """,
                 encoding="utf-8",
             )
-            with Runtime(":memory:", roles_path=roles) as rt:
+            drivers = {
+                "product": StaticResponseDriver('{"stance":"assert","option_id":"A","claim":"产品方案","text":"产品方案"}'),
+                "dev": StaticResponseDriver('{"stance":"assert","option_id":"B","claim":"开发方案","text":"开发方案"}'),
+                "test": StaticResponseDriver('{"stance":"assert","option_id":"C","claim":"测试方案","text":"测试方案"}'),
+            }
+            with Runtime(":memory:", roles_path=roles, drivers=drivers) as rt:
                 task_id = rt.create_task("Need supreme fallback")
                 rt.battle(task_id)
                 task = rt.task(task_id)
@@ -1091,10 +1096,10 @@ class CliTests(unittest.TestCase):
 
         code, out = self.run_cli("show", task_id)
         self.assertEqual(code, 0)
-        self.assertIn("cabinet=vetoed", out)
+        self.assertNotIn("cabinet=", out)
         self.assertIn("assignments=3", out)
         self.assertIn("ladder:", out)
-        self.assertIn("Cabinet: vetoed", out)
+        self.assertIn("Cabinet: skipped", out)
 
         code, out = self.run_cli("inbox")
         self.assertEqual(code, 0)
@@ -1150,7 +1155,7 @@ class CliTests(unittest.TestCase):
         code, out = self.run_cli("profiles")
         self.assertEqual(code, 0)
         self.assertIn("product", out)
-        self.assertIn("challenges=1", out)
+        self.assertIn("challenges=0", out)
 
     def test_cli_policy(self):
         code, out = self.run_cli("policy")
@@ -1531,7 +1536,7 @@ class WebTests(unittest.TestCase):
         self.assertIn("human / lifecycle", html)
         self.assertIn("filter-pill active", html)
         self.assertEqual([step["id"] for step in ladder], ["battle", "cabinet", "supreme", "human"])
-        self.assertEqual(ladder[1]["status"], "vetoed")
+        self.assertEqual(ladder[1]["status"], "recommended")
 
     def test_render_task_can_filter_timeline_by_category(self):
         with Runtime(":memory:") as rt:
@@ -1830,7 +1835,7 @@ class WebTests(unittest.TestCase):
             with Runtime(db) as rt:
                 tasks = rt.tasks()
                 self.assertEqual(len(tasks), 1)
-                self.assertEqual(tasks[0].status, "rework")
+                self.assertEqual(tasks[0].status, "running")
                 self.assertEqual(tasks[0].acceptance, ["battle runs", "inbox updates"])
                 self.assertEqual(len(tasks[0].assignments), 3)
 

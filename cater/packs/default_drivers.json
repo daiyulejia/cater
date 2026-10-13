@@ -13,7 +13,7 @@
       "name": "dev",
       "tokens_per_call": 200,
       "script": [
-        "{\"stance\":\"assert\",\"option_id\":\"B\",\"claim\":\"先加固驱动与事件边界\",\"evidence\":[\"真实 CLI 接入会暴露协议漂移与崩溃问题\"],\"confidence\":0.74,\"text\":\"建议在扩展界面前，先接入并验证真实驱动。\",\"deliverables\":[{\"title\":\"驱动接入检查清单\",\"summary\":\"优先验证 NDJSON 协议、存活探针和崩溃恢复边界。\",\"kind\":\"checklist\"}]}"
+        "{\"stance\":\"assert\",\"option_id\":\"A\",\"claim\":\"先加固最小闭环的驱动与事件边界\",\"evidence\":[\"真实 CLI 接入会暴露协议漂移与崩溃问题\"],\"confidence\":0.74,\"text\":\"同意先交付最小闭环，并为它接入和验证真实驱动。\",\"deliverables\":[{\"title\":\"驱动接入检查清单\",\"summary\":\"优先验证最小闭环的 NDJSON 协议、存活探针和崩溃恢复边界。\",\"kind\":\"checklist\"}]}"
       ]
     },
     {
@@ -21,7 +21,7 @@
       "name": "test",
       "tokens_per_call": 200,
       "script": [
-        "{\"stance\":\"challenge\",\"option_id\":\"C\",\"claim\":\"没有可回放证据，就不能宣称协作有效\",\"evidence\":[\"能够运行不等于结果正确\"],\"confidence\":0.82,\"text\":\"在保留过程证据之前，我反对宣布已经达成共识。\",\"deliverables\":[{\"title\":\"可回放验证要求\",\"summary\":\"结论必须关联事件链、验收标准和可复现证据。\",\"kind\":\"checklist\"}]}"
+        "{\"stance\":\"assert\",\"option_id\":\"A\",\"claim\":\"最小闭环必须带可回放证据\",\"evidence\":[\"能够运行不等于结果正确\"],\"confidence\":0.82,\"text\":\"同意先交付最小闭环，但结论必须关联可回放证据。\",\"deliverables\":[{\"title\":\"可回放验证要求\",\"summary\":\"最小闭环的结论必须关联事件链、验收标准和可复现证据。\",\"kind\":\"checklist\"}]}"
       ]
     }
   ]
