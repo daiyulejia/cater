@@ -2243,6 +2243,67 @@ class WebTests(unittest.TestCase):
             thread.join(timeout=1)
             server.server_close()
 
+    def test_web_uses_the_latest_queued_strategy_after_multiple_directions(self):
+        driver = BlockingDriver()
+        self.addCleanup(driver.release.set)
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-latest-direction.db")
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                json.dumps(
+                    {
+                        "governance": {"trigger_on_option_split": False},
+                        "cabinet": {"approval_threshold": 1, "quorum": 1, "veto_roles": []},
+                        "roles": [{"id": "worker", "name": "执行", "role": "worker", "driver": "blocking"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def runtime_factory() -> Runtime:
+                return Runtime(db, roles_path=roles, drivers={"blocking": driver})
+
+            base, server, thread = start_test_web(self, db, runtime_factory=runtime_factory, return_server=True)
+            create = Request(
+                f"{base}/api/tasks",
+                data=json.dumps({"goal": "Work while receiving new directions", "run": True, "background": True}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(create, timeout=2) as response:
+                task_id = json.loads(response.read().decode("utf-8"))["task"]["id"]
+            self.assertTrue(driver.started.wait(timeout=1))
+
+            for instruction in ("先继续正常推进", "请内阁一起审查最新取舍"):
+                command = Request(
+                    f"{base}/api/tasks/{task_id}/command",
+                    data=json.dumps({"instruction": instruction, "continue": True}).encode("utf-8"),
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urlopen(command, timeout=2) as response:
+                    queued = json.loads(response.read().decode("utf-8"))
+
+            self.assertEqual(queued["activity"]["follow_up"]["action"], "battle")
+            replacements = [
+                event for event in queued["events"]
+                if event["type"] == "activity.queued" and event["payload"].get("replaces_action") == "run"
+            ]
+            self.assertEqual(replacements[-1]["payload"]["action"], "battle")
+
+            driver.release.set()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                with urlopen(f"{base}/api/tasks/{task_id}", timeout=2) as response:
+                    completed = json.loads(response.read().decode("utf-8"))
+                if not completed["activity"]["active"]:
+                    break
+                time.sleep(0.03)
+            self.assertEqual(completed["activity"]["state"], "completed")
+            server.shutdown()
+            thread.join(timeout=1)
+            server.server_close()
+
     def test_bundled_workroom_includes_chinese_shell_and_static_assets(self):
         root = Path(web_module.__file__).resolve().parent / "static" / "workroom"
         shell = (root / "index.html").read_text(encoding="utf-8")

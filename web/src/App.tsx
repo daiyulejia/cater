@@ -118,7 +118,8 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     if (event.type === 'activity.queued') {
       if (hasFinishedActivity) return []
       const followUp = typeof payload.after_activity_id === 'string'
-      return [message(followUp ? '新方向已收下' : '协作已排队', followUp ? '店长会在当前这一轮结束后，按你刚补充的方向继续安排。' : String(payload.action) === 'battle' ? '店长请几位铲屎官一起看看。' : '团队将开始下一轮协作。', 'system')]
+      const changed = typeof payload.replaces_action === 'string'
+      return [message(changed ? '店长更新了排队安排' : followUp ? '新方向已收下' : '协作已排队', changed ? (String(payload.action) === 'battle' ? '店长会在当前这一轮结束后，先请伙伴复核最新取舍。' : '店长会在当前这一轮结束后，按最新方向直接继续推进。') : followUp ? '店长会在当前这一轮结束后，按你刚补充的方向继续安排。' : String(payload.action) === 'battle' ? '店长请几位铲屎官一起看看。' : '团队将开始下一轮协作。', 'system')]
     }
     // The header already carries live activity state. Completion, routing and
     // plan bookkeeping remain in the audit trail but should not crowd out the

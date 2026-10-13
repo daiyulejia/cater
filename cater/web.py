@@ -113,6 +113,21 @@ class ActivityRunner:
                         except Exception:
                             current.pop("follow_up", None)
                             raise
+                    elif queued["action"] != action:
+                        previous_action = queued["action"]
+                        queued["action"] = action
+                        queued["revised_at"] = _now_iso()
+                        try:
+                            self._record_queued(
+                                task_id,
+                                queued,
+                                after_activity_id=current["id"],
+                                replaces_action=previous_action,
+                            )
+                        except Exception:
+                            queued["action"] = previous_action
+                            queued.pop("revised_at", None)
+                            raise
                 return self.status(task_id)
             activity = {
                 "id": "activity_" + uuid.uuid4().hex[:10],
@@ -137,6 +152,7 @@ class ActivityRunner:
         activity: dict[str, Any],
         *,
         after_activity_id: str | None = None,
+        replaces_action: str | None = None,
     ) -> None:
         with self._runtime_factory() as runtime:
             if runtime.task(task_id) is None:
@@ -144,6 +160,8 @@ class ActivityRunner:
             payload: dict[str, Any] = {"activity_id": activity["id"], "action": activity["action"]}
             if after_activity_id:
                 payload["after_activity_id"] = after_activity_id
+            if replaces_action:
+                payload["replaces_action"] = replaces_action
             runtime.log.emit(
                 actor=EventActor.system("orchestrator"),
                 type="activity.queued",
