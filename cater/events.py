@@ -148,41 +148,49 @@ class EventLog:
         category = EVENT_CATEGORIES.get(type)
         if category is None:
             raise UnknownEventType(type)
-        prev = self.head_hash()
-        event_id = uuid.uuid4().hex
-        ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
-        payload = dict(payload or {})
-        fingerprint = self._fingerprint(
-            event_id=event_id,
-            ts=ts,
-            task_id=task_id,
-            actor=actor,
-            type=type,
-            category=category,
-            payload=payload,
-            prev_hash=prev,
-        )
-        signature = self._sign(fingerprint) if self.audit_key else None
-        key_id = self.key_id if signature else None
-        cur = self.db.execute(
-            """INSERT INTO events
-               (id, ts, task_id, actor_json, type, category, payload_json, prev_hash, hash, key_id, signature)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                event_id,
-                ts,
-                task_id,
-                json.dumps(actor.to_dict(), ensure_ascii=False, sort_keys=True),
-                type,
-                category,
-                json.dumps(payload, ensure_ascii=False, sort_keys=True),
-                prev,
-                fingerprint,
-                key_id,
-                signature,
-            ),
-        )
-        self.db.commit()
+        # Multiple Web requests use independent SQLite connections.  Acquiring
+        # the write transaction before reading the previous hash prevents two
+        # writers from attaching different events to the same chain head.
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            prev = self.head_hash()
+            event_id = uuid.uuid4().hex
+            ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+            payload = dict(payload or {})
+            fingerprint = self._fingerprint(
+                event_id=event_id,
+                ts=ts,
+                task_id=task_id,
+                actor=actor,
+                type=type,
+                category=category,
+                payload=payload,
+                prev_hash=prev,
+            )
+            signature = self._sign(fingerprint) if self.audit_key else None
+            key_id = self.key_id if signature else None
+            cur = self.db.execute(
+                """INSERT INTO events
+                   (id, ts, task_id, actor_json, type, category, payload_json, prev_hash, hash, key_id, signature)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    event_id,
+                    ts,
+                    task_id,
+                    json.dumps(actor.to_dict(), ensure_ascii=False, sort_keys=True),
+                    type,
+                    category,
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    prev,
+                    fingerprint,
+                    key_id,
+                    signature,
+                ),
+            )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         seq = int(cur.lastrowid)
         return Event(
             seq,

@@ -24,6 +24,7 @@ from cater import __version__, web as web_module
 from cater import cli as cli_module
 from cater.cli import main
 from cater.drivers import CliDriver, DriverProtocolError, DriverResponse, DriverUnavailable, OpenAICompatibleDriver, _RejectRedirects, load_drivers
+from cater.events import Actor, EventLog
 from cater.ladder import decision_ladder
 from cater.messages import message_relation
 from cater.profiles import agent_profiles
@@ -205,6 +206,45 @@ class RuntimeTests(unittest.TestCase):
             report = rt.verify_chain()
             self.assertTrue(report.ok, report.describe())
             self.assertEqual(report.checked, rt.log.count())
+
+    def test_concurrent_event_writers_preserve_one_linear_hash_chain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "concurrent-events.db")
+            ready = threading.Barrier(3)
+            errors: list[Exception] = []
+
+            def emit(index: int) -> None:
+                log = EventLog(db)
+                try:
+                    ready.wait(timeout=2)
+                    log.emit(
+                        actor=Actor.system("test"),
+                        type="task.started",
+                        task_id=f"task_{index}",
+                        payload={"writer": index},
+                    )
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    log.close()
+
+            writers = [threading.Thread(target=emit, args=(index,)) for index in (1, 2)]
+            for writer in writers:
+                writer.start()
+            ready.wait(timeout=2)
+            for writer in writers:
+                writer.join(timeout=5)
+
+            log = EventLog(db)
+            try:
+                report = log.verify_chain()
+                count = log.count()
+            finally:
+                log.close()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(count, 2)
+        self.assertTrue(report.ok, report.describe())
 
     def test_hmac_audit_signature_verifies_and_rejects_wrong_key(self):
         with tempfile.TemporaryDirectory() as tmp:
