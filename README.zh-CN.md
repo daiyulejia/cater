@@ -45,6 +45,7 @@ cater inbox
 cater policy
 cater doctor
 cater doctor --probe
+cater doctor --json
 cater dispatch <task_id>
 cater run <task_id>
 cater export <task_id>
@@ -89,6 +90,7 @@ cater profiles
 cater policy
 cater doctor
 cater doctor --probe
+cater doctor --probe --json
 cater decide <task_id> --resolution done --reason "Accepted"
 cater chain
 cater chain --json
@@ -106,6 +108,8 @@ cater --audit-key "dev-secret" chain --json
 `dispatch` 会记录金字塔式任务分发路径：顶层定义 mission，内阁把 mission 拆成执行 lane，worker agent 在下一轮协作前拿到明确分工。它是可选能力；小任务可以用 `assign` 或 `new --assign-to dev --run` 直接派给执行层。
 
 `--driver-attempts` 和 `--circuit-breaker-threshold` 可以调节 driver 重试与熔断策略，不需要改 driver 代码。
+
+`doctor --json` 会输出同一套机器可读健康检查，适合 CI、定时自审和接入新 driver 前的探针。
 
 什么时候用直接派发、内阁分发或治理路径，见 [docs/organization-flow.md](docs/organization-flow.md)。
 

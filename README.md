@@ -45,6 +45,7 @@ cater inbox
 cater policy
 cater doctor
 cater doctor --probe
+cater doctor --json
 cater dispatch <task_id>
 cater run <task_id>
 cater export <task_id>
@@ -89,6 +90,7 @@ cater profiles
 cater policy
 cater doctor
 cater doctor --probe
+cater doctor --probe --json
 cater decide <task_id> --resolution done --reason "Accepted"
 cater chain
 cater chain --json
@@ -106,6 +108,8 @@ cater --audit-key "dev-secret" chain --json
 `dispatch` records the pyramid-style task distribution path: the top layer frames the mission, the cabinet decomposes it into execution lanes, and worker agents receive assigned work before the next collaboration round. This is optional; small tasks can go straight to a worker with `assign` or `new --assign-to dev --run`.
 
 `--driver-attempts` and `--circuit-breaker-threshold` tune retry containment without changing driver code.
+
+`doctor --json` returns the same health check in a machine-readable shape for CI, scheduled review, and pre-integration probes.
 
 See [docs/organization-flow.md](docs/organization-flow.md) for when to use direct assignment, cabinet dispatch, or governance.
 

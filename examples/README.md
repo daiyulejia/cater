@@ -78,6 +78,13 @@ instead of storing speculative links.
 
 Do not infer behavior from package names, function names, or framework marketing.
 
+Before running a configured external driver through a real task, use the
+machine-readable doctor output:
+
+```bash
+cater --drivers examples/tool_driver_config.json doctor --probe --json
+```
+
 Before wrapping a tool:
 
 - run a probe
