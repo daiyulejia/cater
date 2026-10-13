@@ -931,6 +931,7 @@ def task_to_dict(task: TaskSnapshot) -> dict[str, Any]:
         "status": task.status,
         "messages": task.messages,
         "driver_failures": task.driver_failures,
+        "budget_exhaustions": task.budget_exhaustions,
         "discipline_flags": task.discipline_flags,
         "cabinet": task.cabinet,
         "proposal": task.proposal,

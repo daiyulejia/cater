@@ -18,6 +18,7 @@ type Task = {
   id: string; goal: string; acceptance: string[]; status: string; messages: Message[]; assignments: Assignment[]
   deliverables: Deliverable[]
   discipline_flags?: DisciplineFlag[]
+  budget_exhaustions?: { seq: number; driver?: string; budget?: number; used_tokens?: number }[]
   activity?: Activity
   decision?: { resolution?: string; reason?: string; source?: string }
   brief?: { dispute?: string; consensus?: string[] }; mission?: { goal?: string }; cabinet?: { status?: string; reason?: string }
@@ -176,6 +177,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       const issues = Array.isArray(payload.issues) ? payload.issues.filter((item): item is string => typeof item === 'string') : []
       return [message('协作提醒', `这条发言需要补充：${disciplineText(issues)}。它不会直接影响团队决策。`, 'system', 'decision')]
     }
+    if (event.type === 'driver.budget_exhausted') return [message('协作预算提醒', `通道 ${String(payload.driver ?? '')} 已使用 ${String(payload.used_tokens ?? 0)} / ${String(payload.budget ?? 0)} 个已报告 token，本轮不再继续调用它。`, 'system', 'decision')]
     if (event.type === 'driver.failed') return [message('已隔离的驱动异常', String(payload.message ?? ''), 'system')]
     return []
   })

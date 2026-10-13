@@ -42,10 +42,11 @@ class DriverUnavailable(DriverError):
 
 
 class ScriptedDriver:
-    def __init__(self, name: str, script: list[str], tokens_per_call: int = 200):
+    def __init__(self, name: str, script: list[str], tokens_per_call: int = 200, token_budget: int | None = None):
         self.name = name
         self.script = list(script)
         self.tokens_per_call = tokens_per_call
+        self.token_budget = token_budget
         self.cursor = 0
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
@@ -69,9 +70,10 @@ class GuidedDriver:
     driver yet.
     """
 
-    def __init__(self, name: str, tokens_per_call: int = 80):
+    def __init__(self, name: str, tokens_per_call: int = 80, token_budget: int | None = None):
         self.name = name
         self.tokens_per_call = tokens_per_call
+        self.token_budget = token_budget
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
         focus = _demo_focus(context)
@@ -207,12 +209,14 @@ class CliDriver:
         cwd: str | Path | None = None,
         timeout: float = 120.0,
         restart_limit: int = 1,
+        token_budget: int | None = None,
     ):
         self.name = name
         self.command = list(command)
         self.cwd = str(cwd) if cwd is not None else None
         self.timeout = timeout
         self.restart_limit = restart_limit
+        self.token_budget = token_budget
         self._proc: subprocess.Popen[str] | None = None
         self._lock = threading.Lock()
 
@@ -350,6 +354,7 @@ class OpenAICompatibleDriver:
         api_key_env: str,
         timeout: float = 120.0,
         temperature: float | None = None,
+        token_budget: int | None = None,
     ):
         self.name = name
         self.endpoint = endpoint
@@ -357,6 +362,7 @@ class OpenAICompatibleDriver:
         self.api_key_env = api_key_env
         self.timeout = timeout
         self.temperature = temperature
+        self.token_budget = token_budget
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
         api_key = os.environ.get(self.api_key_env)
@@ -456,12 +462,13 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
             name,
             list(script),
             tokens_per_call=tokens_per_call,
+            token_budget=_token_budget(data, name),
         )
     if kind == "guided":
         tokens_per_call = int(data.get("tokens_per_call", 80))
         if tokens_per_call < 0:
             raise ValueError(f"guided driver {name!r} tokens_per_call must be non-negative")
-        return GuidedDriver(name, tokens_per_call=tokens_per_call)
+        return GuidedDriver(name, tokens_per_call=tokens_per_call, token_budget=_token_budget(data, name))
     if kind == "cli":
         command = data.get("command")
         if not isinstance(command, list) or not all(isinstance(item, str) for item in command):
@@ -478,6 +485,7 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
             cwd=data.get("cwd"),
             timeout=timeout,
             restart_limit=restart_limit,
+            token_budget=_token_budget(data, name),
         )
     if kind == "openai_compatible":
         endpoint = data.get("endpoint")
@@ -502,8 +510,24 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
             api_key_env=api_key_env.strip(),
             timeout=timeout,
             temperature=float(temperature_raw) if temperature_raw is not None else None,
+            token_budget=_token_budget(data, name),
         )
     raise ValueError(f"unknown driver kind: {kind!r}")
+
+
+def _token_budget(data: dict[str, Any], name: str) -> int | None:
+    value = data.get("token_budget")
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"driver {name!r} token_budget must be a non-negative integer")
+    try:
+        budget = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"driver {name!r} token_budget must be a non-negative integer") from exc
+    if budget < 0 or str(value).strip() != str(budget):
+        raise ValueError(f"driver {name!r} token_budget must be a non-negative integer")
+    return budget
 
 
 def load_drivers(path: str | Path) -> dict[str, Driver]:

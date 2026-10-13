@@ -32,6 +32,7 @@ EVENT_CATEGORIES = {
     "subtask.assigned": "planning",
     "plan.proposed": "planning",
     "driver.failed": "driver",
+    "driver.budget_exhausted": "driver",
     "agent.working": "dialogue",
     "msg.said": "dialogue",
     "msg.challenge": "dialogue",

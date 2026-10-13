@@ -232,6 +232,8 @@ cater --roles examples/layered_api_roles.json --drivers examples/layered_api_dri
 
 网页会显示“本地演示”“部分成员已接入外部驱动”或“已接入外部驱动”，并按执行成员显示通道状态；它不会显示账号、端点或密钥。provider 未返回可验证的 `usage.total_tokens` 时，成本会记为未知而不是伪造为零。
 
+需要控制共享账号的消耗时，可在任一 driver 配置中增加 `token_budget`。预算按 driver 名跨角色累计，所以给 `council` 设置预算就是给整层内阁设置一个共享上限。它只累计 `token_usage=reported` 的实际 provider 用量；达到上限后 Cater 会写入 `driver.budget_exhausted` 并停止该通道后续调用。由于一次调用完成后才知道总用量，它是防止继续扩张的护栏，不是对单次请求的硬性账单上限；provider 不报告 usage 时，Cater 会明确保留“未知”，而不会假装预算可精确执行。
+
 `meta.token_usage` 可选值为 `reported`、`estimated`、`unavailable`。缺省值是 `reported`，供已经返回可信用量的第三方 driver 保持兼容；演示 driver 会标记为 `estimated`。若 provider 没有可验证的用量数据，必须标记为 `unavailable`，Cater 会在回放和 `review` 中把成本显示为未知，而不是把它误报成零。随附的 Codex CLI 适配器遵循这一规则。
 
 ## 角色命名

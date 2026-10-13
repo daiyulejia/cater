@@ -719,6 +719,22 @@ class Runtime:
         prompt: str,
         round_outputs: list[dict[str, Any]] | None = None,
     ) -> DriverResponse:
+        token_budget = getattr(driver, "token_budget", None)
+        used_tokens = self._reported_driver_tokens(role.driver)
+        if isinstance(token_budget, int) and used_tokens >= token_budget:
+            self.log.emit(
+                actor=Actor.system("driver_gateway"),
+                type="driver.budget_exhausted",
+                task_id=task_id,
+                payload={
+                    "role": role.id,
+                    "driver": role.driver,
+                    "budget": token_budget,
+                    "used_tokens": used_tokens,
+                    "accounting": "reported_only",
+                },
+            )
+            return self._contained_driver_failure(role, "reported token budget is exhausted")
         if self._is_circuit_open(role.driver):
             self._emit_driver_failure(
                 task_id=task_id,
@@ -770,6 +786,16 @@ class Runtime:
                 )
         assert last_error is not None
         return self._contained_driver_failure(role, str(last_error))
+
+    def _reported_driver_tokens(self, driver_name: str) -> int:
+        """Count only provider-reported usage; unknown telemetry cannot be safely capped."""
+        return sum(
+            int(event.payload.get("tokens") or 0)
+            for event in self.log.read()
+            if event.type in {"msg.said", "msg.challenge"}
+            and event.payload.get("driver") == driver_name
+            and event.payload.get("token_usage") == "reported"
+        )
 
     def _emit_driver_failure(
         self,

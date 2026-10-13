@@ -87,8 +87,10 @@ class StaticResponseDriver:
         self.text = text
         self.tokens = tokens
         self.meta = meta
+        self.calls = 0
 
     def complete(self, *, role: str, prompt: str, context: dict) -> DriverResponse:
+        self.calls += 1
         return DriverResponse(text=self.text, tokens=self.tokens, meta=self.meta)
 
 
@@ -414,6 +416,31 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("invalid_target", task.discipline_flags[0]["issues"])
         self.assertIn("agent.discipline_flagged", [event.type for event in events])
         self.assertTrue(any(item["id"] == "discipline" and item["status"] == "watch" for item in review["lenses"]))
+
+    def test_reported_token_budget_is_shared_by_roles_using_the_same_driver(self):
+        driver = StaticResponseDriver(
+            '{"stance":"assert","option_id":"A","claim":"正常输出","evidence":["可核验"],"text":"正常输出"}',
+            tokens=5,
+        )
+        driver.token_budget = 5
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                '{"organization":{"leader":{"id":"lead","name":"Lead","role":"lead"},"cabinet_members":["alpha","beta"],"worker_members":["alpha","beta"]},"roles":[{"id":"alpha","name":"Alpha","role":"alpha","driver":"shared"},{"id":"beta","name":"Beta","role":"beta","driver":"shared"}]}',
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"shared": driver}) as rt:
+                task_id = rt.create_task("共享预算")
+                rt.collaborate(task_id)
+                task = rt.task(task_id)
+                events = rt.log.read(task_id=task_id)
+
+        self.assertEqual(driver.calls, 1)
+        self.assertEqual(task.tokens, 5)
+        self.assertEqual(len(task.budget_exhaustions), 1)
+        self.assertEqual(task.budget_exhaustions[0]["role"], "beta")
+        self.assertEqual(task.budget_exhaustions[0]["used_tokens"], 5)
+        self.assertIn("driver.budget_exhausted", [event.type for event in events])
 
     def test_task_memory_shares_prior_agent_outputs_between_roles(self):
         driver = PromptCaptureDriver()
@@ -1360,6 +1387,12 @@ class DriverTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "api_key_env"):
+                load_drivers(drivers)
+            drivers.write_text(
+                '{"drivers":[{"kind":"guided","name":"bad","token_budget":1.5}]}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "token_budget must be a non-negative integer"):
                 load_drivers(drivers)
 
     def test_example_tool_driver_speaks_ndjson(self):

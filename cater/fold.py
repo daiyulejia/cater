@@ -16,6 +16,7 @@ class TaskSnapshot:
     status: str = "pending"
     messages: list[dict[str, Any]] = field(default_factory=list)
     driver_failures: list[dict[str, Any]] = field(default_factory=list)
+    budget_exhaustions: list[dict[str, Any]] = field(default_factory=list)
     cabinet: dict[str, Any] | None = None
     proposal: dict[str, Any] | None = None
     brief: dict[str, Any] | None = None
@@ -84,6 +85,8 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
             task.token_usage[source] = task.token_usage.get(source, 0) + 1
         elif event.type == "driver.failed":
             task.driver_failures.append({"seq": event.seq, **payload})
+        elif event.type == "driver.budget_exhausted":
+            task.budget_exhaustions.append({"seq": event.seq, **payload})
         elif event.type == "agent.discipline_flagged":
             task.discipline_flags.append({"seq": event.seq, **payload})
         elif event.type == "escalation.triggered":
