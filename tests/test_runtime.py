@@ -91,9 +91,11 @@ class StaticResponseDriver:
         self.tokens = tokens
         self.meta = meta
         self.calls = 0
+        self.prompts: list[str] = []
 
     def complete(self, *, role: str, prompt: str, context: dict) -> DriverResponse:
         self.calls += 1
+        self.prompts.append(prompt)
         return DriverResponse(text=self.text, tokens=self.tokens, meta=self.meta)
 
 
@@ -475,6 +477,81 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertEqual(task.diagnoses, [])
         self.assertEqual(task.handoffs, [])
+
+    def test_agent_confirmation_is_recorded_as_a_report_until_independently_checked(self):
+        response = json.dumps(
+            {
+                "stance": "assert",
+                "option_id": "A",
+                "claim": "模型认为已定位根因",
+                "evidence": ["模型描述了一次复现"],
+                "text": "我认为原因已找到。",
+                "diagnosis": {
+                    "status": "confirmed",
+                    "symptom": "提交后出现回归",
+                    "cause": "可能改动了共享路径",
+                    "observations": ["模型报告曾看到异常"],
+                },
+            },
+            ensure_ascii=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                '{"roles":[{"id":"worker","name":"执行者","role":"执行","driver":"result"}]}',
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"result": StaticResponseDriver(response)}) as rt:
+                task_id = rt.create_task("核对根因")
+                rt.collaborate(task_id)
+                task = rt.task(task_id)
+
+        self.assertEqual(task.diagnoses[0]["status"], "reported")
+        self.assertEqual(task.diagnoses[0]["message_seq"], task.messages[0]["seq"])
+
+    def test_follow_up_question_receives_prior_diagnosis_and_handoff_as_reports(self):
+        response = json.dumps(
+            {
+                "stance": "assert",
+                "option_id": "A",
+                "claim": "提出修复方案",
+                "text": "先确认影响面。",
+                "diagnosis": {
+                    "status": "hypothesis",
+                    "symptom": "登录偶发失败",
+                    "cause": "共享状态可能被覆盖",
+                    "alternatives": ["也可能是网络超时"],
+                    "impact": ["会影响并发登录"],
+                },
+                "handoff": {
+                    "summary": "收紧共享状态写入",
+                    "why": "避免覆盖其他请求",
+                    "changed": ["写入路径"],
+                    "verification": ["本地并发测试由成员报告通过"],
+                    "limits": ["生产流量尚未验证"],
+                    "teach_back": ["为什么锁要覆盖读写两步？"],
+                },
+            },
+            ensure_ascii=False,
+        )
+        driver = StaticResponseDriver(response)
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                '{"roles":[{"id":"worker","name":"执行者","role":"执行","driver":"result"}]}',
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"result": driver}) as rt:
+                task_id = rt.create_task("修复登录问题")
+                rt.collaborate(task_id)
+                rt.command(task_id, "为什么锁要覆盖读写两步？")
+                rt.collaborate(task_id)
+
+        self.assertIn("latest_agent_diagnosis=", driver.prompts[1])
+        self.assertIn("共享状态可能被覆盖", driver.prompts[1])
+        self.assertIn("latest_agent_handoff=", driver.prompts[1])
+        self.assertIn("为什么锁要覆盖读写两步？", driver.prompts[1])
+        self.assertIn("checks are agent-reported", driver.prompts[1])
 
     def test_profile_memory_is_fed_into_later_collaboration_prompts(self):
         driver = PromptCaptureDriver()
@@ -930,6 +1007,18 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual([item["owner"] for item in content_task.assignments], ["product"])
         self.assertEqual([message["actor"] for message in content_task.messages], ["product"])
         self.assertEqual(screen_task.plan["participants"], ["product", "design", "dev", "test"])
+
+    def test_bugfix_intake_includes_quality_without_convening_cabinet(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("修复登录时偶发的 bug")
+            result = rt.intake(task_id)
+            task = rt.task(task_id)
+            dev_assignment = next(item for item in task.assignments if item["owner"] == "dev")
+            test_assignment = next(item for item in task.assignments if item["owner"] == "test")
+
+        self.assertEqual(result["route"]["route"], "collaborate")
+        self.assertEqual(task.plan["participants"], ["product", "dev", "test"])
+        self.assertIn(dev_assignment["id"], test_assignment["depends_on"])
 
     def test_intake_does_not_treat_a_generic_multiple_word_as_governance_scope(self):
         with Runtime(":memory:") as rt:
@@ -2838,6 +2927,10 @@ class WebTests(unittest.TestCase):
         self.assertIn("已避免重复启动", bundle_text)
         self.assertIn("这段内容太长了", bundle_text)
         self.assertIn("自证与交接", bundle_text)
+        self.assertIn("成员称已证实，待独立核验", bundle_text)
+        self.assertIn("成员报告的检查", bundle_text)
+        self.assertIn("核验事件链", bundle_text)
+        self.assertNotIn("事件链完整 · 本地工作区", bundle_text)
         self.assertIn("role:`alert`", bundle_text)
         self.assertNotIn("向猫咖下单", bundle_text)
 

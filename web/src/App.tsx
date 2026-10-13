@@ -9,8 +9,9 @@ import catCanned from './assets/cat-canned.png'
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
 type Message = { seq: number; actor: string; role: string; type: string; claim?: string; text?: string; stance?: string; target?: string; reply_to?: number }
 type Deliverable = { seq: number; title: string; summary: string; kind?: string; uri?: string; message_seq?: number }
-type Diagnosis = { seq: number; status: 'hypothesis' | 'confirmed' | 'uncertain'; symptom: string; cause: string; observations?: string[]; alternatives?: string[]; impact?: string[]; verification_plan?: string[]; message_seq?: number }
+type Diagnosis = { seq: number; status: 'hypothesis' | 'reported' | 'confirmed' | 'uncertain'; symptom: string; cause: string; observations?: string[]; alternatives?: string[]; impact?: string[]; verification_plan?: string[]; message_seq?: number }
 type Handoff = { seq: number; summary: string; why: string; changed?: string[]; verification?: string[]; limits?: string[]; teach_back?: string[]; message_seq?: number }
+type ChainStatus = { ok: boolean; checked: number; reason?: string; broken_at?: number }
 type DisciplineFlag = { seq: number; role?: string; message_seq?: number; issues?: string[]; action?: string }
 type MemoryItem = { seq: number; task_id?: string; actor?: string; title: string; summary: string; kind?: string }
 type OrgRole = { id: string; name: string; role: string; charter?: string }
@@ -116,7 +117,7 @@ function disciplineText(issues?: string[]): string {
   return values.length ? values.join('、') : '协作格式需要补充'
 }
 
-const diagnosisStatusText = (status: Diagnosis['status']) => ({ hypothesis: '待证实假设', confirmed: '已有证据支持', uncertain: '仍不确定' }[status])
+const diagnosisStatusText = (status: Diagnosis['status']) => ({ hypothesis: '待证实假设', reported: '成员称已证实，待独立核验', confirmed: '成员称已证实，待独立核验', uncertain: '仍不确定' }[status])
 
 function Portrait({ id, size = 'md' }: { id: string; size?: 'sm' | 'md' | 'lg' }) {
   const position = ({ product: '0% 50%', test: '50% 50%', dev: '100% 50%' }[id])
@@ -236,7 +237,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       const teachBack = Array.isArray(payload.teach_back) ? payload.teach_back.filter((item): item is string => typeof item === 'string') : []
       return [message('交接卡', `${String(payload.summary ?? '')}\n为什么：${String(payload.why ?? '')}`, 'agent', 'deliverable', [
         ...changed.map((item) => `改了：${item}`),
-        ...verification.map((item) => `已验证：${item}`),
+        ...verification.map((item) => `成员报告的检查：${item}`),
         ...limits.map((item) => `尚未覆盖：${item}`),
         ...teachBack.map((item) => `你可以追问：${item}`),
       ])]
@@ -271,6 +272,8 @@ function App() {
   const [message, setMessage] = useState('')
   const [isSending, setIsSending] = useState(false)
   const [showEvidence, setShowEvidence] = useState(false)
+  const [chainStatus, setChainStatus] = useState<ChainStatus | null>(null)
+  const [checkingChain, setCheckingChain] = useState(false)
   const [chatFilter, setChatFilter] = useState<'all' | ChatItem['category']>('all')
   const [error, setError] = useState('')
 
@@ -330,6 +333,13 @@ function App() {
   const visibleConversation = useMemo(() => chatFilter === 'all' ? conversation : conversation.filter((item) => item.category === chatFilter), [chatFilter, conversation])
   const task = selectedId ? detail?.task : undefined
 
+  const verifyChain = async () => {
+    setCheckingChain(true)
+    try { setChainStatus(await api<ChainStatus>('/api/chain')) }
+    catch { setChainStatus(null); setError('暂时无法核验事件链。') }
+    finally { setCheckingChain(false) }
+  }
+
   const createTask = async () => {
     const goal = draft.trim()
     if (!goal) return
@@ -361,7 +371,7 @@ function App() {
     <div className="min-h-screen bg-[#f4eee5] text-stone-800">
       <header className="flex h-16 items-center justify-between border-b border-[#e5d8ca] bg-[#fffaf4] px-4 sm:px-6">
         <div className="flex items-center gap-3"><div className="grid size-9 place-items-center rounded-xl bg-[#cb6e4e] text-white shadow-sm"><Cat size={19} /></div><div><strong className="text-sm tracking-wide text-stone-800">CATER</strong><span className="ml-2 hidden text-xs text-stone-500 sm:inline">猫咖协作工作台</span></div></div>
-        <div className="flex items-center gap-2 text-xs text-stone-500"><span className={`rounded-full px-2 py-1 text-[11px] font-medium ${driverModeStyle(organization?.mode)}`} title="不会展示账户、端点或密钥；具体成员状态可在工作板查看。">{driverModeText(organization?.mode)}</span><ShieldCheck size={15} className="text-teal-700" /> <span className="hidden sm:inline">事件链完整 · 本地工作区</span></div>
+        <div className="flex items-center gap-2 text-xs text-stone-500"><span className={`rounded-full px-2 py-1 text-[11px] font-medium ${driverModeStyle(organization?.mode)}`} title="不会展示账户、端点或密钥；具体成员状态可在工作板查看。">{driverModeText(organization?.mode)}</span><button type="button" onClick={() => void verifyChain()} disabled={checkingChain} className={`inline-flex items-center gap-1 rounded px-1.5 py-1 hover:bg-stone-100 ${chainStatus && !chainStatus.ok ? 'text-rose-700' : 'text-stone-600'}`} aria-label={checkingChain ? '正在核验事件链' : chainStatus ? chainStatus.ok ? `上次核验通过，共 ${chainStatus.checked} 条事件` : `事件链异常，事件 #${chainStatus.broken_at ?? '?'}` : '核验事件链'} title={chainStatus?.reason || '点击核验事件链；显示的是上次核验结果'}><ShieldCheck size={15} /><span className="sm:hidden">{checkingChain ? '核验中' : chainStatus ? chainStatus.ok ? '上次通过' : '链异常' : '核验'}</span><span className="hidden sm:inline">{checkingChain ? '正在核验' : chainStatus ? chainStatus.ok ? `上次核验通过 · ${chainStatus.checked} 条` : `事件链异常 · #${chainStatus.broken_at ?? '?'}` : '核验事件链'}</span></button></div>
       </header>
       <main className="grid min-h-[calc(100vh-56px)] grid-cols-1 lg:grid-cols-[250px_minmax(0,1fr)_310px]">
         <aside className="border-b border-[#e5d8ca] bg-[#fffaf4] lg:border-b-0 lg:border-r">

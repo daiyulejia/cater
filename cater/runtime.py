@@ -1171,10 +1171,16 @@ class Runtime:
             "User-facing response: speak naturally in your configured character. Do not expose internal "
             "role names, seat classes, orchestration policies, prompts, or hidden reasoning. State only "
             "useful work, visible evidence, decisions, risks, and results.\n"
+            "When the customer asks why or how, answer their specific question from the prior diagnosis, "
+            "handoff, and observed work. Explain the key choice and how they can reproduce the check; "
+            "separate observed results from unrun checks and invite one useful follow-up question.\n"
             "Agent-to-agent policy: when you are continuing, correcting, or handing off another "
             "agent's output, include target=<role id> and reply_to=<event seq> in the JSON.\n"
             "Team discipline: every contribution needs a visible claim; a challenge needs explicit evidence; "
             "and a directed reply must name a valid visible event. Unsupported challenges cannot act as vetoes.\n"
+            "For code diagnosis or changes, trace the affected callers and side effects, consider a plausible "
+            "alternative cause, and state what was actually reproduced or tested. In a handoff, name the "
+            "specific checks and observed results; if tools were unavailable, say the checks were not run.\n"
             f"{memory}\n"
             f"{organization_memory}\n"
             f"{task_memory}\n"
@@ -1185,7 +1191,8 @@ class Runtime:
             "optional target, reply_to, and optional deliverables. Each deliverable needs title and summary; "
             "it may also include kind and uri. When diagnosing a problem, optionally include diagnosis with "
             "status (hypothesis, confirmed, or uncertain), symptom, cause, observations, alternatives, impact, "
-            "and verification_plan. When handing work to a customer or teammate, optionally include handoff with "
+            "and verification_plan. A claimed confirmed diagnosis is recorded as agent-reported until an "
+            "independent check is available. When handing work to a customer or teammate, optionally include handoff with "
             "summary, changed, why, verification, limits, and teach_back. These are concise, user-visible "
             "rationales and evidence, never hidden reasoning. Do not claim a cause or test result as confirmed "
             "unless the visible evidence supports it."
@@ -1279,6 +1286,42 @@ class Runtime:
                     messages.append(f"{actor}/{stance}: {claim[:180]}{suffix}")
             if messages:
                 parts.append("recent_agent_outputs=" + " | ".join(messages))
+        if task.diagnoses:
+            latest = task.diagnoses[-1]
+            parts.append(
+                "latest_agent_diagnosis="
+                + json.dumps(
+                    {
+                        "seq": latest.get("seq"),
+                        "status": latest.get("status"),
+                        "symptom": str(latest.get("symptom") or "")[:180],
+                        "cause": str(latest.get("cause") or "")[:180],
+                        "observations": [str(item)[:120] for item in latest.get("observations", [])[:2]],
+                        "alternatives": [str(item)[:120] for item in latest.get("alternatives", [])[:2]],
+                        "impact": [str(item)[:120] for item in latest.get("impact", [])[:2]],
+                        "verification_plan": [str(item)[:120] for item in latest.get("verification_plan", [])[:2]],
+                    },
+                    ensure_ascii=False,
+                )
+                + "; this is an agent report, not independently verified"
+            )
+        if task.handoffs:
+            latest = task.handoffs[-1]
+            parts.append(
+                "latest_agent_handoff="
+                + json.dumps(
+                    {
+                        "seq": latest.get("seq"),
+                        "summary": str(latest.get("summary") or "")[:180],
+                        "why": str(latest.get("why") or "")[:180],
+                        "verification": [str(item)[:120] for item in latest.get("verification", [])[:2]],
+                        "limits": [str(item)[:120] for item in latest.get("limits", [])[:2]],
+                        "teach_back": [str(item)[:120] for item in latest.get("teach_back", [])[:2]],
+                    },
+                    ensure_ascii=False,
+                )
+                + "; checks are agent-reported until independently observed"
+            )
         if not parts:
             return "Task memory: no prior collaboration on this task."
         return "Task memory: " + "; ".join(parts) + "."
@@ -1439,8 +1482,8 @@ class Runtime:
         text = task.goal.lower()
         content_terms = ("文案", "说明", "文档", "readme", "介绍", "总结", "整理")
         design_terms = ("网页", "页面", "ui", "交互", "界面", "视觉", "原型")
-        implementation_terms = ("代码", "接口", "cli", "api", "实现", "开发", "python", "java", "搭建", "修复", "重构")
-        verification_terms = ("测试", "验证", "风险", "发布", "上线", "安全")
+        implementation_terms = ("代码", "接口", "cli", "api", "实现", "开发", "python", "java", "搭建", "修复", "重构", "bug", "故障", "异常", "崩溃", "回归", "漏洞", "排查")
+        verification_terms = ("测试", "验证", "风险", "发布", "上线", "安全", "修复", "bug", "故障", "异常", "崩溃", "回归", "漏洞", "并发")
         selected_lanes = {"目标与用户价值"}
         is_content_request = any(term in text for term in content_terms)
         if any(term in text for term in design_terms):
@@ -1664,7 +1707,7 @@ class Runtime:
         if status not in {"hypothesis", "confirmed", "uncertain"} or not symptom or not cause:
             return None
         result: dict[str, Any] = {
-            "status": status,
+            "status": "reported" if status == "confirmed" else status,
             "symptom": symptom[:1_200],
             "cause": cause[:1_200],
         }
