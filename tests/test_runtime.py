@@ -21,7 +21,7 @@ from urllib.request import Request, urlopen
 from cater.cabinet import majority_threshold, tally_votes
 from cater import __version__, web as web_module
 from cater.cli import main
-from cater.drivers import CliDriver, DriverResponse, DriverUnavailable, OpenAICompatibleDriver, load_drivers
+from cater.drivers import CliDriver, DriverProtocolError, DriverResponse, DriverUnavailable, OpenAICompatibleDriver, load_drivers
 from cater.ladder import decision_ladder
 from cater.messages import message_relation
 from cater.profiles import agent_profiles
@@ -1333,7 +1333,7 @@ class DriverTests(unittest.TestCase):
             def __exit__(self, *_args):
                 return False
 
-            def read(self):
+            def read(self, _limit=-1):
                 return json.dumps(
                     {
                         "choices": [{"message": {"content": '{"stance":"assert","text":"完成"}'}}],
@@ -1369,6 +1369,29 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(response.meta["token_usage"], "reported")
         self.assertIn("完成", response.text)
         self.assertEqual(captured["timeout"], 9)
+
+    def test_openai_compatible_driver_rejects_oversized_api_response(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, limit=-1):
+                return b"x" * limit
+
+        driver = OpenAICompatibleDriver(
+            "worker-api",
+            endpoint="https://models.example.test/v1/chat/completions",
+            model="test-model",
+            api_key_env="CATER_TEST_API_KEY",
+        )
+        with patch.dict("cater.drivers.os.environ", {"CATER_TEST_API_KEY": "secret-value"}, clear=False), patch(
+            "cater.drivers.urlopen", return_value=FakeResponse()
+        ):
+            with self.assertRaisesRegex(DriverProtocolError, "response exceeds"):
+                driver.complete(role="worker", prompt="Return JSON", context={})
 
     def test_openai_compatible_driver_does_not_send_a_request_without_its_key(self):
         driver = OpenAICompatibleDriver(

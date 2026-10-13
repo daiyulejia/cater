@@ -15,6 +15,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
+MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
 @dataclass(frozen=True)
 class DriverResponse:
     text: str
@@ -398,11 +401,15 @@ class OpenAICompatibleDriver:
         )
         try:
             with urlopen(request, timeout=self.timeout) as response:
-                raw = response.read()
+                raw = response.read(MAX_API_RESPONSE_BYTES + 1)
         except HTTPError as exc:
             raise DriverUnavailable(f"{self.name} API request failed with HTTP {exc.code}") from exc
         except (URLError, TimeoutError, OSError) as exc:
             raise DriverUnavailable(f"{self.name} API endpoint is unavailable") from exc
+        if len(raw) > MAX_API_RESPONSE_BYTES:
+            raise DriverProtocolError(
+                f"{self.name} API response exceeds {MAX_API_RESPONSE_BYTES} byte limit"
+            )
         try:
             data = json.loads(raw)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
