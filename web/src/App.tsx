@@ -9,6 +9,7 @@ import catCanned from './assets/cat-canned.png'
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
 type Message = { seq: number; actor: string; role: string; type: string; claim?: string; text?: string; stance?: string; target?: string; reply_to?: number }
 type Deliverable = { seq: number; title: string; summary: string; kind?: string; uri?: string; message_seq?: number }
+type DisciplineFlag = { seq: number; role?: string; message_seq?: number; issues?: string[]; action?: string }
 type OrgRole = { id: string; name: string; role: string; charter?: string }
 type DriverCoverage = { role_id: string; name: string; driver: string; mode: 'local_demo' | 'external' }
 type Organization = { leader: OrgRole; cabinet: OrgRole[]; workers: OrgRole[]; mode?: 'local_demo' | 'mixed_driver' | 'external_driver'; worker_drivers?: DriverCoverage[] }
@@ -16,6 +17,7 @@ type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'runn
 type Task = {
   id: string; goal: string; acceptance: string[]; status: string; messages: Message[]; assignments: Assignment[]
   deliverables: Deliverable[]
+  discipline_flags?: DisciplineFlag[]
   activity?: Activity
   decision?: { resolution?: string; reason?: string; source?: string }
   brief?: { dispute?: string; consensus?: string[] }; mission?: { goal?: string }; cabinet?: { status?: string; reason?: string }
@@ -65,6 +67,15 @@ function reasonText(value: string): string {
   const recommended = /^Option (.+) reached approval threshold (\d+)\.$/.exec(value)
   if (recommended) return `方案 ${recommended[1]} 达到 ${recommended[2]} 票通过门槛。`
   return value
+}
+
+function disciplineText(issues?: string[]): string {
+  const labels: Record<string, string> = {
+    invalid_stance: '表达格式不完整', missing_claim: '没有写清结论', challenge_without_evidence: '质疑缺少可复查依据',
+    invalid_target: '点名对象不存在', invalid_reply_to: '回复没有对应到可见发言', target_without_visible_reply: '点名缺少回复依据', reply_without_target: '回复缺少明确对象',
+  }
+  const values = (issues ?? []).map((item) => labels[item] ?? item)
+  return values.length ? values.join('、') : '协作格式需要补充'
 }
 
 function Portrait({ id, size = 'md' }: { id: string; size?: 'sm' | 'md' | 'lg' }) {
@@ -160,6 +171,10 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     if (event.type === 'brief.generated' && !hasAutonomousDecision) {
       const brief = payload.brief as Record<string, unknown> | undefined
       return [message('本轮总结', reasonText(String(brief?.dispute ?? '团队已完成一轮协作。')), 'system')]
+    }
+    if (event.type === 'agent.discipline_flagged') {
+      const issues = Array.isArray(payload.issues) ? payload.issues.filter((item): item is string => typeof item === 'string') : []
+      return [message('协作提醒', `这条发言需要补充：${disciplineText(issues)}。它不会直接影响团队决策。`, 'system', 'decision')]
     }
     if (event.type === 'driver.failed') return [message('已隔离的驱动异常', String(payload.message ?? ''), 'system')]
     return []
