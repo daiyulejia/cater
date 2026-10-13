@@ -582,6 +582,14 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-empty string id"):
                 Runtime(":memory:", roles_path=roles)
 
+            roles.write_text('{"roles":[{"id":"dev"},{"id":"dev"}]}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate role id: dev"):
+                Runtime(":memory:", roles_path=roles)
+
+            roles.write_text('{"roles":[{"id":"dev","driver":"  "}]}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "non-empty string driver"):
+                Runtime(":memory:", roles_path=roles)
+
     def test_supreme_decides_when_cabinet_has_no_consensus(self):
         with tempfile.TemporaryDirectory() as tmp:
             roles = Path(tmp) / "roles.json"
@@ -811,6 +819,27 @@ class DriverTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ValueError, "tokens_per_call must be non-negative"):
+                load_drivers(drivers)
+
+    def test_driver_config_rejects_non_object_and_duplicate_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            drivers = Path(tmp) / "drivers.json"
+            drivers.write_text('{"drivers":["bad"]}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "each driver config must be an object"):
+                load_drivers(drivers)
+
+            drivers.write_text(
+                """
+                {
+                  "drivers": [
+                    {"kind":"scripted","name":"same","script":[]},
+                    {"kind":"scripted","name":"same","script":[]}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "duplicate driver name: same"):
                 load_drivers(drivers)
 
     def test_cli_driver_config_rejects_invalid_recovery_values(self):

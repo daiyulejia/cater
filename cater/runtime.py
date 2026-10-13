@@ -881,6 +881,7 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
     if not isinstance(roles_raw, list):
         raise ValueError("roles config must be a list or an object with roles")
     roles = []
+    seen_role_ids: set[str] = set()
     for item in roles_raw:
         if not isinstance(item, dict):
             raise ValueError("each role must be an object")
@@ -888,12 +889,24 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
         if not isinstance(role_id, str) or not role_id.strip():
             raise ValueError("each role requires a non-empty string id")
         role_id = role_id.strip()
+        if role_id in seen_role_ids:
+            raise ValueError(f"duplicate role id: {role_id}")
+        seen_role_ids.add(role_id)
+        role_name = item.get("name", role_id)
+        role_description = item.get("role", role_id)
+        driver_name = item.get("driver", role_id)
+        if not isinstance(role_name, str) or not role_name.strip():
+            raise ValueError(f"role {role_id!r} requires a non-empty string name")
+        if not isinstance(role_description, str) or not role_description.strip():
+            raise ValueError(f"role {role_id!r} requires a non-empty string role")
+        if not isinstance(driver_name, str) or not driver_name.strip():
+            raise ValueError(f"role {role_id!r} requires a non-empty string driver")
         roles.append(
             Role(
                 id=role_id,
-                name=str(item.get("name") or role_id),
-                role=str(item.get("role") or role_id),
-                driver=str(item.get("driver") or role_id),
+                name=role_name.strip(),
+                role=role_description.strip(),
+                driver=driver_name.strip(),
             )
         )
     return RuntimeConfig(

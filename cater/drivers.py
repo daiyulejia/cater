@@ -239,5 +239,14 @@ def load_drivers(path: str | Path) -> dict[str, Driver]:
     items = raw.get("drivers") if isinstance(raw, dict) else raw
     if not isinstance(items, list):
         raise ValueError("driver config must be a list or an object with drivers")
-    drivers = [driver_from_dict(item) for item in items]
+    drivers = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("each driver config must be an object")
+        driver = driver_from_dict(item)
+        if driver.name in seen:
+            raise ValueError(f"duplicate driver name: {driver.name}")
+        seen.add(driver.name)
+        drivers.append(driver)
     return {driver.name: driver for driver in drivers}
