@@ -1295,6 +1295,51 @@ class WebTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, 400)
             self.assertIn("choose either run", raised.exception.read().decode("utf-8"))
 
+    def test_web_api_task_actions_share_runtime_semantics(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-api-actions.db")
+            with Runtime(db) as rt:
+                task_id = rt.create_task("Drive API actions")
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = f"http://127.0.0.1:{server.server_port}"
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join, 1)
+            self.addCleanup(server.shutdown)
+
+            assign = Request(
+                f"{base}/api/tasks/{task_id}/assign",
+                data=json.dumps({"owner": "dev", "objective": "Use API route"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(assign, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(data["task"]["assignments"][-1]["owner"], "dev")
+
+            command = Request(
+                f"{base}/api/tasks/{task_id}/command",
+                data=json.dumps({"instruction": "Narrow goal", "goal": "Drive API actions safely"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(command, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(data["task"]["goal"], "Drive API actions safely")
+
+            decide = Request(
+                f"{base}/api/tasks/{task_id}/decide",
+                data=json.dumps({"resolution": "done", "reason": "API accepted"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(decide, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(data["task"]["status"], "done")
+            self.assertEqual(data["task"]["decision"]["reason"], "API accepted")
+
     def test_web_direct_assign_reports_unknown_role(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-bad-assign.db")

@@ -123,6 +123,58 @@ def make_handler(
                     elif force_battle:
                         rt.battle(task_id)
                     return self._send_json(task_api_payload(rt, task_id), status=HTTPStatus.CREATED)
+            if path.startswith("/api/tasks/"):
+                parts = path.split("/")
+                if len(parts) != 5:
+                    return self._not_found()
+                task_id = parts[3]
+                action = parts[4]
+                data = self._read_json()
+                if data is None:
+                    return
+                with self._runtime() as rt:
+                    if rt.task(task_id) is None:
+                        return self._not_found()
+                    try:
+                        if action == "run":
+                            rt.collaborate(task_id)
+                        elif action == "battle":
+                            rt.battle(task_id)
+                        elif action == "dispatch":
+                            rt.dispatch(task_id)
+                        elif action == "assign":
+                            owner = str(data.get("owner", "")).strip()
+                            if not owner:
+                                return self._bad_request("owner is required")
+                            rt.assign(
+                                task_id,
+                                owner,
+                                objective=_optional_text(data.get("objective")),
+                                acceptance=_optional_text(data.get("acceptance")),
+                            )
+                        elif action == "command":
+                            instruction = _optional_text(data.get("instruction")) or "Updated from Cater API"
+                            rt.command(
+                                task_id,
+                                instruction,
+                                goal=_optional_text(data.get("goal")),
+                                acceptance=(
+                                    _acceptance_lines(data.get("acceptance"))
+                                    if "acceptance" in data
+                                    else None
+                                ),
+                            )
+                        elif action == "decide":
+                            rt.decide(
+                                task_id,
+                                str(data.get("resolution", "done")),
+                                _optional_text(data.get("reason")) or "Decided from Cater API",
+                            )
+                        else:
+                            return self._not_found()
+                    except ValueError as exc:
+                        return self._bad_request(str(exc))
+                    return self._send_json(task_api_payload(rt, task_id))
             if path == "/tasks":
                 data = self._read_form()
                 goal = data.get("goal", [""])[0].strip()

@@ -110,12 +110,19 @@ When `cater web` is running, local tools can read machine-friendly state from:
 
 ```text
 POST /api/tasks
+POST /api/tasks/<task_id>/run
+POST /api/tasks/<task_id>/battle
+POST /api/tasks/<task_id>/dispatch
+POST /api/tasks/<task_id>/assign
+POST /api/tasks/<task_id>/command
+POST /api/tasks/<task_id>/decide
 GET /api/tasks
 GET /api/tasks/<task_id>
 GET /api/chain
 ```
 
 `POST /api/tasks` accepts JSON with `goal`, optional `acceptance`, and optional booleans `dispatch`, `run`, or `battle`.
+Task action endpoints return the same replay payload as `GET /api/tasks/<task_id>`.
 
 ## Current Scope
 
