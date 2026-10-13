@@ -403,6 +403,11 @@ def make_handler(
                 requested_route = _optional_text(data.get("requested_route"))
                 acceptance = _acceptance_lines(data.get("acceptance"))
                 with self._runtime() as rt:
+                    if not assign_owner and requested_route is None:
+                        mentioned_workers = rt.mentioned_workers(goal)
+                        if len(mentioned_workers) == 1:
+                            assign_owner = mentioned_workers[0]
+                            requested_route = "direct"
                     if assign_owner and assign_owner not in {role.id for role in rt.worker_roles}:
                         return self._bad_request(f"unknown role {assign_owner!r}")
                     task_id = rt.create_task(goal, acceptance)

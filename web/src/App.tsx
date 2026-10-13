@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   ArrowUp, Bot, Cat, CheckCircle2, ChevronDown, CircleDot,
-  CornerDownRight, FileText, Menu, Plus, Send, ShieldCheck, Sparkles, Users,
+  CornerDownRight, FileText, Menu, Plus, Send, ShieldCheck, Users,
 } from 'lucide-react'
 import catTrio from './assets/cat-trio.png'
 
@@ -22,7 +22,7 @@ type Task = {
 }
 type Event = { seq: number; type: string; category: string; actor: { id: string; role: string; kind: string }; payload: Record<string, unknown> }
 type TaskDetail = { task: Task; events: Event[]; review: { health?: string; summary?: string }; activity?: Activity }
-type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; targets: string[]; replyTo?: number; evidence: Event }
+type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; targets: string[]; replyTo?: number; evidence: Event }
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) } })
@@ -31,7 +31,7 @@ const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
 }
 
 const statusText = (value?: string) => ({
-  pending: '待开始', running: '进行中', rework: '需返工', done: '已完成', escalated: '待处理',
+  pending: '待开始', running: '进行中', rework: '需返工', decided: '已定下', done: '已完成', escalated: '待处理',
   assigned: '已指派', accepted: '已定下', rejected: '未通过', recommended: '已建议', vetoed: '已否决', needs_supreme: '待最高决策', needs_human: '待人工处理',
 }[value ?? ''] ?? value ?? '未知')
 
@@ -81,8 +81,9 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
   return events.flatMap((event) => {
     const payload = event.payload
     const actor = event.actor
-    const message = (title: string | undefined, text: string, kind: ChatItem['kind'], category: ChatItem['category'] = kind === 'agent' || kind === 'human' ? 'collaboration' : 'system'): ChatItem => ({
+    const message = (title: string | undefined, text: string, kind: ChatItem['kind'], category: ChatItem['category'] = kind === 'agent' || kind === 'human' ? 'collaboration' : 'system', details?: string[]): ChatItem => ({
       id: event.seq, actor: actor.id, display: identities[actor.id]?.name ?? actorText(actor.id), role: publicIdentity(actor.id, organization), kind, category, title, text, evidence: event,
+      details: details?.filter(Boolean),
       targets: [
         ...(typeof payload.target === 'string' ? [payload.target] : []),
         ...(Array.isArray(payload.mentions) ? payload.mentions.filter((item): item is string => typeof item === 'string') : []),
@@ -100,8 +101,20 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     if (event.type === 'activity.completed') return [message('本轮协作完成', String(payload.action) === 'battle' ? '这轮讨论已经结束。' : '团队已完成这一轮协作。', 'system')]
     if (event.type === 'activity.failed') return [message('协作异常', String(payload.message ?? '后台协作未能完成。'), 'system')]
     if (event.type === 'human.commanded') return [message('方向更新', String(payload.instruction ?? ''), 'human')]
-    if (event.type === 'task.interpreted') return [message('店长先把这单听明白', `${String(payload.summary ?? '')}\n${String(payload.objective ?? '')}`, 'system', 'decision')]
-    if (event.type === 'task.routed') return [message('店长决定先这样推进', reasonText(String(payload.reason ?? '已选择下一步协作路径。')), 'system', 'decision')]
+    if (event.type === 'task.interpreted') {
+      const scope = Array.isArray(payload.scope) ? payload.scope.filter((item): item is string => typeof item === 'string') : []
+      const risks = Array.isArray(payload.risks) ? payload.risks.filter((item): item is string => typeof item === 'string') : []
+      const acceptance = Array.isArray(payload.acceptance) ? payload.acceptance.filter((item): item is string => typeof item === 'string') : []
+      return [message('店长先把这单听明白', `${String(payload.summary ?? '')}\n${String(payload.objective ?? '')}`, 'system', 'decision', [
+        ...scope.map((item) => `这次会覆盖：${item}`),
+        ...acceptance.map((item) => `完成时要满足：${item}`),
+        ...risks.map((item) => `店长会留意：${item}`),
+      ])]
+    }
+    if (event.type === 'task.routed') {
+      const route = ({ direct: '先请一位猫咪直接推进', collaborate: '店长先安排猫咪们协作', cabinet: '先请几位铲屎官校准安排' }[String(payload.route ?? '')] ?? '')
+      return [message('店长决定先这样推进', reasonText(String(payload.reason ?? '已选择下一步协作路径。')), 'system', 'decision', route ? [route] : undefined)]
+    }
     if (event.type === 'cabinet.convened') {
       const names = memberNames(payload.members)
       return [message(names.length ? `店长请 ${names.join('、')} 一起看看` : '店长请伙伴一起看看', `${reasonText(String(payload.reason ?? '任务需要更多伙伴一起确认。'))}${names.length ? `\n这次由铲屎官 ${names.join('、')} 先行商量。` : ''}`, 'system', 'decision')]
@@ -109,12 +122,23 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     if (event.type === 'mission.created') return [message('任务使命已发布', String(payload.goal ?? ''), 'system')]
     if (event.type === 'task.decomposed') {
       const names = memberNames(payload.members)
-      return [message(String(payload.source) === 'cabinet' ? `${names.join('、') || '几位铲屎官'}安排好任务` : '店长安排好分工', '这一单已经安排妥当，大家会依次接力推进。', 'system', 'decision')]
+      const subtasks = Array.isArray(payload.subtasks) ? payload.subtasks.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object') : []
+      const details = subtasks.map((item) => {
+        const owner = String(item.owner ?? '')
+        const name = identities[owner]?.name ?? actorText(owner)
+        const lane = String(item.lane ?? '执行')
+        const acceptance = String(item.acceptance ?? '')
+        return `@${name} 负责${lane}${acceptance ? `，完成时：${acceptance}` : ''}`
+      })
+      return [message(String(payload.source) === 'cabinet' ? `${names.join('、') || '几位铲屎官'}安排好任务` : '店长安排好分工', '这一单已经安排妥当，大家会依次接力推进。', 'system', 'decision', details)]
     }
     if (event.type === 'subtask.assigned') {
       const owner = String(payload.owner ?? '团队')
       const name = identities[owner]?.name ?? actorText(owner)
-      return [message(`已请 @${name} 接手`, `${name}已经接下这一项安排。`, 'system')]
+      const lane = String(payload.lane ?? '执行')
+      const objective = String(payload.objective ?? '')
+      const acceptance = String(payload.acceptance ?? '')
+      return [message(`已请 @${name} 接手`, `${name}接下了${lane}这一项安排。`, 'system', 'collaboration', [objective, acceptance ? `完成时需要：${acceptance}` : ''])]
     }
     if (event.type === 'plan.proposed') return [message('执行计划已发布', reasonText(String(payload.reason ?? '')), 'system', 'decision')]
     if (event.type === 'agent.working') return [message('开始处理', String(payload.summary ?? '正在处理本执行线。'), 'agent')]
@@ -139,11 +163,8 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<TaskDetail | null>(null)
   const [draft, setDraft] = useState('')
-  const [acceptance, setAcceptance] = useState('')
-  const [routing, setRouting] = useState<'auto' | 'direct'>('auto')
   const [roles, setRoles] = useState<OrgRole[]>([])
   const [organization, setOrganization] = useState<Organization | null>(null)
-  const [directOwner, setDirectOwner] = useState('')
   const [composerMode, setComposerMode] = useState<'new' | 'message'>('message')
   const [message, setMessage] = useState('')
   const [isSending, setIsSending] = useState(false)
@@ -161,7 +182,6 @@ function App() {
   useEffect(() => {
     void api<OrgRole[]>('/api/organization').then((nextRoles) => {
       setRoles(nextRoles)
-      setDirectOwner((current) => current || nextRoles.find((role) => role.id === 'dev')?.id || nextRoles[0]?.id || '')
     }).catch((err: Error) => setError(err.message))
   }, [])
   useEffect(() => { void api<Organization>('/api/organization/profile').then(setOrganization).catch((err: Error) => setError(err.message)) }, [])
@@ -197,13 +217,10 @@ function App() {
         method: 'POST',
         body: JSON.stringify({
           goal,
-          acceptance: acceptance.split('\n').map((item) => item.trim()).filter(Boolean),
           run: true, background: true,
-          requested_route: routing,
-          ...(routing === 'direct' ? { assign_to: directOwner } : {}),
         }),
       })
-      setDraft(''); setAcceptance(''); setComposerMode('message'); setChatFilter('all'); await refresh(result.task.id); setDetail(result)
+      setDraft(''); setComposerMode('message'); setChatFilter('all'); await refresh(result.task.id); setDetail(result)
     } catch (err) { setError(err instanceof Error ? err.message : '创建任务失败') }
     finally { setIsSending(false) }
   }
@@ -235,8 +252,8 @@ function App() {
             <div className="border-b border-[#eaded1] bg-[#fffaf4] px-5 py-4"><div className="flex items-start justify-between gap-4"><div className="flex items-start gap-3"><Portrait id="store_manager" /><div><p className="mb-1 text-xs font-medium tracking-[0.12em] text-teal-700">店长正在跟进</p><h1 className="text-lg font-semibold leading-snug">{task.goal}</h1></div></div><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${detail?.activity?.active ? 'bg-teal-50 text-teal-800' : 'bg-[#f1e7dc] text-stone-600'}`}>{activityText(detail?.activity) || taskListStatus(task)}</span></div></div>
             <div className="border-b border-[#eaded1] bg-[#fffaf4] px-4 py-2 sm:px-7"><div className="flex gap-1 overflow-x-auto" role="group" aria-label="对话筛选">{([{ id: 'all', label: '全部' }, { id: 'collaboration', label: '协作' }, { id: 'decision', label: '决策' }, { id: 'deliverable', label: '成果' }] as const).map((filter) => <button key={filter.id} onClick={() => setChatFilter(filter.id)} className={`shrink-0 rounded-md px-3 py-1.5 text-xs font-medium ${chatFilter === filter.id ? 'bg-[#f7dfcf] text-[#7a3f2d]' : 'text-stone-500 hover:bg-[#f5ebe1]'}`}>{filter.label}</button>)}</div></div>
             <div className="flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7">{visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={item.id} item={item} />) : <p className="py-10 text-center text-sm text-stone-400">这个筛选下暂时没有记录。</p>}</div>
-            {composerMode === 'new' ? <TaskComposer draft={draft} acceptance={acceptance} routing={routing} roles={roles} directOwner={directOwner} isSending={isSending} onDraftChange={setDraft} onAcceptanceChange={setAcceptance} onRoutingChange={setRouting} onOwnerChange={setDirectOwner} onCreate={() => void createTask()} /> : <DirectionComposer message={message} isSending={isSending} onMessageChange={setMessage} onSend={() => void sendDirection()} />}
-          </> : <><EmptyConversation /><TaskComposer draft={draft} acceptance={acceptance} routing={routing} roles={roles} directOwner={directOwner} isSending={isSending} onDraftChange={setDraft} onAcceptanceChange={setAcceptance} onRoutingChange={setRouting} onOwnerChange={setDirectOwner} onCreate={() => void createTask()} /></>}
+            {composerMode === 'new' ? <TaskComposer draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /> : <DirectionComposer message={message} isSending={isSending} onMessageChange={setMessage} onSend={() => void sendDirection()} />}
+          </> : <><EmptyConversation /><TaskComposer draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
         </section>
         <aside className="bg-[#fffaf4] p-4 lg:border-l lg:border-[#e5d8ca]">
           {task && <Workboard task={task} detail={detail} names={Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />}
@@ -251,15 +268,21 @@ function DirectionComposer({ message, isSending, onMessageChange, onSend }: { me
   return <div className="border-t border-[#e5d8ca] bg-[#fffaf4] p-3 sm:p-4"><div className="mx-auto flex max-w-3xl gap-2 rounded-xl border border-[#ddccbc] bg-white p-2 shadow-sm focus-within:border-[#cb6e4e] focus-within:ring-2 focus-within:ring-[#f7dfcf]"><textarea value={message} onChange={(event) => onMessageChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onSend() } }} placeholder="向店长和猫咪们补充方向" aria-label="向团队发送消息" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm outline-none placeholder:text-stone-400" /><button disabled={isSending || !message.trim()} onClick={onSend} className="grid size-10 shrink-0 place-items-center self-end rounded-lg bg-[#cb6e4e] text-white disabled:bg-stone-200" title="发送指令并启动下一轮协作"><Send size={17} /></button></div></div>
 }
 
-function TaskComposer({ draft, acceptance, routing, roles, directOwner, isSending, onDraftChange, onAcceptanceChange, onRoutingChange, onOwnerChange, onCreate }: { draft: string; acceptance: string; routing: 'auto' | 'direct'; roles: OrgRole[]; directOwner: string; isSending: boolean; onDraftChange: (value: string) => void; onAcceptanceChange: (value: string) => void; onRoutingChange: (value: 'auto' | 'direct') => void; onOwnerChange: (value: string) => void; onCreate: () => void }) {
-  return <div className="border-t border-[#e5d8ca] bg-[#fffaf4] p-3 sm:p-4"><div className="mx-auto max-w-3xl rounded-xl border border-[#ddccbc] bg-white p-3 shadow-sm focus-within:border-[#cb6e4e] focus-within:ring-2 focus-within:ring-[#f7dfcf]"><div className="mb-2 flex items-center gap-2"><Sparkles size={16} className="text-[#cb6e4e]" /><h2 className="text-sm font-semibold">向猫咖下单</h2></div><textarea id="new-task" value={draft} onChange={(event) => onDraftChange(event.target.value)} placeholder="希望店长和猫咪们完成什么任务？" rows={3} className="w-full resize-none border-0 px-1 py-1 text-sm outline-none placeholder:text-stone-400" /><textarea value={acceptance} onChange={(event) => onAcceptanceChange(event.target.value)} placeholder="验收标准，每行一项（可选）" rows={2} className="mt-2 w-full resize-none rounded-lg border border-[#eaded1] px-3 py-2 text-sm outline-none focus:border-[#cb6e4e]" /><div className="mt-3 flex flex-wrap items-center gap-2"><div className="grid grid-cols-2 rounded-lg border border-[#eaded1] bg-[#fcf5ee] p-1" role="group" aria-label="任务路径"><button type="button" onClick={() => onRoutingChange('auto')} className={`rounded-md px-3 py-2 text-xs font-medium ${routing === 'auto' ? 'bg-white text-[#8b4732] shadow-sm' : 'text-stone-500'}`}>交给店长判断</button><button type="button" onClick={() => onRoutingChange('direct')} className={`rounded-md px-3 py-2 text-xs font-medium ${routing === 'direct' ? 'bg-white text-[#8b4732] shadow-sm' : 'text-stone-500'}`}>优先找猫咪</button></div>{routing === 'direct' && <select aria-label="优先猫咪" value={directOwner} onChange={(event) => onOwnerChange(event.target.value)} className="min-w-36 rounded-lg border border-[#ddccbc] bg-white px-2 py-2 text-sm text-stone-800 outline-none focus:border-[#cb6e4e]">{roles.map((role) => <option key={role.id} value={role.id}>{role.name}</option>)}</select>}<button disabled={isSending || !draft.trim() || (routing === 'direct' && !directOwner)} onClick={onCreate} className="ml-auto inline-flex items-center justify-center gap-2 rounded-lg bg-[#cb6e4e] px-3 py-2 text-sm font-semibold text-white disabled:bg-stone-200"><ArrowUp size={16} /> 交给店长</button></div></div></div>
+function TaskComposer({ draft, isSending, onDraftChange, onCreate }: { draft: string; isSending: boolean; onDraftChange: (value: string) => void; onCreate: () => void }) {
+  return <div className="border-t border-[#e5d8ca] bg-[#fffaf4] p-3 sm:p-4"><div className="mx-auto flex max-w-3xl gap-2 rounded-xl border border-[#ddccbc] bg-white p-2 shadow-sm focus-within:border-[#cb6e4e] focus-within:ring-2 focus-within:ring-[#f7dfcf]"><textarea id="new-task" value={draft} onChange={(event) => onDraftChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onCreate() } }} placeholder="和店长聊聊，或 @月亮、@米寇、@三角 直接点名" aria-label="发起任务对话" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm outline-none placeholder:text-stone-400" /><button disabled={isSending || !draft.trim()} onClick={onCreate} className="grid size-10 shrink-0 place-items-center self-end rounded-lg bg-[#cb6e4e] text-white disabled:bg-stone-200" title="发送新任务"><ArrowUp size={17} /></button></div></div>
 }
 
 function ChatBubble({ item }: { item: ChatItem }) {
   const system = item.kind === 'system'; const human = item.kind === 'human'
   return <article className={`flex gap-3 ${human ? 'justify-end' : ''}`}>
     {!human && (system ? <div className="mt-1 grid size-9 shrink-0 place-items-center rounded-full bg-[#efe3d7] text-[#8a614b]"><Bot size={16} /></div> : <Portrait id={item.actor} />)}
-    <div className={`max-w-[82%] ${human ? 'rounded-2xl rounded-tr-sm bg-[#cb6e4e] px-4 py-3 text-white' : 'rounded-2xl rounded-tl-sm border border-[#eaded1] bg-white px-4 py-3 shadow-[0_1px_2px_rgba(97,62,40,.08)]'}`}><div className={`mb-1 flex items-center gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-stone-500'}`}><strong className={human ? 'text-white' : 'text-stone-800'}>{human ? '你' : item.display}</strong><span>{item.role}</span>{item.title && <span className="rounded bg-[#f5ece4] px-1.5 py-0.5 text-[10px] font-medium text-[#80533f]">{item.title}</span>}</div><p className="whitespace-pre-wrap text-sm leading-6">{item.text}</p>{(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}<details className={`mt-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-stone-400'}`}><summary className="cursor-pointer">决策依据 · 事件 #{item.id}</summary><pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded bg-stone-950 p-2 text-[10px] text-stone-100">{JSON.stringify(item.evidence.payload, null, 2)}</pre></details></div>
+    <div className={`max-w-[82%] ${human ? 'rounded-2xl rounded-tr-sm bg-[#cb6e4e] px-4 py-3 text-white' : 'rounded-2xl rounded-tl-sm border border-[#eaded1] bg-white px-4 py-3 shadow-[0_1px_2px_rgba(97,62,40,.08)]'}`}>
+      <div className={`mb-1 flex items-center gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-stone-500'}`}><strong className={human ? 'text-white' : 'text-stone-800'}>{human ? '你' : item.display}</strong><span>{item.role}</span>{item.title && <span className="rounded bg-[#f5ece4] px-1.5 py-0.5 text-[10px] font-medium text-[#80533f]">{item.title}</span>}</div>
+      <p className="whitespace-pre-wrap text-sm leading-6">{item.text}</p>
+      {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
+      {item.details?.length ? <details className={`mt-3 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#eee2d6] text-stone-600'}`}><summary className="cursor-pointer font-medium">展开这一步的安排</summary><ul className="mt-2 space-y-1.5 leading-5">{item.details.map((detail, index) => <li key={`${item.id}-${index}`}>{detail}</li>)}</ul></details> : null}
+      <details className={`mt-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-stone-400'}`}><summary className="cursor-pointer">审计证据 · 事件 #{item.id}</summary><pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded bg-stone-950 p-2 text-[10px] text-stone-100">{JSON.stringify(item.evidence.payload, null, 2)}</pre></details>
+    </div>
   </article>
 }
 

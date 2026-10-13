@@ -548,6 +548,18 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("your_assignment=Implement the smallest useful path", driver.prompts[0])
         self.assertIn("assigned_work=dev:", driver.prompts[0])
 
+    def test_display_name_mention_can_prefer_a_single_worker(self):
+        with Runtime(":memory:") as rt:
+            mentions = rt.mentioned_workers("@月亮 帮我整理一个短页面文案")
+            task_id = rt.create_task("@月亮 帮我整理一个短页面文案")
+            result = rt.intake(task_id, requested_route="direct", preferred_owner=mentions[0])
+            task = rt.task(task_id)
+
+        self.assertEqual(mentions, ["product"])
+        self.assertEqual(result["route"]["route"], "direct")
+        self.assertEqual(task.assignments[0]["owner"], "product")
+        self.assertIn("做到什么算完成", task.interpretation["summary"])
+
     def test_intake_records_task_understanding_before_lightweight_collaboration(self):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("为团队做一个网页任务入口", ["用户能发起并查看任务", "过程可回放"])
@@ -1907,7 +1919,10 @@ class WebTests(unittest.TestCase):
         bundles = list((root / "assets").glob("*.js"))
         self.assertTrue(bundles)
         self.assertTrue(list((root / "assets").glob("*.css")))
-        self.assertIn("对话筛选", "\n".join(bundle.read_text(encoding="utf-8") for bundle in bundles))
+        bundle_text = "\n".join(bundle.read_text(encoding="utf-8") for bundle in bundles)
+        self.assertIn("对话筛选", bundle_text)
+        self.assertIn("和店长聊聊", bundle_text)
+        self.assertNotIn("向猫咖下单", bundle_text)
 
     def test_web_serves_optional_built_workroom_from_same_origin(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2142,6 +2157,22 @@ class WebTests(unittest.TestCase):
             self.assertIn("review", data)
             self.assertIn("decision_ladder", data)
             self.assertEqual(data["organization_path"][0]["status"], "cabinet_dispatch")
+
+    def test_web_api_uses_a_single_display_name_mention_as_a_lightweight_preference(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "web-mention.db")
+            base = start_test_web(self, db)
+            request = Request(
+                f"{base}/api/tasks",
+                data=json.dumps({"goal": "@月亮 帮我整理首页文案"}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+
+        self.assertEqual(data["task"]["route"]["route"], "direct")
+        self.assertEqual(data["task"]["assignments"][0]["owner"], "product")
 
     def test_web_api_intake_exposes_interpretation_and_can_upgrade_route(self):
         with tempfile.TemporaryDirectory() as tmp:

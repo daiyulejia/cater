@@ -934,12 +934,20 @@ class Runtime:
         return role
 
     def _mentioned_roles(self, instruction: str) -> list[str]:
-        """Return known role ids explicitly addressed by a human command."""
+        """Return known roles addressed by stable ids or their displayed names."""
         return [
             role.id
             for role in self.roles
-            if re.search(rf"(?<![\w-])@{re.escape(role.id)}\b", instruction, flags=re.IGNORECASE)
+            if any(
+                re.search(rf"(?<![\w-])@{re.escape(alias)}(?![\w-])", instruction, flags=re.IGNORECASE)
+                for alias in (role.id, role.name)
+            )
         ]
+
+    def mentioned_workers(self, instruction: str) -> list[str]:
+        """Return execution-role mentions in the order their role cards define."""
+        worker_ids = self.organization.worker_members
+        return [role_id for role_id in self._mentioned_roles(instruction) if role_id in worker_ids]
 
     def _interpret_task(self, task: TaskSnapshot) -> dict[str, Any]:
         """Produce a bounded, user-visible task analysis for the local runtime."""
@@ -979,6 +987,7 @@ class Runtime:
             scope.append("落实实现边界并保留可运行证据")
         if not task.acceptance:
             scope.append("补齐最小验收标准")
+            summary += "你也可以随时补充“做到什么算完成”；如果暂时不写，店长会先按最小可验证结果推进。"
 
         risks = []
         if complexity == "complex":
