@@ -2096,6 +2096,32 @@ class CliTests(unittest.TestCase):
 
 
 class WebTests(unittest.TestCase):
+
+    def test_web_refuses_non_loopback_bind_without_explicit_opt_in(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "remote-bind.db")
+            with self.assertRaisesRegex(ValueError, "unauthenticated Cater control plane"):
+                web_module.serve(db, host="0.0.0.0", port=0)
+        self.assertTrue(web_module._is_loopback_host("127.0.0.1"))
+        self.assertTrue(web_module._is_loopback_host("::1"))
+        self.assertTrue(web_module._is_loopback_host("localhost"))
+        self.assertFalse(web_module._is_loopback_host("192.168.1.15"))
+
+    def test_web_api_rejects_an_oversized_request_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "large-body.db")
+            base = start_test_web(self, db)
+            body = b"x" * (web_module.MAX_REQUEST_BYTES + 1)
+            request = Request(
+                f"{base}/api/tasks",
+                data=body,
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(request, timeout=5)
+            self.assertEqual(raised.exception.code, 400)
+            self.assertIn("request body exceeds", raised.exception.read().decode("utf-8"))
     def test_web_marks_interrupted_background_activity_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-recovery.db")

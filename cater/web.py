@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import ipaddress
 import json
 import mimetypes
 import threading
@@ -22,6 +23,9 @@ from .messages import message_relation
 from .path import organization_path
 from .review import build_review
 from .runtime import Runtime
+
+
+MAX_REQUEST_BYTES = 1_048_576
 
 
 class ActivityRunner:
@@ -260,7 +264,13 @@ def serve(
     circuit_breaker_threshold: int = 2,
     audit_key: str | bytes | None = None,
     audit_key_id: str = "local",
+    allow_remote: bool = False,
 ) -> None:
+    if not allow_remote and not _is_loopback_host(host):
+        raise ValueError(
+            "refusing to expose the unauthenticated Cater control plane beyond localhost; "
+            "use --allow-remote only behind an authenticated network boundary"
+        )
     handler = make_handler(
         db_path,
         drivers_path=drivers_path,
@@ -279,6 +289,16 @@ def serve(
         pass
     finally:
         server.server_close()
+
+
+def _is_loopback_host(host: str) -> bool:
+    normalized = host.strip().lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def _workroom_dist() -> Path | None:
@@ -707,13 +727,15 @@ def make_handler(
             self.wfile.write(raw)
 
         def _read_form(self) -> dict[str, list[str]]:
-            length = int(self.headers.get("Content-Length", "0") or "0")
-            raw = self.rfile.read(length).decode("utf-8")
+            raw = self._read_body()
+            if raw is None:
+                return {}
             return parse_qs(raw)
 
         def _read_json(self) -> dict[str, Any] | None:
-            length = int(self.headers.get("Content-Length", "0") or "0")
-            raw = self.rfile.read(length).decode("utf-8")
+            raw = self._read_body()
+            if raw is None:
+                return None
             try:
                 data = json.loads(raw or "{}")
             except json.JSONDecodeError:
@@ -723,6 +745,22 @@ def make_handler(
                 self._bad_request("JSON body must be an object")
                 return None
             return data
+
+        def _read_body(self) -> str | None:
+            raw_length = self.headers.get("Content-Length", "0") or "0"
+            try:
+                length = int(raw_length)
+            except ValueError:
+                self._bad_request("invalid Content-Length")
+                return None
+            if length < 0 or length > MAX_REQUEST_BYTES:
+                self._bad_request(f"request body exceeds {MAX_REQUEST_BYTES} byte limit")
+                return None
+            try:
+                return self.rfile.read(length).decode("utf-8")
+            except UnicodeDecodeError:
+                self._bad_request("request body must be UTF-8")
+                return None
 
         def _redirect(self, location: str) -> None:
             self.send_response(HTTPStatus.SEE_OTHER)

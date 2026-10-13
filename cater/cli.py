@@ -590,6 +590,7 @@ def cmd_web(args: argparse.Namespace) -> int:
         circuit_breaker_threshold=args.circuit_breaker_threshold,
         audit_key=resolve_audit_key(args),
         audit_key_id=args.audit_key_id,
+        allow_remote=args.allow_remote,
     )
     return 0
 
@@ -699,6 +700,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_web = sub.add_parser("web", help="run local replay web UI")
     p_web.add_argument("--host", default="127.0.0.1")
     p_web.add_argument("--port", type=int, default=8765)
+    p_web.add_argument(
+        "--allow-remote",
+        action="store_true",
+        help="allow a non-loopback bind only behind an authenticated network boundary",
+    )
     p_web.set_defaults(func=cmd_web)
     return parser
 
