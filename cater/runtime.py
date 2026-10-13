@@ -1254,8 +1254,10 @@ class Runtime:
         topic = self._task_topic(text)
         normalized = text.lower()
         complex_terms = (
-            "系统", "架构", "重构", "迁移", "多", "集成", "接入", "安全", "上线",
-            "平台", "workflow", "architecture", "refactor", "migrate", "integrat", "security",
+            "系统", "架构", "重构", "迁移", "集成", "接入", "安全", "上线", "平台",
+            "多智能体", "多 agent", "多agent", "多角色", "多模块", "跨角色",
+            "workflow", "architecture", "refactor", "migrate", "integrat", "security",
+            "multi-agent", "multi agent", "multi-role", "multi role", "cross-role", "cross role",
         )
         has_complex_signal = any(term in normalized for term in complex_terms)
         if has_complex_signal or len(task.acceptance) >= 3 or len(text) > 120:

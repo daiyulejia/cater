@@ -773,6 +773,16 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual([message["actor"] for message in content_task.messages], ["product"])
         self.assertEqual(screen_task.plan["participants"], ["product", "design", "dev", "test"])
 
+    def test_intake_does_not_treat_a_generic_multiple_word_as_governance_scope(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("整理多份活动说明")
+            result = rt.intake(task_id)
+            task = rt.task(task_id)
+
+        self.assertEqual(result["route"]["route"], "collaborate")
+        self.assertEqual(task.interpretation["complexity"], "light")
+        self.assertEqual(task.plan["participants"], ["product"])
+
     def test_explicit_cabinet_dispatch_keeps_full_default_team(self):
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("整理一页活动说明")
