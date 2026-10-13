@@ -55,11 +55,12 @@ class PromptCaptureDriver:
 
 
 class StaticResponseDriver:
-    def __init__(self, text: str):
+    def __init__(self, text: str, tokens: int = 5):
         self.text = text
+        self.tokens = tokens
 
     def complete(self, *, role: str, prompt: str, context: dict) -> DriverResponse:
-        return DriverResponse(text=self.text, tokens=5)
+        return DriverResponse(text=self.text, tokens=self.tokens)
 
 
 class ReplyDriver:
@@ -729,6 +730,32 @@ class RuntimeTests(unittest.TestCase):
                 findings = [item["finding"] for item in review["lenses"]]
 
         self.assertTrue(any("uses explicit reply metadata" in finding for finding in findings))
+
+    def test_review_flags_high_token_cost(self):
+        driver = StaticResponseDriver(
+            '{"stance":"assert","option_id":"A","claim":"Expensive output","evidence":[],"confidence":0.8,"text":"ok"}',
+            tokens=5000,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                """
+                {
+                  "cabinet": {"approval_threshold": 1, "quorum": 1, "veto_roles": []},
+                  "roles": [
+                    {"id":"cost","name":"Cost","role":"planner","driver":"static"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"static": driver}) as rt:
+                task_id = rt.create_task("Watch cost")
+                rt.collaborate(task_id)
+                review = rt.review(task_id)
+                findings = [item["finding"] for item in review["lenses"]]
+
+        self.assertTrue(any("5000 token" in finding for finding in findings))
 
 
 class CabinetTests(unittest.TestCase):

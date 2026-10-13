@@ -32,6 +32,7 @@ def build_review(
         _design_lens(tasks, events),
         _distribution_lens(tasks),
         _collaboration_lens(tasks),
+        _cost_lens(tasks),
         _testing_lens(tasks, chain),
         _ui_lens(tasks),
         _logic_lens(tasks),
@@ -179,6 +180,17 @@ def _collaboration_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     if linked:
         return _lens("logic", "ok", "At least one worker exchange uses explicit reply metadata.", "Keep replies purposeful; do not turn ordinary work into unnecessary chatter.")
     return _lens("logic", "watch", "Multi-agent output exists but no explicit worker-to-worker reply is visible.", "Use target/reply_to when one agent continues, corrects, or hands off another agent's work.")
+
+
+def _cost_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
+    messages = sum(len(task.messages) for task in tasks)
+    tokens = sum(task.tokens for task in tasks)
+    if not messages:
+        return _lens("design", "ok", "No token-bearing agent output is recorded yet.", "Measure token cost once real driver output exists.")
+    average = tokens / messages
+    if tokens >= 4000 or average >= 1500:
+        return _lens("design", "watch", f"Agent output used {tokens} token(s) across {messages} message(s).", "Review whether fewer roles, direct assignment, or a smaller prompt would preserve quality with less cost.")
+    return _lens("design", "ok", f"Agent output cost is currently {tokens} token(s) across {messages} message(s).", "Keep monitoring token cost as driver prompts and memory grow.")
 
 
 def _testing_lens(tasks: list[TaskSnapshot], chain: ChainReport) -> dict[str, str]:
