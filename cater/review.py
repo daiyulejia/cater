@@ -185,7 +185,24 @@ def _collaboration_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     ]
     if linked:
         return _lens("logic", "ok", "At least one worker exchange uses explicit reply metadata.", "Keep replies purposeful; do not turn ordinary work into unnecessary chatter.")
-    return _lens("logic", "watch", "Multi-agent output exists but no explicit worker-to-worker reply is visible.", "Use target/reply_to when one agent continues, corrects, or hands off another agent's work.")
+    dependent = [
+        task
+        for task in multi_agent
+        if any(assignment.get("depends_on") for assignment in task.assignments)
+    ]
+    if dependent:
+        return _lens(
+            "logic",
+            "watch",
+            "Dependent multi-agent work has no explicit worker-to-worker reply.",
+            "Use target/reply_to when one agent continues, corrects, or hands off another agent's work.",
+        )
+    return _lens(
+        "logic",
+        "ok",
+        "Multiple agents contributed independently; no worker handoff reply was needed.",
+        "Keep replies purposeful; parallel work does not need performative chatter.",
+    )
 
 
 def _cost_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
@@ -230,7 +247,12 @@ def _ui_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
         return _lens("ui", "needs_attention", "A task is waiting for rare human input.", "Make the required human command or override explicit.")
     if any(task.commands for task in tasks):
         return _lens("ui", "ok", "Human commands are recorded as normal events.", "Keep command entry lightweight and reversible.")
-    return _lens("ui", "watch", "No human command has been recorded yet.", "Verify the command surface is obvious in CLI/Web.")
+    return _lens(
+        "ui",
+        "ok",
+        "No human redirection was needed; the autonomous path remained uninterrupted.",
+        "Keep command entry discoverable without making it the default workflow.",
+    )
 
 
 def _logic_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:

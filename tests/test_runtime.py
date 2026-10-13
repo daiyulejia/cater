@@ -1206,7 +1206,7 @@ class RuntimeTests(unittest.TestCase):
             findings = [item["finding"] for item in review["lenses"]]
             self.assertTrue(any("visible dependency structure" in finding for finding in findings))
 
-    def test_review_flags_worker_exchange_quality(self):
+    def test_review_distinguishes_independent_work_from_missing_handoffs(self):
         flat_driver = StaticResponseDriver(
             '{"stance":"assert","option_id":"A","claim":"independent","text":"independent"}'
         )
@@ -1231,7 +1231,7 @@ class RuntimeTests(unittest.TestCase):
                 review = rt.review(task_id)
                 findings = [item["finding"] for item in review["lenses"]]
 
-        self.assertTrue(any("no explicit worker-to-worker reply" in finding for finding in findings))
+        self.assertTrue(any("contributed independently" in finding for finding in findings))
 
         with Runtime(":memory:") as rt:
             task_id = rt.create_task("Guided exchange")
@@ -1264,6 +1264,44 @@ class RuntimeTests(unittest.TestCase):
                 findings = [item["finding"] for item in review["lenses"]]
 
         self.assertTrue(any("uses explicit reply metadata" in finding for finding in findings))
+
+    def test_review_flags_missing_reply_only_when_work_has_dependencies(self):
+        flat_driver = StaticResponseDriver(
+            '{"stance":"assert","option_id":"A","claim":"independent","text":"independent"}'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "dependent-roles.json"
+            roles.write_text(
+                """
+                {
+                  "governance": {"trigger_on_option_split": false},
+                  "cabinet": {"approval_threshold": 2, "quorum": 2, "veto_roles": []},
+                  "roles": [
+                    {"id":"alpha","name":"Alpha","role":"product","driver":"flat"},
+                    {"id":"beta","name":"Beta","role":"developer","driver":"flat"}
+                  ]
+                }
+                """,
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"flat": flat_driver}) as rt:
+                task_id = rt.create_task("Dependent exchange")
+                rt.dispatch(task_id)
+                rt.collaborate(task_id)
+                review = rt.review(task_id)
+                findings = [item["finding"] for item in review["lenses"]]
+
+        self.assertTrue(any("Dependent multi-agent work has no explicit" in finding for finding in findings))
+
+    def test_review_treats_absent_human_commands_as_normal_autonomy(self):
+        with Runtime(":memory:") as rt:
+            task_id = rt.create_task("Autonomous review")
+            rt.collaborate(task_id)
+            review = rt.review(task_id)
+
+        ui_lens = next(item for item in review["lenses"] if item["id"] == "ui")
+        self.assertEqual(ui_lens["status"], "ok")
+        self.assertIn("autonomous path remained uninterrupted", ui_lens["finding"])
 
     def test_review_flags_high_token_cost(self):
         driver = StaticResponseDriver(
