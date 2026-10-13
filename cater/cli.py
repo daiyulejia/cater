@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__
+from .events import Actor
 from .ladder import decision_ladder
 from .messages import message_relation
 from .path import organization_path
 from .runtime import Runtime
+from .verification import run_check
 from .web import event_to_dict, serve, task_to_dict
 
 DEFAULT_DB = Path.cwd() / ".cater" / "cater.db"
@@ -258,6 +260,38 @@ def cmd_events(args: argparse.Namespace) -> int:
             suffix = f" [{relation}]" if relation else ""
             print(f"#{event.seq:<3} {event.type:<20} {event.actor.id:<12} {str(text)[:80]}{suffix}")
     return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    command = list(args.command_args)
+    if command and command[0] == "--":
+        command.pop(0)
+    with open_runtime(args) as rt:
+        if rt.task(args.task_id) is None:
+            raise KeyError(args.task_id)
+        if args.for_event is not None:
+            target = next(
+                (event for event in rt.log.read(task_id=args.task_id) if event.seq == args.for_event),
+                None,
+            )
+            if target is None or target.type not in {"diagnosis.recorded", "handoff.published"}:
+                raise ValueError("--for-event must identify a diagnosis or handoff in this task")
+        result = run_check(
+            command, cwd=Path(args.cwd), timeout=args.timeout,
+            record_output=args.record_output,
+        )
+        payload = dict(result.payload)
+        if args.for_event is not None:
+            payload["for_event"] = args.for_event
+        event = rt.log.emit(
+            actor=Actor.system("local_verifier"), type="verification.completed",
+            task_id=args.task_id, payload=payload,
+        )
+        print(f"recorded check #{event.seq}: {payload['outcome']} (exit={payload['exit_code']})")
+        for label, preview in (("stdout", result.stdout_preview), ("stderr", result.stderr_preview)):
+            if preview:
+                print(f"{label} preview (up to 8192 bytes):\n{preview}")
+        return 0 if payload["outcome"] == "passed" else 1
 
 
 def cmd_export(args: argparse.Namespace) -> int:
@@ -683,6 +717,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_events.add_argument("task_id", nargs="?")
     p_events.set_defaults(func=cmd_events)
 
+    p_verify = sub.add_parser("verify", help="run an explicit local check and record observed result")
+    p_verify.add_argument("task_id")
+    p_verify.add_argument("--cwd", default=".", help="working directory for the check")
+    p_verify.add_argument("--timeout", type=float, default=60, help="seconds, maximum 600")
+    p_verify.add_argument("--for-event", type=int, help="link to a diagnosis or handoff event")
+    p_verify.add_argument("--record-output", action="store_true", help="persist bounded output excerpts; may expose secrets")
+    p_verify.set_defaults(func=cmd_verify, command_args=[])
+
     p_export = sub.add_parser("export", help="export replay data as JSON or JSONL")
     p_export.add_argument("task_id", nargs="?")
     p_export.add_argument("--format", choices=["json", "jsonl"], default="json")
@@ -750,7 +792,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     _configure_utf8_output(sys.stdout, sys.stderr)
-    args = build_parser().parse_args(argv)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--" in argv:
+        boundary = argv.index("--")
+        prefix = argv[:boundary]
+        args = build_parser().parse_args(prefix)
+        if args.command == "verify":
+            args.command_args = argv[boundary + 1:]
+        else:
+            args = build_parser().parse_args(argv)
+    else:
+        args = build_parser().parse_args(argv)
     try:
         return args.func(args)
     except KeyError as exc:

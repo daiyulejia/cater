@@ -1,16 +1,18 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
-  ArrowUp, Bot, Cat, CheckCircle2, ChevronDown, CircleDot,
-  CornerDownRight, FileText, Menu, Plus, Send, ShieldCheck, Users,
+  Cat, CheckCircle2, ChevronDown, CircleDot,
+  Coffee, CornerDownRight, FileText, PawPrint, Plus, ShieldCheck, X,
 } from 'lucide-react'
-import catTrio from './assets/cat-trio.png'
-import catCanned from './assets/cat-canned.png'
+import catPortraits from './assets/cat-portraits.jpg'
+import staffPortraits from './assets/staff-portraits.jpg'
+import cafeWelcome from './assets/cafe-welcome-v2.jpg'
 
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
 type Message = { seq: number; actor: string; role: string; type: string; claim?: string; text?: string; stance?: string; target?: string; reply_to?: number }
 type Deliverable = { seq: number; title: string; summary: string; kind?: string; uri?: string; message_seq?: number }
 type Diagnosis = { seq: number; status: 'hypothesis' | 'reported' | 'confirmed' | 'uncertain'; symptom: string; cause: string; observations?: string[]; alternatives?: string[]; impact?: string[]; verification_plan?: string[]; message_seq?: number }
 type Handoff = { seq: number; summary: string; why: string; changed?: string[]; verification?: string[]; limits?: string[]; teach_back?: string[]; message_seq?: number }
+type Verification = { seq: number; command: string[]; outcome: 'passed' | 'failed' | 'timeout' | 'launch_error'; exit_code: number | null; for_event?: number; git?: { head?: string | null; dirty?: boolean | null }; stdout?: { bytes?: number; sha256?: string; excerpt?: string }; stderr?: { bytes?: number; sha256?: string; excerpt?: string } }
 type ChainStatus = { ok: boolean; checked: number; reason?: string; broken_at?: number }
 type DisciplineFlag = { seq: number; role?: string; message_seq?: number; issues?: string[]; action?: string }
 type MemoryItem = { seq: number; task_id?: string; actor?: string; title: string; summary: string; kind?: string }
@@ -21,7 +23,7 @@ type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'runn
 type Task = {
   id: string; goal: string; acceptance: string[]; status: string; messages: Message[]; assignments: Assignment[]
   deliverables: Deliverable[]
-  diagnoses?: Diagnosis[]; handoffs?: Handoff[]
+  diagnoses?: Diagnosis[]; handoffs?: Handoff[]; verifications?: Verification[]
   discipline_flags?: DisciplineFlag[]
   budget_exhaustions?: { seq: number; driver?: string; budget?: number; used_tokens?: number }[]
   activity?: Activity
@@ -120,11 +122,18 @@ function disciplineText(issues?: string[]): string {
 const diagnosisStatusText = (status: Diagnosis['status']) => ({ hypothesis: '待证实假设', reported: '成员称已证实，待独立核验', confirmed: '成员称已证实，待独立核验', uncertain: '仍不确定' }[status])
 
 function Portrait({ id, size = 'md' }: { id: string; size?: 'sm' | 'md' | 'lg' }) {
-  const position = ({ product: '0% 50%', test: '50% 50%', dev: '100% 50%' }[id])
-  const dimensions = ({ sm: 'size-7', md: 'size-9', lg: 'size-11' }[size])
-  if (id === 'design') return <span className={`${dimensions} shrink-0 rounded-full border-2 border-[#fffaf4] bg-cover bg-center shadow-sm`} style={{ backgroundImage: `url(${catCanned})` }} />
-  if (!position) return <span className={`grid ${dimensions} shrink-0 place-items-center rounded-full bg-[#e7ddd1] text-[#705545]`}><Cat size={size === 'lg' ? 22 : 16} /></span>
-  return <span className={`${dimensions} shrink-0 rounded-full border-2 border-[#fffaf4] bg-cover shadow-sm`} style={{ backgroundImage: `url(${catTrio})`, backgroundSize: '300% 100%', backgroundPosition: position }} />
+  const catPosition: Record<string, string> = { product: '0% 0%', test: '100% 0%', dev: '0% 100%', design: '100% 100%' }
+  const staffPosition: Record<string, string> = {
+    store_manager: '0% 0%', orchestrator: '0% 0%', leader: '0% 0%',
+    caretaker_product: '100% 0%', cabinet_product: '100% 0%',
+    caretaker_engineering: '0% 100%', cabinet_engineering: '0% 100%',
+    caretaker_quality: '100% 100%', cabinet_quality: '100% 100%',
+  }
+  const dimensions = ({ sm: 'size-8', md: 'size-10', lg: 'size-14' }[size])
+  const image = catPosition[id] ? catPortraits : staffPosition[id] ? staffPortraits : null
+  const position = catPosition[id] ?? staffPosition[id]
+  if (!image) return <span className={`grid ${dimensions} shrink-0 place-items-center rounded-full border-2 border-white bg-[#dce9e4] text-[#247468] shadow-sm`} aria-hidden="true"><Cat size={size === 'lg' ? 22 : 16} /></span>
+  return <span className={`inline-block ${dimensions} shrink-0 rounded-full border-2 border-white shadow-[0_2px_7px_rgba(42,56,48,.16)]`} role="img" aria-label={actorText(id)} style={{ backgroundImage: `url(${image})`, backgroundSize: '200% 200%', backgroundPosition: position }} />
 }
 
 function publicIdentity(actorId: string, organization: Organization | null): string {
@@ -242,6 +251,19 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
         ...teachBack.map((item) => `你可以追问：${item}`),
       ])]
     }
+    if (event.type === 'verification.completed') {
+      const command = Array.isArray(payload.command) ? payload.command.filter((item): item is string => typeof item === 'string') : []
+      const outcome = String(payload.outcome ?? '')
+      const label = ({ passed: '命令通过', failed: '命令失败', timeout: '执行超时', launch_error: '无法启动' } as Record<string, string>)[outcome] ?? '检查结束'
+      const git = payload.git as Record<string, unknown> | undefined
+      const details = [
+        `退出码：${payload.exit_code ?? '无'}`,
+        typeof payload.for_event === 'number' ? `关联自报事件 #${payload.for_event}；并不自动证实其结论` : '',
+        git?.head ? `Git 提交：${String(git.head).slice(0, 12)}${git.dirty ? '（工作区有未提交改动，检查未绑定具体文件内容）' : ''}` : '未识别 Git 状态',
+        '仅表示这条本地命令的观察结果，不代表根因或整项任务已证实。',
+      ]
+      return [message(`本机检查 · ${label}`, command.join(' '), 'system', 'decision', details)]
+    }
     if (event.type === 'cabinet.voted') {
       const tally = payload.tally as Record<string, unknown> | undefined
       return [message('伙伴们给出建议', reasonText(String(tally?.reason ?? '几位伙伴已经看过当前选项。')), 'system', 'decision')]
@@ -272,6 +294,7 @@ function App() {
   const [message, setMessage] = useState('')
   const [isSending, setIsSending] = useState(false)
   const [showEvidence, setShowEvidence] = useState(false)
+  const [showMobileBoard, setShowMobileBoard] = useState(false)
   const [chainStatus, setChainStatus] = useState<ChainStatus | null>(null)
   const [checkingChain, setCheckingChain] = useState(false)
   const [chatFilter, setChatFilter] = useState<'all' | ChatItem['category']>('all')
@@ -367,60 +390,84 @@ function App() {
     finally { setIsSending(false) }
   }
 
+  const team = organization ? [organization.leader, ...organization.cabinet, ...organization.workers] : roles
+  const names = Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))
   return (
-    <div className="min-h-screen bg-[#f4eee5] text-stone-800">
-      <header className="flex h-16 items-center justify-between border-b border-[#e5d8ca] bg-[#fffaf4] px-4 sm:px-6">
-        <div className="flex items-center gap-3"><div className="grid size-9 place-items-center rounded-xl bg-[#cb6e4e] text-white shadow-sm"><Cat size={19} /></div><div><strong className="text-sm tracking-wide text-stone-800">CATER</strong><span className="ml-2 hidden text-xs text-stone-500 sm:inline">猫咖协作工作台</span></div></div>
-        <div className="flex items-center gap-2 text-xs text-stone-500"><span className={`rounded-full px-2 py-1 text-[11px] font-medium ${driverModeStyle(organization?.mode)}`} title="不会展示账户、端点或密钥；具体成员状态可在工作板查看。">{driverModeText(organization?.mode)}</span><button type="button" onClick={() => void verifyChain()} disabled={checkingChain} className={`inline-flex items-center gap-1 rounded px-1.5 py-1 hover:bg-stone-100 ${chainStatus && !chainStatus.ok ? 'text-rose-700' : 'text-stone-600'}`} aria-label={checkingChain ? '正在核验事件链' : chainStatus ? chainStatus.ok ? `上次核验通过，共 ${chainStatus.checked} 条事件` : `事件链异常，事件 #${chainStatus.broken_at ?? '?'}` : '核验事件链'} title={chainStatus?.reason || '点击核验事件链；显示的是上次核验结果'}><ShieldCheck size={15} /><span className="sm:hidden">{checkingChain ? '核验中' : chainStatus ? chainStatus.ok ? '上次通过' : '链异常' : '核验'}</span><span className="hidden sm:inline">{checkingChain ? '正在核验' : chainStatus ? chainStatus.ok ? `上次核验通过 · ${chainStatus.checked} 条` : `事件链异常 · #${chainStatus.broken_at ?? '?'}` : '核验事件链'}</span></button></div>
+    <div className="cater-app text-[#253d38]">
+      <header className="app-header flex h-[72px] items-center justify-between px-4 sm:px-6">
+        <div className="flex min-w-0 items-center gap-3">
+          <div className="brand-mark grid size-11 shrink-0 place-items-center rounded-lg text-white"><Cat size={23} strokeWidth={2.2} /></div>
+          <div className="min-w-0"><strong className="block text-[19px] font-extrabold leading-5 text-[#713f34]">Cater</strong><span className="mt-1 block text-[11px] font-semibold text-[#a9604f]">有猫的工作间</span></div>
+        </div>
+        <div className="flex items-center gap-2 text-xs">
+          <span className={`max-w-32 truncate rounded-md px-2.5 py-1.5 text-[11px] font-medium sm:max-w-none ${driverModeStyle(organization?.mode)}`} title="具体成员状态可在工作板查看。">{driverModeText(organization?.mode)}</span>
+          <button type="button" onClick={() => void verifyChain()} disabled={checkingChain} className={`inline-flex size-8 items-center justify-center rounded-md hover:bg-[#e7f0ec] sm:w-auto sm:gap-1 sm:px-2 ${chainStatus && !chainStatus.ok ? 'text-rose-700' : 'text-[#34786e]'}`} aria-label={checkingChain ? '正在核验事件链' : chainStatus ? chainStatus.ok ? `上次核验通过，共 ${chainStatus.checked} 条事件` : `事件链异常，事件 #${chainStatus.broken_at ?? '?'}` : '核验事件链'} title={chainStatus?.reason || '点击核验事件链；显示的是上次核验结果'}><ShieldCheck size={17} /><span className="hidden sm:inline">{checkingChain ? '正在核验' : chainStatus ? chainStatus.ok ? `已核验 ${chainStatus.checked} 条` : `链异常 · #${chainStatus.broken_at ?? '?'}` : '核验事件链'}</span></button>
+        </div>
       </header>
-      <main className="grid min-h-[calc(100vh-56px)] grid-cols-1 lg:grid-cols-[250px_minmax(0,1fr)_310px]">
-        <aside className="border-b border-[#e5d8ca] bg-[#fffaf4] lg:border-b-0 lg:border-r">
-          <div className="flex items-center justify-between px-4 pb-2 pt-4"><span className="text-xs font-semibold tracking-[0.12em] text-stone-500">顾客任务</span><button className="grid size-7 place-items-center rounded-md text-stone-500 hover:bg-[#f3e7da]" title="新建任务" onClick={() => setComposerMode('new')}><Plus size={17} /></button></div>
-          <nav className="flex gap-1 overflow-x-auto px-2 pb-3 lg:block lg:space-y-1">{tasks.slice().reverse().map((item) => <button key={item.id} onClick={() => { setSelectedId(item.id); setComposerMode('message'); setChatFilter('all') }} className={`min-w-52 rounded-lg px-3 py-3 text-left transition lg:min-w-0 lg:w-full ${item.id === selectedId ? 'bg-[#f7dfcf] text-[#6b3424]' : 'hover:bg-[#f8f0e8]'}`}><div className="flex items-center gap-2"><CircleDot size={14} className={item.status === 'done' ? 'text-emerald-600' : 'text-[#cb6e4e]'} /><span className="truncate text-sm font-medium">{item.goal}</span></div><div className="mt-1 pl-5 text-xs text-stone-500">{item.messages.length} 条协作发言 · {taskListStatus(item)}</div></button>)}</nav>
-          <div className="hidden border-t border-[#eee2d6] px-4 py-4 lg:block"><div className="flex -space-x-1">{roles.map((role) => <Portrait key={role.id} id={role.id} size="sm" />)}</div><div className="mt-2 flex items-center gap-2 text-xs text-stone-500"><Users size={15} /> {roles.map((role) => role.name).join(' · ') || '执行猫咪'}</div></div>
+      <main className={`app-layout grid grid-cols-1 ${task ? 'lg:grid-cols-[252px_minmax(0,1fr)_318px]' : 'lg:grid-cols-[252px_minmax(0,1fr)]'}`}>
+        <aside className="task-sidebar min-h-0 lg:flex lg:flex-col lg:overflow-y-auto">
+          <div className="flex items-center justify-between px-4 pb-2 pt-4"><div><span className="text-[11px] font-semibold text-[#a56b56]">正在聊</span><h2 className="flex items-center gap-1.5 text-base font-bold"><PawPrint size={17} className="text-[#c36550]" /> 我的任务 <span className="text-xs font-medium text-[#a98e81]">{tasks.length}</span></h2></div><button className="grid size-9 place-items-center rounded-md border border-[#ead2c5] bg-white text-[#b15342] shadow-sm hover:bg-[#fff0e9]" title="新建任务" aria-label="新建任务" onClick={() => { setComposerMode('new'); setSelectedId(null) }}><Plus size={18} /></button></div>
+          <nav className={`flex gap-2 overflow-x-auto px-3 pb-3 lg:block lg:space-y-2 ${task ? 'lg:min-h-0 lg:flex-1 lg:overflow-x-hidden lg:overflow-y-auto' : 'lg:overflow-visible'}`} aria-label="任务列表">{tasks.slice().reverse().map((item) => <button key={item.id} onClick={() => { setSelectedId(item.id); setComposerMode('message'); setChatFilter('all'); setShowMobileBoard(false) }} className={`task-item min-w-52 px-3 py-3 text-left lg:min-w-0 lg:w-full ${item.id === selectedId ? 'is-active' : ''}`}><div className="flex items-start gap-2"><CircleDot size={15} className={`mt-0.5 shrink-0 ${item.status === 'done' ? 'text-emerald-600' : 'text-[#c2634d]'}`} /><span className="line-clamp-2 text-[13px] font-semibold leading-5">{item.goal}</span></div><div className="mt-2 pl-[23px] text-[11px] text-[#7c918b]">{item.messages.length} 条对话 · {taskListStatus(item)}</div></button>)}</nav>
+          <div className="hidden lg:block">{task ? <TeamRoster members={team} compact /> : <TeamRoster members={team} onMention={(name) => { setDraft((current) => `${current.trim()}${current.trim() ? ' ' : ''}@${name} `); document.getElementById('new-task')?.focus() }} />}</div>
         </aside>
-        <section className="flex min-h-0 flex-col border-b border-[#e5d8ca] bg-[#fffdf9] lg:border-b-0">
+        <section className="chat-pane flex min-h-0 flex-col">
           {task ? <>
-            <div className="border-b border-[#eaded1] bg-[#fffaf4] px-5 py-4"><div className="flex items-start justify-between gap-4"><div className="flex items-start gap-3"><Portrait id="store_manager" /><div><p className="mb-1 text-xs font-medium tracking-[0.12em] text-teal-700">店长正在跟进</p><h1 className="text-lg font-semibold leading-snug">{task.goal}</h1></div></div><span className={`rounded-full px-2.5 py-1 text-xs font-medium ${detail?.activity?.active ? 'bg-teal-50 text-teal-800' : 'bg-[#f1e7dc] text-stone-600'}`}>{activityText(detail?.activity) || taskListStatus(task)}</span></div></div>
-            <div className="border-b border-[#eaded1] bg-[#fffaf4] px-4 py-2 sm:px-7"><div className="flex gap-1 overflow-x-auto" role="group" aria-label="对话筛选">{([{ id: 'all', label: '全部' }, { id: 'collaboration', label: '协作' }, { id: 'decision', label: '决策' }, { id: 'deliverable', label: '成果' }] as const).map((filter) => <button key={filter.id} onClick={() => setChatFilter(filter.id)} className={`shrink-0 rounded-md px-3 py-1.5 text-xs font-medium ${chatFilter === filter.id ? 'bg-[#f7dfcf] text-[#7a3f2d]' : 'text-stone-500 hover:bg-[#f5ebe1]'}`}>{filter.label}</button>)}</div></div>
-            <div className="flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7">{visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={item.id} item={item} />) : <p className="py-10 text-center text-sm text-stone-400">这个筛选下暂时没有记录。</p>}</div>
+            <div className="chat-heading flex items-start justify-between gap-3 px-4 py-3 sm:px-7 sm:py-4" style={{ backgroundImage: `linear-gradient(90deg, #fffaf5 0%, rgba(255,250,245,.98) 55%, rgba(255,250,245,.78) 100%), url(${cafeWelcome})` }}><div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div><div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${detail?.activity?.active ? 'is-running' : ''}`}>{activityText(detail?.activity) || taskListStatus(task)}</span><button onClick={() => setShowMobileBoard(true)} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div></div>
+            <div className="filter-strip px-4 py-2 sm:px-7"><div className="flex gap-1 overflow-x-auto" role="group" aria-label="对话筛选">{([{ id: 'all', label: '全部' }, { id: 'collaboration', label: '协作' }, { id: 'decision', label: '决策' }, { id: 'deliverable', label: '成果' }] as const).map((filter) => <button key={filter.id} onClick={() => setChatFilter(filter.id)} className={`filter-button shrink-0 px-3 py-1.5 text-xs font-semibold ${chatFilter === filter.id ? 'is-active' : ''}`}>{filter.label}</button>)}</div></div>
+            <div className="chat-stream flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7">{visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={item.id} item={item} />) : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
             {composerMode === 'new' ? <TaskComposer draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /> : <DirectionComposer message={message} isSending={isSending} onMessageChange={setMessage} onSend={() => void sendDirection()} />}
-          </> : <><EmptyConversation /><TaskComposer draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
+          </> : <><EmptyConversation onChoose={setDraft} members={team} /><TaskComposer draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
+          {error && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{error}</p>}
         </section>
-        <aside className="bg-[#fffaf4] p-4 lg:border-l lg:border-[#e5d8ca]">
-          {task && <>{detail?.organization_memory && <MemoryBoard items={detail.organization_memory} names={Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))} />}<Workboard task={task} detail={detail} names={Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} /></>}
-          {error && <p role="alert" className="mt-4 rounded-lg bg-rose-50 p-3 text-xs text-rose-700">{error}</p>}
-        </aside>
+        {task && <aside className={`workboard-panel overflow-y-auto p-5 ${showMobileBoard ? 'fixed inset-0 z-50 block' : 'hidden'} lg:static lg:block`} aria-label="成果与过程">
+          <div className="mb-5 flex items-center justify-between"><div><p className="flex items-center gap-1.5 text-[11px] font-semibold text-[#ac6c56]"><Coffee size={14} /> 猫咖记事板</p><h2 className="mt-1 text-[16px] font-bold">成果与过程</h2></div><button onClick={() => setShowMobileBoard(false)} className="grid size-9 place-items-center rounded-md border border-[#d5e2db] bg-white text-[#4a736b] lg:hidden" aria-label="关闭成果面板"><X size={18} /></button></div>
+          {detail?.organization_memory && <MemoryBoard items={detail.organization_memory} names={names} />}<VerificationBoard items={task.verifications ?? []} /><Workboard task={task} detail={detail} names={names} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />
+        </aside>}
       </main>
     </div>
   )
 }
 
 function DirectionComposer({ message, isSending, onMessageChange, onSend }: { message: string; isSending: boolean; onMessageChange: (value: string) => void; onSend: () => void }) {
-  return <div className="border-t border-[#e5d8ca] bg-[#fffaf4] p-3 sm:p-4"><div className="mx-auto flex max-w-3xl gap-2 rounded-xl border border-[#ddccbc] bg-white p-2 shadow-sm focus-within:border-[#cb6e4e] focus-within:ring-2 focus-within:ring-[#f7dfcf]"><textarea value={message} onChange={(event) => onMessageChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onSend() } }} placeholder="随时补充、改目标，或 @罐头 加入；请内阁复核也可以直接说" aria-label="向团队发送消息" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm outline-none placeholder:text-stone-400" /><button disabled={isSending || !message.trim()} onClick={onSend} className="grid size-10 shrink-0 place-items-center self-end rounded-lg bg-[#cb6e4e] text-white disabled:bg-stone-200" title="发送消息并安排下一轮协作"><Send size={17} /></button></div></div>
+  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><textarea value={message} onChange={(event) => onMessageChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onSend() } }} placeholder="继续说吧，补充想法、改目标，或直接 @一位伙伴" aria-label="向团队发送消息" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm leading-6 outline-none placeholder:text-[#a8958d]" /><button disabled={isSending || !message.trim()} onClick={onSend} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title="发送消息并安排下一轮协作" aria-label="发送消息"><PawPrint size={20} fill="currentColor" strokeWidth={1.8} /></button></div></div>
 }
 
 function TaskComposer({ draft, isSending, onDraftChange, onCreate }: { draft: string; isSending: boolean; onDraftChange: (value: string) => void; onCreate: () => void }) {
-  return <div className="border-t border-[#e5d8ca] bg-[#fffaf4] p-3 sm:p-4"><div className="mx-auto flex max-w-3xl gap-2 rounded-xl border border-[#ddccbc] bg-white p-2 shadow-sm focus-within:border-[#cb6e4e] focus-within:ring-2 focus-within:ring-[#f7dfcf]"><textarea id="new-task" value={draft} onChange={(event) => onDraftChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onCreate() } }} placeholder="和店长聊聊，或 @月亮、@罐头、@米寇、@三角 直接点名" aria-label="发起任务对话" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm outline-none placeholder:text-stone-400" /><button disabled={isSending || !draft.trim()} onClick={onCreate} className="grid size-10 shrink-0 place-items-center self-end rounded-lg bg-[#cb6e4e] text-white disabled:bg-stone-200" title="发送新任务"><ArrowUp size={17} /></button></div></div>
+  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><textarea id="new-task" value={draft} onChange={(event) => onDraftChange(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onCreate() } }} placeholder="和店长说说，今天想做什么？" aria-label="发起任务对话" rows={2} className="min-h-12 flex-1 resize-none border-0 bg-transparent px-2 py-1 text-sm leading-6 outline-none placeholder:text-[#a8958d]" /><button disabled={isSending || !draft.trim()} onClick={onCreate} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title="发送新任务" aria-label="发送新任务"><PawPrint size={20} fill="currentColor" strokeWidth={1.8} /></button></div></div>
 }
 
 function ChatBubble({ item }: { item: ChatItem }) {
   const system = item.kind === 'system'; const human = item.kind === 'human'
-  return <article className={`flex gap-3 ${human ? 'justify-end' : ''}`}>
-    {!human && (system ? <div className="mt-1 grid size-9 shrink-0 place-items-center rounded-full bg-[#efe3d7] text-[#8a614b]"><Bot size={16} /></div> : <Portrait id={item.actor} />)}
-    <div className={`max-w-[82%] ${human ? 'rounded-2xl rounded-tr-sm bg-[#cb6e4e] px-4 py-3 text-white' : 'rounded-2xl rounded-tl-sm border border-[#eaded1] bg-white px-4 py-3 shadow-[0_1px_2px_rgba(97,62,40,.08)]'}`}>
-      <div className={`mb-1 flex items-center gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-stone-500'}`}><strong className={human ? 'text-white' : 'text-stone-800'}>{human ? '你' : item.display}</strong><span>{item.role}</span>{item.title && <span className="rounded bg-[#f5ece4] px-1.5 py-0.5 text-[10px] font-medium text-[#80533f]">{item.title}</span>}</div>
-      <p className="whitespace-pre-wrap text-sm leading-6">{item.text}</p>
+  return <article className={`flex items-start gap-3 ${human ? 'justify-end' : ''}`}>
+    {!human && <Portrait id={item.actor} />}
+    <div className={`message-bubble max-w-[min(86%,700px)] px-4 py-3 ${human ? 'is-human text-white' : system ? 'is-system' : 'is-agent'}`} data-actor={item.actor}>
+      <div className={`mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${human ? 'text-[#fff0e8]' : 'text-[#6e8981]'}`}><strong className={human ? 'text-white' : 'text-[#28433d]'}>{human ? '你' : item.display}</strong><span>{item.role}</span>{item.title && <span className={`text-[11px] font-semibold ${human ? 'text-[#fff4d9]' : 'text-[#a56049]'}`}>· {item.title}</span>}</div>
+      <p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>
       {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
-      {item.details?.length ? <details className={`mt-3 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#eee2d6] text-stone-600'}`}><summary className="cursor-pointer font-medium">展开这一步的安排</summary><ul className="mt-2 space-y-1.5 leading-5">{item.details.map((detail, index) => <li key={`${item.id}-${index}`}>{detail}</li>)}</ul></details> : null}
-      <details className={`mt-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-stone-400'}`}><summary className="cursor-pointer">审计证据 · 事件 #{item.id}</summary><pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded bg-stone-950 p-2 text-[10px] text-stone-100">{JSON.stringify(item.evidence.payload, null, 2)}</pre></details>
+      {item.details?.length ? <details className={`mt-3 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#dfeae5] text-[#52766d]'}`}><summary className="cursor-pointer font-semibold">查看判断与依据</summary><ul className="mt-2 space-y-1.5 leading-5">{item.details.map((detail, index) => <li key={`${item.id}-${index}`}>{detail}</li>)}</ul></details> : null}
+      <details className={`mt-2 text-[11px] ${human ? 'text-[#fde9dd]' : 'text-[#94a9a2]'}`}><summary className="cursor-pointer">事件 #{item.id} · 审计记录</summary><pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded bg-[#233833] p-2 text-[10px] text-stone-100">{JSON.stringify(item.evidence.payload, null, 2)}</pre></details>
     </div>
   </article>
+}
+
+function TeamRoster({ members, compact = false, onMention }: { members: OrgRole[]; compact?: boolean; onMention?: (name: string) => void }) {
+  const identity = (id: string) => id === 'store_manager' || id === 'orchestrator' || id === 'leader' ? '店长' : id.startsWith('caretaker_') || id.startsWith('cabinet_') ? '铲屎官' : '猫咪'
+  const cats = members.filter((member) => identity(member.id) === '猫咪')
+  const staff = members.filter((member) => identity(member.id) !== '猫咪')
+  return <section className={compact ? 'team-roster-compact p-4' : 'team-roster-full'}>
+    <div className="mb-3 flex items-center gap-2 text-[#a85643]"><Cat size={18} /><h2 className="text-[13px] font-bold">今天在店里</h2><span className="ml-auto text-[11px] text-[#a99080]">{members.length} 位伙伴</span></div>
+    {compact ? <><div className="flex flex-wrap gap-1.5">{[...cats, ...staff].map((member) => <span key={member.id} title={`${member.name} · ${identity(member.id)}`}><Portrait id={member.id} size="sm" /></span>)}</div><p className="mt-2 text-[11px] leading-5 text-[#92796b]">{cats.map((member) => member.name).join(' · ') || '猫咪们正在准备'}</p></> : <><div className="grid grid-cols-1 gap-2">{cats.map((member) => <button key={member.id} type="button" onClick={() => onMention?.(member.name)} className="cat-member flex items-center gap-3 px-3 py-2 text-left" title={`在新任务中点名 ${member.name}`} aria-label={`点名 ${member.name}`}><Portrait id={member.id} size="lg" /><div className="min-w-0"><strong className="block text-[13px]">{member.name}</strong><span className="text-[11px] text-[#9d7869]">猫咪 · 点名聊聊</span></div></button>)}</div>{staff.length > 0 && <div className="mt-5 border-t border-[#e3e2d7] pt-3"><h3 className="mb-1 text-[11px] font-semibold text-[#93796b]">店里还有</h3>{staff.map((member) => <div key={member.id} className="flex items-center gap-3 border-b border-[#e6e9dd] py-2 last:border-0"><Portrait id={member.id} size="sm" /><strong className="text-[12px]">{member.name}</strong><span className="ml-auto text-[11px] text-[#9d8e7f]">{identity(member.id)}</span></div>)}</div>}</>}
+  </section>
 }
 
 function MemoryBoard({ items, names }: { items: MemoryItem[]; names: Record<string, string> }) {
   if (!items.length) return null
   return <section className="mb-5 border-b border-[#eaded1] pb-5"><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">猫咖记忆</h2><span className="text-xs text-stone-400">已发布成果</span></div><div className="space-y-2">{items.map((item) => <div key={item.seq} className="border-l-2 border-sky-600 pl-3 py-1"><strong className="block text-xs text-stone-800">{item.title}</strong><p className="mt-1 text-xs leading-5 text-stone-600">{item.summary}</p><span className="mt-1 block text-[11px] text-stone-400">{names[item.actor ?? ''] ?? actorText(item.actor ?? '猫咖')} · 事件 #{item.seq}</span></div>)}</div></section>
+}
+
+function VerificationBoard({ items }: { items: Verification[] }) {
+  if (!items.length) return null
+  return <section className="mb-5 border-b border-[#eaded1] pb-5"><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">本机检查</h2><span className="text-xs text-stone-400">显式运行 · {items.length} 次</span></div><div className="space-y-3">{[...items].reverse().slice(0, 3).map((item) => <div key={item.seq} className={`border-l-2 pl-3 py-1 ${item.outcome === 'passed' ? 'border-emerald-600' : 'border-rose-600'}`}><strong className="text-xs text-stone-800">{item.outcome === 'passed' ? '命令通过' : item.outcome === 'timeout' ? '执行超时' : item.outcome === 'launch_error' ? '无法启动' : '命令失败'}</strong><p className="mt-1 break-all font-mono text-[11px] leading-5 text-stone-600">{item.command.join(' ')}</p><p className="mt-1 text-[11px] text-stone-500">事件 #{item.seq}{item.for_event ? ` · 关联自报 #${item.for_event}` : ''} · 退出码 {item.exit_code ?? '无'}</p>{item.git?.dirty && <p className="mt-1 text-[11px] text-amber-700">工作区有未提交改动，未绑定具体文件内容</p>}</div>)}</div><p className="mt-2 text-[11px] leading-5 text-stone-500">单条命令通过，不代表诊断或整项任务已证实。</p></section>
 }
 
 function Workboard({ task, detail, names, driverCoverage, showEvidence, onToggleEvidence }: { task: Task; detail: TaskDetail | null; names: Record<string, string>; driverCoverage?: DriverCoverage[]; showEvidence: boolean; onToggleEvidence: () => void }) {
@@ -434,7 +481,17 @@ function Workboard({ task, detail, names, driverCoverage, showEvidence, onToggle
   return <div className="space-y-5 border-t border-[#eaded1] pt-5">{driverCoverage && <section><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">协作通道</h2><span className="text-xs text-stone-400">不展示密钥</span></div><div className="space-y-1.5">{driverCoverage.map((item) => <div key={item.role_id} className="flex items-center justify-between gap-2 text-xs"><span className="truncate text-stone-600">{item.name}</span><span className={item.mode === 'external' ? 'text-teal-700' : 'text-amber-700'}>{item.mode === 'external' ? '外部模型' : '本地演示'}</span></div>)}</div></section>}<section><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">本轮参与</h2><span className="text-xs text-stone-400">{participants.length} 位伙伴</span></div><div className="space-y-2">{participants.map((owner) => <div key={owner} className="flex items-center gap-2 border-l-2 border-[#cb6e4e] py-1 pl-3"><Portrait id={owner} size="sm" /><strong className="text-xs">{names[owner] ?? actorText(owner)}</strong><span className="text-xs text-stone-400">{assignments.length ? '已接下这一轮安排' : '已参与本轮协作'}</span></div>)}</div></section><section><div className="mb-2 flex items-center justify-between gap-2"><h2 className="text-sm font-semibold">已发布成果</h2><span className="text-xs text-stone-400">{deliverables.length} 项</span></div>{deliverables.length ? <div className="space-y-2">{deliverables.map((item) => <div key={item.seq} className="border-l-2 border-emerald-600 pl-3 py-1"><strong className="block text-xs text-stone-800">{item.title}</strong><p className="mt-1 text-xs leading-5 text-stone-600">{item.summary}</p>{item.uri && <span className="mt-1 block truncate text-[11px] text-teal-700">{item.uri}</span>}</div>)}</div> : <p className="text-xs leading-5 text-stone-400">猫咪们尚未发布可复用的成果。</p>}</section><section><div className="mb-2 flex items-center justify-between gap-2"><h2 className="text-sm font-semibold">自证与交接</h2><span className="text-xs text-stone-400">{diagnoses.length + handoffs.length} 条</span></div>{diagnoses.length || handoffs.length ? <div className="space-y-3">{diagnoses.map((item) => <div key={`diagnosis-${item.seq}`} className="border-l-2 border-amber-500 pl-3 py-1"><strong className="block text-xs text-stone-800">诊断 · {diagnosisStatusText(item.status)}</strong><p className="mt-1 text-xs leading-5 text-stone-600">{item.symptom}</p><p className="mt-1 text-xs leading-5 text-stone-500">{item.cause}</p></div>)}{handoffs.map((item) => <div key={`handoff-${item.seq}`} className="border-l-2 border-sky-600 pl-3 py-1"><strong className="block text-xs text-stone-800">交接卡</strong><p className="mt-1 text-xs leading-5 text-stone-600">{item.summary}</p><p className="mt-1 text-xs leading-5 text-stone-500">为什么：{item.why}</p></div>)}</div> : <p className="text-xs leading-5 text-stone-400">尚未留下诊断或交接卡；完成关键改动时，伙伴会说明证据、验证与未覆盖范围。</p>}</section><section><div className="mb-2 flex items-center gap-2"><CheckCircle2 size={16} className="text-teal-700" /><h2 className="text-sm font-semibold">当前结论</h2></div><p className="text-sm leading-6 text-stone-600">{reasonText(task.decision?.reason ?? task.brief?.dispute ?? '团队正在形成下一步可交付结果。')}</p>{task.decision && <span className="mt-2 inline-block rounded-full bg-teal-50 px-2 py-1 text-xs text-teal-800">{actorText(task.decision.source ?? '团队')} · {statusText(task.decision.resolution)}</span>}</section><section className="border-t border-[#eaded1] pt-4"><button onClick={onToggleEvidence} className="flex w-full items-center justify-between text-left text-sm font-semibold"><span className="flex items-center gap-2"><FileText size={16} className="text-stone-500" /> 过程证据</span><ChevronDown size={16} className={showEvidence ? 'rotate-180 transition' : 'transition'} /></button>{showEvidence && <div className="mt-3 max-h-52 overflow-auto rounded-lg bg-[#fcf5ee] p-3 text-xs text-stone-500"><p>{detail?.events.length ?? 0} 条不可变事件已记录。</p><a className="mt-2 inline-block text-teal-700 hover:underline" href={`/tasks/${task.id}`}>打开完整审计回放</a></div>}</section></div>
 }
 
-function EmptyConversation() { return <div className="grid flex-1 place-items-center px-6 text-center"><div><div className="mx-auto mb-4 grid size-12 place-items-center rounded-2xl bg-teal-100 text-teal-800"><Menu size={22} /></div><h1 className="text-xl font-semibold">暂无进行中的任务</h1><p className="mx-auto mt-2 max-w-md text-sm leading-6 text-slate-500">从下方发起一个任务。</p></div></div> }
+function EmptyConversation({ onChoose, members }: { onChoose: (value: string) => void; members: OrgRole[] }) {
+  const examples = ['帮我梳理一页活动说明', '帮我复盘一个难定位的 Bug', '聊聊一个新产品想法']
+  return <div className="welcome-view flex-1 overflow-y-auto">
+    <div className="welcome-scene"><img src={cafeWelcome} alt="月亮、三角、米寇和罐头在温暖的猫咖里" /></div>
+    <div className="welcome-content mx-auto max-w-2xl px-5 pb-6 pt-5 sm:px-8">
+      <div className="flex items-start gap-3"><Portrait id="store_manager" size="lg" /><div className="min-w-0"><span className="text-[11px] font-bold text-[#2a8075]">店长</span><h1 className="mt-1 text-xl font-bold leading-snug text-[#23433b] sm:text-2xl">欢迎来猫咖，今天想聊什么？</h1><p className="mt-2 text-[13px] leading-6 text-[#5e796e]">先说说你心里那件事。月亮、罐头、米寇和三角都在。</p></div></div>
+      <div className="mt-5 flex gap-2 overflow-x-auto pb-2 sm:flex-wrap" aria-label="任务示例">{examples.map((example) => <button key={example} onClick={() => { onChoose(example); document.getElementById('new-task')?.focus() }} className="example-prompt shrink-0 border border-[#c9ddd5] bg-white px-3 py-2 text-left text-xs font-medium text-[#356d61] shadow-sm">{example}</button>)}</div>
+      {members.length > 0 && <div className="mt-6 flex items-center gap-2 border-t border-[#e5d7c8] pt-4"><div className="flex -space-x-2">{members.filter((member) => ['product', 'design', 'dev', 'test'].includes(member.id)).map((member) => <Portrait key={member.id} id={member.id} size="sm" />)}</div><span className="text-[11px] text-[#92796b]">月亮、罐头、米寇和三角都在</span></div>}
+    </div>
+  </div>
+}
 
 export default App
 

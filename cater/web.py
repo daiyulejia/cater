@@ -1156,6 +1156,7 @@ def task_to_dict(task: TaskSnapshot) -> dict[str, Any]:
         "deliverables": task.deliverables,
         "diagnoses": task.diagnoses,
         "handoffs": task.handoffs,
+        "verifications": task.verifications,
         "tokens": task.tokens,
         "token_usage": task.token_usage,
     }

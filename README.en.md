@@ -57,6 +57,7 @@ cater dispatch <task_id>
 cater run <task_id>
 cater export <task_id>
 cater events <task_id>
+cater verify <task_id> -- python -m unittest discover -s tests
 cater review --next
 cater decide <task_id> --resolution done --reason "Ship the smallest loop first"
 ```
@@ -92,6 +93,8 @@ cater export [task_id] --format jsonl
 cater review [task_id] --record
 cater review [task_id] --plain
 cater review [task_id] --next
+cater verify <task_id> -- python -m unittest discover -s tests
+cater verify <task_id> --for-event <diagnosis-or-handoff-seq> -- python -m unittest discover -s tests
 cater inbox
 cater profiles
 cater policy
@@ -119,6 +122,8 @@ cater --audit-key "dev-secret" chain --json
 `--driver-attempts` and `--circuit-breaker-threshold` tune retry containment without changing driver code.
 
 `doctor --json` returns the same health check in a machine-readable shape for CI, scheduled review, and pre-integration probes.
+
+`verify` runs only the command explicitly provided after `--`, locally, and records its exit code, duration, output digests, and Git state. Command output is not stored in the event log unless `--record-output` is set; that option keeps excerpts up to 8 KiB. Command arguments are always recorded, so do not put secrets on the command line. Cater never executes an agent-suggested command automatically, and one passing command does not prove a diagnosis or entire task. Use `--cwd` and `--timeout` to bound the check.
 
 See [docs/organization-flow.md](docs/organization-flow.md) for when to use direct assignment, cabinet dispatch, or governance.
 

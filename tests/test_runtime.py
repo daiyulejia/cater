@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import importlib.util
 import json
@@ -552,6 +553,28 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("latest_agent_handoff=", driver.prompts[1])
         self.assertIn("为什么锁要覆盖读写两步？", driver.prompts[1])
         self.assertIn("checks are agent-reported", driver.prompts[1])
+
+    def test_follow_up_distinguishes_observed_check_from_task_proof(self):
+        response = '{"stance":"assert","option_id":"A","claim":"继续排查","text":"先看实际检查。"}'
+        driver = StaticResponseDriver(response)
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                '{"roles":[{"id":"worker","name":"执行者","role":"执行","driver":"result"}]}',
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"result": driver}) as rt:
+                task_id = rt.create_task("核对修复")
+                rt.log.emit(
+                    actor=Actor.system("local_verifier"), type="verification.completed",
+                    task_id=task_id, payload={
+                        "source": "explicit_local_cli", "command": ["python", "-m", "unittest"],
+                        "outcome": "passed", "exit_code": 0, "git": {"head": None, "dirty": None},
+                    },
+                )
+                rt.collaborate(task_id)
+        self.assertIn("latest_explicit_local_check=", driver.prompts[0])
+        self.assertIn("observed for this command only", driver.prompts[0])
 
     def test_profile_memory_is_fed_into_later_collaboration_prompts(self):
         driver = PromptCaptureDriver()
@@ -2308,6 +2331,83 @@ class CliTests(unittest.TestCase):
         self.assertIn("error: not found: missing-task", out)
         self.assertNotIn("Traceback", out)
 
+    def test_explicit_check_records_observed_result_without_persisting_output(self):
+        _, created = self.run_cli("new", "核对修复")
+        task_id = created.splitlines()[0].split()[1]
+        code, out = self.run_cli(
+            "verify", task_id, "--cwd", self.tmp.name, "--",
+            sys.executable, "-c", "print(''.join(['private', ' check output']))",
+        )
+        self.assertEqual(code, 0)
+        self.assertIn("recorded check", out)
+        self.assertIn("private check output", out)
+        with Runtime(self.db) as rt:
+            task = rt.task(task_id)
+            self.assertIsNotNone(task)
+            check = task.verifications[0]
+            self.assertEqual(check["outcome"], "passed")
+            self.assertEqual(check["exit_code"], 0)
+            self.assertEqual(check["source"], "explicit_local_cli")
+            self.assertNotIn("excerpt", check["stdout"])
+            self.assertEqual(check["stdout"]["bytes"], len("private check output".encode()) + len(os.linesep.encode()))
+            self.assertTrue(rt.verify_chain().ok)
+            self.assertNotIn("private check output", json.dumps(rt.log.read(task_id=task_id)[-1].payload))
+
+    def test_explicit_check_failure_timeout_and_opt_in_output(self):
+        _, created = self.run_cli("new", "检查失败路径")
+        task_id = created.splitlines()[0].split()[1]
+        with Runtime(self.db) as rt:
+            diagnosis = rt.log.emit(
+                actor=Actor.agent("dev", "dev"), type="diagnosis.recorded", task_id=task_id,
+                payload={"status": "hypothesis", "symptom": "现象", "cause": "猜测"},
+            )
+        code, _ = self.run_cli(
+            "verify", task_id, "--for-event", str(diagnosis.seq), "--record-output", "--",
+            sys.executable, "-c", "import sys; print('failed'); sys.exit(7)",
+        )
+        self.assertEqual(code, 1)
+        code, _ = self.run_cli(
+            "verify", task_id, "--timeout", "0.05", "--",
+            sys.executable, "-c", "import time; time.sleep(2)",
+        )
+        self.assertEqual(code, 1)
+        with Runtime(self.db) as rt:
+            checks = rt.task(task_id).verifications
+        self.assertEqual([item["outcome"] for item in checks], ["failed", "timeout"])
+        self.assertEqual(checks[0]["exit_code"], 7)
+        self.assertEqual(checks[0]["for_event"], diagnosis.seq)
+        self.assertIn("failed", checks[0]["stdout"]["excerpt"])
+        self.assertIsNone(checks[1]["exit_code"])
+
+    def test_invalid_check_link_never_runs_command(self):
+        _, created = self.run_cli("new", "拒绝错误关联")
+        task_id = created.splitlines()[0].split()[1]
+        marker = Path(self.tmp.name) / "must-not-run"
+        code, out = self.run_cli(
+            "verify", task_id, "--for-event", "1", "--",
+            sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()",
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("diagnosis or handoff", out)
+        self.assertFalse(marker.exists())
+        with Runtime(self.db) as rt:
+            self.assertEqual(rt.task(task_id).verifications, [])
+
+    def test_explicit_check_output_excerpt_is_bounded_but_digest_covers_all_bytes(self):
+        _, created = self.run_cli("new", "核对大量输出")
+        task_id = created.splitlines()[0].split()[1]
+        code, _ = self.run_cli(
+            "verify", task_id, "--record-output", "--",
+            sys.executable, "-c", "import sys; sys.stdout.write('x' * 12000)",
+        )
+        self.assertEqual(code, 0)
+        with Runtime(self.db) as rt:
+            output = rt.task(task_id).verifications[0]["stdout"]
+        self.assertEqual(output["bytes"], 12000)
+        self.assertTrue(output["truncated"])
+        self.assertEqual(len(output["excerpt"].encode()), 8192)
+        self.assertEqual(output["sha256"], hashlib.sha256(b"x" * 12000).hexdigest())
+
     def test_cli_doctor_can_probe_cli_drivers(self):
         driver_script = Path(__file__).resolve().parent / "fixtures" / "ndjson_driver.py"
         config = Path(self.tmp.name) / "drivers.json"
@@ -2915,14 +3015,18 @@ class WebTests(unittest.TestCase):
         shell = (root / "index.html").read_text(encoding="utf-8")
 
         self.assertIn('lang="zh-CN"', shell)
-        self.assertIn("Cater 自治工作台", shell)
+        self.assertIn("Cater · 有猫的工作间", shell)
         self.assertTrue((root / "favicon.svg").is_file())
         bundles = list((root / "assets").glob("*.js"))
         self.assertTrue(bundles)
         self.assertTrue(list((root / "assets").glob("*.css")))
         bundle_text = "\n".join(bundle.read_text(encoding="utf-8") for bundle in bundles)
         self.assertIn("对话筛选", bundle_text)
-        self.assertIn("和店长聊聊", bundle_text)
+        self.assertIn("和店长说说", bundle_text)
+        self.assertIn("本机检查", bundle_text)
+        self.assertTrue(list((root / "assets").glob("cafe-welcome-*.jpg")))
+        self.assertTrue(list((root / "assets").glob("cat-portraits-*.jpg")))
+        self.assertTrue(list((root / "assets").glob("staff-portraits-*.jpg")))
         self.assertIn("这个工作台需要访问令牌", bundle_text)
         self.assertIn("已避免重复启动", bundle_text)
         self.assertIn("这段内容太长了", bundle_text)

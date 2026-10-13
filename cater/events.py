@@ -41,6 +41,7 @@ EVENT_CATEGORIES = {
     "diagnosis.recorded": "analysis",
     "deliverable.published": "outcome",
     "handoff.published": "outcome",
+    "verification.completed": "review",
     "cabinet.voted": "decision",
     "decision.proposed": "decision",
     "agent.decided": "decision",

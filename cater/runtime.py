@@ -1322,6 +1322,23 @@ class Runtime:
                 )
                 + "; checks are agent-reported until independently observed"
             )
+        if task.verifications:
+            latest = task.verifications[-1]
+            parts.append(
+                "latest_explicit_local_check="
+                + json.dumps(
+                    {
+                        "seq": latest.get("seq"),
+                        "for_event": latest.get("for_event"),
+                        "command": latest.get("command"),
+                        "outcome": latest.get("outcome"),
+                        "exit_code": latest.get("exit_code"),
+                        "git": latest.get("git"),
+                    },
+                    ensure_ascii=False,
+                )
+                + "; observed for this command only; it does not prove the diagnosis or entire task"
+            )
         if not parts:
             return "Task memory: no prior collaboration on this task."
         return "Task memory: " + "; ".join(parts) + "."

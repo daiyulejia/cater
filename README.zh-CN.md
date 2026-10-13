@@ -54,6 +54,7 @@ cater dispatch <task_id>
 cater run <task_id>
 cater export <task_id>
 cater events <task_id>
+cater verify <task_id> -- python -m unittest discover -s tests
 cater review --next
 cater decide <task_id> --resolution done --reason "Ship the smallest loop first"
 ```
@@ -89,6 +90,8 @@ cater export [task_id] --format jsonl
 cater review [task_id] --record
 cater review [task_id] --plain
 cater review [task_id] --next
+cater verify <task_id> -- python -m unittest discover -s tests
+cater verify <task_id> --for-event <诊断或交接事件序号> -- python -m unittest discover -s tests
 cater inbox
 cater profiles
 cater policy
@@ -118,6 +121,8 @@ cater --audit-key "dev-secret" chain --json
 `--driver-attempts` 和 `--circuit-breaker-threshold` 可以调节 driver 重试与熔断策略，不需要改 driver 代码。
 
 `doctor --json` 会输出同一套机器可读健康检查，适合 CI、定时自审和接入新 driver 前的探针。
+
+`verify` 仅在你显式调用时，在本机运行 `--` 后的命令，记录退出码、耗时、输出摘要与当时的 Git 状态。默认不把命令输出写入事件链；`--record-output` 才会保存最多 8 KiB 的输出摘录。命令参数本身会被记录，所以不要把令牌、密码或其他敏感值写进命令行。它不会自动执行 Agent 建议的命令，也不会因为一条命令通过就宣称诊断或整项任务已经证实。可用 `--cwd` 指定工作目录、`--timeout` 限制秒数。
 
 什么时候用直接派发、内阁分发或治理路径，见 [docs/organization-flow.md](docs/organization-flow.md)。
 
