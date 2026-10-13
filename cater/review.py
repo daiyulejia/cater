@@ -14,6 +14,7 @@ LENSES = [
     ("testing", "Testing"),
     ("ui", "UI"),
     ("logic", "Logic"),
+    ("discipline", "Discipline"),
     ("reliability", "Reliability"),
     ("adoption", "Adoption"),
 ]
@@ -36,6 +37,7 @@ def build_review(
         _testing_lens(tasks, chain),
         _ui_lens(tasks),
         _logic_lens(tasks),
+        _discipline_lens(tasks),
         _reliability_lens(tasks),
         _adoption_lens(tasks, profiles),
     ]
@@ -247,6 +249,23 @@ def _logic_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     if skipped:
         return _lens("logic", "watch", "Only non-governed collaboration is represented.", "Force one governance round to verify the escalation path.")
     return _lens("logic", "needs_attention", "No collaboration or governance path has completed.", "Run a task before evaluating the organization logic.")
+
+
+def _discipline_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
+    flags = [flag for task in tasks for flag in task.discipline_flags]
+    if flags:
+        return _lens(
+            "discipline",
+            "watch",
+            f"{len(flags)} agent contribution(s) violated the visible collaboration protocol.",
+            "Inspect discipline flags and tighten the affected role prompt or driver adapter.",
+        )
+    return _lens(
+        "discipline",
+        "ok",
+        "No visible collaboration protocol violations are recorded.",
+        "Keep contribution, evidence, and reply-link rules explicit for new drivers.",
+    )
 
 
 def _reliability_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:

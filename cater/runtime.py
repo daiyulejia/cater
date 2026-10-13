@@ -16,6 +16,7 @@ from .cabinet import CabinetPolicy, tally_votes
 from .drivers import Driver, DriverResponse, load_drivers
 from .events import Actor, Event, EventLog
 from .fold import TaskSnapshot, fold
+from .memory import shared_deliverable_memory
 from .profiles import agent_profiles
 from .review import build_review
 
@@ -491,9 +492,10 @@ class Runtime:
         utterances = list(earlier or [])
         produced = []
         role_ids = {role.id for role in self.roles}
+        workspace_memory = self.shared_memory(exclude_task_id=task_id)
         for role in roles:
             driver = self.drivers[role.driver]
-            prompt = self._prompt(task, role, profiles.get(role.id), utterances)
+            prompt = self._prompt(task, role, profiles.get(role.id), utterances, workspace_memory)
             self.log.emit(
                 actor=Actor.agent(role.id, role.role),
                 type="agent.working",
@@ -508,19 +510,6 @@ class Runtime:
                 prompt=prompt,
                 round_outputs=utterances,
             )
-            parsed = self._parse_response(response.text)
-            event_type = "msg.challenge" if parsed.get("stance") == "challenge" else "msg.said"
-            payload = {
-                "stance": parsed.get("stance", "assert"),
-                "option_id": parsed.get("option_id"),
-                "claim": parsed.get("claim", ""),
-                "evidence": list(parsed.get("evidence", []) or []),
-                "confidence": parsed.get("confidence"),
-                "text": parsed.get("text", response.text),
-                "tokens": response.tokens,
-                "token_usage": self._token_usage(response),
-                "driver": role.driver,
-            }
             visible_refs = {
                 int(item["seq"])
                 for item in task.messages
@@ -532,8 +521,25 @@ class Runtime:
                 for event in [item.get("event")]
                 if isinstance(getattr(event, "seq", None), int)
             )
-            target = self._optional_target(parsed.get("target"), role_ids)
-            reply_to = self._optional_reply_to(parsed.get("reply_to"), visible_refs)
+            parsed, discipline_issues = self._discipline_response(
+                self._parse_response(response.text), role_ids, visible_refs
+            )
+            event_type = "msg.challenge" if parsed.get("stance") == "challenge" else "msg.said"
+            payload = {
+                "stance": parsed.get("stance", "assert"),
+                "option_id": parsed.get("option_id"),
+                "claim": parsed.get("claim", ""),
+                "evidence": parsed.get("evidence", []),
+                "confidence": parsed.get("confidence"),
+                "text": parsed.get("text", response.text),
+                "tokens": response.tokens,
+                "token_usage": self._token_usage(response),
+                "driver": role.driver,
+            }
+            if discipline_issues:
+                payload["discipline"] = {"issues": discipline_issues}
+            target = parsed.get("target")
+            reply_to = parsed.get("reply_to")
             if target is not None:
                 payload["target"] = target
             if reply_to is not None:
@@ -544,6 +550,18 @@ class Runtime:
                 task_id=task_id,
                 payload=payload,
             )
+            if discipline_issues:
+                self.log.emit(
+                    actor=Actor.system("discipline"),
+                    type="agent.discipline_flagged",
+                    task_id=task_id,
+                    payload={
+                        "role": role.id,
+                        "message_seq": event.seq,
+                        "issues": discipline_issues,
+                        "action": "kept visible output, prevented unsupported protocol fields from governing decisions",
+                    },
+                )
             for deliverable in self._deliverables(parsed.get("deliverables")):
                 self.log.emit(
                     actor=Actor.agent(role.id, role.role),
@@ -663,6 +681,10 @@ class Runtime:
 
     def profiles(self) -> dict[str, dict[str, Any]]:
         return agent_profiles(self.log.read())
+
+    def shared_memory(self, *, exclude_task_id: str | None = None) -> list[dict[str, Any]]:
+        """Return bounded cross-task outcomes that remain inspectable in the log."""
+        return shared_deliverable_memory(self.log.read(), exclude_task_id=exclude_task_id)
 
     def review(self, task_id: str | None = None, *, record: bool = False) -> dict[str, Any]:
         events = self.log.read(task_id=task_id)
@@ -810,10 +832,12 @@ class Runtime:
         role: Role,
         profile: dict[str, Any] | None = None,
         round_outputs: list[dict[str, Any]] | None = None,
+        workspace_memory: list[dict[str, Any]] | None = None,
     ) -> str:
         memory = self._profile_memory(profile)
         task_memory = self._task_memory(task, role.id)
         round_memory = self._round_memory(round_outputs or [])
+        organization_memory = self._organization_memory(workspace_memory or [])
         objective = self._task_objective(task)
         seat = (
             "You are serving on the cabinet: assess the worker outputs, compare options, and return a decision-ready position."
@@ -836,7 +860,10 @@ class Runtime:
             "useful work, visible evidence, decisions, risks, and results.\n"
             "Agent-to-agent policy: when you are continuing, correcting, or handing off another "
             "agent's output, include target=<role id> and reply_to=<event seq> in the JSON.\n"
+            "Team discipline: every contribution needs a visible claim; a challenge needs explicit evidence; "
+            "and a directed reply must name a valid visible event. Unsupported challenges cannot act as vetoes.\n"
             f"{memory}\n"
+            f"{organization_memory}\n"
             f"{task_memory}\n"
             f"{round_memory}\n"
             "Return JSON with stance, option_id, claim, evidence, confidence, text, "
@@ -864,6 +891,16 @@ class Runtime:
         if last_failure:
             parts.append(f"last_failure={last_failure[:160]}")
         return "Profile memory: " + "; ".join(parts) + "."
+
+    @staticmethod
+    def _organization_memory(items: list[dict[str, Any]]) -> str:
+        if not items:
+            return "Organization memory: no prior published outcomes from other tasks."
+        summaries = [
+            f"#{item.get('seq')} {item.get('actor')} published {item.get('title')}: {item.get('summary')}"
+            for item in items
+        ]
+        return "Organization memory: " + " | ".join(summaries) + ". Treat it as reusable context, not current-task fact."
 
     @staticmethod
     def _task_memory(task: TaskSnapshot, role_id: str | None = None) -> str:
@@ -1192,6 +1229,62 @@ class Runtime:
         if not items:
             return "Current round memory: earlier outputs had no claims."
         return "Current round memory: " + " | ".join(items) + "."
+
+    @classmethod
+    def _discipline_response(
+        cls,
+        parsed: dict[str, Any],
+        role_ids: set[str],
+        visible_refs: set[int],
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Normalize visible collaboration fields and retain only enforceable signals."""
+        result = dict(parsed)
+        issues: list[str] = []
+        stance = str(result.get("stance") or "assert").strip().lower()
+        if stance not in {"assert", "challenge"}:
+            stance = "assert"
+            issues.append("invalid_stance")
+        text = str(result.get("text") or "").strip()
+        claim = str(result.get("claim") or "").strip()
+        if not claim:
+            claim = text[:240] or "未提供可见结论"
+            issues.append("missing_claim")
+        evidence_raw = result.get("evidence")
+        evidence = (
+            [str(item).strip()[:320] for item in evidence_raw if str(item).strip()]
+            if isinstance(evidence_raw, list)
+            else []
+        )
+        if stance == "challenge" and not evidence:
+            stance = "assert"
+            result.pop("option_id", None)
+            issues.append("challenge_without_evidence")
+
+        raw_target = result.get("target")
+        raw_reply = result.get("reply_to")
+        target = cls._optional_target(raw_target, role_ids)
+        reply_to = cls._optional_reply_to(raw_reply, visible_refs)
+        if raw_target not in (None, "") and target is None:
+            issues.append("invalid_target")
+        if raw_reply not in (None, "") and reply_to is None:
+            issues.append("invalid_reply_to")
+        if target is not None and reply_to is None:
+            target = None
+            issues.append("target_without_visible_reply")
+        if reply_to is not None and target is None:
+            reply_to = None
+            issues.append("reply_without_target")
+
+        result.update({"stance": stance, "claim": claim, "text": text or claim, "evidence": evidence})
+        if target is None:
+            result.pop("target", None)
+        else:
+            result["target"] = target
+        if reply_to is None:
+            result.pop("reply_to", None)
+        else:
+            result["reply_to"] = reply_to
+        return result, issues
 
     @staticmethod
     def _optional_target(value: Any, role_ids: set[str]) -> str | None:

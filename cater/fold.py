@@ -28,6 +28,7 @@ class TaskSnapshot:
     plan: dict[str, Any] | None = None
     assignments: list[dict[str, Any]] = field(default_factory=list)
     deliverables: list[dict[str, Any]] = field(default_factory=list)
+    discipline_flags: list[dict[str, Any]] = field(default_factory=list)
     tokens: int = 0
     token_usage: dict[str, int] = field(default_factory=dict)
 
@@ -83,6 +84,8 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
             task.token_usage[source] = task.token_usage.get(source, 0) + 1
         elif event.type == "driver.failed":
             task.driver_failures.append({"seq": event.seq, **payload})
+        elif event.type == "agent.discipline_flagged":
+            task.discipline_flags.append({"seq": event.seq, **payload})
         elif event.type == "escalation.triggered":
             task.status = "escalated"
         elif event.type == "cabinet.voted":

@@ -58,6 +58,30 @@ class PromptCaptureDriver:
         return DriverResponse(text=text, tokens=3)
 
 
+class DeliverableCaptureDriver:
+    name = "deliverable-memory"
+
+    def __init__(self):
+        self.prompts: list[str] = []
+
+    def complete(self, *, role: str, prompt: str, context: dict) -> DriverResponse:
+        self.prompts.append(prompt)
+        return DriverResponse(
+            text=json.dumps(
+                {
+                    "stance": "assert",
+                    "option_id": "A",
+                    "claim": "发布可复用成果",
+                    "evidence": ["已形成可回放交付物"],
+                    "text": "我已留下可供下次任务参考的成果。",
+                    "deliverables": [{"title": "组织记忆样例", "summary": "这是一个已发布成果。"}],
+                },
+                ensure_ascii=False,
+            ),
+            tokens=3,
+        )
+
+
 class StaticResponseDriver:
     def __init__(self, text: str, tokens: int = 5, meta: dict | None = None):
         self.text = text
@@ -334,6 +358,62 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("messages=1", driver.prompts[1])
         self.assertIn("supports=1", driver.prompts[1])
         self.assertIn("last_claim=memory claim 1", driver.prompts[1])
+
+    def test_published_outcomes_become_bounded_shared_memory_for_later_tasks(self):
+        driver = DeliverableCaptureDriver()
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                '{"roles":[{"id":"memory","name":"Memory","role":"memory","driver":"memory"}]}',
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"memory": driver}) as rt:
+                first = rt.create_task("First task")
+                rt.collaborate(first)
+                second = rt.create_task("Second task")
+                rt.collaborate(second)
+                memory = rt.shared_memory(exclude_task_id=second)
+
+        self.assertEqual(len(memory), 1)
+        self.assertEqual(memory[0]["title"], "组织记忆样例")
+        self.assertIn("Organization memory: #", driver.prompts[1])
+        self.assertIn("组织记忆样例", driver.prompts[1])
+        self.assertNotIn("First task", driver.prompts[1])
+
+    def test_discipline_flags_unsupported_challenge_and_reply_without_turning_it_into_a_veto(self):
+        response = json.dumps(
+            {
+                "stance": "challenge",
+                "option_id": "A",
+                "claim": "这里需要额外核验",
+                "evidence": [],
+                "text": "请先补充可以复查的证据。",
+                "target": "missing-role",
+                "reply_to": 999,
+            },
+            ensure_ascii=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            roles = Path(tmp) / "roles.json"
+            roles.write_text(
+                '{"roles":[{"id":"worker","name":"执行者","role":"worker","driver":"static"}]}',
+                encoding="utf-8",
+            )
+            with Runtime(":memory:", roles_path=roles, drivers={"static": StaticResponseDriver(response)}) as rt:
+                task_id = rt.create_task("纪律检查")
+                rt.collaborate(task_id)
+                task = rt.task(task_id)
+                events = rt.log.read(task_id=task_id)
+                review = rt.review(task_id)
+
+        self.assertEqual(task.messages[0]["type"], "msg.said")
+        self.assertIsNone(task.messages[0]["option_id"])
+        self.assertNotIn("target", task.messages[0])
+        self.assertNotIn("reply_to", task.messages[0])
+        self.assertIn("challenge_without_evidence", task.messages[0]["discipline"]["issues"])
+        self.assertIn("invalid_target", task.discipline_flags[0]["issues"])
+        self.assertIn("agent.discipline_flagged", [event.type for event in events])
+        self.assertTrue(any(item["id"] == "discipline" and item["status"] == "watch" for item in review["lenses"]))
 
     def test_task_memory_shares_prior_agent_outputs_between_roles(self):
         driver = PromptCaptureDriver()

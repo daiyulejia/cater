@@ -35,6 +35,7 @@ EVENT_CATEGORIES = {
     "agent.working": "dialogue",
     "msg.said": "dialogue",
     "msg.challenge": "dialogue",
+    "agent.discipline_flagged": "decision",
     "deliverable.published": "outcome",
     "cabinet.voted": "decision",
     "decision.proposed": "decision",

@@ -240,6 +240,16 @@ cater --roles examples/layered_api_roles.json --drivers examples/layered_api_dri
 
 Skills 和 MCP 也应该放在这条边界后面：用 driver 进程包住它们，让 adapter 调用工具，再返回 Cater 的小 JSON 结构。`examples/ndjson_tool_driver.py` 提供了一个零依赖 adapter 骨架。如果 Windows 上的 `python` 指向 Microsoft Store 占位符，请把 `examples/tool_driver_config.json` 里的命令换成真实 Python 解释器完整路径。
 
+## 身份、记忆与纪律
+
+角色身份由角色卡持续定义：名字、职责、charter、表达方式和绑定的 driver 不会因为一次对话结束而丢失。运行时不会把整段历史或模型隐藏推理塞回下一次调用，而是使用三层有界上下文：
+
+- **身份记忆**：从角色卡读取的长期职责与表达边界。
+- **任务共享记忆**：当前任务最近的协作消息、分工、命令与同轮产出，带事件序号，供伙伴明确回复或接力。
+- **组织共享记忆**：其他任务中显式发布的最近三项成果摘要；每项保留原始事件序号、发布者和任务 ID，可回放验证，并被提示为“参考而非当前事实”。
+
+团队纪律同样不是人格设定：每条贡献需要可见结论；质疑必须给出证据；定向回复必须同时指向有效角色和可见事件。运行时会把违反这些格式约束的情况记录为 `agent.discipline_flagged`。其中无证据质疑会被保留为可见提醒，但不能触发否决或升级为治理投票依据。这样既不把模型偶发格式错误悄悄吞掉，也不会让它劫持自治决策。
+
 仓库也提供可直接尝试的 [`examples/codex_cli_driver.py`](examples/codex_cli_driver.py)：它把本机已登录的 Codex CLI 接到同一 NDJSON 边界，默认只读、短生命周期，并用 JSON Schema 限定模型的可见协作消息。接入步骤和安全边界见 [`examples/README.md`](examples/README.md#codex-cli-适配器)。
 
 ## 内阁策略
