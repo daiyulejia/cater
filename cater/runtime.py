@@ -1002,6 +1002,12 @@ class Runtime:
                     exc=exc,
                     circuit_open=failures >= self.circuit_breaker_threshold,
                 )
+                # Do not let a retry budget overrule an already-open circuit.
+                # The failed attempt is recorded above, then subsequent roles
+                # receive the contained circuit-open response without another
+                # call into an unhealthy model or tool process.
+                if failures >= self.circuit_breaker_threshold:
+                    break
         assert last_error is not None
         return self._contained_driver_failure(role, str(last_error))
 

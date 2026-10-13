@@ -1125,6 +1125,24 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(driver.calls, 2)
             self.assertTrue(any(item["attempt"] == 0 for item in task.driver_failures))
 
+    def test_open_circuit_stops_remaining_retries_in_the_same_round(self):
+        driver = AlwaysFailDriver()
+        with Runtime(
+            ":memory:",
+            drivers={"product": driver},
+            driver_attempts=4,
+            circuit_breaker_threshold=2,
+        ) as rt:
+            task_id = rt.create_task("Stop retries after circuit opens")
+            rt.battle(task_id)
+            task = rt.task(task_id)
+
+        self.assertEqual(driver.calls, 2)
+        assert task is not None
+        first_failures = [item for item in task.driver_failures if item["attempt"] > 0]
+        self.assertEqual([item["attempt"] for item in first_failures[:2]], [1, 2])
+        self.assertTrue(first_failures[1]["circuit_open"])
+
     def test_driver_health_can_keep_a_circuit_open_across_runtime_instances(self):
         driver = AlwaysFailDriver()
         health = DriverHealth()
