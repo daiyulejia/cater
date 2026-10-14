@@ -57,6 +57,34 @@ test('聊天内点名保留草稿并聚焦，既不发送也不污染其他任�
   expect(screen.getByRole('button', { name: '全部' }).getAttribute('aria-pressed')).toBe('true')
 })
 
+test('输入框点名建议随任务关闭，草稿仍归属于原任务', async () => {
+  render(<App />); await ready('乙')
+  input().focus(); write('@店')
+  expect(screen.getByRole('option', { name: '店长' })).toBeTruthy()
+  select('甲'); await ready('甲')
+  expect(screen.queryByRole('listbox')).toBeNull()
+  expect(input().value).toBe('')
+  select('乙'); await ready('乙')
+  expect(input().value).toBe('@店')
+  expect(screen.queryByRole('listbox')).toBeNull()
+  expect(fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0)
+})
+
+test('任务和伙伴栏分别收起，不改变当前任务或草稿', async () => {
+  render(<App />); await ready('乙'); write('保留这段方向')
+  fireEvent.click(screen.getByRole('button', { name: '收起任务列表' }))
+  expect(screen.getByRole('button', { name: '展开任务列表' }).getAttribute('aria-expanded')).toBe('false')
+  expect(document.getElementById('task-list')?.classList.contains('mobile-collapsed')).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: '收起伙伴栏' }))
+  expect(document.getElementById('member-seats')?.classList.contains('mobile-collapsed')).toBe(true)
+  expect(input().value).toBe('保留这段方向')
+  expect(screen.getByRole('heading', { name: '乙任务', exact: true })).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '展开任务列表' }))
+  fireEvent.click(screen.getByRole('button', { name: '展开伙伴栏' }))
+  expect(document.getElementById('task-list')?.classList.contains('mobile-collapsed')).toBe(false)
+  expect(document.getElementById('member-seats')?.classList.contains('mobile-collapsed')).toBe(false)
+})
+
 test('任务详情未到达时不展示旧消息，也不能向新任务发送', async () => {
   render(<App />)
   await ready('乙')

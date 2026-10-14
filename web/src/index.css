@@ -54,7 +54,8 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible { outline: 2
 }
 .team-roster-compact { border-top: 1px solid #e6d0c2; background: #fff5eb; }
 .chat-pane { height: 100%; min-height: 0; min-width: 0; background: #f4f7f6; }
-.member-seats { border-bottom: 1px solid #dce7e5; background: #eef5f4; scrollbar-width: thin; scrollbar-color: #bdd3cd transparent; }
+.member-bar { border-bottom: 1px solid #dce7e5; background: #eef5f4; }
+.member-seats { scrollbar-width: thin; scrollbar-color: #bdd3cd transparent; }
 .member-seat { border: 1px solid #d6e3de; border-radius: 6px; background: #fffcf8; color: #45665c; box-shadow: 0 2px 0 #dce8e1; transition: border-color .16s, background .16s; }
 .member-seat:hover { border-color: #d49c89; background: #fff0e8; color: #944f3d; }
 .member-seat:active { box-shadow: none; }
@@ -81,6 +82,10 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible { outline: 2
 .composer-shell { border-top: 1px solid #ead5c7; background: #fff0e5; box-shadow: 0 -3px 14px rgba(121, 76, 59, .06); }
 .composer-box { border: 1px solid #debca9; border-radius: 8px; background: white; box-shadow: 0 3px 0 #efcebb, 0 8px 20px rgba(121, 76, 59, .08); }
 .composer-box:focus-within { border-color: #c7634d; box-shadow: 0 0 0 3px rgba(199, 99, 77, .13), 0 3px 0 #efcebb; }
+.mention-menu { border: 1px solid #d4dfd7; border-radius: 8px; background: #fffdf8; box-shadow: 0 4px 0 rgba(54, 87, 72, .07), 0 12px 32px rgba(54, 87, 72, .16); }
+.mention-menu [role="listbox"] { scrollbar-color: #c3d7ce transparent; scrollbar-width: thin; }
+.mention-option { min-height: 44px; border-radius: 6px; color: #45665c; }
+.mention-option.is-active, .mention-option:hover { background: #e8f1eb; color: #2e695a; }
 .send-button { border-radius: 6px; background: #c7634d; box-shadow: inset 0 1px rgba(255, 255, 255, .2), 0 2px 0 #9d4a3b; }
 .send-button:not(:disabled):hover { background: #b65342; }
 .send-button:disabled { box-shadow: none; }
@@ -142,6 +147,10 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible { outline: 2
 @media (min-width: 1024px) {
   .app-layout { grid-template-rows: minmax(0, 1fr); }
   .task-sidebar { border-right: 1px solid #e6d0c2; border-bottom: 0; }
+}
+
+@media (max-width: 1023px) {
+  .mobile-collapsed { display: none; }
 }
 
 @media (max-width: 639px) {
