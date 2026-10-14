@@ -14,6 +14,7 @@ from typing import Any, Mapping
 
 from .assignments import latest_assignments_by_owner
 from .artifacts import normalize_deliverables
+from .usage import usage_source, valid_token_count
 from .cabinet import CabinetPolicy, tally_votes
 from .drivers import Driver, DriverResponse, driver_mode, load_drivers
 from .events import Actor, Event, EventLog
@@ -602,7 +603,7 @@ class Runtime:
                 "evidence": parsed.get("evidence", []),
                 "confidence": parsed.get("confidence"),
                 "text": parsed.get("text", response.text),
-                "tokens": response.tokens,
+                "tokens": response.tokens if valid_token_count(response.tokens) else 0,
                 "token_usage": self._token_usage(response),
                 "driver": role.driver,
             }
@@ -1075,11 +1076,12 @@ class Runtime:
     def _reported_driver_tokens(self, driver_name: str) -> int:
         """Count only provider-reported usage; unknown telemetry cannot be safely capped."""
         return sum(
-            int(event.payload.get("tokens") or 0)
+            event.payload["tokens"]
             for event in self.log.read()
             if event.type in {"msg.said", "msg.challenge"}
             and event.payload.get("driver") == driver_name
             and event.payload.get("token_usage") == "reported"
+            and valid_token_count(event.payload.get("tokens"))
         )
 
     def _emit_driver_failure(
@@ -1132,10 +1134,7 @@ class Runtime:
     def _token_usage(response: DriverResponse) -> str:
         """Normalize optional driver telemetry without trusting missing data as zero."""
         meta = response.meta if isinstance(response.meta, dict) else {}
-        source = meta.get("token_usage")
-        if source in {"reported", "estimated", "unavailable"}:
-            return str(source)
-        return "reported"
+        return usage_source(response.tokens, meta.get("token_usage"))
 
     def _prompt(
         self,

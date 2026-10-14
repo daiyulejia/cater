@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .processes import ProcessScope
+from .usage import usage_source, valid_token_count
 
 
 MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -267,12 +268,13 @@ class CliDriver:
         if not isinstance(text, str):
             raise DriverProtocolError(f"{self.name} response must include string text")
         tokens = data.get("tokens", 0)
-        if not isinstance(tokens, int):
-            raise DriverProtocolError(f"{self.name} response tokens must be an integer")
+        if not valid_token_count(tokens):
+            raise DriverProtocolError(f"{self.name} response tokens must be a non-negative integer")
         meta = data.get("meta") or {}
         if not isinstance(meta, dict):
             raise DriverProtocolError(f"{self.name} response meta must be an object")
-        return DriverResponse(text=text, tokens=tokens, meta={**meta, "driver": self.name})
+        source = meta.get("token_usage", "reported") if "tokens" in data else "unavailable"
+        return DriverResponse(text=text, tokens=tokens, meta={**meta, "driver": self.name, "token_usage": usage_source(tokens, source)})
 
     def probe(self) -> bool:
         try:
@@ -494,7 +496,7 @@ class OpenAICompatibleDriver:
         text = _openai_response_text(data)
         usage = data.get("usage")
         tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
-        reported = isinstance(tokens, int) and tokens >= 0
+        reported = valid_token_count(tokens)
         return DriverResponse(
             text=text,
             tokens=tokens if reported else 0,

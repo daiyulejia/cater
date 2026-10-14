@@ -227,6 +227,16 @@ def _cost_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
             f"Token usage is estimated for {estimated} of {messages} message(s); {tokens} token(s) is not a billing total.",
             "Use provider-reported usage before making cost decisions from this workspace.",
         )
+    failed_attempts = sum(
+        1 for task in tasks for failure in task.driver_failures
+        if type(failure.get("attempt")) is int and failure["attempt"] > 0
+    )
+    if failed_attempts:
+        return _lens(
+            "design", "watch",
+            f"Recorded outputs report {tokens} token(s), but usage for {failed_attempts} failed driver attempt(s) is unknown.",
+            "Reconcile provider usage for failed attempts before treating recorded output tokens as a complete cost total.",
+        )
     average = tokens / messages
     if tokens >= 4000 or average >= 1500:
         return _lens("design", "watch", f"Agent output used {tokens} token(s) across {messages} message(s).", "Review whether fewer roles, direct assignment, or a smaller prompt would preserve quality with less cost.")

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .events import Event
+from .usage import usage_source, valid_token_count
 
 
 @dataclass
@@ -87,10 +88,9 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
                     **payload,
                 }
             )
-            task.tokens += int(payload.get("tokens") or 0)
-            source = payload.get("token_usage", "reported")
-            if source not in {"reported", "estimated", "unavailable"}:
-                source = "reported"
+            tokens = payload.get("tokens")
+            task.tokens += tokens if valid_token_count(tokens) else 0
+            source = usage_source(tokens, payload.get("token_usage"))
             task.token_usage[source] = task.token_usage.get(source, 0) + 1
         elif event.type == "driver.failed":
             task.driver_failures.append({"seq": event.seq, **payload})

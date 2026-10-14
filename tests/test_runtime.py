@@ -673,6 +673,7 @@ class RuntimeTests(unittest.TestCase):
         driver = StaticResponseDriver(
             '{"stance":"assert","option_id":"A","claim":"正常输出","evidence":["可核验"],"text":"正常输出"}',
             tokens=5,
+            meta={"token_usage": "reported"},
         )
         driver.token_budget = 5
         with tempfile.TemporaryDirectory() as tmp:

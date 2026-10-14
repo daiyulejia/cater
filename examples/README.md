@@ -131,3 +131,14 @@ cater --roles examples/layered_api_roles.json --drivers examples/layered_api_dri
 
 同一个 driver 被多个角色引用时，会共享该通道的账户、模型、速率限制和 token 预算；
 是否拆分，取决于权限隔离、成本归属和模型专长，而不是角色数量。
+
+### Token 统计与预算含义
+
+CLI 明确返回非负整数 `tokens` 时，默认视为适配器报告；可通过 `meta.token_usage: "estimated"` 标为估算。
+缺失计数或来源未知时标为 `unavailable`，不当作免费调用。布尔值、负数、浮点数和字符串不算合法计数。
+自定义 Python driver 应明确返回 `meta.token_usage: "reported"` 或 `"estimated"`；只返回 `tokens` 不证明来源。
+
+`token_budget` 按驱动通道在当前事件库中的已报告用量，决定是否允许后续调用。
+它不是供应商费用硬上限：当前调用可能越过余额，未知/估算用量不纳入已报告账本，失败调用可能仍收费，
+CLI 内部重试也可能重复产生费用。需要硬费用限制时还必须使用供应商配额或实际执行后端的调用额度。
+复盘会对缺失、估算和失败尝试的未知成本发出提醒；没有足够证据时不声称完整账单已知。
