@@ -34,6 +34,7 @@ class TaskSnapshot:
     diagnoses: list[dict[str, Any]] = field(default_factory=list)
     handoffs: list[dict[str, Any]] = field(default_factory=list)
     verifications: list[dict[str, Any]] = field(default_factory=list)
+    work: dict[str, Any] | None = None
     discipline_flags: list[dict[str, Any]] = field(default_factory=list)
     tokens: int = 0
     token_usage: dict[str, int] = field(default_factory=dict)
@@ -82,6 +83,13 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
             task.verifications.append({"seq": event.seq, **payload})
         elif event.type in {"plan.proposed", "plan.amended"}:
             task.plan = {"seq": event.seq, **payload}
+        elif event.type == "work.plan_created":
+            task.work = {"plan_seq": event.seq}
+            if payload.get("source_seq") == 0:
+                task.plan = {"seq": event.seq, "subtasks": payload["items"], "work_contract": True}
+            task.status = "running"
+        elif event.type in {"work.claimed", "work.submitted", "work.reviewed", "work.invalidated", "work.failed"}:
+            task.status = "running"
         elif event.type in {"msg.said", "msg.challenge"}:
             task.messages.append(
                 {

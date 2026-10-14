@@ -1210,6 +1210,7 @@ def task_to_dict(task: TaskSnapshot, *, include_content: bool = True) -> dict[st
         "diagnoses": task.diagnoses,
         "handoffs": task.handoffs,
         "verifications": task.verifications,
+        "work": task.work,
         "tokens": task.tokens,
         "token_usage": task.token_usage,
     }

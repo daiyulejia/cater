@@ -42,6 +42,12 @@ class RuleTests(unittest.TestCase):
         self.other = self.book.create_project("Project B")["id"]
         self.task = self.rt.create_task("Original task", project_id=self.project)
 
+    def legacy_assignment(self, owner):
+        # Historical discussions did not have a versioned execution plan.
+        # Keep testing their rule/consensus guards; test_work covers new gates.
+        self.rt.log.emit(type="subtask.assigned", actor=Actor.human(), task_id=self.task,
+                         payload={"id": owner, "owner": owner, "objective": "Discuss", "status": "assigned"})
+
     def test_scopes_survive_restart_and_do_not_bleed_between_projects(self):
         common = self.book.record("COMMON_RULE", scope="workspace")
         local = self.book.record("PROJECT_RULE", scope="project", project_id=self.project)
@@ -134,8 +140,8 @@ class RuleTests(unittest.TestCase):
         first, second = CaptureDriver(), CaptureDriver()
         first.after_call = lambda: self.book.update(rule["id"], revision=1, text="AFTER", status="active")
         self.rt.drivers.update(product=first, dev=second)
-        self.rt.assign(self.task, "product")
-        self.rt.assign(self.task, "dev")
+        self.legacy_assignment("product")
+        self.legacy_assignment("dev")
         self.rt.collaborate(self.task)
         self.assertIn('"text": "BEFORE"', first.calls[0]["prompt"])
         self.assertIn('"text": "AFTER"', second.calls[0]["prompt"])
@@ -148,7 +154,7 @@ class RuleTests(unittest.TestCase):
         builder, product, reviewer = CaptureDriver(), CaptureDriver(), CaptureDriver()
         reviewer.after_call = lambda: self.book.update(rule["id"], revision=1, text="After review", status="active")
         self.rt.drivers.update(dev=builder, product=product, test=reviewer)
-        self.rt.assign(self.task, "dev")
+        self.legacy_assignment("dev")
         self.rt.battle(self.task)
         self.assertEqual(len(reviewer.calls), 1)
         self.assertEqual(self.rt.task(self.task).decision["resolution"], "rework")
@@ -158,8 +164,8 @@ class RuleTests(unittest.TestCase):
         rule = self.book.record("Original", scope="task", task_id=self.task)
         driver = CaptureDriver()
         self.rt.drivers["dev"] = driver
-        self.rt.assign(self.task, "dev")
         original_emit = self.rt.log.emit
+        self.legacy_assignment("dev")
         changed = False
 
         def emit(**args):
@@ -188,7 +194,7 @@ class RuleTests(unittest.TestCase):
         self.rt.drivers["dev"] = driver
         self.rt.driver_attempts = 3
         self.rt.circuit_breaker_threshold = 10
-        self.rt.assign(self.task, "dev")
+        self.legacy_assignment("dev")
         self.rt.collaborate(self.task)
         self.assertEqual(len(driver.calls), 1)
         self.assertEqual(self.rt.task(self.task).decision["resolution"], "rework")
@@ -197,7 +203,7 @@ class RuleTests(unittest.TestCase):
         driver = CaptureDriver()
         driver.after_call = lambda: self.book.record("Other project rule", scope="project", project_id=self.other)
         self.rt.drivers["dev"] = driver
-        self.rt.assign(self.task, "dev")
+        self.legacy_assignment("dev")
         self.rt.collaborate(self.task)
         self.assertEqual(self.rt.task(self.task).decision["resolution"], "accepted")
 

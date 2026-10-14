@@ -22,6 +22,8 @@ class ReviewSemanticsTests(unittest.TestCase):
             review = rt.review(task)
             self.assertEqual(next(item for item in review["lenses"] if item["id"] == "logic")["status"], "ok")
             self.assertEqual(next(item for item in review["lenses"] if item["id"] == "distribution")["status"], "ok")
+            self.assertEqual(next(item for item in review["lenses"] if item["id"] == "collaboration")["status"], "ok")
+            self.assertEqual(next(item for item in review["lenses"] if item["id"] == "testing")["status"], "watch")
             self.assertFalse(any("Force one governance" in action for action in review["next_actions"]))
 
     def test_direct_assignment_alone_is_not_a_coverage_defect(self):

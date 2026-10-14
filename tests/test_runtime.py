@@ -1036,7 +1036,8 @@ class RuntimeTests(unittest.TestCase):
             screen_task = rt.task(screen_task_id)
 
         self.assertEqual([item["owner"] for item in content_task.assignments], ["product"])
-        self.assertEqual([message["actor"] for message in content_task.messages], ["product"])
+        self.assertEqual([message["actor"] for message in content_task.messages if message.get("phase") != "review"], ["product"])
+        self.assertEqual(content_task.work["items"][0]["reviewer"], "cabinet_product")
         self.assertEqual(screen_task.plan["participants"], ["product", "design", "dev", "test"])
 
     def test_bugfix_intake_includes_quality_without_convening_cabinet(self):
@@ -1537,7 +1538,7 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertTrue(any("uses explicit reply metadata" in finding for finding in findings))
 
-    def test_review_flags_missing_reply_only_when_work_has_dependencies(self):
+    def test_unaccepted_dependencies_do_not_force_downstream_reply_for_coverage(self):
         flat_driver = StaticResponseDriver(
             '{"stance":"assert","option_id":"A","claim":"independent","text":"independent"}'
         )
@@ -1562,8 +1563,10 @@ class RuntimeTests(unittest.TestCase):
                 rt.collaborate(task_id)
                 review = rt.review(task_id)
                 findings = [item["finding"] for item in review["lenses"]]
+                work_statuses = [item["status"] for item in rt.work.view(task_id)["items"]]
 
-        self.assertTrue(any("Dependent multi-agent work has no explicit" in finding for finding in findings))
+        self.assertFalse(any("Dependent multi-agent work has no explicit" in finding for finding in findings))
+        self.assertEqual(work_statuses, ["ready", "blocked"])
 
     def test_review_treats_absent_human_commands_as_normal_autonomy(self):
         with Runtime(":memory:") as rt:
@@ -2762,7 +2765,7 @@ class WebTests(unittest.TestCase):
             base = start_test_web(self, db, shared_drivers={"product": driver})
             request = Request(
                 f"{base}/api/tasks",
-                data=json.dumps({"goal": "Use the shared CLI driver", "run": True}).encode("utf-8"),
+                data=json.dumps({"goal": "Use the shared CLI driver", "run": True, "requested_route": "direct", "assign_to": "product"}).encode("utf-8"),
                 method="POST",
                 headers={"Content-Type": "application/json"},
             )
@@ -3295,7 +3298,8 @@ class WebTests(unittest.TestCase):
             self.assertEqual(data["task"]["plan"]["source"], "leader")
             self.assertEqual(data["organization_path"][0]["status"], "leader_dispatch")
             self.assertFalse(any(event["type"].startswith("cabinet.") for event in data["events"]))
-            self.assertEqual(data["task"]["status"], "decided")
+            self.assertEqual(data["task"]["status"], "running")
+            self.assertFalse(data["task"]["work"]["stage_accepted"])
             self.assertIsNone(data["task"]["cabinet"])
             request = Request(
                 f"{base}/api/tasks/{data['task']['id']}/battle",
@@ -3630,8 +3634,8 @@ class WebTests(unittest.TestCase):
             with Runtime(db) as rt:
                 tasks = rt.tasks()
                 self.assertEqual(len(tasks), 1)
-                self.assertEqual(tasks[0].status, "decided")
-                self.assertEqual(tasks[0].decision["source"], "leader")
+                self.assertEqual(tasks[0].status, "running")
+                self.assertIsNone(tasks[0].decision)
                 self.assertEqual(tasks[0].acceptance, ["battle runs", "inbox updates"])
                 self.assertEqual(len(tasks[0].assignments), 4)
 

@@ -13,6 +13,8 @@ import { MentionInput } from './MentionInput'
 import { TeamDirectory } from './TeamDirectory'
 import { TaskList } from './TaskList'
 import { RulesPanel } from './RulesPanel'
+import { WorkItems } from './WorkItems'
+import type { WorkState } from './WorkItems'
 import type { TeamAvailability } from './TeamDirectory'
 
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
@@ -29,6 +31,7 @@ type DriverCoverage = { role_id: string; name: string; driver: string; mode: 'lo
 type Organization = { leader: OrgRole; cabinet: OrgRole[]; workers: OrgRole[]; mode?: 'local_demo' | 'mixed_driver' | 'external_driver'; worker_drivers?: DriverCoverage[]; availability?: TeamAvailability }
 type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'; active: boolean; error?: string; follow_up?: { action?: string } }
 type Task = {
+  work?: WorkState | null
   project_id?: string | null
   id: string; goal: string; acceptance: string[]; status: string; messages: Message[]; assignments: Assignment[]
   deliverables: Deliverable[]
@@ -95,14 +98,21 @@ const activityText = (activity?: Activity) => {
   if (activity?.active && activity.follow_up?.action === 'run') return '已收下新方向，当前轮结束后继续'
   if (activity?.state === 'queued') return '协作已排队'
   if (activity?.state === 'running') return '正在协作'
-  if (activity?.state === 'completed') return '协作完成'
   if (activity?.state === 'failed') return '协作失败'
   return ''
 }
 
-const taskListStatus = (task: Task) => task.activity?.active ? activityText(task.activity) || '正在协作' : task.status === 'running' && task.brief
-  ? '等待下一轮'
-  : statusText(task.status)
+const taskListStatus = (task: Task) => {
+  if (task.activity?.active) return activityText(task.activity) || '正在协作'
+  if (task.work?.items.length) {
+    if (task.work.items.some((item) => item.status === 'uncertain')) return '结果待核实'
+    if (!task.work.scope_current) return '需要重新核对'
+    if (task.work.stage_accepted) return '阶段通过，待整体验收'
+    if (task.work.items.some((item) => item.status === 'submitted')) return '等待验收'
+    return '待补充成果'
+  }
+  return task.status === 'running' && task.brief ? '等待下一轮' : statusText(task.status)
+}
 
 const driverModeText = (mode?: Organization['mode']) => ({ local_demo: '本地演示模式', mixed_driver: '部分成员已接入外部驱动', external_driver: '已接入外部驱动' }[mode ?? 'local_demo'] ?? '本地演示模式')
 const driverModeStyle = (mode?: Organization['mode']) => ({ local_demo: 'bg-amber-50 text-amber-800', mixed_driver: 'bg-sky-50 text-sky-800', external_driver: 'bg-teal-50 text-teal-800' }[mode ?? 'local_demo'] ?? 'bg-amber-50 text-amber-800')
@@ -587,7 +597,7 @@ function App() {
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
         {task && <WorkboardPanel open={showMobileBoard} onOpenChange={setShowMobileBoard}>
-          {currentDetail ? <><VerificationBoard items={task.verifications ?? []} /><Workboard task={task} detail={currentDetail} names={names} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />{Boolean(currentDetail.organization_memory?.length) && <details className="mt-5 border-t border-[#dce8e1] pt-4"><summary className="cursor-pointer text-xs font-semibold text-[#52766d]">猫咖记忆 · {currentDetail.organization_memory?.length} 项</summary><div className="mt-3"><MemoryBoard items={currentDetail.organization_memory ?? []} names={names} /></div></details>}</> : <p className="text-xs leading-6 text-[#74897d]">正在读取这件事的成果与过程。</p>}
+          {currentDetail ? <><WorkItems work={task.work} names={names} /><VerificationBoard items={task.verifications ?? []} /><Workboard task={task} detail={currentDetail} names={names} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />{Boolean(currentDetail.organization_memory?.length) && <details className="mt-5 border-t border-[#dce8e1] pt-4"><summary className="cursor-pointer text-xs font-semibold text-[#52766d]">猫咖记忆 · {currentDetail.organization_memory?.length} 项</summary><div className="mt-3"><MemoryBoard items={currentDetail.organization_memory ?? []} names={names} /></div></details>}</> : <p className="text-xs leading-6 text-[#74897d]">正在读取这件事的成果与过程。</p>}
         </WorkboardPanel>}
       </main>
     </div>

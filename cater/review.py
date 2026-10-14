@@ -180,9 +180,13 @@ def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
 def _collaboration_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     multi_agent = [
         task for task in tasks
-        if len({message.get("actor") for message in task.messages}) > 1
+        if not (task.work and task.work.get("items"))
+        and len({message.get("actor") for message in task.messages if message.get("phase") != "review"}) > 1
     ]
     if not multi_agent:
+        if any(task.work and task.work.get("items") for task in tasks):
+            return _lens("collaboration", "ok", "Work-item handoffs are bound to accepted input versions; waiting dependencies do not need chat replies.",
+                         "Inspect the linked artifacts and acceptance records, not the number of messages.")
         return _lens("collaboration", "ok", "No multi-agent exchange is visible; that alone is not a collaboration defect.", "Use additional roles only when the task needs collaboration or independent checking.")
     linked = [
         task for task in multi_agent
@@ -253,6 +257,10 @@ def _testing_lens(tasks: list[TaskSnapshot], chain: ChainReport) -> dict[str, st
         return _lens("testing", "needs_attention", chain.describe(), "Investigate the first broken event before trusting projections.")
     if any(task.driver_failures for task in tasks):
         return _lens("testing", "watch", "Driver failures were contained during execution.", "Add or inspect driver failure tests for this path.")
+    pending = [item for task in tasks for item in (task.work or {}).get("items", []) if item["status"] != "accepted"]
+    if pending:
+        return _lens("testing", "watch", f"{len(pending)} work item(s) have not passed current stage acceptance; event-chain validity is not delivery proof.",
+                     "Inspect missing artifacts, reviewer evidence, and required local checks before releasing downstream work.")
     return _lens("testing", "ok", chain.describe(), "Keep using scripts/check.py before commits.")
 
 

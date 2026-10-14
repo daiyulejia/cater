@@ -113,9 +113,10 @@ class CompactOrganizationTests(unittest.TestCase):
         self.assertEqual(len(builder.prompts), 1)
         self.assertEqual(len(checker.prompts), 0)
         self.assertIsNone(result["brief"]["cabinet"])
-        self.assertEqual(rt.task(task_id).status, "decided")
+        self.assertEqual(rt.task(task_id).status, "running")
         self.assertEqual(rt.task(task_id).deliverables, [])
-        self.assertIn("仍需实际验收", rt.task(task_id).decision["reason"])
+        self.assertIsNone(rt.task(task_id).decision)
+        self.assertIn("尚未提交", rt.task(task_id).work["items"][0]["reason"])
 
     def test_risk_is_retained_without_fabricating_votes_or_human_escalation(self):
         for risk in ({"option": "B"}, {"stance": "challenge"}, {"confidence": 0.2}):
@@ -123,7 +124,7 @@ class CompactOrganizationTests(unittest.TestCase):
                 builder, checker = RecordingDriver(), RecordingDriver(**risk)
                 with Runtime(":memory:", roles_path=self.roles_path, drivers={"dev": builder, "test": checker}) as rt:
                     task_id = rt.create_task("Refactor architecture")
-                    rt.dispatch(task_id)
+                    # Historical unplanned collaboration still retains its risk policy.
                     result = rt.collaborate(task_id)
                     task = rt.task(task_id)
                     events = rt.log.read(task_id=task_id)

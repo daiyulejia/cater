@@ -43,6 +43,23 @@ const input = () => screen.getByRole('textbox', { name: '向团队发送消息' 
 const write = (text: string) => fireEvent.change(input(), { target: { value: text } })
 const ready = (id: string) => screen.findByText(`${id}任务专属消息 #2`)
 
+test('后台活动结束不代表工作通过验收，页头保留等待状态', async () => {
+  handler = (url) => {
+    if (url === '/api/tasks/乙') {
+      const data = detail('乙')
+      return json({ ...data, activity: { active: false, state: 'completed' }, task: {
+        ...data.task, status: 'running', work: { plan_seq: 4, scope_current: true, stage_accepted: false, items: [
+          { id: 'one', owner: 'dev', reviewer: 'test', status: 'submitted', objective: '提交登录入口', reason: '',
+            depends_on: [], criteria: [], checks: [], submission: null },
+        ] },
+      } })
+    }
+  }
+  render(<App />); await ready('乙')
+  expect(screen.queryByText('协作完成')).toBeNull()
+  expect(screen.getAllByText('等待验收').length).toBeGreaterThan(0)
+})
+
 test('新对话关联项目后发送任务，项目归属随请求提交', async () => {
   handler = (url, init) => {
     if (url === '/api/projects') return json([{ id: 'project-a', name: '作品集' }])

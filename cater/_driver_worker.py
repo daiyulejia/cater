@@ -1,6 +1,7 @@
 """Attach the NDJSON driver's process scope before permitting it to start."""
 
 import json
+import os
 import subprocess
 import sys
 
@@ -13,7 +14,9 @@ def main() -> int:
     sys.stdout.write('{"ready":true}\n')
     sys.stdout.flush()
     try:
-        child = subprocess.Popen(command, shell=False)
+        # Python CLI adapters otherwise use the Windows locale for inherited
+        # pipes, even though the NDJSON transport contract is UTF-8.
+        child = subprocess.Popen(command, shell=False, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
         return child.wait()
     except OSError:
         return 1

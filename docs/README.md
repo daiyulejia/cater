@@ -8,6 +8,7 @@
 - [可读成果](artifacts.zh-CN.md)：如何发布正文、标明来源，并在对话中阅读、复制和下载。
 - [本机检查](local-verification.zh-CN.md)：显式命令核验的证据与进程运行边界。
 - [项目与店规](project-rules.zh-CN.md)：在聊天中保留工作要求、查看来源和版本，以及当前的保证边界。
+- [工作项与验收](work-items.zh-CN.md)：执行依赖、阶段审查、版本绑定的本地检查，以及尚未完成的边界。
 - [执行权限设计](execution-permissions.zh-CN.md)：桌面优先、权限预设与沙箱执行边界；目前为未实现的设计提案。
 - [事件查询](event-queries.zh-CN.md)：任务级投影、预算查询边界与可重复运行的内存基准。
 - [持续自驱迭代铁律](autonomy-covenant.md)：如何持续从发起人目标、用户体验和工程证据出发改进项目。

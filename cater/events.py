@@ -19,6 +19,12 @@ from typing import Any, Iterable, Iterator, Mapping
 GENESIS_HASH = "0" * 64
 
 EVENT_CATEGORIES = {
+    "work.plan_created": "planning",
+    "work.claimed": "lifecycle",
+    "work.submitted": "outcome",
+    "work.reviewed": "review",
+    "work.invalidated": "review",
+    "work.failed": "lifecycle",
     "project.created": "planning",
     "task.project_bound": "planning",
     "rule.recorded": "policy",

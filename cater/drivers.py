@@ -318,7 +318,10 @@ class CliDriver:
 
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         last_error: DriverError | None = None
-        for attempt in range(self.restart_limit + 1):
+        context = payload.get("context")
+        restart_limit = (0 if payload.get("type") == "complete" and isinstance(context, dict)
+                         and isinstance(context.get("work"), dict) else self.restart_limit)
+        for attempt in range(restart_limit + 1):
             with self._lock:
                 request_payload = dict(payload)
                 request_payload["id"] = uuid.uuid4().hex
@@ -327,7 +330,7 @@ class CliDriver:
                 except DriverError as exc:
                     last_error = exc
                     self._restart()
-            if attempt >= self.restart_limit:
+            if attempt >= restart_limit:
                 break
         assert last_error is not None
         raise last_error
