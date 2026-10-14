@@ -14,6 +14,8 @@
 
 首次执行前请先在 `web/` 目录运行一次 `pnpm install`。
 
+仅验证前端生产构建时运行 `pnpm --dir web build`，产物位于 `web/dist/`，不会同步到 `cater/static`。构建使用 Vite 8 的 `build.rolldownOptions.output.codeSplitting`，将 React 运行时、其余第三方依赖与业务入口分块，保留默认 500 kB 告警阈值。拆分改善业务更新后的依赖缓存复用；目前各块仍在首屏静态加载，不代表首访总下载量减少。性能测试直接构建内存产物，检查每个 JS 块不超过 500 kB、业务入口不超过 150 kB，以及静态依赖完整且无循环。
+
 前端开发推荐 Node.js 24 与 pnpm 11。交互测试使用 Vitest 和 React Testing Library，仅属于前端开发依赖；Python 运行时依然零第三方依赖。
 
 ```powershell

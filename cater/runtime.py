@@ -27,7 +27,8 @@ from .profiles import agent_profiles
 from .review import build_review
 from .rules import RuleBook, RuleConflict
 from .work import WorkLedger, WorkConflict, validate_items
-from .verification import run_check
+from .verification import run_check, validate_check
+from .delivery import DeliveryService
 
 
 MAX_TASK_GOAL_CHARS = 12_000
@@ -187,6 +188,7 @@ class Runtime:
         self.log = EventLog(db_path, audit_key=audit_key, key_id=audit_key_id, audit_keys=audit_keys)
         self.rulebook = RuleBook(self.log)
         self.work = WorkLedger(self.log, self.rulebook)
+        self.delivery = DeliveryService(self)
         self.driver_attempts = max(1, driver_attempts)
         self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
         self._driver_health = driver_health or DriverHealth()
@@ -798,21 +800,28 @@ class Runtime:
             return self._request_leader_rework(task.id, utterances, {
                 "status": "forced", "reason": "顾客请求复核；阶段验收尚不能由讨论替代。", "signals": ["forced"],
             })
+        delivery = self.delivery.run(task.id) if view["stage_accepted"] else self.delivery.view(task.id)
+        view = self.work.view(task.id)
+        statuses = [i["status"] for i in view["items"]]
         if not view.get("scope_current"):
             reason = "顾客方向或店规有更新，旧工作暂停放行，需要重新核对计划。"
+        elif delivery["status"] == "accepted":
+            reason = "当前要求与整体标准已通过，成果和复查说明已经整理好，可以取回交付包。"
         elif view["stage_accepted"]:
-            reason = "各工作项的阶段标准已通过；整体集成和最终交付仍需核对。"
+            reason = delivery["reason"]
         elif "uncertain" in statuses:
             reason = "有执行结果不明的工作，先核查再继续，避免重复操作。"
         elif "submitted" in statuses:
             reason = "成果已提交，正在等待独立审查或实际检查证据；下游尚未放行。"
+        elif delivery.get("affected"):
+            reason = "最后核对发现了有正文依据的问题，已把相关成果交回修正；通过重验前不会宣布交付。"
         else:
             reason = "工作停在可核对的检查点，缺少成果或前置验收的项目不会继续执行。"
         brief = {"dispute": reason, "root_cause": reason, "consensus": [], "options": [],
                  "cabinet": None, "positions": [],
                  "governance": {"status": "deferred" if force_governance else "not_needed",
                                 "reason": "复核请求已记录，需要先补齐阶段成果与证据；不能通过投票越过验收。"
-                                if force_governance else "阶段验收不要求全员投票。"}, "work": view}
+                                if force_governance else "阶段验收不要求全员投票。"}, "work": {**view, "delivery": delivery}}
         event = self.log.emit(actor=self._leader_actor(), type="brief.generated", task_id=task.id,
                               payload={"brief": brief, "reason": "work_checkpoint", "options": []})
         return {"task_id": task.id, "brief_event": event.seq, "brief": brief}
@@ -822,6 +831,13 @@ class Runtime:
             return
         local = self.work.checks(task.id, item)
         if any(c["kind"] == "local_check" and c["id"] not in local for c in item["criteria"]):
+            return
+        if any(c["kind"] == "local_check" and not self.work._receipt_passed(local[c["id"]]) for c in item["criteria"]):
+            try:
+                self.work.rework(task.id, item["id"], "当前成果的实际检查未通过，先修正后再独立复核。",
+                                 expected_plan_seq=item["submission"]["plan_seq"], expected_scope=item["submission"]["scope"])
+            except WorkConflict:
+                pass
             return
         role = self._role_by_id(item["reviewer"])
         artifacts = self.work.artifacts(task.id, item["submission"])
@@ -869,8 +885,9 @@ class Runtime:
     def verify_work(self, task_id: str, item_id: str, criterion_id: str, command: list[str], *,
                     timeout: float = 60, record_output: bool = False):
         """Explicit trusted invocation against a disposable copy, not a sandbox."""
+        validate_check(command, timeout)
         _, item = self.work._item(task_id, item_id)
-        if item["status"] != "submitted":
+        if not item.get("submission"):
             raise WorkConflict("only a current submission can be checked")
         if not any(c["id"] == criterion_id and c["kind"] == "local_check" for c in item["criteria"]):
             raise ValueError("criterion must identify a local_check in this work item")
@@ -882,11 +899,15 @@ class Runtime:
             root = Path(tmp)
             for name, artifact in zip(names, artifacts):
                 (root / name).write_bytes(artifact["content"].encode("utf-8"))
+            started = self.work.start_check(task_id, item_id, criterion_id, lease_seconds=timeout + 30,
+                                             expected_submission_seq=item["submission"]["seq"])
             result = run_check(command, cwd=root, timeout=timeout, record_output=record_output)
             unchanged = all((root / name).is_file() and not (root / name).is_symlink()
                             and hashlib.sha256((root / name).read_bytes()).hexdigest() == a["content_sha256"]
                             for name, a in zip(names, artifacts))
         payload = {**result.payload, "work_item_id": item_id, "criterion_id": criterion_id,
+                   "check_attempt_seq": started.seq, "check_attempt": started.payload["check_attempt"],
+                   "plan_seq": started.payload["plan_seq"], "scope": started.payload["scope"],
                    "submission_digest": item["submission"]["digest"], "submission_seq": item["submission"]["seq"],
                    "artifacts_unchanged": unchanged, "environment": "temporary_artifact_copy_not_sandbox"}
         event = self.log.emit(actor=Actor.system("local_verifier"), type="verification.completed",
@@ -1099,12 +1120,23 @@ class Runtime:
     def decide(self, task_id: str, resolution: str, reason: str) -> Event:
         if resolution not in {"done", "rework"}:
             raise ValueError("resolution must be done or rework")
-        return self.log.emit(
-            actor=Actor.human("human"),
-            type="human.decided",
-            task_id=task_id,
-            payload={"resolution": resolution, "reason": reason},
-        )
+        def build():
+            if self.task(task_id) is None:
+                raise KeyError(task_id)
+            payload = {"resolution": resolution, "reason": reason}
+            if resolution == "rework":
+                delivery = self.delivery.view(task_id)
+                if delivery.get("digest"):
+                    payload["delivery_digest"] = delivery["digest"]
+                    payload["delivery_review_seq"] = delivery.get("review_seq")
+            if resolution == "done" and self.work.view(task_id)["plan_seq"] is not None:
+                delivery = self.delivery.view(task_id)
+                if delivery["status"] != "accepted":
+                    raise WorkConflict("整体验收尚未通过，人工完成确认不能覆盖缺失、失败或过期证据。")
+                payload["delivery_digest"] = delivery["digest"]
+                payload["delivery_review_seq"] = delivery["review_seq"]
+            return "human.decided", payload, Actor.human("human")
+        return self.work._write(task_id, build)
 
     def command(
         self,
@@ -1199,8 +1231,10 @@ class Runtime:
                     text += "有调用结果还没核对清楚，暂时不能直接重做，以免重复操作。"
                 elif view.get("scope_current") is False:
                     text += "要求或店规已经变化，需要更新计划；旧成果暂不放行。"
+                elif view.get("delivery", {}).get("status") == "accepted":
+                    text += "整体验收也已通过，可以取回交付包与复查说明。"
                 elif view.get("stage_accepted"):
-                    text += "各项阶段标准已经通过，但还没有整体集成验收，不能说整件任务已交付。"
+                    text += "各项阶段标准已经通过。" + view.get("delivery", {}).get("reason", "整体集成验收仍需核对。")
                 elif counts.get("submitted"):
                     text += "成果已经交上来了，但验收证据还没齐，依赖它的工作不会抢跑。"
                 elif counts.get("running"):
@@ -1387,15 +1421,23 @@ class Runtime:
         task = fold(self.log.read(task_id=task_id)).get(task_id)
         if task is not None:
             work = self.work.view(task_id)
-            task.work = work if work["plan_seq"] is not None else None
+            task.work = self._with_delivery(task, work) if work["plan_seq"] is not None else None
         return task
 
     def tasks(self) -> list[TaskSnapshot]:
         tasks = list(fold(self.log.read()).values())
         for task in tasks:
             if task.work is not None:
-                task.work = self.work.view(task.id)
+                task.work = self._with_delivery(task, self.work.view(task.id))
         return tasks
+
+    def _with_delivery(self, task: TaskSnapshot, work: dict[str, Any]) -> dict[str, Any]:
+        delivery = self.delivery.view(task.id)
+        if delivery["status"] == "accepted":
+            task.status = "done"
+        elif delivery.get("digest") and task.status == "done":
+            task.status = "running"
+        return {**work, "delivery": delivery}
 
     def inbox(self) -> list[dict[str, Any]]:
         items = []

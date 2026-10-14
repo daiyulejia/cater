@@ -1,9 +1,11 @@
 import { CheckCircle2, ChevronRight, Circle, CircleAlert, Clock3, GitBranch, LoaderCircle } from 'lucide-react'
+import type { DeliveryState } from './DeliveryPanel'
 
 export type WorkState = {
   plan_seq: number | null
   stage_accepted: boolean
   scope_current?: boolean
+  delivery?: DeliveryState
   planning?: { summary: string; coverage: { source_id: string; item_ids: string[]; superseded_by: string | null; reason: string; quote: string }[] } | null
   items: {
     id: string; owner: string; reviewer: string | null; objective: string; status: string; reason: string
@@ -79,6 +81,6 @@ export function WorkItems({ work, names }: { work?: WorkState | null; names: Rec
         </li>
       })}
     </ol>
-    {work.stage_accepted && <p className="mt-3 text-xs leading-5 text-teal-800">阶段验收已通过，尚不代表整体交付完成。</p>}
+    {work.stage_accepted && work.delivery?.status !== 'accepted' && <p className="mt-3 text-xs leading-5 text-teal-800">阶段验收已通过，尚不代表整体交付完成。</p>}
   </section>
 }

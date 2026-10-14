@@ -2193,6 +2193,10 @@ class CliTests(unittest.TestCase):
         self.assertIn("command recorded", out)
 
         code, out = self.run_cli("decide", task_id, "--resolution", "done", "--reason", "ok")
+        self.assertEqual(code, 1)
+        self.assertIn("整体验收尚未通过", out)
+
+        code, out = self.run_cli("decide", task_id, "--resolution", "rework", "--reason", "补齐验收依据")
         self.assertEqual(code, 0)
         self.assertIn("manual override recorded", out)
 

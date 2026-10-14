@@ -14,6 +14,7 @@ import { TeamDirectory } from './TeamDirectory'
 import { TaskList } from './TaskList'
 import { RulesPanel } from './RulesPanel'
 import { WorkItems } from './WorkItems'
+import { DeliveryPanel } from './DeliveryPanel'
 import type { WorkState } from './WorkItems'
 import type { TeamAvailability } from './TeamDirectory'
 
@@ -107,6 +108,8 @@ const taskListStatus = (task: Task) => {
   if (task.work?.items.length) {
     if (task.work.items.some((item) => item.status === 'uncertain')) return '结果待核实'
     if (!task.work.scope_current) return '需要重新核对'
+    if (task.work.delivery?.status === 'accepted') return '已交付'
+    if (task.work.delivery?.status === 'uncertain') return '复核结果待确认'
     if (task.work.stage_accepted) return '阶段通过，待整体验收'
     if (task.work.items.some((item) => item.status === 'submitted')) return '等待验收'
     return '待补充成果'
@@ -203,7 +206,15 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     if (event.type === 'task.progress_reported') return [message('当前进展', String(payload.text ?? ''), 'system', 'collaboration')]
     if (event.type === 'planning.started') return [message('店长在整理安排', '我先核对这次的要求、已有成果和前后依赖，再把具体工作交给伙伴。', 'system', 'collaboration')]
     if (event.type === 'planning.finished') return [message(payload.status === 'installed' ? '这次这样安排' : '计划先不下发', String(payload.reason ?? ''), 'system', 'decision')]
-    if (event.type === 'msg.said' && payload.phase === 'planning') return []
+    if (event.type === 'msg.said' && (payload.phase === 'planning' || payload.phase === 'delivery_receipt')) return []
+    if (event.type === 'delivery.review_started') return [message('最后一起核对', '各项成果已经过阶段验收。我再检查它们合起来是否满足你现在的要求，再整理交付和复查说明。', 'agent', 'collaboration')]
+    if (event.type === 'delivery.review_finished') {
+      const handoff = payload.handoff && typeof payload.handoff === 'object' ? payload.handoff as Record<string, unknown> : null
+      const steps = handoff && Array.isArray(handoff.reproduce) ? handoff.reproduce.filter((s): s is string => typeof s === 'string') : []
+      return [message(payload.status === 'accepted' ? '这次的成果整理好了' : '最后核对还有一处要处理',
+        payload.status === 'accepted' && handoff ? `${String(handoff.summary)}\n${String(handoff.why)}` : String(payload.reason ?? '还需要补齐整体验收依据。'),
+        'agent', payload.status === 'accepted' ? 'deliverable' : 'decision', steps)]
+    }
     if (event.type === 'task.interpreted') {
       const scope = Array.isArray(payload.scope) ? payload.scope.filter((item): item is string => typeof item === 'string') : []
       const risks = Array.isArray(payload.risks) ? payload.risks.filter((item): item is string => typeof item === 'string') : []
@@ -601,7 +612,7 @@ function App() {
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
         {task && <WorkboardPanel taskId={task.id} open={showMobileBoard} onOpenChange={setShowMobileBoard}>
-          {currentDetail ? <><WorkItems work={task.work} names={names} /><VerificationBoard items={task.verifications ?? []} /><Workboard task={task} detail={currentDetail} names={names} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />{Boolean(currentDetail.organization_memory?.length) && <details className="mt-5 border-t border-[#dce8e1] pt-4"><summary className="cursor-pointer text-xs font-semibold text-[#52766d]">猫咖记忆 · {currentDetail.organization_memory?.length} 项</summary><div className="mt-3"><MemoryBoard items={currentDetail.organization_memory ?? []} names={names} /></div></details>}</> : <p className="text-xs leading-6 text-[#74897d]">正在读取这件事的成果与过程。</p>}
+          {currentDetail ? <><WorkItems work={task.work} names={names} /><DeliveryPanel key={task.id} taskId={task.id} delivery={task.work?.delivery} names={names} accessToken={accessToken} /><VerificationBoard items={task.verifications ?? []} /><Workboard task={task} detail={currentDetail} names={names} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />{Boolean(currentDetail.organization_memory?.length) && <details className="mt-5 border-t border-[#dce8e1] pt-4"><summary className="cursor-pointer text-xs font-semibold text-[#52766d]">猫咖记忆 · {currentDetail.organization_memory?.length} 项</summary><div className="mt-3"><MemoryBoard items={currentDetail.organization_memory ?? []} names={names} /></div></details>}</> : <p className="text-xs leading-6 text-[#74897d]">正在读取这件事的成果与过程。</p>}
         </WorkboardPanel>}
       </main>
     </div>
@@ -662,7 +673,9 @@ function Workboard({ task, detail, names, driverCoverage, showEvidence, onToggle
     : [...new Set(task.messages.map((item) => item.actor).filter((actor) => actor !== 'human'))]
   const deliverables = [...(task.deliverables ?? [])].reverse()
   const diagnoses = [...(task.diagnoses ?? [])].reverse()
-  const handoffs = [...(task.handoffs ?? [])].reverse()
+  const finalHandoff = task.work?.delivery?.status === 'accepted' ? task.work.delivery.handoff : undefined
+  const handoffs = [...(task.handoffs ?? []), ...(finalHandoff ? [{ seq: task.work?.delivery?.review_seq ?? 0,
+    summary: finalHandoff.summary, why: finalHandoff.why }] : [])].reverse()
   return <div className="space-y-5 border-t border-[#eaded1] pt-5">{driverCoverage && <section><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">协作通道</h2><span className="text-xs text-stone-400">不展示密钥</span></div><div className="space-y-1.5">{driverCoverage.map((item) => <div key={item.role_id} className="flex items-center justify-between gap-2 text-xs"><span className="truncate text-stone-600">{item.name}</span><span className={item.mode === 'external' ? 'text-teal-700' : 'text-amber-700'}>{item.mode === 'external' ? '外部模型' : '本地演示'}</span></div>)}</div></section>}<section><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">本轮参与</h2><span className="text-xs text-stone-400">{participants.length} 位伙伴</span></div><div className="space-y-2">{participants.map((owner) => <div key={owner} className="flex items-center gap-2 border-l-2 border-[#cb6e4e] py-1 pl-3"><Portrait id={owner} size="sm" /><strong className="text-xs">{names[owner] ?? actorText(owner)}</strong><span className="text-xs text-stone-400">{assignments.length ? '已接下这一轮安排' : '已参与本轮协作'}</span></div>)}</div></section><section><div className="mb-2 flex items-center justify-between gap-2"><h2 className="text-sm font-semibold">已发布成果</h2><span className="text-xs text-stone-400">{deliverables.length} 项</span></div>{deliverables.length ? <div className="space-y-2">{deliverables.map((item) => <div key={item.seq} className="border-l-2 border-emerald-600 pl-3 py-1"><ArtifactPreview item={item} publisher={names[item.actor ?? ''] ?? actorText(item.actor ?? '猫咖')} /></div>)}</div> : <p className="text-xs leading-5 text-stone-400">猫咪们尚未发布可复用的成果。</p>}</section><section><div className="mb-2 flex items-center justify-between gap-2"><h2 className="text-sm font-semibold">自证与交接</h2><span className="text-xs text-stone-400">{diagnoses.length + handoffs.length} 条</span></div>{diagnoses.length || handoffs.length ? <div className="space-y-3">{diagnoses.map((item) => <div key={`diagnosis-${item.seq}`} className="border-l-2 border-amber-500 pl-3 py-1"><strong className="block text-xs text-stone-800">诊断 · {diagnosisStatusText(item.status)}</strong><p className="mt-1 text-xs leading-5 text-stone-600">{item.symptom}</p><p className="mt-1 text-xs leading-5 text-stone-500">{item.cause}</p></div>)}{handoffs.map((item) => <div key={`handoff-${item.seq}`} className="border-l-2 border-sky-600 pl-3 py-1"><strong className="block text-xs text-stone-800">交接卡</strong><p className="mt-1 text-xs leading-5 text-stone-600">{item.summary}</p><p className="mt-1 text-xs leading-5 text-stone-500">为什么：{item.why}</p></div>)}</div> : <p className="text-xs leading-5 text-stone-400">尚未留下诊断或交接卡；完成关键改动时，伙伴会说明证据、验证与未覆盖范围。</p>}</section><section><div className="mb-2 flex items-center gap-2"><CheckCircle2 size={16} className="text-teal-700" /><h2 className="text-sm font-semibold">当前结论</h2></div><p className="text-sm leading-6 text-stone-600">{reasonText(task.decision?.reason ?? task.brief?.dispute ?? '团队正在形成下一步可交付结果。')}</p>{task.decision && <span className="mt-2 inline-block rounded-full bg-teal-50 px-2 py-1 text-xs text-teal-800">{actorText(task.decision.source ?? '团队')} · {statusText(task.decision.resolution)}</span>}</section><section className="border-t border-[#eaded1] pt-4"><button onClick={onToggleEvidence} className="flex w-full items-center justify-between text-left text-sm font-semibold"><span className="flex items-center gap-2"><FileText size={16} className="text-stone-500" /> 过程证据</span><ChevronDown size={16} className={showEvidence ? 'rotate-180 transition' : 'transition'} /></button>{showEvidence && <div className="mt-3 max-h-52 overflow-auto rounded-lg bg-[#fcf5ee] p-3 text-xs text-stone-500"><p>{detail?.events.length ?? 0} 条不可变事件已记录。</p><a className="mt-2 inline-block text-teal-700 hover:underline" href={`/tasks/${task.id}`}>打开完整审计回放</a></div>}</section></div>
 }
 

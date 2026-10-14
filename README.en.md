@@ -33,6 +33,7 @@ Available today:
 - **Chat collaboration**: create tasks, mention teammates, add directions, and follow progress.
 - **Readable deliverables**: open, copy, or download published text, Markdown, and code bodies.
 - **Inspectable records**: replay collaboration events and distinguish agent reports from explicitly executed local checks.
+- **Versioned acceptance**: execute work in dependency order and download artifact bodies, a manifest, and handoff notes after whole-task acceptance.
 - **Configurable teammates**: customize names, responsibilities, and model connections through local CLI drivers or Chat Completions-compatible APIs.
 
 ## Connect Real Models
@@ -43,7 +44,7 @@ Keep API keys in environment variables, not role cards, chat messages, or Git. F
 
 ## Current Limits
 
-- A model's conclusion, vote, or "done" message is not independent verification. Dependency-aware execution and automatic acceptance for long tasks remain incomplete.
+- A model's conclusion, vote, or "done" message does not prove correctness. Dependency scheduling and stage/whole-task acceptance gates are implemented; real-model long-task quality, automatic tool execution, and uncertain-result recovery still need work.
 - Cater does not provide a general filesystem or network sandbox. Role definitions, prompts, and process management are not permission isolation. Run only trusted driver configurations and commands.
 - The workroom binds to loopback by default. Remote access requires explicit opt-in, an access token, and HTTPS or an equivalent controlled network boundary that you provide.
 
@@ -53,6 +54,7 @@ The guides below are primarily in Chinese.
 
 - [Integration and configuration](examples/README.md)
 - [Deliverables and replay](docs/artifacts.zh-CN.md)
+- [Work items and whole-task acceptance](docs/work-items.zh-CN.md)
 - [Local verification and safety](docs/local-verification.zh-CN.md)
 - [Frontend development and remote access](web/README.md)
 - [Contributing](CONTRIBUTING.md)

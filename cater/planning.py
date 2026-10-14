@@ -23,6 +23,10 @@ def requirement_sources(events) -> list[dict[str, Any]]:
     sources = []
     request = next((event for event in reversed(events) if event.type == "planning.requested"), None)
     for event in events:
+        if event.type == "human.decided" and event.payload.get("resolution") == "rework":
+            sources.append({"id": f"{event.seq}:reason:0", "seq": event.seq,
+                            "text": event.payload.get("reason") or "顾客要求返工"})
+            continue
         if event is request:
             for key in ("preferred_objective", "preferred_acceptance"):
                 if event.payload.get(key):

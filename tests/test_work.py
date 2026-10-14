@@ -337,9 +337,11 @@ class WorkTests(unittest.TestCase):
         self.rt.collaborate(self.task)
         receipt, _ = self.rt.verify_work(self.task, "a", "behavior", [sys.executable, "-c", "open('check.py','w').write('changed')"])
         self.assertFalse(receipt.payload["artifacts_unchanged"])
+        calls = len(self.driver.calls)
         self.rt.collaborate(self.task)
-        reviews = list(self.rt.log.iter_events(task_id=self.task, event_types=("work.reviewed",)))
-        self.assertEqual(reviews[0].payload["status"], "rework")
+        self.assertEqual(len(self.driver.calls), calls)
+        invalidated = list(self.rt.log.iter_events(task_id=self.task, event_types=("work.invalidated",)))
+        self.assertEqual(invalidated[0].payload["affected"], ["a"])
         self.assertNotEqual(self.statuses()["a"], "accepted")
 
     def test_model_verification_event_cannot_impersonate_local_verifier(self):
@@ -480,7 +482,9 @@ class WorkTests(unittest.TestCase):
         self.rt.plan_work(self.task, [item("a", local=True), item("b", deps=["a"])])
         self.rt.collaborate(self.task)
         self.rt.verify_work(self.task, "a", "behavior", [sys.executable, "-c", "raise SystemExit(1)"])
+        calls = len(self.driver.calls)
         self.rt.battle(self.task)
+        self.assertEqual(len(self.driver.calls), calls)
         self.assertEqual(self.statuses(), {"a": "ready", "b": "blocked"})
         self.assertFalse(self.rt.work.view(self.task)["stage_accepted"])
 

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["requirements", "checks", "handoff"],
+  "properties": {
+    "requirements": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+    "checks": {"type": "array", "items": {"$ref": "#/$defs/check"}},
+    "handoff": {
+      "type": "object", "additionalProperties": false,
+      "required": ["summary", "why", "reproduce", "limits"],
+      "properties": {
+        "summary": {"type": "string"}, "why": {"type": "string"},
+        "reproduce": {"type": "array", "items": {"type": "string"}},
+        "limits": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  },
+  "$defs": {
+    "check": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "status", "reason", "evidence", "superseded_by", "source_quote"],
+      "properties": {
+        "id": {"type": "string"},
+        "status": {"type": "string", "enum": ["passed", "failed", "unknown", "superseded"]},
+        "reason": {"type": "string"},
+        "superseded_by": {"type": ["string", "null"]},
+        "source_quote": {"type": ["string", "null"]},
+        "evidence": {
+          "type": "array", "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["artifact_seq", "quote"],
+            "properties": {"artifact_seq": {"type": "integer"}, "quote": {"type": "string"}}
+          }
+        }
+      }
+    }
+  }
+}

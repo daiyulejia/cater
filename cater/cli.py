@@ -275,6 +275,17 @@ def cmd_verify(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         if rt.task(args.task_id) is None:
             raise KeyError(args.task_id)
+        if args.delivery:
+            if args.work_item or args.for_event is not None or not args.criterion:
+                raise ValueError("--delivery requires --criterion and cannot combine with --work-item or --for-event")
+            event, result = rt.delivery.verify(args.task_id, args.criterion, command,
+                                               timeout=args.timeout, record_output=args.record_output)
+            print(f"recorded delivery check #{event.seq}: {event.payload['outcome']}")
+            print("Executed in a temporary delivery copy, not an OS sandbox.")
+            for preview in (result.stdout_preview, result.stderr_preview):
+                if preview:
+                    print(preview)
+            return 0 if event.payload["outcome"] == "passed" and event.payload["artifacts_unchanged"] else 1
         if args.work_item is not None:
             if not args.criterion or args.for_event is not None:
                 raise ValueError("--work-item requires --criterion and cannot combine with --for-event")
@@ -287,7 +298,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
                     print(preview)
             return 0 if event.payload["outcome"] == "passed" and event.payload["artifacts_unchanged"] else 1
         if args.criterion:
-            raise ValueError("--criterion requires --work-item")
+            raise ValueError("--criterion requires --work-item or --delivery")
         if args.for_event is not None:
             target = next(
                 (event for event in rt.log.read(task_id=args.task_id) if event.seq == args.for_event),
@@ -749,7 +760,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("--timeout", type=float, default=60, help="seconds, maximum 600")
     p_verify.add_argument("--for-event", type=int, help="link to a diagnosis or handoff event")
     p_verify.add_argument("--work-item", help="check exact submitted inline artifacts in a temporary copy (not a sandbox)")
-    p_verify.add_argument("--criterion", help="local_check criterion id for --work-item")
+    p_verify.add_argument("--delivery", action="store_true", help="check all current delivery files in a temporary copy")
+    p_verify.add_argument("--criterion", help="local_check criterion id for --work-item or --delivery")
     p_verify.add_argument("--record-output", action="store_true", help="persist bounded output excerpts; may expose secrets")
     p_verify.set_defaults(func=cmd_verify, command_args=[])
 

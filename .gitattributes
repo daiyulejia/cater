@@ -1,1 +1,3 @@
 * text=auto eol=lf
+# Generated vendor template strings may contain meaningful trailing whitespace.
+cater/static/workroom/assets/*.js whitespace=-blank-at-eol

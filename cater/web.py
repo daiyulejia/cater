@@ -463,6 +463,23 @@ def make_handler(
                     return self._send_json(chain_to_dict(rt.verify_chain()))
             if path.startswith("/api/tasks/"):
                 task_id = path.split("/", 3)[3]
+                if task_id.endswith("/delivery"):
+                    task_id = task_id.removesuffix("/delivery")
+                    with self._runtime() as rt:
+                        if rt.task(task_id) is None:
+                            return self._not_found()
+                        try:
+                            raw = rt.delivery.archive(task_id)
+                        except ValueError as exc:
+                            return self._conflict(str(exc))
+                        self.send_response(HTTPStatus.OK)
+                        self.send_header("Content-Type", "application/zip")
+                        self.send_header("Content-Disposition", 'attachment; filename="cater-delivery.zip"')
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("Content-Length", str(len(raw)))
+                        self.end_headers()
+                        self.wfile.write(raw)
+                        return
                 with self._runtime() as rt:
                     task = rt.task(task_id)
                     if task is None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import json
 import os
 import subprocess
@@ -91,16 +92,22 @@ def _git_state(cwd: Path) -> dict[str, object]:
         return {"head": None, "dirty": None}
 
 
+def validate_check(command: list[str], timeout: float) -> None:
+    if not isinstance(command, list) or not command or not isinstance(command[0], str) or not command[0]:
+        raise ValueError("verification command is required after --")
+    if any(not isinstance(arg, str) or "\0" in arg for arg in command):
+        raise ValueError("verification command must contain valid string arguments")
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or not 0 < timeout <= 600:
+        raise ValueError("verification timeout must be between 0 and 600 seconds")
+
+
 def run_check(
     command: list[str], *, cwd: Path, timeout: float = 60,
     record_output: bool = False,
 ) -> CheckResult:
-    if not command or not command[0]:
-        raise ValueError("verification command is required after --")
+    validate_check(command, timeout)
     if not cwd.is_dir():
         raise ValueError(f"verification directory does not exist: {cwd}")
-    if not 0 < timeout <= 600:
-        raise ValueError("verification timeout must be between 0 and 600 seconds")
 
     cwd = cwd.resolve()
     started = time.monotonic()

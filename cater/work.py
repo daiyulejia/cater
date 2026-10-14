@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 import uuid
 from typing import Any, Callable
@@ -91,9 +92,10 @@ class WorkLedger:
         self.log, self.rules = log, rules
 
     def scope(self, task_id: str) -> dict[str, Any]:
-        events = list(self.log.iter_events(task_id=task_id, event_types=("task.created", "human.commanded", "plan.proposed", "plan.amended", "planning.requested")))
+        events = list(self.log.iter_events(task_id=task_id, event_types=("task.created", "human.commanded", "human.decided", "plan.proposed", "plan.amended", "planning.requested")))
         directions = [e for e in events if e.type == "task.created"
-                      or (e.type == "human.commanded" and changes_direction(e.payload))]
+                      or (e.type == "human.commanded" and changes_direction(e.payload))
+                      or (e.type == "human.decided" and e.payload.get("resolution") == "rework")]
         if not directions:
             raise KeyError(task_id)
         plans = [e.seq for e in events if e.type in {"plan.proposed", "plan.amended", "planning.requested"}]
@@ -101,9 +103,12 @@ class WorkLedger:
                 "rules": self.rules.current_snapshot(task_id)["fingerprint"]}
 
     def directions(self, task_id: str, through_seq: int) -> list[dict[str, Any]]:
-        return [{"seq": e.seq, **{key: e.payload[key] for key in ("instruction", "goal", "acceptance") if key in e.payload}}
-                for e in self.log.iter_events(task_id=task_id, event_types=("human.commanded",))
-                if e.seq <= through_seq and changes_direction(e.payload)]
+        return [{"seq": e.seq, **({"instruction": e.payload.get("reason", "顾客要求返工")}
+                 if e.type == "human.decided" else
+                 {key: e.payload[key] for key in ("instruction", "goal", "acceptance") if key in e.payload})}
+                for e in self.log.iter_events(task_id=task_id, event_types=("human.commanded", "human.decided"))
+                if e.seq <= through_seq and ((e.type == "human.commanded" and changes_direction(e.payload))
+                    or (e.type == "human.decided" and e.payload.get("resolution") == "rework"))]
 
     def _write(self, task_id: str, build: Callable[[], tuple[str, dict[str, Any], Actor]]) -> Event:
         for _ in range(8):
@@ -142,19 +147,56 @@ class WorkLedger:
         for candidate in (plan.payload.get("planning") or {}).get("reuse", []):
             if candidate["work_item_id"] in items:
                 items[candidate["work_item_id"]]["reuse_candidate"] = candidate
+        histories = {}
+
+        def history(item):
+            submission = item["submission"]
+            key = submission["seq"]
+            if key not in histories:
+                histories[key] = self._check_history(events, item)
+            return histories[key]
+
+        def invalidate_dependents(item_id):
+            affected = {item_id}
+            for _ in items:
+                affected.update(i["id"] for i in items.values() if set(i["depends_on"]) & affected)
+            for target in affected - {item_id}:
+                dependent = items[target]
+                uncertain = dependent["status"] in {"running", "uncertain"}
+                checking = dependent["submission"] is not None and any(
+                    e.seq not in state["receipts"] for state in history(dependent)["criteria"].values()
+                    for e in state["starts"])
+                dependent.update(status="uncertain" if uncertain else "stale",
+                                 submission=dependent["submission"] if checking else None, checks=[],
+                                 dependency_check_stale=checking,
+                                 dependency_uncertain=uncertain,
+                                 reason="前置成果重新检查，执行副作用须先核对。" if uncertain else "前置成果重新检查，需要重新验收。")
+
         for event in events:
             p = event.payload
-            if event.seq <= plan.seq or p.get("plan_seq") != plan.seq:
+            if event.seq <= plan.seq or (event.type != "verification.completed" and p.get("plan_seq") != plan.seq):
                 continue
-            item = items.get(p.get("work_item_id"))
+            item_id = p.get("work_item_id")
+            item = items.get(item_id) if isinstance(item_id, str) else None
             if item is None:
                 continue
             if event.type == "work.claimed":
                 item.update(status="running", attempt_id=p["attempt_id"], lease_until=p["lease_until"],
-                            inputs=p["inputs"], submission=None, checks=[], reason="")
-            elif event.type == "work.submitted" and p.get("attempt_id") == item["attempt_id"]:
+                            inputs=p["inputs"], submission=None, checks=[], reason="", dependency_uncertain=False,
+                            dependency_check_stale=False)
+            elif (event.type == "work.submitted" and p.get("attempt_id") == item["attempt_id"]
+                  and not item.get("dependency_uncertain") and not item.get("dependency_check_stale")):
                 item.update(status="submitted", submission={"seq": event.seq, **p}, reason="")
-            elif event.type == "work.reviewed" and p.get("submission_seq") == (item["submission"] or {}).get("seq"):
+            elif (event.type == "work.check_started" and item["submission"]
+                  and event.seq in history(item)["valid_starts"]):
+                item.update(status="submitted", checks=[], reason="本地检查已启动，需要等待本波次全部回执并重新验收。")
+                invalidate_dependents(item["id"])
+            elif (event.type == "verification.completed" and item["submission"]
+                  and event.seq in history(item)["valid_receipts"] and item["status"] == "accepted"):
+                item.update(status="submitted", checks=[], reason="本地检查证据已更新，需要重新验收。")
+                invalidate_dependents(item["id"])
+            elif (event.type == "work.reviewed" and p.get("submission_seq") == (item["submission"] or {}).get("seq")
+                  and not item.get("dependency_uncertain") and not item.get("dependency_check_stale")):
                 item.update(status=p["status"], checks=p["checks"], reason=p["reason"], review_seq=event.seq)
             elif event.type == "work.review_deferred" and p.get("submission_seq") == (item["submission"] or {}).get("seq"):
                 item.update(reason=p["reason"])
@@ -164,10 +206,42 @@ class WorkLedger:
                         items[target].update(status="rework" if target == item["id"] else "stale",
                                              reason=p["reason"], submission=None, checks=[])
             elif event.type == "work.failed" and p.get("attempt_id") == item["attempt_id"]:
-                item.update(status="uncertain" if p["uncertain"] else "rework", reason=p["reason"])
+                item.update(status="uncertain" if p["uncertain"] else "rework", reason=p["reason"],
+                            dependency_uncertain=bool(p["uncertain"] and item.get("dependency_uncertain")))
         scope_current = plan.payload["scope"] == self.scope(task_id)
         for item in items.values():
-            item["in_flight"] = item["status"] in {"running", "uncertain"}
+            item["execution_in_flight"] = item["status"] in {"running", "uncertain"}
+            item["check_in_flight"] = False
+            item["check_uncertain"] = False
+            item["check_lifecycle"] = {}
+            if item["submission"]:
+                states = history(item)["criteria"]
+                for criterion_id, state in states.items():
+                    pending = [e for e in state["starts"] if e.seq not in state["receipts"]]
+                    expired = [e for e in pending if e.payload["lease_until"] <= time.time()]
+                    item["check_in_flight"] |= bool(pending)
+                    item["check_uncertain"] |= bool(expired)
+                    item["check_lifecycle"][criterion_id] = {
+                        "check_wave": state["wave"], "attempt_seqs": [e.seq for e in state["starts"]],
+                        "pending_seqs": [e.seq for e in pending], "uncertain_seqs": [e.seq for e in expired],
+                        "receipt_seqs": [e.seq for e in state["receipts"].values()],
+                        "failed": (any(not self._receipt_passed(e) for e in state["receipts"].values())
+                                   if state["starts"] else bool(state["legacy"]
+                                   and not self._receipt_passed(state["legacy"][-1]))),
+                    }
+                local = self._selected_checks(states)
+                if item["status"] == "accepted" and any(
+                        c["kind"] == "local_check" and (c["id"] not in local or not self._receipt_passed(local[c["id"]]))
+                        for c in item["criteria"]):
+                    item.update(status="submitted", checks=[], reason="当前本地检查尚未全部通过，旧验收不能沿用。")
+                if item["check_in_flight"]:
+                    item.update(status="uncertain" if item["check_uncertain"] else "submitted",
+                                reason="本地检查期限已过，结果不明；不会自动重放。" if item["check_uncertain"]
+                                else "本地检查尚未全部结束，不能放行。")
+                elif item.get("dependency_check_stale"):
+                    item.update(status="stale", submission=None, checks=[], dependency_check_stale=False,
+                                reason="前置成果重新检查，旧提交已失效。")
+            item["in_flight"] = item["execution_in_flight"] or item["check_in_flight"]
             if item["status"] == "running" and item["lease_until"] < time.time():
                 item.update(status="uncertain", reason="执行期限已过，结果不明；不会自动重放。")
             if not scope_current and item["status"] != "uncertain":
@@ -323,18 +397,137 @@ class WorkLedger:
         def build():
             view, item = self._item(task_id, claim.payload["work_item_id"])
             if (view["plan_seq"] != claim.payload["plan_seq"] or item["attempt_id"] != claim.payload["attempt_id"]
-                    or not item.get("in_flight")):
+                    or not item.get("execution_in_flight")):
                 raise WorkConflict("cannot fail a different attempt")
             return "work.failed", {"plan_seq": view["plan_seq"], "work_item_id": item["id"],
                                    "attempt_id": item["attempt_id"], "reason": reason, "uncertain": uncertain}, Actor.system("work_scheduler")
         return self._write(task_id, build)
 
+    @staticmethod
+    def _receipt_passed(receipt: Event) -> bool:
+        p = receipt.payload
+        return (p.get("outcome") == "passed" and type(p.get("exit_code")) is int and p["exit_code"] == 0
+                and p.get("artifacts_unchanged") is True
+                and all(isinstance(p.get(s), dict) and p[s].get("complete") is True for s in ("stdout", "stderr")))
+
+    @staticmethod
+    def _check_binding(event: Event, item: dict[str, Any], *, started: bool = False) -> bool:
+        submission, p = item.get("submission"), event.payload
+        if (not submission or event.actor != Actor.system("local_verifier") or event.seq <= submission["seq"]
+                or p.get("work_item_id") != item["id"] or p.get("submission_digest") != submission["digest"]):
+            return False
+        for field, expected in (("plan_seq", submission["plan_seq"]), ("submission_seq", submission["seq"])):
+            if (started or field in p) and (type(p.get(field)) is not int or p[field] != expected):
+                return False
+        return (not started or p.get("scope") == submission["scope"]) and (
+            "scope" not in p or p["scope"] == submission["scope"])
+
+    def _check_history(self, events: list[Event], item: dict[str, Any]) -> dict[str, Any]:
+        states = {c["id"]: {"wave": None, "starts": [], "receipts": {}, "legacy": []}
+                  for c in item["criteria"] if c["kind"] == "local_check"}
+        valid_starts, valid_receipts, attempt_ids = set(), set(), set()
+        for event in events:
+            if event.type not in {"work.check_started", "verification.completed"}:
+                continue
+            p = event.payload
+            if not self._check_binding(event, item, started=event.type == "work.check_started"):
+                continue
+            criterion_id = p.get("criterion_id")
+            if not isinstance(criterion_id, str) or criterion_id not in states:
+                continue
+            state = states[criterion_id]
+            if event.type == "work.check_started":
+                attempt, wave, lease = p.get("check_attempt"), p.get("check_wave"), p.get("lease_until")
+                supersedes, legacy = p.get("supersedes"), p.get("supersedes_receipt_seqs")
+                if (not isinstance(attempt, str) or not attempt or attempt in attempt_ids
+                        or not isinstance(wave, str) or not wave or type(lease) not in (int, float)
+                        or not math.isfinite(lease) or not isinstance(supersedes, list)
+                        or not isinstance(legacy, list) or any(type(seq) is not int for seq in supersedes + legacy)):
+                    continue
+                pending = any(e.seq not in state["receipts"] for e in state["starts"])
+                if pending:
+                    if wave != state["wave"] or supersedes or legacy:
+                        continue
+                else:
+                    if (wave == state["wave"] or supersedes != [e.seq for e in state["starts"]]
+                            or legacy != [e.seq for e in state["legacy"]]):
+                        continue
+                    state.update(wave=wave, starts=[], receipts={}, legacy=[])
+                state["starts"].append(event)
+                attempt_ids.add(attempt)
+                valid_starts.add(event.seq)
+            elif "check_attempt_seq" in p:
+                seq = p["check_attempt_seq"]
+                if type(seq) is not int or seq in state["receipts"]:
+                    continue
+                start = next((e for e in state["starts"] if e.seq == seq), None)
+                if (start is None or event.seq <= start.seq or type(p.get("submission_seq")) is not int
+                        or p["submission_seq"] != item["submission"]["seq"]
+                        or ("check_attempt" in p and p["check_attempt"] != start.payload["check_attempt"])):
+                    continue
+                state["receipts"][seq] = event
+                valid_receipts.add(event.seq)
+            elif state["wave"] is None:
+                # Legacy receipts are accepted only until this criterion adopts starts.
+                state["legacy"].append(event)
+                valid_receipts.add(event.seq)
+        return {"criteria": states, "valid_starts": valid_starts, "valid_receipts": valid_receipts}
+
+    def _selected_checks(self, states: dict[str, Any]) -> dict[str, Event]:
+        selected = {}
+        for criterion_id, state in states.items():
+            if any(e.seq not in state["receipts"] for e in state["starts"]):
+                continue
+            receipts = list(state["receipts"].values())
+            if receipts:
+                failures = [e for e in receipts if not self._receipt_passed(e)]
+                selected[criterion_id] = min(failures, key=lambda e: e.seq) if failures else max(receipts, key=lambda e: e.seq)
+            elif state["legacy"]:
+                selected[criterion_id] = state["legacy"][-1]
+        return selected
+
     def checks(self, task_id: str, item: dict[str, Any]) -> dict[str, Event]:
-        submission = item["submission"]
-        return {e.payload["criterion_id"]: e for e in self.log.iter_events(task_id=task_id, event_types=("verification.completed",))
-                if e.actor == Actor.system("local_verifier") and submission
-                and e.payload.get("submission_digest") == submission["digest"]
-                and e.payload.get("work_item_id") == item["id"] and e.payload.get("criterion_id")}
+        view = self.view(task_id)
+        current = next((i for i in view["items"] if i["id"] == item["id"]), None)
+        if (not view.get("scope_current") or current is None or not current["submission"]
+                or current.get("dependency_check_stale") or current["submission"] != item.get("submission")):
+            return {}
+        return self._selected_checks(self._check_history(self.log.read(task_id=task_id), item)["criteria"])
+
+    def start_check(self, task_id: str, item_id: str, criterion_id: str, *, lease_seconds: float = 600,
+                    expected_submission_seq: int | None = None) -> Event:
+        """Join overlapping checks; supersede a wave only after every attempt ended."""
+        if type(lease_seconds) not in (int, float) or not math.isfinite(lease_seconds) or not 0 < lease_seconds <= 3600:
+            raise ValueError("check lease must be between 0 and 3600 seconds")
+
+        def build():
+            view, item = self._item(task_id, item_id)
+            if expected_submission_seq is not None and (
+                    type(expected_submission_seq) is not int or not item["submission"]
+                    or item["submission"]["seq"] != expected_submission_seq):
+                raise WorkConflict("check target submission changed")
+            if (not view.get("scope_current") or not item["submission"]
+                    or item["status"] not in {"submitted", "accepted", "ready"}
+                    or item.get("execution_in_flight") or item.get("check_uncertain")
+                    or item.get("dependency_check_stale")
+                    or any(i["status"] != "accepted" for i in view["items"] if i["id"] in item["depends_on"])):
+                raise WorkConflict("checking requires a current submission with reconciled effects and accepted inputs")
+            if not any(c["id"] == criterion_id and c["kind"] == "local_check" for c in item["criteria"]):
+                raise ValueError("criterion must identify a local_check in this work item")
+            state = self._check_history(self.log.read(task_id=task_id), item)["criteria"][criterion_id]
+            pending = any(e.seq not in state["receipts"] for e in state["starts"])
+            submission = item["submission"]
+            return "work.check_started", {
+                "plan_seq": view["plan_seq"], "scope": view["scope"], "work_item_id": item_id,
+                "criterion_id": criterion_id, "submission_seq": submission["seq"],
+                "submission_digest": submission["digest"], "check_attempt": uuid.uuid4().hex,
+                "check_wave": state["wave"] if pending else uuid.uuid4().hex,
+                "lease_until": time.time() + lease_seconds,
+                "supersedes": [] if pending else [e.seq for e in state["starts"]],
+                "supersedes_receipt_seqs": [] if pending else [e.seq for e in state["legacy"]],
+            }, Actor.system("local_verifier")
+
+        return self._write(task_id, build)
 
     def review(self, task_id: str, item_id: str, *, reviewer: str, submission_seq: int,
                results: object) -> Event:
@@ -353,10 +546,7 @@ class WorkLedger:
                 if criterion["kind"] == "local_check":
                     receipt = local.get(criterion["id"])
                     if receipt:
-                        p = receipt.payload
-                        passed = (p.get("outcome") == "passed" and type(p.get("exit_code")) is int
-                                  and p["exit_code"] == 0 and p.get("artifacts_unchanged") is True
-                                  and all(p.get(s, {}).get("complete") is True for s in ("stdout", "stderr")))
+                        passed = self._receipt_passed(receipt)
                         check.update(status="passed" if passed else "failed", receipt_seq=receipt.seq,
                                      reason="已记录该成果副本的本地检查；覆盖范围仅限所执行命令。")
                 else:
@@ -380,11 +570,15 @@ class WorkLedger:
                                      "checks": checks, "reason": reason}, Actor.agent(reviewer, "reviewer")
         return self._write(task_id, build)
 
-    def rework(self, task_id: str, item_id: str, reason: str) -> Event:
+    def rework(self, task_id: str, item_id: str, reason: str, *, expected_plan_seq: int | None = None,
+               expected_scope: dict[str, Any] | None = None) -> Event:
         reason = _text(reason, "rework reason", 2000)
 
         def build():
             view, item = self._item(task_id, item_id)
+            if ((expected_plan_seq is not None and view["plan_seq"] != expected_plan_seq)
+                    or (expected_scope is not None and self.scope(task_id) != expected_scope)):
+                raise WorkConflict("rework target plan or scope changed")
             affected = {item_id}
             for _ in view["items"]:
                 affected.update(i["id"] for i in view["items"] if set(i["depends_on"]) & affected)
