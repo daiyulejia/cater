@@ -125,6 +125,97 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(self.rt.delivery.view(self.task)["status"], "accepted")
         self.assertTrue(self.rt.verify_chain().ok)
 
+    def test_handoff_exports_actual_checks_independently_of_model_instructions(self):
+        self.prepare(local=True)
+        command = [sys.executable, "-c", "import runpy; runpy.run_path('work-1/check.py'); print('actual-check')"]
+        event, result = self.rt.delivery.verify(self.task, "integration_behavior", command, record_output=True)
+        self.final.transform = lambda raw: {**raw, "handoff": {**raw["handoff"], "reproduce": ["MODEL_STEP_NOT_EXECUTED"]}}
+        self.rt.collaborate(self.task)
+        delivery = self.rt.delivery.view(self.task)
+        receipt = delivery["local_checks"][0]["receipts"][0]
+        self.assertEqual(receipt["command"], command)
+        self.assertEqual(receipt["receipt_seq"], event.seq)
+        self.assertEqual(receipt["attempt_seq"], event.payload["check_attempt_seq"])
+        self.assertEqual(receipt["stdout"], result.payload["stdout"])
+        self.assertIn("actual-check", receipt["stdout"]["excerpt"])
+        self.assertNotIn("cwd", receipt)
+        with zipfile.ZipFile(io.BytesIO(self.rt.delivery.archive(self.task))) as archive:
+            exported = json.loads(archive.read("manifest.json"))["local_checks"][0]["receipts"][0]
+            self.assertEqual(exported, receipt)
+            notes = archive.read("handoff.md").decode("utf-8")
+            self.assertIn("MODEL_STEP_NOT_EXECUTED", notes)
+            actual = notes.split("## 实际执行的整体检查", 1)[1]
+            self.assertNotIn("MODEL_STEP_NOT_EXECUTED", actual)
+            self.assertIn(json.dumps(command, ensure_ascii=False, indent=2), actual)
+            self.assertIn(receipt["stdout"]["sha256"], actual)
+            self.assertIn("原临时目录已清理", actual)
+        with Runtime(self.db, roles_path=self.roles, drivers=self.drivers) as reopened:
+            self.assertEqual(reopened.delivery.view(self.task)["local_checks"], delivery["local_checks"])
+
+    def test_check_receipts_keep_output_text_opt_in(self):
+        self.prepare(local=True)
+        command = [sys.executable, "-c", "import runpy; runpy.run_path('work-1/check.py'); print('check-output')"]
+        event, _ = self.rt.delivery.verify(self.task, "integration_behavior", command)
+        self.rt.collaborate(self.task)
+        receipt = self.rt.delivery.view(self.task)["local_checks"][0]["receipts"][0]
+        for stream in ("stdout", "stderr"):
+            self.assertNotIn("excerpt", receipt[stream])
+            self.assertEqual(receipt[stream], event.payload[stream])
+        self.assertGreater(receipt["stdout"]["bytes"], 0)
+        with zipfile.ZipFile(io.BytesIO(self.rt.delivery.archive(self.task))) as archive:
+            exported = json.loads(archive.read("manifest.json"))["local_checks"][0]["receipts"][0]
+            self.assertNotIn("excerpt", exported["stdout"])
+
+    def test_current_check_wave_exposes_all_receipts_without_hiding_failures(self):
+        self.prepare(local=True)
+        old, _ = self.rt.delivery.verify(self.task, "integration_behavior", [sys.executable, "work-1/check.py"])
+        current = self.rt.delivery.view(self.task)
+        first = self.rt.delivery._start_check(self.task, current, "integration_behavior", 60)
+        second = self.rt.delivery._start_check(self.task, current, "integration_behavior", 60)
+        base = {"delivery_digest": current["digest"], "criterion_id": "integration_behavior", "artifacts_unchanged": True,
+                "stdout": {"complete": True}, "stderr": {"complete": True}}
+        failure = self.rt.log.emit(type="verification.completed", actor=Actor.system("local_verifier"), task_id=self.task,
+            payload={**base, "check_attempt_seq": first.seq, "outcome": "failed", "exit_code": 1})
+        pending = self.rt.delivery.view(self.task)
+        self.assertEqual(pending["status"], "checking")
+        self.assertEqual([r["receipt_seq"] for r in pending["local_checks"][0]["receipts"]], [failure.seq])
+        success = self.rt.log.emit(type="verification.completed", actor=Actor.system("local_verifier"), task_id=self.task,
+            payload={**base, "check_attempt_seq": second.seq, "outcome": "passed", "exit_code": 0})
+        self.rt.log.emit(type="verification.completed", actor=Actor.system("local_verifier"), task_id=self.task,
+            payload={**base, "check_attempt_seq": first.seq, "outcome": "passed", "exit_code": 0})
+        check = self.rt.delivery.view(self.task)["local_checks"][0]
+        self.assertEqual(check["status"], "failed")
+        self.assertEqual([r["receipt_seq"] for r in check["receipts"]], [failure.seq, success.seq])
+        self.assertNotIn(old.seq, [r["receipt_seq"] for r in check["receipts"]])
+        self.assertNotIn("command", check["receipts"][0])
+        replacement, _ = self.rt.delivery.verify(self.task, "integration_behavior", [sys.executable, "work-1/check.py"])
+        check = self.rt.delivery.view(self.task)["local_checks"][0]
+        self.assertEqual(check["status"], "passed")
+        self.assertEqual([r["receipt_seq"] for r in check["receipts"]], [replacement.seq])
+
+    def test_receipt_details_ignore_model_claims_and_wrong_attempt_references(self):
+        self.prepare(local=True)
+        current = self.rt.delivery.view(self.task)
+        started = self.rt.delivery._start_check(self.task, current, "integration_behavior", 60)
+        base = {"delivery_digest": current["digest"], "criterion_id": "integration_behavior",
+                "check_attempt_seq": started.seq, "outcome": "passed", "exit_code": 0,
+                "artifacts_unchanged": True, "stdout": {"complete": True}, "stderr": {"complete": True},
+                "command": ["MODEL_CLAIM_NOT_A_CHECK"]}
+        for actor, override in ((Actor.agent("dev", "worker"), {}),
+                                (Actor.system("local_verifier"), {"delivery_digest": "wrong-digest"}),
+                                (Actor.system("local_verifier"), {"criterion_id": "wrong-criterion"}),
+                                (Actor.system("local_verifier"), {"check_attempt_seq": 99999})):
+            self.rt.log.emit(type="verification.completed", actor=actor, task_id=self.task, payload={**base, **override})
+        check = self.rt.delivery.view(self.task)["local_checks"][0]
+        self.assertEqual(check["status"], "unknown")
+        self.assertEqual(check["receipts"], [])
+
+    def test_document_handoff_does_not_invent_behavior_check_commands(self):
+        self.prepare()
+        with zipfile.ZipFile(io.BytesIO(self.rt.delivery.archive(self.task))) as archive:
+            self.assertEqual(json.loads(archive.read("manifest.json"))["local_checks"], [])
+            self.assertIn("没有整体行为检查回执", archive.read("handoff.md").decode("utf-8"))
+
     def test_code_output_cannot_skip_behavior_gate_when_planning_omits_local_check(self):
         raw_worker = WorkDriver()
         with Runtime(":memory:", roles_path=self.roles, drivers={**{name: raw_worker for name in ("product", "design", "dev", "test")}, "final": self.final}) as rt:

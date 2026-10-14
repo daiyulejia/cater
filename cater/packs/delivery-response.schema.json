@@ -10,8 +10,9 @@
       "type": "object", "additionalProperties": false,
       "required": ["summary", "why", "reproduce", "limits"],
       "properties": {
-        "summary": {"type": "string"}, "why": {"type": "string"},
-        "reproduce": {"type": "array", "items": {"type": "string"}},
+        "summary": {"type": "string"},
+        "why": {"type": "string", "description": "Teach the customer how to judge and explain a concrete choice: problem mechanism, evidence, alternative and inspected impact boundary. Mark inferences and uninspected scope explicitly."},
+        "reproduce": {"type": "array", "items": {"type": "string"}, "description": "A customer-readable walkthrough of the actual files and checks, including expected observable results and how a contrary result would challenge the conclusion."},
         "limits": {"type": "array", "items": {"type": "string"}}
       }
     }

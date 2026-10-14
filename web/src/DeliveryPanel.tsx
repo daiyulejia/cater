@@ -1,18 +1,45 @@
 import { useState } from 'react'
-import { Download, PackageCheck, LoaderCircle } from 'lucide-react'
+import { Download, FileCheck2, PackageCheck, LoaderCircle } from 'lucide-react'
 
 type Evidence = { artifact_seq: number; quote: string }
-type Result = { id: string; status: string; reason?: string; text?: string; evidence?: Evidence[]; source_quote?: string | null; receipt_seq?: number }
+type Result = { id: string; status: string; reason?: string; text?: string; evidence?: Evidence[]; source_quote?: string | null; receipt_seq?: number | null }
+type CheckOutput = { bytes?: number; sha256?: string; truncated?: boolean; complete?: boolean; excerpt?: string }
+type CheckReceipt = {
+  receipt_seq: number; attempt_seq: number; at: string; command?: string[]; outcome?: string
+  exit_code?: number | null; duration_ms?: number; stdout?: CheckOutput; stderr?: CheckOutput
+  artifacts_unchanged?: boolean; environment?: string
+}
 export type DeliveryState = {
   status: string; reason: string; digest?: string; reviewer?: string | null; review_seq?: number
   manifest?: { sources: { id: string; text: string }[]; files: { path: string; artifact_seq: number }[] }
-  requirements?: Result[]; checks?: Result[]; local_checks?: Result[]
+  requirements?: Result[]; checks?: Result[]; local_checks?: (Result & { receipts?: CheckReceipt[] })[]
   handoff?: { summary: string; why: string; reproduce: string[]; limits: string[] }
 }
 
 const labels: Record<string, string> = {
   pending: '等待整体核对', reviewing: '正在整体核对', checking: '正在整体检查', uncertain: '复核结果待确认', accepted: '整体验收通过',
   stale: '需要重新核对', needs_evidence: '还需补齐依据', rework: '需要返工', invalid: '复核记录待补正', blocked: '停在检查点',
+}
+
+const outcomeLabels: Record<string, string> = {
+  passed: '通过', failed: '未通过', timeout: '超时', launch_error: '启动失败',
+}
+
+function ReceiptOutput({ name, output }: { name: string; output?: CheckOutput }) {
+  const empty = output?.bytes === 0 && output.complete === true
+  const excerpt = output?.excerpt
+  const bodyStatus = empty ? '无输出。' : excerpt === '' ? '已保存的输出文本为空。'
+    : output?.bytes === 0 && output.complete === false ? '未采集到输出，采集尚未完成。'
+    : output?.bytes !== undefined && output.bytes > 0 && output.sha256 !== undefined ? '未保存输出正文，仅提供字节数与 SHA256。'
+    : '输出正文未记录。'
+  return <div className="mt-2 min-w-0" role="group" aria-label={name}>
+    <p className="font-semibold">{name} · {output?.bytes === undefined ? '字节数未记录' : `${output.bytes} 字节`}</p>
+    <p className="break-all">SHA256：{output?.sha256 ?? '未记录'}</p>
+    <p>采集：{output?.complete === undefined ? '未记录' : output.complete ? '完整' : '未完成'} · 预览截断：{output?.truncated === undefined ? '未记录' : output.truncated ? '是' : '否'}</p>
+    {excerpt !== undefined && excerpt !== ''
+      ? <pre tabIndex={0} aria-label={`${name}输出文本`} className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all font-mono">{excerpt}</pre>
+      : <p className="mt-1 text-stone-500">{bodyStatus}</p>}
+  </div>
 }
 
 export function DeliveryPanel({ taskId, delivery, names, accessToken = '' }: {
@@ -49,12 +76,29 @@ export function DeliveryPanel({ taskId, delivery, names, accessToken = '' }: {
     <p className="mt-1 break-words text-xs leading-5 text-stone-600">{delivery.reason}</p>
     {delivery.reviewer && <p className="mt-2 text-xs text-stone-500">整体复核：{names[delivery.reviewer] ?? delivery.reviewer}</p>}
     {error && <p role="alert" className="mt-2 text-xs text-rose-700">{error}</p>}
-    {delivery.local_checks?.map(check => <p key={check.id} className="mt-2 break-words text-xs leading-5 text-stone-600">
-      {check.text ?? '整体行为检查'} · {check.status === 'passed' ? '通过' : check.status === 'failed' ? '未通过' : '待检查'}{check.receipt_seq ? ` · 回执 #${check.receipt_seq}` : ''}
-    </p>)}
+    {delivery.local_checks?.map(check => <div key={check.id} className="mt-2 min-w-0 text-xs leading-5 text-stone-600">
+      <p className="break-words">{check.text ?? '整体行为检查'} · {check.status === 'passed' ? '通过' : check.status === 'failed' ? '未通过' : '待检查'}{check.receipt_seq ? ` · 回执 #${check.receipt_seq}` : ''}</p>
+      {!!check.receipts?.length && <details className="mt-1">
+        <summary aria-label={`${check.text ?? '整体行为检查'}的实际检查记录`} className="cursor-pointer font-semibold"><FileCheck2 size={14} aria-hidden="true" className="mr-1 inline" />实际检查记录 · {check.receipts.length} 条</summary>
+        <p className="mt-2 text-stone-500">来源：这次交付的实际执行记录</p>
+        <ol className="mt-2 space-y-3">{check.receipts.map(receipt => <li key={receipt.receipt_seq} aria-label={`真实回执 #${receipt.receipt_seq}`} className="min-w-0 border-l-2 border-teal-200 pl-2">
+          <h3 className="font-semibold">真实回执 #{receipt.receipt_seq} · {receipt.outcome === undefined ? '结果未记录' : outcomeLabels[receipt.outcome] ?? receipt.outcome}</h3>
+          <p className="break-words">尝试 #{receipt.attempt_seq} · 记录时间：<time dateTime={receipt.at}>{receipt.at}</time></p>
+          <p>退出码：{receipt.exit_code === undefined ? '未记录' : receipt.exit_code ?? '无'} · 用时：{receipt.duration_ms === undefined ? '未记录' : `${receipt.duration_ms} 毫秒`}</p>
+          <p className="break-words">检查环境：{receipt.environment === 'temporary_delivery_copy_not_sandbox' ? '临时交付副本（非沙箱，已清理）' : receipt.environment ?? '未记录'}</p>
+          <p>交付正文：{receipt.artifacts_unchanged === undefined ? '未记录' : receipt.artifacts_unchanged ? '未被修改' : '发生变化'}</p>
+          <p className="mt-2 font-semibold">实际命令（JSON 参数数组）</p>
+          {receipt.command === undefined ? <p className="mt-1 text-stone-500">实际命令未记录。</p>
+            : <pre tabIndex={0} aria-label={`回执 #${receipt.receipt_seq} 的实际命令参数数组`} className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all font-mono">{JSON.stringify(receipt.command, null, 2)}</pre>}
+          <ReceiptOutput name="标准输出（stdout）" output={receipt.stdout} />
+          <ReceiptOutput name="标准错误（stderr）" output={receipt.stderr} />
+        </li>)}</ol>
+      </details>}
+    </div>)}
     {accepted && delivery.handoff && <div className="mt-3 space-y-3 text-xs leading-5 text-stone-600">
       <p className="break-words">{delivery.handoff.summary}</p>
       <details><summary className="cursor-pointer font-semibold">为什么这样做 · 如何复查</summary>
+        <p className="mt-2 text-stone-500">来源：整体复核人的说明；复查步骤不代表实际执行记录。</p>
         <p className="mt-2 break-words">{delivery.handoff.why}</p>
         <ol className="mt-2 list-decimal space-y-1 pl-4">{delivery.handoff.reproduce.map((step, i) => <li key={i} className="break-words">{step}</li>)}</ol>
         {delivery.handoff.limits.length > 0 && <><p className="mt-2 font-semibold">未覆盖范围</p><ul className="mt-1 list-disc space-y-1 pl-4">{delivery.handoff.limits.map((limit, i) => <li key={i} className="break-words">{limit}</li>)}</ul></>}

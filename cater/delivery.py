@@ -112,8 +112,9 @@ class DeliveryService:
             raise
         return self.view(task_id)
 
-    def _checks(self, task_id: str, bundle_digest: str) -> dict:
-        events = self.rt.log.read(task_id=task_id)
+    def _check_waves(self, task_id: str, bundle_digest: str, *, events=None) -> dict:
+        if events is None:
+            events = self.rt.log.read(task_id=task_id)
         starts = [e for e in events if e.type == "delivery.check_started"
                   and e.actor == Actor.system("local_verifier") and e.payload["delivery_digest"] == bundle_digest]
         receipts = {}
@@ -121,17 +122,31 @@ class DeliveryService:
             if (e.type == "verification.completed" and e.actor == Actor.system("local_verifier")
                     and e.payload.get("delivery_digest") == bundle_digest):
                 receipts.setdefault((e.payload.get("check_attempt_seq"), e.payload.get("criterion_id")), e)
+        latest_waves = {e.payload["criterion_id"]: e.payload["wave"] for e in starts}
+        return {criterion_id: [(e, receipts.get((e.seq, criterion_id))) for e in starts
+                              if e.payload["criterion_id"] == criterion_id and e.payload["wave"] == wave]
+                for criterion_id, wave in latest_waves.items()}
+
+    @staticmethod
+    def _completed_checks(waves: dict) -> dict:
         result = {}
-        for criterion_id in {e.payload["criterion_id"] for e in starts}:
-            latest = next(e for e in reversed(starts) if e.payload["criterion_id"] == criterion_id)
-            wave = [e for e in starts if e.payload["criterion_id"] == criterion_id
-                    and e.payload["wave"] == latest.payload["wave"]]
-            completed = [receipts.get((e.seq, criterion_id)) for e in wave]
+        for criterion_id, wave in waves.items():
+            completed = [receipt for _, receipt in wave]
             if any(e is None or e.payload.get("criterion_id") != criterion_id for e in completed):
                 continue
             # Concurrent checks are one wave: a late success cannot hide failure.
             result[criterion_id] = next((e for e in completed if not receipt_passed(e.payload)), completed[-1])
         return result
+
+    def _checks(self, task_id: str, bundle_digest: str) -> dict:
+        return self._completed_checks(self._check_waves(task_id, bundle_digest))
+
+    @staticmethod
+    def _receipt(started, event) -> dict:
+        fields = ("command", "outcome", "exit_code", "duration_ms", "stdout", "stderr",
+                  "artifacts_unchanged", "environment")
+        return {"receipt_seq": event.seq, "attempt_seq": started.seq, "at": event.ts,
+                **{key: event.payload[key] for key in fields if key in event.payload}}
 
     def view(self, task_id: str) -> dict[str, Any]:
         events = self.rt.log.read(task_id=task_id)
@@ -148,10 +163,13 @@ class DeliveryService:
         if attempts and not any(e.payload["attempt_seq"] == attempts[-1].seq for e in finished):
             result.update(status="reviewing" if attempts[-1].payload["lease_until"] >= time.time() else "uncertain",
                           reason="整体复核调用尚未结束；中断后需核对，不能自动重放。")
-        local = self._checks(task_id, p["digest"])
+        waves = self._check_waves(task_id, p["digest"], events=events)
+        local = self._completed_checks(waves)
         result["local_checks"] = [{"id": c["id"], "text": c["text"],
             "status": ("passed" if receipt_passed(local[c["id"]].payload) else "failed") if c["id"] in local else "unknown",
-            "receipt_seq": local[c["id"]].seq if c["id"] in local else None}
+            "receipt_seq": local[c["id"]].seq if c["id"] in local else None,
+            "receipts": [self._receipt(started, receipt) for started, receipt in waves.get(c["id"], [])
+                         if receipt is not None]}
             for c in p["manifest"]["criteria"] if c["kind"] == "local_check"]
         try:
             current = self._manifest(task_id)
@@ -336,7 +354,14 @@ class DeliveryService:
                           "Assess whether supplied check commands and observed outputs cover the intended behavior; exit zero alone is insufficient. "
                           "Only a later human source may supersede an earlier conflicting requirement; keep unrelated requirements. "
                           "Do not approve local_check criteria; runtime handles actual receipts. Explain in Chinese what was delivered, "
-                          "why the choices fit, how the user can reproduce checks, and what was not verified. No private reasoning.\n"
+                          "why the choices fit, how the user can reproduce checks, and what was not verified. "
+                          "Teach the customer to judge this result and explain the choice to someone else. In handoff.why, "
+                          "use one concrete example from the delivered material to explain the observed problem, why this choice "
+                          "addresses it, a relevant alternative, and the inspected impact boundary. Separate observations from "
+                          "inferences; do not claim an uninspected caller or a suspected root cause is verified. In handoff.reproduce, "
+                          "walk the customer through the actual files and checks, explain the expected observable result and "
+                          "what would contradict the conclusion. Do not substitute a process recap or jargon for an explanation. "
+                          "Adapt depth to the task; no compulsory quiz and no private reasoning.\n"
                           + json.dumps({"schema": schema, **context}, ensure_ascii=False))
                 if len(prompt) > 131072:
                     verdict = {"status": "blocked", "reason": "整体复核输入过大，需要分阶段汇总；没有截断要求或证据。"}
@@ -426,10 +451,26 @@ class DeliveryService:
                 raise WorkConflict("当前任务还没有有效的整体验收，不能下载正式交付包。")
             files = self._files(task_id, view["manifest"])
             handoff = view["handoff"]
-            text = "# 交付与复查\n\n" + handoff["summary"] + "\n\n## 为什么这样做\n\n" + handoff["why"]
+            text = "# 交付与复查\n\n" + handoff["summary"] + "\n\n## 为什么这样做（整体复核人的说明）\n\n" + handoff["why"]
             for title, key in (("复查步骤", "reproduce"), ("未覆盖范围", "limits")):
                 text += f"\n\n## {title}\n\n" + "\n".join(f"- {s}" for s in handoff[key])
             text += "\n\n审查引用只证明正文内容；实际检查回执仅证明所执行命令的范围。\n"
+            text += "\n## 实际执行的整体检查\n\n"
+            receipts = [receipt for check in view["local_checks"] for receipt in check["receipts"]]
+            if not receipts:
+                text += "本次交付没有整体行为检查回执；语义复核说明不代表执行过命令。\n"
+            for receipt in receipts:
+                text += f"\n### 回执 #{receipt['receipt_seq']}\n\n"
+                text += f"结果：{receipt.get('outcome', '未记录')}；退出码：{receipt.get('exit_code', '未记录')}。\n\n"
+                if receipt.get("environment") == "temporary_delivery_copy_not_sandbox":
+                    text += "检查在整包临时副本中执行，原临时目录已清理。复查前需核对本机程序路径与运行环境。\n\n"
+                if receipt.get("command"):
+                    text += "实际命令参数：\n\n```json\n" + json.dumps(receipt["command"], ensure_ascii=False, indent=2) + "\n```\n"
+                else:
+                    text += "旧记录未保存命令参数。\n"
+                outputs = {key: {k: v for k, v in receipt[key].items() if k != "excerpt"}
+                           for key in ("stdout", "stderr") if isinstance(receipt.get(key), dict)}
+                text += "\n输出摘要（已保存的正文见 manifest.json）：\n\n```json\n" + json.dumps(outputs, ensure_ascii=False, indent=2) + "\n```\n"
             if self.rt.log.head_hash() != head:
                 continue
             output = io.BytesIO()
