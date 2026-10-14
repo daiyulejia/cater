@@ -88,9 +88,13 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible { outline: 2
 .board-heading { margin: -20px -20px 20px; padding: 20px; border-bottom: 3px solid #d5b38a; background: #365d51; color: #f6f3e5; }
 .workboard-panel .board-heading h2 { color: #fffaf0; }
 .board-heading p { color: #e2c9a7; }
-.workboard-panel section { border-color: #dce8e1; padding-bottom: 14px; }
+.workboard-overlay { position: fixed; inset: 0; z-index: 50; background: rgba(34, 53, 45, .32); }
+.workboard-dialog { position: fixed; inset: 0 0 0 auto; z-index: 51; width: min(440px, 100vw); height: 100dvh; background: #f5f8f2; color: #253d38; box-shadow: -12px 0 40px rgba(39, 56, 44, .18); }
+.workboard-dialog section h2 { color: #284c43; }
+.workboard-dialog > div { scrollbar-color: #c3d7ce transparent; scrollbar-width: thin; }
+.workboard-panel section, .workboard-dialog section { border-color: #dce8e1; padding-bottom: 14px; }
 .workboard-panel h2 { color: #284c43; }
-.workboard-panel section h2::before { display: inline-block; width: 4px; height: 12px; margin-right: 7px; border-radius: 2px; background: #c9785d; content: ""; }
+.workboard-panel section h2::before, .workboard-dialog section h2::before { display: inline-block; width: 4px; height: 12px; margin-right: 7px; border-radius: 2px; background: #c9785d; content: ""; }
 .welcome-view { scrollbar-color: #d6c5b8 transparent; scrollbar-width: thin; background: #fff9f4; }
 .welcome-scene { height: clamp(180px, 31vh, 300px); overflow: hidden; background: #d8e9dc; }
 .welcome-scene img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center 38%; }

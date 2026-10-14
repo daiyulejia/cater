@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown, Cat, CheckCircle2, ChevronDown, CircleDot,
-  Coffee, CornerDownRight, FilePenLine, FileText, LoaderCircle, PawPrint, Plus, RefreshCw, ShieldCheck, X,
+  CornerDownRight, FilePenLine, FileText, LoaderCircle, PawPrint, Plus, RefreshCw, ShieldCheck,
 } from 'lucide-react'
 import catPortraits from './assets/cat-portraits.jpg'
 import staffPortraits from './assets/staff-portraits.jpg'
 import cafeWelcome from './assets/cafe-welcome-v2.jpg'
 import { ArtifactPreview } from './Artifact'
 import type { Artifact } from './Artifact'
+import { WorkboardPanel } from './WorkboardPanel'
 
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
 type Message = { seq: number; actor: string; role: string; type: string; claim?: string; text?: string; stance?: string; target?: string; reply_to?: number }
@@ -501,7 +502,10 @@ function App() {
         </aside>
         <section className="chat-pane flex min-h-0 flex-col">
           {task ? <>
-            <div className="chat-heading flex items-start justify-between gap-3 px-4 py-3 sm:px-7 sm:py-4" style={{ backgroundImage: `linear-gradient(90deg, #fffaf5 0%, rgba(255,250,245,.98) 55%, rgba(255,250,245,.78) 100%), url(${cafeWelcome})` }}><div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div><div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${currentDetail?.activity?.active ? 'is-running' : ''}`}>{loading ? '接入对话中' : activityText(currentDetail?.activity) || taskListStatus(task)}</span><button onClick={() => setShowMobileBoard(true)} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div></div>
+            <div className="chat-heading flex items-start justify-between gap-3 px-4 py-3 sm:px-7 sm:py-4" style={{ backgroundImage: `linear-gradient(90deg, #fffaf5 0%, rgba(255,250,245,.98) 55%, rgba(255,250,245,.78) 100%), url(${cafeWelcome})` }}>
+              <div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div>
+              <div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${currentDetail?.activity?.active ? 'is-running' : ''}`}>{loading ? '接入对话中' : activityText(currentDetail?.activity) || taskListStatus(task)}</span><button id="workboard-trigger" onClick={() => setShowMobileBoard(true)} aria-label="打开成果与过程" title="打开成果与过程" aria-haspopup="dialog" aria-expanded={showMobileBoard} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div>
+            </div>
             <div className="member-seats flex shrink-0 gap-2 overflow-x-auto px-4 py-2 sm:px-7" role="group" aria-label="点名伙伴">{team.map((member) => <button key={member.id} type="button" className="member-seat flex h-10 shrink-0 items-center gap-2 px-2" aria-label={`点名 ${member.name}`} title={`在当前对话中点名 ${member.name}`} onClick={() => { setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${member.name} `); document.querySelector<HTMLTextAreaElement>('textarea[aria-label="向团队发送消息"]')?.focus() }}><Portrait id={member.id} size="sm" /><span className="max-w-24 truncate text-xs font-semibold">{member.name}</span></button>)}</div>
             <div className="filter-strip px-4 py-2 sm:px-7"><div className="flex gap-1 overflow-x-auto" role="group" aria-label="对话筛选">{([{ id: 'all', label: '全部' }, { id: 'collaboration', label: '协作' }, { id: 'decision', label: '决策' }, { id: 'deliverable', label: '成果' }] as const).map((filter) => <button key={filter.id} onClick={() => setChatFilter(filter.id)} aria-pressed={chatFilter === filter.id} className={`filter-button shrink-0 px-3 py-1.5 text-xs font-semibold ${chatFilter === filter.id ? 'is-active' : ''}`}>{filter.label}</button>)}</div></div>
             <div className="relative flex min-h-0 flex-1 flex-col">
@@ -512,10 +516,9 @@ function App() {
           </> : <><EmptyConversation onChoose={setDraft} members={team} /><TaskComposer draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
-        {task && <aside className={`workboard-panel overflow-y-auto p-5 ${showMobileBoard ? 'fixed inset-0 z-50 block' : 'hidden'} lg:static lg:block`} aria-label="成果与过程">
-          <div className="board-heading mb-5 flex items-center justify-between"><div><p className="flex items-center gap-1.5 text-[11px] font-semibold"><Coffee size={14} /> 猫咖记事板</p><h2 className="mt-1 text-[16px] font-bold">成果与过程</h2></div><button onClick={() => setShowMobileBoard(false)} className="grid size-9 place-items-center rounded-md border border-[#d5e2db] bg-white text-[#4a736b] lg:hidden" aria-label="关闭成果面板"><X size={18} /></button></div>
+        {task && <WorkboardPanel open={showMobileBoard} onOpenChange={setShowMobileBoard}>
           {currentDetail ? <><VerificationBoard items={task.verifications ?? []} /><Workboard task={task} detail={currentDetail} names={names} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />{Boolean(currentDetail.organization_memory?.length) && <details className="mt-5 border-t border-[#dce8e1] pt-4"><summary className="cursor-pointer text-xs font-semibold text-[#52766d]">猫咖记忆 · {currentDetail.organization_memory?.length} 项</summary><div className="mt-3"><MemoryBoard items={currentDetail.organization_memory ?? []} names={names} /></div></details>}</> : <p className="text-xs leading-6 text-[#74897d]">正在读取这件事的成果与过程。</p>}
-        </aside>}
+        </WorkboardPanel>}
       </main>
     </div>
   )
