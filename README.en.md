@@ -155,6 +155,8 @@ See [examples/api_client.py](examples/api_client.py) for a zero-dependency clien
 
 ## Current Scope
 
+Agents can publish readable Markdown, plain-text, or code deliverables. Open a body from the conversation or workboard, copy or download it, then return to the same conversation. Bodies are limited to 64 KiB of UTF-8 per artifact and eight artifacts per contribution; oversized code is omitted rather than silently truncated. Demo samples are labeled, published output is distinct from verification, and resource references never cause implicit local file reads.
+
 Implemented now:
 
 - SQLite append-only event store with hash-chain verification

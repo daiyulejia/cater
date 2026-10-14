@@ -64,12 +64,15 @@ RESPONSE_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["title", "summary", "kind", "uri"],
+                "required": ["title", "summary", "kind", "uri", "content", "format", "filename"],
                 "properties": {
                     "title": {"type": "string", "minLength": 1, "maxLength": 240},
                     "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
                     "kind": {"type": ["string", "null"], "maxLength": 80},
                     "uri": {"type": ["string", "null"], "maxLength": 2000},
+                    "content": {"type": ["string", "null"], "maxLength": 65536},
+                    "format": {"type": ["string", "null"], "enum": ["markdown", "text", "code", None]},
+                    "filename": {"type": ["string", "null"], "maxLength": 180},
                 },
             },
         },
@@ -231,7 +234,9 @@ def _model_prompt(request: dict[str, Any]) -> str:
         "checkable evidence. Use stance=challenge only for a material risk, disagreement, or missing "
         "evidence. Use target and reply_to only when the supplied Cater prompt provides a valid visible "
         "role id and event sequence; otherwise set both to null. Use an empty deliverables array when "
-        "there is no concrete artifact to publish.\n\nCater request data:\n"
+        "there is no concrete artifact to publish. For a readable artifact include its body in content "
+        "(at most 65536 UTF-8 bytes), format (markdown, text, or code), and a simple filename; "
+        "use null when these fields do not apply. Do not claim a referenced file exists unless observed.\n\nCater request data:\n"
         + data
     )
 
@@ -262,11 +267,21 @@ def _valid_payload(payload: Any) -> bool:
 
 
 def _valid_deliverable(item: Any) -> bool:
-    if not isinstance(item, dict) or set(item) != {"title", "summary", "kind", "uri"}:
+    required = {"title", "summary", "kind", "uri"}
+    optional = {"content", "format", "filename"}
+    if not isinstance(item, dict) or not required <= set(item) or set(item) - required - optional:
         return False
     if not all(isinstance(item[key], str) and item[key].strip() for key in ("title", "summary")):
         return False
-    return all(item[key] is None or isinstance(item[key], str) for key in ("kind", "uri"))
+    if not all(item.get(key) is None or isinstance(item[key], str) for key in ("kind", "uri", "content", "filename")):
+        return False
+    format = item.get("format")
+    if format is not None and (not isinstance(format, str) or format not in {"markdown", "text", "code"}):
+        return False
+    try:
+        return item.get("content") is None or len(item["content"].encode("utf-8")) <= 65536
+    except UnicodeEncodeError:
+        return False
 
 
 class AdapterError(RuntimeError):

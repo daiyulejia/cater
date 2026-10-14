@@ -377,6 +377,10 @@ class RuntimeTests(unittest.TestCase):
                         "summary": "核心流程已经验证通过。",
                         "kind": "report",
                         "uri": "reports/acceptance.md",
+                        "content": "# 验收报告\n\n  保留正文缩进。\n",
+                        "format": "markdown",
+                        "filename": "验收报告.md",
+                        "source": "local_demo",
                     },
                     {"title": "", "summary": "缺少标题的项目不应发布。"},
                 ],
@@ -403,6 +407,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(task.deliverables[0]["title"], "验收报告")
         self.assertEqual(task.deliverables[0]["uri"], "reports/acceptance.md")
         self.assertEqual(task.deliverables[0]["message_seq"], task.messages[0]["seq"])
+        self.assertEqual(task.deliverables[0]["content"], "# 验收报告\n\n  保留正文缩进。\n")
+        self.assertEqual(task.deliverables[0]["source"], "external")
+        self.assertEqual(task.deliverables[0]["actor"], "worker")
 
     def test_agent_can_publish_falsifiable_diagnosis_and_teachable_handoff(self):
         response = json.dumps(
@@ -2653,6 +2660,26 @@ class CliTests(unittest.TestCase):
 
 
 class WebTests(unittest.TestCase):
+
+    def test_artifact_body_is_available_in_detail_but_not_copied_into_task_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "artifact-body.db")
+            with Runtime(db) as rt:
+                task_id = rt.create_task("发布一份可读成果")
+                rt.collaborate(task_id)
+            base = start_test_web(self, db)
+            with urlopen(f"{base}/api/tasks", timeout=5) as response:
+                listed = json.load(response)
+            with urlopen(f"{base}/api/tasks/{task_id}", timeout=5) as response:
+                detail = json.load(response)
+        self.assertTrue(listed[0]["deliverables"])
+        self.assertNotIn("content", listed[0]["deliverables"][0])
+        artifact = detail["task"]["deliverables"][0]
+        self.assertIn("本地演示样例", artifact["content"])
+        self.assertEqual(artifact["source"], "local_demo")
+        self.assertEqual(artifact["content_sha256"], hashlib.sha256(artifact["content"].encode()).hexdigest())
+        event = next(event for event in detail["events"] if event["seq"] == artifact["seq"])
+        self.assertEqual(event["payload"]["content"], artifact["content"])
 
     def test_web_refuses_non_loopback_bind_without_explicit_opt_in(self):
         with tempfile.TemporaryDirectory() as tmp:

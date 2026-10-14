@@ -17,6 +17,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .assignments import latest_assignments_by_owner
+from .drivers import driver_mode
 from .events import Actor as EventActor, Event
 from .fold import TaskSnapshot
 from .ladder import decision_ladder
@@ -253,7 +254,7 @@ def _now_iso() -> str:
 
 def _driver_mode(driver: Any) -> str:
     """Classify drivers without exposing commands, endpoints, or secrets."""
-    return "local_demo" if type(driver).__name__ in {"GuidedDriver", "ScriptedDriver"} else "external"
+    return driver_mode(driver)
 
 
 def serve(
@@ -394,7 +395,7 @@ def make_handler(
                 with self._runtime() as rt:
                     return self._send_json(
                         [
-                            {**task_to_dict(task), "activity": activities.status(task.id)}
+                            {**task_to_dict(task, include_content=False), "activity": activities.status(task.id)}
                             for task in rt.tasks()
                         ]
                     )
@@ -1132,7 +1133,7 @@ def page(title: str, body: str) -> str:
 """
 
 
-def task_to_dict(task: TaskSnapshot) -> dict[str, Any]:
+def task_to_dict(task: TaskSnapshot, *, include_content: bool = True) -> dict[str, Any]:
     return {
         "id": task.id,
         "goal": task.goal,
@@ -1153,7 +1154,10 @@ def task_to_dict(task: TaskSnapshot) -> dict[str, Any]:
         "mission": task.mission,
         "plan": task.plan,
         "assignments": task.assignments,
-        "deliverables": task.deliverables,
+        "deliverables": task.deliverables if include_content else [
+            {key: value for key, value in item.items() if key != "content"}
+            for item in task.deliverables
+        ],
         "diagnoses": task.diagnoses,
         "handoffs": task.handoffs,
         "verifications": task.verifications,

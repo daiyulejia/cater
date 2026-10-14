@@ -43,6 +43,20 @@ const input = () => screen.getByRole('textbox', { name: '向团队发送消息' 
 const write = (text: string) => fireEvent.change(input(), { target: { value: text } })
 const ready = (id: string) => screen.findByText(`${id}任务专属消息 #2`)
 
+test('聊天内点名保留草稿并聚焦，既不发送也不污染其他任务', async () => {
+  render(<App />); await ready('乙')
+  write('补充一下')
+  fireEvent.click(screen.getByRole('button', { name: '点名 店长' }))
+  expect(input().value).toBe('补充一下 @店长 ')
+  expect(document.activeElement).toBe(input())
+  expect(fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0)
+  select('甲'); await ready('甲')
+  expect(input().value).toBe('')
+  select('乙'); await ready('乙')
+  expect(input().value).toBe('补充一下 @店长 ')
+  expect(screen.getByRole('button', { name: '全部' }).getAttribute('aria-pressed')).toBe('true')
+})
+
 test('任务详情未到达时不展示旧消息，也不能向新任务发送', async () => {
   render(<App />)
   await ready('乙')

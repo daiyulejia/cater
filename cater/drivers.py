@@ -102,6 +102,7 @@ class GuidedDriver:
             deliverables: list[dict[str, str]] = []
         else:
             text, claim, evidence, deliverable = _cat_response(role_lower, focus, identity)
+            deliverable.update(content=_demo_artifact(deliverable, focus), format="markdown", filename="演示成果.md")
             deliverables = [deliverable]
         payload = {
             "stance": "assert",
@@ -126,6 +127,20 @@ class GuidedDriver:
             tokens=self.tokens_per_call,
             meta={"driver": self.name, "mode": "guided_demo", "token_usage": "estimated"},
         )
+
+
+def driver_mode(driver: Driver) -> str:
+    return "local_demo" if isinstance(driver, (GuidedDriver, ScriptedDriver)) else "external"
+
+
+def _demo_artifact(deliverable: dict[str, str], focus: str) -> str:
+    sections = {
+        "brief": "## 先把目标说清楚\n\n- 谁会使用这个结果？\n- 他们需要完成哪一步？\n- 什么证据能说明这一步可用？\n\n## 最小交付\n\n先完成一条可检查的路径，再根据反馈补充范围。",
+        "design": "## 关键状态\n\n| 状态 | 用户看到什么 | 下一步 |\n| --- | --- | --- |\n| 尚未开始 | 目标和入口 | 发起对话 |\n| 正在处理 | 当前进展 | 补充方向 |\n| 需要修正 | 原因和可行动的选择 | 调整目标 |\n| 已有成果 | 摘要与正文 | 阅读并带走 |",
+        "plan": "## 实现顺序\n\n1. 确认输入、输出和负责人。\n2. 完成最小可运行路径。\n3. 检查错误、重试和恢复行为。\n4. 留下改动原因、验证结果和未覆盖范围。\n\n## 待执行\n\n实际代码与构建结果需要执行工具完成后另行发布。",
+        "checklist": "## 验收清单\n\n- [ ] 正常路径可完成。\n- [ ] 空输入与错误输入有明确反馈。\n- [ ] 需求变更后上下文一致。\n- [ ] 失败能够复现和恢复。\n- [ ] 交付包含证据与未覆盖范围。\n\n这些检查项尚未执行，不能当作测试通过的证据。",
+    }
+    return f"# {deliverable['title']}\n\n> 本地演示样例，用于查看交付结构。\n\n## 当前目标\n\n{focus}\n\n{sections.get(deliverable['kind'], sections['brief'])}\n"
 
 
 def _demo_focus(context: dict[str, Any]) -> str:
