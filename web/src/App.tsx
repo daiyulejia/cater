@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown, Cat, CheckCircle2, ChevronDown,
-  CornerDownRight, FileText, GitBranch, LoaderCircle, PawPrint, Plus, RefreshCw, Search, ShieldCheck,
+  CornerDownRight, FileText, GitBranch, GitFork, LoaderCircle, PawPrint, Plus, RefreshCw, Search, ShieldCheck,
 } from 'lucide-react'
 import catPortraits from './assets/cat-portraits.jpg'
 import staffPortraits from './assets/staff-portraits.jpg'
@@ -16,6 +16,8 @@ import { RulesPanel } from './RulesPanel'
 import { WorkItems } from './WorkItems'
 import { DeliveryPanel } from './DeliveryPanel'
 import { ConversationMembers } from './ConversationMembers'
+import { ConversationOrigin, DerivationDraftBar } from './ConversationOrigin'
+import type { ConversationBackground } from './ConversationOrigin'
 import { conversationParticipants } from './participants'
 import type { WorkState } from './WorkItems'
 import type { TeamAvailability } from './TeamDirectory'
@@ -51,7 +53,8 @@ type Task = {
   route?: { route?: string; reason?: string }
 }
 type Event = { seq: number; type: string; category: string; actor: { id: string; role: string; kind: string }; payload: Record<string, unknown> }
-type TaskDetail = { task: Task; events: Event[]; summary?: TaskSummary; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
+type TaskDetail = { task: Task; events: Event[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
+type DerivationSource = { id: string; goal: string }
 type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; targets: string[]; replyTo?: number; evidence: Event }
 
 const accessToken = (() => {
@@ -83,6 +86,16 @@ const apiResponse = (path: string, init?: RequestInit) => fetch(path, {
 const summaryOrder = (next: TaskSummary, current: TaskSummary) => next.version - current.version
   || (next.activity?.revision ?? 0) - (current.activity?.revision ?? 0)
   || (next.evaluated_at ?? 0) - (current.evaluated_at ?? 0)
+
+function creationRequestId(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  // LAN workrooms may run over HTTP, where randomUUID is unavailable.
+  const bytes = crypto.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 15) | 64
+  bytes[8] = (bytes[8] & 63) | 128
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+}
 
 function userFacingError(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message.trim() : ''
@@ -340,6 +353,11 @@ function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<TaskDetail | null>(null)
   const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [derivation, setDerivation] = useState<DerivationSource | null>(null)
+  const derivationRef = useRef<DerivationSource | null>(null)
+  const derivationRequests = useRef<Record<string, { text: string; requestId: string }>>({})
+  const focusComposerRef = useRef(false)
+  const chatPaneRef = useRef<HTMLElement>(null)
   const [roles, setRoles] = useState<OrgRole[]>([])
   const [organization, setOrganization] = useState<Organization | null>(null)
   const [pending, setPending] = useState<Set<string>>(new Set())
@@ -375,18 +393,29 @@ function App() {
   const versionsRef = useRef<Record<string, { summary: TaskSummary; order: number }>>({})
   const detailOrderRef = useRef(0)
   const newKey = '$new'
-  const composerKey = selectedId ?? newKey
+  const composerKey = derivation ? `$derive:${derivation.id}` : selectedId ?? newKey
   const draft = drafts[newKey] ?? ''
-  const message = selectedId ? drafts[selectedId] ?? '' : ''
+  const message = selectedId ? drafts[composerKey] ?? '' : ''
   const isSending = pending.has(composerKey)
 
   const updateDraft = (key: string, value: string | ((current: string) => string)) => {
     setDrafts((current) => ({ ...current, [key]: typeof value === 'function' ? value(current[key] ?? '') : value }))
   }
   const setDraft = (value: string | ((current: string) => string)) => { navigationRef.current += 1; updateDraft(newKey, value) }
-  const setMessage = (value: string) => { if (selectedId) updateDraft(selectedId, value) }
+  const setMessage = (value: string) => {
+    if (!selectedId) return
+    if (derivation && value !== message) {
+      navigationRef.current += 1
+      delete derivationRequests.current[composerKey]
+      setSendErrors((current) => ({ ...current, [composerKey]: '' }))
+    }
+    updateDraft(composerKey, value)
+  }
 
   const chooseTask = useCallback((id: string | null) => {
+    derivationRef.current = null
+    setDerivation(null)
+    focusComposerRef.current = false
     selectedRef.current = id
     navigationRef.current += 1
     followRef.current = true
@@ -397,6 +426,12 @@ function App() {
     setShowMobileBoard(false)
     setGraphOpen(false)
   }, [])
+
+  useLayoutEffect(() => {
+    if (!focusComposerRef.current) return
+    focusComposerRef.current = false
+    chatPaneRef.current?.querySelector<HTMLTextAreaElement>('.composer-box textarea')?.focus()
+  }, [composerKey])
 
   const requestDetail = useCallback(async (path: string, init?: RequestInit) => {
     const order = ++detailOrderRef.current
@@ -632,10 +667,56 @@ function App() {
     finally { pendingRef.current.delete(newKey); setPending(new Set(pendingRef.current)) }
   }
 
+  const beginDerivation = () => {
+    if (!currentDetail || !selectedId || derivationRef.current) return
+    const source = { id: selectedId, goal: currentDetail.task.goal }
+    derivationRef.current = source
+    navigationRef.current += 1
+    focusComposerRef.current = true
+    setDerivation(source)
+  }
+
+  const cancelDerivation = () => {
+    derivationRef.current = null
+    navigationRef.current += 1
+    focusComposerRef.current = true
+    setDerivation(null)
+  }
+
+  const deriveTask = async () => {
+    const source = derivation
+    const submitted = message
+    const goal = submitted.trim()
+    if (!source || derivationRef.current !== source || selectedRef.current !== source.id || !goal || loading || pendingRef.current.has(composerKey)) return
+    const key = composerKey
+    const navigation = navigationRef.current
+    const previous = derivationRequests.current[key]
+    const attempt = previous?.text === submitted ? previous : { text: submitted, requestId: creationRequestId() }
+    derivationRequests.current[key] = attempt
+    pendingRef.current.add(key); setPending(new Set(pendingRef.current))
+    setSendErrors((current) => ({ ...current, [key]: '' }))
+    try {
+      const { next: result, order } = await requestDetail(`/api/tasks/${encodeURIComponent(source.id)}/derive`, {
+        method: 'POST', body: JSON.stringify({ goal, request_id: attempt.requestId, run: true, background: true }),
+      })
+      // Edits invalidate this attempt, even when the user later restores the same text.
+      if (derivationRequests.current[key] === attempt) {
+        delete derivationRequests.current[key]
+        setDrafts((current) => current[key] === submitted ? { ...current, [key]: '' } : current)
+      }
+      if (navigationRef.current === navigation && derivationRef.current === source && selectedRef.current === source.id) chooseTask(result.task.id)
+      acceptDetail(result, order)
+    } catch (err) {
+      if (derivationRequests.current[key] === attempt) setSendErrors((current) => ({ ...current, [key]: userFacingError(err, '创建新任务失败，请重试。') }))
+    } finally {
+      pendingRef.current.delete(key); setPending(new Set(pendingRef.current))
+    }
+  }
+
   const sendDirection = async () => {
     const id = selectedId
     const submitted = message
-    if (!id || selectedRef.current !== id || loading || !submitted.trim() || pendingRef.current.has(id)) return
+    if (!id || derivationRef.current || selectedRef.current !== id || loading || !submitted.trim() || pendingRef.current.has(id)) return
     pendingRef.current.add(id); setPending(new Set(pendingRef.current))
     setSendErrors((current) => ({ ...current, [id]: '' }))
     try {
@@ -681,15 +762,17 @@ function App() {
           </div>
           <TaskList tasks={tasks} selectedId={selectedId} drafts={drafts} collapsed={tasksCollapsed} searchOpen={taskSearchOpen} onChoose={chooseTask} statusLabel={(item) => item.status_label} />
         </aside>
-        <section className="chat-pane flex min-h-0 flex-col">
+        <section ref={chatPaneRef} className="chat-pane flex min-h-0 flex-col">
           {task ? <>
             <div className="chat-heading flex items-start justify-between gap-3 px-4 py-3 sm:px-7 sm:py-4" style={{ backgroundImage: `linear-gradient(90deg, #fffaf5 0%, rgba(255,250,245,.98) 55%, rgba(255,250,245,.78) 100%), url(${cafeWelcome})` }}>
               <div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div>
               <div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${currentDetail?.activity?.active ? 'is-running' : ''}`}>{loading ? '接入对话中' : activityText(currentDetail?.activity) || taskListStatus(task)}</span><button id="workboard-trigger" onClick={() => setShowMobileBoard(true)} aria-label="打开成果与过程" title="打开成果与过程" aria-haspopup="dialog" aria-expanded={showMobileBoard} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div>
             </div>
             <div className="filter-strip flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-7"><div className="flex gap-1 overflow-x-auto" role="group" aria-label="对话筛选">{([{ id: 'all', label: '全部' }, { id: 'collaboration', label: '协作' }, { id: 'decision', label: '决策' }, { id: 'deliverable', label: '成果' }] as const).map((filter) => <button key={filter.id} onClick={() => setChatFilter(filter.id)} aria-pressed={chatFilter === filter.id} className={`filter-button shrink-0 px-3 py-1.5 text-xs font-semibold ${chatFilter === filter.id ? 'is-active' : ''}`}>{filter.label}</button>)}</div>
-              <div className="flex items-center gap-2">
+              <div className="flex max-w-full flex-wrap items-center gap-2">
                 <ConversationMembers key={task.id} members={team} participants={participants} portrait={(id, size) => <Portrait id={id} size={size} />} onMention={(id) => setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${names[id] ?? id} `)} onOpenDirectory={() => { setTeamOpen(true); void refreshOrganization() }} />
+                {currentDetail?.background && <ConversationOrigin key={`origin:${task.id}`} background={currentDetail.background} onNavigate={(id) => { chooseTask(id); focusComposerRef.current = true }} />}
+                <button type="button" className="origin-tool" aria-label="基于此对话开新任务" title="基于此对话开新任务" aria-pressed={Boolean(derivation)} disabled={loading || Boolean(derivation)} onClick={beginDerivation}><GitFork size={17} aria-hidden="true" /></button>
                 {task.work?.items.length ? <button ref={graphTriggerRef} id="task-graph-trigger" type="button" aria-haspopup="dialog" aria-expanded={graphOpen} aria-busy={graphLoading} disabled={graphLoading} onClick={() => void openTaskGraph()} className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-semibold text-[#34786e] hover:bg-[#e7f0ec]">{graphLoading ? <LoaderCircle size={15} className="motion-safe:animate-spin" /> : <GitBranch size={15} />}任务脉络</button> : null}
               </div>
             </div>
@@ -698,8 +781,8 @@ function App() {
               <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>{loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={item.id} item={item} />) : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
               {!loading && unread > 0 && <button onClick={jumpToLatest} className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-md border border-[#d9b9a5] bg-[#fff7eb] px-3 py-2 text-xs font-semibold text-[#915340] shadow-md" title="返回最新消息"><ArrowDown size={15} /> 查看新消息 · {unread}</button>}
             </div>
-            {rulesControl}
-            <DirectionComposer key={task.id} members={team} message={message} isSending={isSending} isLoading={loading} onMessageChange={setMessage} onSend={() => void sendDirection()} />
+            {derivation ? <DerivationDraftBar goal={derivation.goal} onCancel={cancelDerivation} /> : rulesControl}
+            <DirectionComposer key={composerKey} members={team} message={message} isSending={isSending} isLoading={loading} deriving={Boolean(derivation)} onMessageChange={setMessage} onSend={() => void (derivation ? deriveTask() : sendDirection())} />
           </> : <><EmptyConversation onChoose={setDraft} />{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
@@ -715,8 +798,9 @@ function ChatWaiting({ error, onRetry }: { error: string; onRetry: () => void })
   return <div className="flex items-start gap-3 py-5"><Portrait id="store_manager" /><div className="min-w-0 text-sm leading-6 text-[#6e8175]"><p role={error ? 'alert' : 'status'} className="flex items-center gap-2">{!error && <LoaderCircle size={16} className="shrink-0 motion-safe:animate-spin" />}{error || '正在接上这段对话'}</p>{error && <button onClick={onRetry} className="mt-3 inline-flex items-center gap-2 rounded-md border border-[#dec8b8] bg-white px-3 py-1.5 text-xs text-[#9e5946]"><RefreshCw size={14} /> 重新连接</button>}</div></div>
 }
 
-function DirectionComposer({ members, message, isSending, isLoading, onMessageChange, onSend }: { members: OrgRole[]; message: string; isSending: boolean; isLoading: boolean; onMessageChange: (value: string) => void; onSend: () => void }) {
-  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput value={message} label="向团队发送消息" placeholder="继续说吧，补充想法、改目标，或直接 @一位伙伴" members={members} onChange={onMessageChange} onSubmit={onSend} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={isSending || isLoading || !message.trim()} onClick={onSend} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isLoading ? '正在接上对话' : isSending ? '正在发送消息' : '发送消息并安排下一轮协作'} aria-label="发送消息" aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
+function DirectionComposer({ members, message, isSending, isLoading, deriving = false, onMessageChange, onSend }: { members: OrgRole[]; message: string; isSending: boolean; isLoading: boolean; deriving?: boolean; onMessageChange: (value: string) => void; onSend: () => void }) {
+  const sendLabel = deriving ? '创建衍生任务' : '发送消息'
+  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput value={message} label={deriving ? '衍生任务目标' : '向团队发送消息'} placeholder={deriving ? '说说新任务要完成什么，可直接 @一位伙伴' : '继续说吧，补充想法、改目标，或直接 @一位伙伴'} members={members} onChange={onMessageChange} onSubmit={onSend} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={isSending || isLoading || !message.trim()} onClick={onSend} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isLoading ? '正在接上对话' : isSending ? '正在发送' : deriving ? sendLabel : '发送消息并安排下一轮协作'} aria-label={sendLabel} aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
 }
 
 function TaskComposer({ members, draft, isSending, onDraftChange, onCreate }: { members: OrgRole[]; draft: string; isSending: boolean; onDraftChange: (value: string) => void; onCreate: () => void }) {

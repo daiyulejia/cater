@@ -261,6 +261,20 @@ class CliDriver:
         self._lock = threading.RLock()
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
+        task_id = context.get("task_id") if isinstance(context, dict) else None
+        if isinstance(task_id, str) and task_id and isinstance(context.get("background"), dict):
+            # Snapshot calls carry explicit context and must not reuse process history.
+            worker = CliDriver(
+                self.name, self.command, cwd=self.cwd, timeout=self.timeout,
+                restart_limit=self.restart_limit, token_budget=self.token_budget,
+            )
+            try:
+                return worker._complete(role=role, prompt=prompt, context=context)
+            finally:
+                worker.close()
+        return self._complete(role=role, prompt=prompt, context=context)
+
+    def _complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
         data = self._request(
             {"type": "complete", "role": role, "prompt": prompt, "context": context}
         )

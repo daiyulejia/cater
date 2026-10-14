@@ -31,6 +31,7 @@ from .path import organization_path
 from .review import build_review
 from .runtime import DriverHealth, Runtime
 from .rules import RuleConflict
+from .work import WorkConflict
 
 
 MAX_REQUEST_BYTES = 1_048_576
@@ -638,7 +639,22 @@ def make_handler(
                     if rt.task(task_id) is None:
                         return self._not_found()
                     try:
-                        if action == "project":
+                        if action == "derive":
+                            if set(data) - {"goal", "acceptance", "request_id", "run", "background"}:
+                                return self._bad_request("来源背景与项目由服务器确定，不能由请求替换。")
+                            result = rt.derive_task(task_id, data.get("goal"),
+                                                    _acceptance_lines(data.get("acceptance")),
+                                                    request_id=data.get("request_id"))
+                            child_id = result["task_id"]
+                            if result["created"]:
+                                mentioned = rt.mentioned_workers(data["goal"])
+                                owner = mentioned[0] if len(mentioned) == 1 else None
+                                rt.intake(child_id, requested_route="direct" if owner else "auto", preferred_owner=owner)
+                                if _truthy(data.get("run")):
+                                    activities.submit(child_id, "run")
+                            return self._send_json(self._task_payload(child_id, activities),
+                                                   status=HTTPStatus.CREATED if result["created"] else HTTPStatus.OK)
+                        elif action == "project":
                             if activities.status(task_id)["active"]:
                                 return self._conflict("cannot bind a project while collaboration is active")
                             rt.rulebook.bind_project(task_id, data.get("project_id"))
@@ -686,7 +702,7 @@ def make_handler(
                             )
                         else:
                             return self._not_found()
-                    except RuleConflict as exc:
+                    except (RuleConflict, WorkConflict) as exc:
                         return self._conflict(str(exc))
                     except ValueError as exc:
                         return self._bad_request(str(exc))
@@ -1438,6 +1454,7 @@ def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | N
         "task": task_to_dict(task),
         "events": [event_to_dict(e) for e in events],
         "organization_memory": rt.shared_memory(exclude_task_id=task_id),
+        "background": rt.conversation_background(task_id),
         "decision_ladder": decision_ladder(events),
         "organization_path": organization_path(task, events),
         "review": rt.review(task_id),

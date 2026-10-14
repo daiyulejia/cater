@@ -3,7 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog'
 import { BookOpen, BookPlus, Check, FolderPlus, Pencil, Plus, RefreshCw, Save, X } from 'lucide-react'
 
 type Project = { id: string; name: string }
-type Rule = { id: string; revision: number; text: string; scope: string; status: string; rationale?: string; source: { kind: string; actor: string; event_seq?: number }; seq: number }
+type Rule = { id: string; revision: number; text: string; scope: string; status: string; rationale?: string; source: { kind: string; actor?: string; event_seq?: number; task_id?: string; rule_id?: string }; seq: number }
 type RuleState = { project_id: string | null; rules: Rule[]; enforcement: string }
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 const scopeName: Record<string, string> = { workspace: '猫咖通用', project: '当前项目', task: '本次任务' }
@@ -151,7 +151,7 @@ export function RulesPanel({ request, taskId, projectId, draft, busy, onProjectC
           <div className="mb-3 flex items-center justify-between gap-2"><h2 className="text-sm font-bold">适用店规</h2><label className="flex items-center gap-1.5 text-xs text-[#718574]"><input type="checkbox" checked={showRetired} onChange={(event) => setShowRetired(event.target.checked)} />包含已停用</label></div>
           {loading && !state ? <p className="py-4 text-sm text-[#718574]">正在读取…</p> : state && !state.rules.filter((rule) => showRetired || rule.status !== 'retired').length ? <p className="py-4 text-sm text-[#718574]">这个范围还没有店规。</p> : null}
           {state?.rules.filter((rule) => showRetired || rule.status !== 'retired').map((rule) => <article key={rule.id} className="border-b border-[#e0e6dc] py-3 last:border-0">
-            <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#738478]"><span className={rule.status === 'candidate' ? 'font-semibold text-[#b26a3e]' : 'font-semibold text-[#3d7460]'}>{stateName[rule.status]}</span><span>{scopeName[rule.scope]}</span><span>v{rule.revision}</span><span>{rule.source.kind === 'human' ? '由你制定' : `成员建议 · #${rule.source.event_seq}`}</span></div>
+            <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#738478]"><span className={rule.status === 'candidate' ? 'font-semibold text-[#b26a3e]' : 'font-semibold text-[#3d7460]'}>{stateName[rule.status]}</span><span>{scopeName[rule.scope]}</span><span>v{rule.revision}</span><span>{rule.source.kind === 'human' ? '由你制定' : rule.source.kind === 'inherited' ? `创建时继承 · #${rule.source.event_seq}` : `成员建议 · #${rule.source.event_seq}`}</span></div>
             <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{rule.text}</p>
             {rule.rationale && <details className="mt-2 text-xs leading-5 text-[#718574]"><summary className="cursor-pointer">提出依据（成员报告）</summary><p className="mt-1 whitespace-pre-wrap break-words">{rule.rationale}</p></details>}
             <div className="mt-2 flex justify-end gap-2"><button onClick={() => { setEditing(rule); setText(rule.text) }} disabled={saving} className="artifact-tool" title="修改店规" aria-label={`修改店规 ${rule.text}`}><Pencil size={15} /></button>{rule.status !== 'active' && <button onClick={() => changeStatus(rule, 'active')} disabled={saving} className="inline-flex items-center gap-1 text-xs font-semibold text-[#367562]"><Plus size={14} />采用</button>}{rule.status !== 'retired' && <button onClick={() => changeStatus(rule, 'retired')} disabled={saving} className="text-xs text-[#927665]">停用</button>}</div>

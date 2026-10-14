@@ -67,8 +67,13 @@ class DeliveryService:
         if has_code or any(c["kind"] == "local_check" for item in items for c in item["criteria"]):
             criteria.append({"id": "integration_behavior", "kind": "local_check",
                              "text": "对当前全部交付正文执行整体行为检查，不能沿用单项回执。"})
-        return {"plan_seq": work["plan_seq"], "scope": work["scope"], "sources": sources,
-                "items": items, "files": files, "criteria": criteria}
+        result = {"plan_seq": work["plan_seq"], "scope": work["scope"], "sources": sources,
+                  "items": items, "files": files, "criteria": criteria}
+        background = self.rt.conversation_background(task_id)
+        if background is not None:
+            result["background"] = {"source_task_id": background["source_task_id"],
+                                    "source_seq": background["source_seq"], "sha256": digest(background)}
+        return result
 
     def prepare(self, task_id: str, *, reviewer: str | None = None):
         leader = self.rt.organization.leader

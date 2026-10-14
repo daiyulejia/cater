@@ -82,8 +82,13 @@ class RuleBook:
 
     def all_rules(self) -> list[dict[str, Any]]:
         current = {}
-        for event in self.log.iter_events(event_types=RULE_EVENTS):
-            current[event.payload["id"]] = {**event.payload, "seq": event.seq, "updated_at": event.ts}
+        for event in self.log.iter_events(event_types=(*RULE_EVENTS, "task.created")):
+            if event.type == "task.created":
+                if event.actor == Actor.human():
+                    for rule in event.payload.get("inherited_rules", []):
+                        current[rule["id"]] = {**rule, "seq": event.seq, "updated_at": event.ts}
+            else:
+                current[event.payload["id"]] = {**event.payload, "seq": event.seq, "updated_at": event.ts}
         return list(current.values())
 
     def view(self, *, task_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:
