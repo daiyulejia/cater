@@ -25,6 +25,7 @@ EVENT_CATEGORIES = {
     "work.reviewed": "review",
     "work.invalidated": "review",
     "work.failed": "lifecycle",
+    "work.review_deferred": "review",
     "project.created": "planning",
     "task.project_bound": "planning",
     "rule.recorded": "policy",
@@ -60,6 +61,7 @@ EVENT_CATEGORIES = {
     "escalation.triggered": "decision",
     "brief.generated": "decision",
     "human.commanded": "decision",
+    "task.progress_reported": "dialogue",
     "human.decided": "decision",
     "review.generated": "review",
 }

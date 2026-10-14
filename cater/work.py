@@ -9,6 +9,7 @@ import uuid
 from typing import Any, Callable
 
 from .events import Actor, Event, EventLog, HeadChanged
+from .directions import changes_direction
 from .rules import RuleBook
 
 
@@ -91,12 +92,18 @@ class WorkLedger:
 
     def scope(self, task_id: str) -> dict[str, Any]:
         events = list(self.log.iter_events(task_id=task_id, event_types=("task.created", "human.commanded", "plan.proposed", "plan.amended")))
-        directions = [e for e in events if e.type in {"task.created", "human.commanded"}]
+        directions = [e for e in events if e.type == "task.created"
+                      or (e.type == "human.commanded" and changes_direction(e.payload))]
         if not directions:
             raise KeyError(task_id)
         plans = [e.seq for e in events if e.type in {"plan.proposed", "plan.amended"}]
         return {"direction_seq": directions[-1].seq, "planning_seq": plans[-1] if plans else None,
                 "rules": self.rules.current_snapshot(task_id)["fingerprint"]}
+
+    def directions(self, task_id: str, through_seq: int) -> list[dict[str, Any]]:
+        return [{"seq": e.seq, **{key: e.payload[key] for key in ("instruction", "goal", "acceptance") if key in e.payload}}
+                for e in self.log.iter_events(task_id=task_id, event_types=("human.commanded",))
+                if e.seq <= through_seq and changes_direction(e.payload)]
 
     def _write(self, task_id: str, build: Callable[[], tuple[str, dict[str, Any], Actor]]) -> Event:
         for _ in range(8):
@@ -115,8 +122,9 @@ class WorkLedger:
             current = self.view(task_id)
             if any(item.get("in_flight") for item in current["items"]):
                 raise WorkConflict("running work must be reconciled before replacing the plan")
-            return "work.plan_created", {"items": normalized, "source_seq": source_seq,
-                                         "scope": self.scope(task_id)}, Actor.system("work_scheduler")
+            scope = self.scope(task_id)
+            return "work.plan_created", {"items": normalized, "source_seq": source_seq, "scope": scope,
+                                         "customer_directions": self.directions(task_id, scope["direction_seq"])}, Actor.system("work_scheduler")
         return self._write(task_id, build)
 
     def view(self, task_id: str) -> dict[str, Any]:
@@ -140,6 +148,8 @@ class WorkLedger:
                 item.update(status="submitted", submission={"seq": event.seq, **p}, reason="")
             elif event.type == "work.reviewed" and p.get("submission_seq") == (item["submission"] or {}).get("seq"):
                 item.update(status=p["status"], checks=p["checks"], reason=p["reason"], review_seq=event.seq)
+            elif event.type == "work.review_deferred" and p.get("submission_seq") == (item["submission"] or {}).get("seq"):
+                item.update(reason=p["reason"])
             elif event.type == "work.invalidated":
                 for target in p["affected"]:
                     if target in items:
@@ -174,7 +184,18 @@ class WorkLedger:
             resolve(item_id)
         return {"plan_seq": plan.seq, "source_seq": plan.payload["source_seq"], "scope": plan.payload["scope"],
                 "scope_current": scope_current, "items": list(items.values()),
+                "customer_directions": (plan.payload["customer_directions"] if "customer_directions" in plan.payload
+                                        else self.directions(task_id, plan.payload["scope"]["direction_seq"])),
                 "stage_accepted": all(i["status"] == "accepted" for i in items.values())}
+
+    def defer_review(self, task_id: str, item_id: str, submission_seq: int, reason: str) -> Event:
+        def build():
+            view, item = self._item(task_id, item_id)
+            if item["status"] != "submitted" or item["submission"]["seq"] != submission_seq:
+                raise WorkConflict("review deferral must target the current submission")
+            return "work.review_deferred", {"plan_seq": view["plan_seq"], "work_item_id": item_id,
+                                            "submission_seq": submission_seq, "reason": _text(reason, "reason", 2000)}, Actor.system("work_scheduler")
+        return self._write(task_id, build)
 
     def _item(self, task_id: str, item_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
         view = self.view(task_id)

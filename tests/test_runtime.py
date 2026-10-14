@@ -2665,6 +2665,74 @@ class CliTests(unittest.TestCase):
 
 class WebTests(unittest.TestCase):
 
+    def test_status_query_during_active_work_does_not_queue_or_revise_plan(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = str(Path(tmp.name) / "status-active.db")
+        driver = BlockingDriver()
+
+        def runtime_factory():
+            return Runtime(db, drivers={name: driver for name in ("product", "design", "dev", "test")})
+
+        with runtime_factory() as rt:
+            task_id = rt.create_task("整理页面说明")
+            rt.intake(task_id, requested_route="direct", preferred_owner="product")
+        base = start_test_web(self, db, runtime_factory=runtime_factory)
+        self.addCleanup(driver.release.set)
+
+        def post(action, payload):
+            request = Request(f"{base}/api/tasks/{task_id}/{action}", data=json.dumps(payload).encode(),
+                              method="POST", headers={"Content-Type": "application/json"})
+            with urlopen(request, timeout=2) as response:
+                return response.status, json.load(response)
+
+        post("run", {"background": True})
+        self.assertTrue(driver.started.wait(1))
+        with runtime_factory() as rt:
+            before = rt.work.view(task_id)
+        status, response = post("command", {"instruction": "@店长 进度怎么样？", "continue": True})
+        self.assertEqual(status, 200)
+        self.assertTrue(response["activity"]["active"])
+        self.assertNotIn("follow_up", response["activity"])
+        self.assertEqual(response["task"]["work"]["scope"], before["scope"])
+        reports = [e for e in response["events"] if e["type"] == "task.progress_reported"]
+        self.assertEqual(reports[-1]["payload"]["counts"], {"running": 1})
+        self.assertEqual(driver.calls, 1)
+        self.assertEqual(len([e for e in response["events"] if e["type"] == "activity.queued"]), 1)
+        driver.release.set()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            with urlopen(f"{base}/api/tasks/{task_id}", timeout=2) as reply:
+                completed = json.load(reply)
+            if not completed["activity"]["active"]:
+                break
+            time.sleep(0.02)
+        self.assertFalse(completed["activity"]["active"])
+        self.assertTrue(completed["task"]["work"]["scope_current"])
+        self.assertEqual(driver.calls, 1)
+
+    def test_html_status_query_does_not_execute_even_with_run_checkbox(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        db = str(Path(tmp.name) / "status-form.db")
+        driver = AlwaysFailDriver()
+
+        def runtime_factory():
+            return Runtime(db, drivers={name: driver for name in ("product", "design", "dev", "test")})
+
+        with runtime_factory() as rt:
+            task_id = rt.create_task("只查询记录")
+            before_status = rt.task(task_id).status
+        base = start_test_web(self, db, runtime_factory=runtime_factory)
+        request = Request(f"{base}/tasks/{task_id}/command", method="POST",
+                          data=urlencode({"instruction": "查看进度", "run_now": "on"}).encode())
+        with urlopen(request, timeout=3) as response:
+            self.assertEqual(response.status, 200)
+        self.assertEqual(driver.calls, 0)
+        with runtime_factory() as rt:
+            self.assertEqual(rt.task(task_id).status, before_status)
+            self.assertEqual(rt.log.read(task_id=task_id)[-1].type, "task.progress_reported")
+
     def test_artifact_body_is_available_in_detail_but_not_copied_into_task_list(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "artifact-body.db")

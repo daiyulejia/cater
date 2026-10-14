@@ -43,6 +43,25 @@ const input = () => screen.getByRole('textbox', { name: '向团队发送消息' 
 const write = (text: string) => fireEvent.change(input(), { target: { value: text } })
 const ready = (id: string) => screen.findByText(`${id}任务专属消息 #2`)
 
+test('进度问答在聊天中显示，不冒充方向变更或再次排队', async () => {
+  handler = (url, init) => {
+    if (url === '/api/tasks/乙/command' && init.method === 'POST') {
+      const data = detail('乙')
+      return json({ ...data, events: [...data.events,
+        { seq: 3, type: 'human.commanded', actor: { id: 'human' }, payload: { instruction: '进度怎么样？', intent: 'status' } },
+        { seq: 4, type: 'task.progress_reported', actor: { id: 'store_manager' }, payload: { text: '有一份成果正在等待验收，后续工作尚未放行。' } },
+      ] })
+    }
+  }
+  render(<App />); await ready('乙'); write('进度怎么样？')
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  await screen.findByText('有一份成果正在等待验收，后续工作尚未放行。')
+  expect(screen.queryByText('方向更新')).toBeNull()
+  expect(screen.queryByText('协作已排队')).toBeNull()
+  expect(input().value).toBe('')
+  expect(fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1)
+})
+
 test('后台活动结束不代表工作通过验收，页头保留等待状态', async () => {
   handler = (url) => {
     if (url === '/api/tasks/乙') {

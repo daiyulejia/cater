@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .events import Event
+from .directions import changes_direction
 from .usage import usage_source, valid_token_count
 
 
@@ -60,7 +61,8 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
                 task.goal = str(payload["goal"])
             if "acceptance" in payload:
                 task.acceptance = list(payload.get("acceptance") or [])
-            task.status = "running"
+            if changes_direction(payload):
+                task.status = "running"
         elif event.type == "task.started":
             task.status = "running"
         elif event.type == "task.interpreted":

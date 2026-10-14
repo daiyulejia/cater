@@ -629,7 +629,7 @@ def make_handler(
                                     else None
                                 ),
                             )
-                            if _truthy(data.get("continue")):
+                            if _truthy(data.get("continue")) and command.payload.get("next_action") != "none":
                                 background_action = str(command.payload.get("next_action") or "run")
                         elif action == "decide":
                             rt.decide(
@@ -743,7 +743,7 @@ def make_handler(
                         )
                     except ValueError as exc:
                         return self._bad_request(str(exc))
-                    if data.get("run_now", [""])[0] == "on":
+                    if data.get("run_now", [""])[0] == "on" and command.payload.get("next_action") != "none":
                         if command.payload.get("next_action") == "battle":
                             rt.battle(task_id)
                         else:

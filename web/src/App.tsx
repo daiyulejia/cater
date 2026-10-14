@@ -199,7 +199,8 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     // conversation people actually want to read.
     if (event.type === 'activity.completed') return []
     if (event.type === 'activity.failed') return [message('协作异常', String(payload.message ?? '后台协作未能完成。'), 'system')]
-    if (event.type === 'human.commanded') return [message('方向更新', String(payload.instruction ?? ''), 'human')]
+    if (event.type === 'human.commanded') return [message(payload.intent === 'status' ? '查看进度' : payload.intent === 'resume' ? '继续推进' : '方向更新', String(payload.instruction ?? ''), 'human')]
+    if (event.type === 'task.progress_reported') return [message('当前进展', String(payload.text ?? ''), 'system', 'collaboration')]
     if (event.type === 'task.interpreted') {
       const scope = Array.isArray(payload.scope) ? payload.scope.filter((item): item is string => typeof item === 'string') : []
       const risks = Array.isArray(payload.risks) ? payload.risks.filter((item): item is string => typeof item === 'string') : []
