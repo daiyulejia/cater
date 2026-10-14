@@ -14,7 +14,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Iterator, Mapping
 
 GENESIS_HASH = "0" * 64
 
@@ -211,13 +211,40 @@ class EventLog:
         )
 
     def read(self, task_id: str | None = None) -> list[Event]:
+        return list(self.iter_events(task_id=task_id))
+
+    def iter_events(
+        self, *, task_id: str | None = None, event_types: Iterable[str] | None = None,
+        after_seq: int = 0,
+    ) -> Iterator[Event]:
+        """Stream selected immutable events without materializing other payloads."""
+        if type(after_seq) is not int or after_seq < 0:
+            raise ValueError("after_seq must be a non-negative integer")
+        if isinstance(event_types, str):
+            raise ValueError("event_types must be an iterable of names, not a string")
+        types = tuple(dict.fromkeys(event_types)) if event_types is not None else None
+        if types is not None:
+            for event_type in types:
+                if event_type not in EVENT_CATEGORIES:
+                    raise UnknownEventType(event_type)
+            if not types:
+                return
         sql = "SELECT * FROM events"
-        params: tuple[Any, ...] = ()
+        clauses = ["seq > ?"]
+        params: list[Any] = [after_seq]
         if task_id is not None:
-            sql += " WHERE task_id = ?"
-            params = (task_id,)
-        sql += " ORDER BY seq"
-        return [self._row_to_event(r) for r in self.db.execute(sql, params).fetchall()]
+            clauses.append("task_id = ?")
+            params.append(task_id)
+        if types is not None:
+            clauses.append(f"type IN ({','.join('?' for _ in types)})")
+            params.extend(types)
+        sql += " WHERE " + " AND ".join(clauses) + " ORDER BY seq"
+        cursor = self.db.execute(sql, params)
+        try:
+            for row in cursor:
+                yield self._row_to_event(row)
+        finally:
+            cursor.close()
 
     def count(self) -> int:
         return int(self.db.execute("SELECT COUNT(*) FROM events").fetchone()[0])
@@ -286,6 +313,8 @@ class EventLog:
                 key_id TEXT,
                 signature TEXT
             );
+            CREATE INDEX IF NOT EXISTS events_type_seq ON events(type, seq);
+            CREATE INDEX IF NOT EXISTS events_task_seq ON events(task_id, seq);
             CREATE TRIGGER IF NOT EXISTS events_no_update
             BEFORE UPDATE ON events
             BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;

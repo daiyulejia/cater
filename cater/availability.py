@@ -15,11 +15,11 @@ if TYPE_CHECKING:
 
 def team_availability(rt: Runtime) -> dict[str, Any]:
     totals: dict[str, int] = {}
-    for event in rt.log.read():
-        if event.type in {"msg.said", "msg.challenge"} and event.payload.get("token_usage") == "reported" and valid_token_count(event.payload.get("tokens")):
-            name = event.payload.get("driver")
-            if isinstance(name, str):
-                totals[name] = totals.get(name, 0) + event.payload["tokens"]
+    budgeted = {name for name, driver in rt.drivers.items() if valid_token_count(getattr(driver, "token_budget", None))}
+    for event in rt.log.iter_events(event_types=("msg.said", "msg.challenge")) if budgeted else ():
+        name = event.payload.get("driver")
+        if isinstance(name, str) and name in budgeted and event.payload.get("token_usage") == "reported" and valid_token_count(event.payload.get("tokens")):
+            totals[name] = totals.get(name, 0) + event.payload["tokens"]
     members = [{"role_id": rt.organization.leader.id, "status": "available", "reason": "local_policy"}]
     states = {}
     for role in {role.id: role for role in [*rt.cabinet_roles, *rt.worker_roles]}.values():
@@ -28,6 +28,8 @@ def team_availability(rt: Runtime) -> dict[str, Any]:
             budget = getattr(driver, "token_budget", None)
             if driver is None:
                 state = ("on_leave", "not_configured")
+            elif budget is not None and not valid_token_count(budget):
+                state = ("on_leave", "invalid_budget")
             elif valid_token_count(budget) and totals.get(role.driver, 0) >= budget:
                 state = ("on_leave", "budget_exhausted")
             elif isinstance(driver, OpenAICompatibleDriver) and not os.environ.get(driver.api_key_env):

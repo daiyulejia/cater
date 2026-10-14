@@ -951,7 +951,7 @@ class Runtime:
         return compact[:140] + ("…" if len(compact) > 140 else "") if compact else "顾客补充的最新方向"
 
     def task(self, task_id: str) -> TaskSnapshot | None:
-        return fold(self.log.read()).get(task_id)
+        return fold(self.log.read(task_id=task_id)).get(task_id)
 
     def tasks(self) -> list[TaskSnapshot]:
         return list(fold(self.log.read()).values())
@@ -1011,8 +1011,14 @@ class Runtime:
         round_outputs: list[dict[str, Any]] | None = None,
     ) -> DriverResponse:
         token_budget = getattr(driver, "token_budget", None)
-        used_tokens = self._reported_driver_tokens(role.driver)
-        if isinstance(token_budget, int) and used_tokens >= token_budget:
+        if token_budget is not None and not valid_token_count(token_budget):
+            self._emit_driver_failure(
+                task_id=task_id, role=role, attempt=0,
+                exc=ValueError("token budget must be a non-negative integer"), circuit_open=False,
+            )
+            return self._contained_driver_failure(role, "token budget configuration is invalid")
+        used_tokens = self._reported_driver_tokens(role.driver) if valid_token_count(token_budget) else 0
+        if valid_token_count(token_budget) and used_tokens >= token_budget:
             self.log.emit(
                 actor=Actor.system("driver_gateway"),
                 type="driver.budget_exhausted",
@@ -1088,9 +1094,8 @@ class Runtime:
         """Count only provider-reported usage; unknown telemetry cannot be safely capped."""
         return sum(
             event.payload["tokens"]
-            for event in self.log.read()
-            if event.type in {"msg.said", "msg.challenge"}
-            and event.payload.get("driver") == driver_name
+            for event in self.log.iter_events(event_types=("msg.said", "msg.challenge"))
+            if event.payload.get("driver") == driver_name
             and event.payload.get("token_usage") == "reported"
             and valid_token_count(event.payload.get("tokens"))
         )
