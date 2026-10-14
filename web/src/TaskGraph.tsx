@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { ReactNode, RefObject } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import {
   Background, BackgroundVariant, Handle, MarkerType, Panel, Position,
@@ -18,7 +18,10 @@ type GraphWorkProps = {
   actorText: (id: string) => string
   portrait?: (id: string, size: 'sm' | 'md') => ReactNode
 }
-export type TaskGraphProps = GraphWorkProps & { open: boolean; onOpenChange: (open: boolean) => void }
+export type TaskGraphProps = GraphWorkProps & {
+  open: boolean; onOpenChange: (open: boolean) => void
+  returnFocusRef?: RefObject<HTMLElement | null>
+}
 
 const labels: Record<string, string> = {
   planned: '已安排', ready: '可以开工', running: '正在执行', submitted: '等待验收',
@@ -203,7 +206,7 @@ function GraphBody(props: GraphWorkProps) {
   </>
 }
 
-export function TaskGraph({ open, onOpenChange, ...props }: TaskGraphProps) {
+export function TaskGraph({ open, onOpenChange, returnFocusRef, ...props }: TaskGraphProps) {
   const openingFocus = useRef<HTMLElement | null>(null)
   useEffect(() => {
     if (open && !props.work.items.length) onOpenChange(false)
@@ -212,7 +215,11 @@ export function TaskGraph({ open, onOpenChange, ...props }: TaskGraphProps) {
   return <Dialog.Root open={open} onOpenChange={onOpenChange}>
     <Dialog.Portal><Dialog.Overlay className="task-graph-overlay" /><Dialog.Content className="task-graph-dialog"
       onOpenAutoFocus={() => { openingFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null }}
-      onCloseAutoFocus={event => { event.preventDefault(); if (openingFocus.current?.isConnected) openingFocus.current.focus() }}>
+      onCloseAutoFocus={event => {
+        event.preventDefault()
+        const target = returnFocusRef?.current ?? openingFocus.current
+        if (target?.isConnected) target.focus()
+      }}>
       <header className="task-graph-header"><div><Dialog.Title>任务脉络</Dialog.Title><Dialog.Description className="task-graph-sr-only">当前任务 · {props.work.items.length} 个工作项</Dialog.Description></div>
         <Dialog.Close asChild><button type="button" className="task-graph-close" aria-label="关闭任务脉络" title="关闭任务脉络"><X size={20} /></button></Dialog.Close>
       </header>

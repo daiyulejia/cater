@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import TaskGraph from '../src/TaskGraph'
@@ -52,6 +52,12 @@ function Controlled({ value }: { value: WorkState }) {
   const [open, setOpen] = useState(false)
   return <><button onClick={() => setOpen(true)}>任务脉络</button><TaskGraph work={value} actorText={actorText} open={open} onOpenChange={setOpen} /></>
 }
+function InitiallyUnfocused() {
+  const [open, setOpen] = useState(true)
+  const trigger = useRef<HTMLButtonElement>(null)
+  return <><button ref={trigger} onClick={() => setOpen(true)}>任务脉络</button>
+    <TaskGraph work={work()} actorText={actorText} open={open} onOpenChange={setOpen} returnFocusRef={trigger} /></>
+}
 async function openGraph(value = work()) {
   const view = render(<Controlled value={value} />)
   const trigger = screen.getByRole('button', { name: '任务脉络' })
@@ -103,6 +109,13 @@ describe('current work topology', () => {
     value.items[0].submission = { seq: 20, artifact_seqs: [19] }
     expect(layoutTaskGraph(value.items)).toEqual(before)
   })
+})
+
+it('returns to the explicit trigger when lazy loading lost the opening focus', async () => {
+  render(<InitiallyUnfocused />)
+  await screen.findByRole('dialog', { name: '任务脉络' })
+  fireEvent.click(screen.getByRole('button', { name: '关闭任务脉络' }))
+  await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: '任务脉络' })))
 })
 
 describe('task graph dialog', () => {
