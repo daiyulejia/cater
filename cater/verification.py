@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import signal
 import subprocess
 import sys
 import tempfile
@@ -14,6 +13,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO
+
+from .processes import ProcessScope as _ProcessScope
 
 PREVIEW_LIMIT = 8192
 
@@ -61,25 +62,6 @@ class _Capture:
     def preview_text(self) -> str:
         with self.lock:
             return _decode_preview(self.preview)
-
-
-class _ProcessScope:
-    def __init__(self, process: subprocess.Popen):
-        self.process = process
-        self.job = None
-        self.kind = "windows_job" if os.name == "nt" else "posix_process_group"
-        if os.name == "nt":
-            from ._windows_job import WindowsJob
-            self.job = WindowsJob(process.pid)
-
-    def close(self) -> None:
-        if self.job is not None:
-            self.job.close()
-        else:
-            try:
-                os.killpg(self.process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
 
 
 @dataclass(frozen=True)

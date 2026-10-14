@@ -6,7 +6,9 @@ import json
 import os
 import queue
 import subprocess
+import sys
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +16,8 @@ from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from .processes import ProcessScope
 
 
 MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -251,7 +255,9 @@ class CliDriver:
         self.restart_limit = restart_limit
         self.token_budget = token_budget
         self._proc: subprocess.Popen[str] | None = None
-        self._lock = threading.Lock()
+        self._scope: ProcessScope | None = None
+        self._io_thread: threading.Thread | None = None
+        self._lock = threading.RLock()
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
         data = self._request(
@@ -275,22 +281,38 @@ class CliDriver:
             return False
 
     def close(self) -> None:
-        proc = self._proc
-        self._proc = None
-        if proc is None:
-            return
-        for stream in (proc.stdin, proc.stdout):
-            if stream is not None:
-                try:
-                    stream.close()
-                except OSError:
-                    pass
-        if proc.poll() is None:
-            proc.terminate()
+        with self._lock:
+            proc, scope, reader = self._proc, self._scope, self._io_thread
+            self._proc = self._scope = self._io_thread = None
+            if proc is None:
+                return
+            cleanup_error = None
+            try:
+                if scope is not None:
+                    scope.close()
+                elif proc.poll() is None:
+                    proc.kill()
+            except OSError:
+                cleanup_error = f"{self.name} process scope cleanup failed"
+                if proc.poll() is None:
+                    proc.kill()
             try:
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                cleanup_error = f"{self.name} process did not exit after cleanup"
+            if reader is not None:
+                reader.join(timeout=2)
+            if reader is not None and reader.is_alive():
+                # Closing a stream with a blocked reader/writer can itself deadlock.
+                raise DriverUnavailable(f"{self.name} pipes remained open after cleanup")
+            for stream in (proc.stdin, proc.stdout):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except (OSError, ValueError):
+                        pass
+            if cleanup_error:
+                raise DriverUnavailable(cleanup_error)
 
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         last_error: DriverError | None = None
@@ -309,23 +331,18 @@ class CliDriver:
         raise last_error
 
     def _send_once(self, payload: dict[str, Any]) -> dict[str, Any]:
+        deadline = time.monotonic() + self.timeout
         try:
             request_line = json.dumps(payload, ensure_ascii=False)
-        except (TypeError, ValueError) as exc:
+            request_bytes = request_line.encode("utf-8")
+        except (TypeError, ValueError, UnicodeError) as exc:
             raise DriverProtocolError(f"{self.name} request is not JSON serializable") from exc
-        if len(request_line.encode("utf-8")) > MAX_CLI_REQUEST_BYTES:
+        if len(request_bytes) > MAX_CLI_REQUEST_BYTES:
             raise DriverProtocolError(
                 f"{self.name} request exceeds {MAX_CLI_REQUEST_BYTES} byte limit"
             )
-        proc = self._ensure_started()
-        assert proc.stdin is not None
-        try:
-            proc.stdin.write(request_line + "\n")
-            proc.stdin.flush()
-        except (BrokenPipeError, OSError) as exc:
-            raise DriverUnavailable(f"{self.name} stdin is not writable") from exc
-
-        line = self._readline(proc)
+        proc = self._ensure_started(deadline)
+        line = self._exchange(proc, request_line, deadline)
         if line == "":
             raise DriverUnavailable(f"{self.name} exited before responding")
         try:
@@ -342,45 +359,56 @@ class CliDriver:
             raise DriverProtocolError(f"{self.name} response must include ok=true/false")
         return data
 
-    def _ensure_started(self) -> subprocess.Popen[str]:
+    def _ensure_started(self, deadline: float) -> subprocess.Popen[str]:
         if self._proc is not None and self._proc.poll() is None:
             return self._proc
-        self._proc = subprocess.Popen(
-            self.command,
-            cwd=self.cwd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            encoding="utf-8",
-            bufsize=1,
-        )
+        if self._proc is not None:
+            self.close()
+        try:
+            self._proc = subprocess.Popen(
+                [sys.executable, "-I", str(Path(__file__).with_name("_driver_worker.py"))],
+                cwd=self.cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1,
+                shell=False, start_new_session=os.name != "nt",
+            )
+            self._scope = ProcessScope(self._proc)
+            ready = self._exchange(self._proc, json.dumps(self.command, ensure_ascii=False), deadline)
+            if json.loads(ready) != {"ready": True}:
+                raise DriverProtocolError(f"{self.name} worker did not acknowledge startup")
+        except (OSError, ValueError) as exc:
+            raise DriverUnavailable(f"{self.name} process could not start safely") from exc
         return self._proc
 
     def _restart(self) -> None:
         self.close()
 
-    def _readline(self, proc: subprocess.Popen[str]) -> str:
-        assert proc.stdout is not None
-        out: queue.Queue[str | None] = queue.Queue(maxsize=1)
+    def _exchange(self, proc: subprocess.Popen[str], request_line: str, deadline: float) -> str:
+        assert proc.stdin is not None and proc.stdout is not None
+        out: queue.Queue[str | DriverError] = queue.Queue(maxsize=1)
 
         def reader() -> None:
             try:
+                proc.stdin.write(request_line + "\n")
+                proc.stdin.flush()
                 line = proc.stdout.readline(MAX_CLI_RESPONSE_CHARS + 1)
-                out.put(None if len(line) > MAX_CLI_RESPONSE_CHARS else line)
-            except ValueError:
-                out.put("")
+                if len(line) > MAX_CLI_RESPONSE_CHARS:
+                    out.put(DriverProtocolError(f"{self.name} response exceeds {MAX_CLI_RESPONSE_CHARS} character limit"))
+                else:
+                    out.put(line)
+            except UnicodeError:
+                out.put(DriverProtocolError(f"{self.name} response is not valid UTF-8"))
+            except (OSError, ValueError):
+                out.put(DriverUnavailable(f"{self.name} pipe is unavailable"))
 
         thread = threading.Thread(target=reader, daemon=True)
+        self._io_thread = thread
         thread.start()
         try:
-            line = out.get(timeout=self.timeout)
+            line = out.get(timeout=max(0, deadline - time.monotonic()))
         except queue.Empty as exc:
             raise DriverUnavailable(f"{self.name} did not respond within {self.timeout}s") from exc
-        if line is None:
-            raise DriverProtocolError(
-                f"{self.name} response exceeds {MAX_CLI_RESPONSE_CHARS} character limit"
-            )
+        if isinstance(line, DriverError):
+            raise line
         return line
 
 
