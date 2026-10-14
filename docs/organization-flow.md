@@ -2,6 +2,12 @@
 
 Cater has three paths. They are intentionally not the same size.
 
+A separate cabinet is optional: `examples/compact_roles.json` explicitly sets
+`organization.cabinet_members` to `[]`. Existing configurations retain their
+behavior. With no cabinet, the leader publishes dispatch plans and records
+requests for evidence/rework when governance is triggered; no empty cabinet vote
+is produced. This leader is a local policy, not a model-driven reviewer.
+
 ## 1. Direct Worker Path
 
 Use this when the task is small, obvious, or already scoped by the human.
@@ -41,6 +47,10 @@ dependencies. The default lane chain is scope -> implementation -> verification:
 product clarifies value and acceptance, development turns it into an
 implementation path, and testing reviews risk and confidence. If dispatch does
 not add this kind of sequencing clarity, prefer direct assignment.
+
+Dependencies currently describe the plan; they do not yet gate execution on
+independent acceptance of upstream artifacts. Agreement and a generated plan
+must not be treated as proof that the work has passed verification.
 
 ## 3. Governance Path
 

@@ -38,12 +38,23 @@ def _distribution_step(task: TaskSnapshot) -> dict[str, Any]:
             "detail": f"Direct worker assignment to {owner}.",
         }
     if task.mission or task.plan:
-        return {
-            "id": "distribution",
-            "label": "Distribution",
-            "status": "cabinet_dispatch",
-            "detail": f"Cabinet dispatch produced {len(active)} active lane(s).",
-        }
+        source = (task.plan or {}).get("source")
+        if source not in {"leader", "cabinet"}:
+            source = (task.mission or {}).get("source")
+        if source == "leader":
+            return {
+                "id": "distribution",
+                "label": "Distribution",
+                "status": "leader_dispatch",
+                "detail": f"Leader dispatch produced {len(active)} active lane(s).",
+            }
+        if source == "cabinet":
+            return {
+                "id": "distribution",
+                "label": "Distribution",
+                "status": "cabinet_dispatch",
+                "detail": f"Cabinet dispatch produced {len(active)} active lane(s).",
+            }
     return {
         "id": "distribution",
         "label": "Distribution",

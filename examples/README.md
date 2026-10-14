@@ -2,6 +2,16 @@
 
 本目录展示如何接入外部工具，同时不让它们渗入 Cater 核心。
 
+## 精简编队
+
+[`compact_roles.json`](compact_roles.json) 配置店长和月亮、罐头、米寇、三角，不设固定中间层：
+
+```bash
+python -m cater --roles examples/compact_roles.json web
+```
+
+在源码目录运行；端口占用时加 `--port` 选择其他端口。未指定 `--drivers` 时使用本地演示，不会调用付费模型。角色可以接到既有 API/CLI driver，但角色卡本身不会提供工具权限或独立验收。如何比较与配置不同编队，见 [编队说明](../docs/roster-policy.md)。
+
 ## Web API 客户端
 
 先启动 Cater：

@@ -302,7 +302,8 @@ class Runtime:
         return self._run_round(task_id, force_governance=True)
 
     def dispatch(self, task_id: str) -> dict[str, Any]:
-        return self._publish_execution_plan(task_id, source="cabinet")
+        source = "cabinet" if self.cabinet_roles else "leader"
+        return self._publish_execution_plan(task_id, source=source)
 
     def _publish_execution_plan(
         self,
@@ -457,11 +458,14 @@ class Runtime:
                     payload={
                         "resolution": "accepted",
                         "option_id": brief["consensus"][0],
-                        "reason": "成员已形成一致结论，店长确认本轮成果可用。",
+                        "reason": "成员对本轮推进方向已形成一致意见；成果是否可用仍需实际验收。",
                         "source": "leader",
                     },
                 )
             return {"task_id": task_id, "brief_event": brief_event.seq, "brief": brief}
+
+        if not self.organization.cabinet_members:
+            return self._request_leader_rework(task_id, utterances, governance)
 
         cabinet_roles = self._cabinet_roles_for_consultation(utterances)
         if cabinet_roles:
@@ -560,6 +564,45 @@ class Runtime:
                 task_id=task_id,
                 payload={"brief": brief},
             )
+        return {"task_id": task_id, "brief_event": brief_event.seq, "brief": brief}
+
+    def _request_leader_rework(
+        self,
+        task_id: str,
+        utterances: list[dict[str, Any]],
+        governance: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Preserve unresolved risk when no separate review seats are configured."""
+        reason = (
+            "本轮需要复核取舍，请对照验收要求补充依据和未覆盖风险后再继续。"
+            if governance["status"] == "forced"
+            else "本轮仍有分歧或风险，请核对相关意见、补充依据并修正后再继续。"
+        )
+        reason += "店长按本地规则记录返工，本轮尚未通过成果验收。"
+        brief = self._build_collaboration_brief(task_id, utterances, governance)
+        brief.update(
+            dispute="本轮意见已保留，待补证或修正。",
+            consensus=[],
+            root_cause=reason,
+            governance={**governance, "handler": "leader", "cabinet_enabled": False},
+        )
+        self.log.emit(
+            actor=self._leader_actor(),
+            type="supreme.decided",
+            task_id=task_id,
+            payload={
+                "resolution": "rework",
+                "option_id": None,
+                "reason": reason,
+                "source": "leader",
+            },
+        )
+        brief_event = self.log.emit(
+            actor=self._leader_actor(),
+            type="brief.generated",
+            task_id=task_id,
+            payload={"brief": brief, "reason": "rework_requested", "options": brief["options"]},
+        )
         return {"task_id": task_id, "brief_event": brief_event.seq, "brief": brief}
 
     def _collect_utterances(
@@ -674,7 +717,7 @@ class Runtime:
 
     @staticmethod
     def _can_complete_without_governance(utterances: list[dict[str, Any]]) -> bool:
-        """Autonomously close only a genuinely converged, non-challenged round."""
+        """Recognize agreement on an option, not acceptance of a deliverable."""
         if not utterances:
             return False
         positions = [item["payload"] for item in utterances]
@@ -925,8 +968,10 @@ class Runtime:
         removed = [role_id for role_id in previous if role_id not in participants]
         if replan:
             strategy = "店长已按新目标重新核对范围和分工"
+        elif next_action == "battle":
+            strategy = "请内阁在下一轮复核取舍" if self.cabinet_roles else "店长将在下一轮跟进复核取舍"
         else:
-            strategy = "请内阁在下一轮复核取舍" if next_action == "battle" else "按更新后的编队继续协作"
+            strategy = "按更新后的编队继续协作"
         self.log.emit(
             actor=self._leader_actor(),
             type="plan.amended",
@@ -1251,6 +1296,8 @@ class Runtime:
     @staticmethod
     def _task_memory(task: TaskSnapshot, role_id: str | None = None) -> str:
         parts = []
+        if task.status == "rework" and task.decision:
+            parts.append("current_rework_request=" + str(task.decision.get("reason") or "")[:600])
         if task.assignments:
             latest_assignments = [
                 item
@@ -1477,8 +1524,8 @@ class Runtime:
             return "当前任务"
         return compact if len(compact) <= 40 else compact[:37] + "…"
 
-    @staticmethod
     def _select_route(
+        self,
         interpretation: dict[str, Any],
         *,
         requested_route: str,
@@ -1486,6 +1533,8 @@ class Runtime:
     ) -> tuple[str, str]:
         complexity = str(interpretation["complexity"])
         if complexity == "complex":
+            if not self.cabinet_roles:
+                return "collaborate", "任务跨越多个边界，由店长统筹现有执行伙伴并保留风险复核要求。"
             return "cabinet", "任务跨越多个边界或存在明显风险，由内阁先校准拆解与优先级。"
         if requested_route == "direct" and preferred_owner:
             if complexity == "light":
@@ -1960,11 +2009,15 @@ def load_runtime_config(path: str | Path | None = None) -> RuntimeConfig:
                 voice=voice.strip(),
             )
         )
+    organization = _load_organization(organization_raw, roles)
+    cabinet_policy = CabinetPolicy.from_dict(cabinet_raw)
+    if not organization.cabinet_members and cabinet_policy != CabinetPolicy():
+        raise ValueError("cabinet policy requires cabinet members; remove the unused cabinet policy")
     return RuntimeConfig(
         roles=roles,
-        cabinet_policy=CabinetPolicy.from_dict(cabinet_raw),
+        cabinet_policy=cabinet_policy,
         governance_policy=GovernancePolicy.from_dict(governance_raw),
-        organization=_load_organization(organization_raw, roles),
+        organization=organization,
     )
 
 
@@ -2027,7 +2080,9 @@ def _load_organization(data: Any, roles: list[Role]) -> Organization:
     if not all(isinstance(value, str) and value.strip() for value in leader_values.values()):
         raise ValueError("organization.leader requires non-empty id, name, and role")
 
-    cabinet_members = _organization_members(data.get("cabinet_members"), "cabinet_members", role_ids)
+    cabinet_members = _organization_members(
+        data.get("cabinet_members"), "cabinet_members", role_ids, allow_empty=True,
+    )
     worker_members = _organization_members(data.get("worker_members"), "worker_members", role_ids)
     return Organization(
         leader=Leader(**{key: value.strip() for key, value in leader_values.items()}),
@@ -2036,8 +2091,12 @@ def _load_organization(data: Any, roles: list[Role]) -> Organization:
     )
 
 
-def _organization_members(value: Any, label: str, known_roles: set[str]) -> set[str]:
-    if not isinstance(value, list) or not value:
+def _organization_members(
+    value: Any, label: str, known_roles: set[str], *, allow_empty: bool = False,
+) -> set[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"organization.{label} requires a role id list")
+    if not value and not allow_empty:
         raise ValueError(f"organization.{label} requires a non-empty role id list")
     members = [item.strip() for item in value if isinstance(item, str) and item.strip()]
     if len(members) != len(value) or len(set(members)) != len(members):

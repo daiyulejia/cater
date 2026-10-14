@@ -117,6 +117,8 @@ cater --audit-key "dev-secret" chain --json
 
 `dispatch` records the pyramid-style task distribution path: the top layer frames the mission, the cabinet decomposes it into execution lanes, and worker agents receive assigned work before the next collaboration round. This is optional; small tasks can go straight to a worker with `assign` or `new --assign-to dev --run`.
 
+A separate middle layer is optional. From the source checkout, run `python -m cater --roles examples/compact_roles.json web` for a leader and four workers. Explicitly setting `organization.cabinet_members` to `[]` and removing the cabinet voting policy delegates dispatch to the leader. Risk signals or forced review produce a local-policy request for evidence and rework, without an empty vote or escalation merely because no cabinet exists. Independent artifact acceptance and model-driven leader arbitration are not implemented. The example uses demo drivers unless external drivers are configured; the existing default roster is unchanged.
+
 `path` summarizes how one task moved through distribution, collaboration, governance, and decision steps.
 
 `--driver-attempts` and `--circuit-breaker-threshold` tune retry containment without changing driver code.

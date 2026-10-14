@@ -30,7 +30,10 @@ def decision_ladder(events: list[Event]) -> list[dict[str, Any]]:
         elif event.type == "brief.generated":
             brief = event.payload.get("brief", {})
             governance = brief.get("governance", {}) if isinstance(brief, dict) else {}
-            if governance.get("status") == "not_needed":
+            if governance.get("cabinet_enabled") is False:
+                steps[1]["status"] = "skipped"
+                steps[1]["detail"] = "No cabinet seats configured; the leader handled the review request."
+            elif governance.get("status") == "not_needed":
                 steps[1]["status"] = "skipped"
                 steps[1]["detail"] = str(governance.get("reason", "governance not needed"))
         elif event.type == "supreme.decided":

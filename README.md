@@ -129,7 +129,13 @@ cater web --host 0.0.0.0 --allow-remote
 
 CLI 中只执行 `new` 时，任务会保持待安排，方便脚本随后显式调用 `dispatch` 或 `assign`；一旦使用 `new --run`、`new --battle` 或 `new --assign-to`，店长也会先记录任务理解与路线选择，再进入执行层。这与对话工作台保持一致。
 
-默认编队为何保持 3 位铲屎官与 4 只猫咪、又该如何扩容，见 [docs/roster-policy.md](docs/roster-policy.md)。
+也可以只配置店长和执行猫咪，不设固定中间层。在源码目录运行：
+
+```bash
+python -m cater --roles examples/compact_roles.json web
+```
+
+该示例保留月亮、罐头、米寇和三角；没有外部 driver 配置时仍是本地演示。明确设置 `organization.cabinet_members: []` 并移除内阁投票策略后，复杂任务与 `dispatch` 由店长安排，风险或强制复核由店长的本地规则记录补证/返工，不产生空投票。它尚不提供独立成果验收或智能店长仲裁。既有默认编队不变，配置说明见 [默认与精简编队](docs/roster-policy.md)。
 
 `path` 会汇总单个任务经过的分发、协作、治理和决策步骤。
 

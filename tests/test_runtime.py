@@ -3273,6 +3273,40 @@ class WebTests(unittest.TestCase):
         self.assertEqual(len(profile["availability"]["members"]), 8)
         self.assertEqual(sum(item["status"] == "demo" for item in profile["availability"]["members"]), 7)
 
+    def test_web_supports_compact_members_and_leader_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "compact-web.db")
+            roles = Path(__file__).resolve().parents[1] / "examples" / "compact_roles.json"
+            base = start_test_web(self, db, roles_path=roles)
+            with urlopen(f"{base}/api/organization/profile", timeout=5) as response:
+                profile = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(profile["cabinet"], [])
+            self.assertEqual(len(profile["availability"]["members"]), 5)
+            self.assertEqual(len(profile["workers"]), 4)
+
+            request = Request(
+                f"{base}/api/tasks",
+                data=json.dumps({"goal": "Refactor architecture", "dispatch": True, "run": True}).encode("utf-8"),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(data["task"]["plan"]["source"], "leader")
+            self.assertEqual(data["organization_path"][0]["status"], "leader_dispatch")
+            self.assertFalse(any(event["type"].startswith("cabinet.") for event in data["events"]))
+            self.assertEqual(data["task"]["status"], "decided")
+            self.assertIsNone(data["task"]["cabinet"])
+            request = Request(
+                f"{base}/api/tasks/{data['task']['id']}/battle",
+                data=b"{}", method="POST", headers={"Content-Type": "application/json"},
+            )
+            with urlopen(request, timeout=5) as response:
+                review = json.loads(response.read().decode("utf-8"))
+            self.assertEqual(review["task"]["status"], "rework")
+            self.assertIsNone(review["task"]["cabinet"])
+            self.assertFalse(any(event["type"].startswith("cabinet.") for event in review["events"]))
+
     def test_web_marks_a_partially_connected_team_as_mixed(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = str(Path(tmp) / "web-mixed-drivers.db")

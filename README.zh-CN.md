@@ -116,6 +116,8 @@ cater --audit-key "dev-secret" chain --json
 
 `dispatch` 会记录金字塔式任务分发路径：顶层定义 mission，内阁把 mission 拆成执行 lane，worker agent 在下一轮协作前拿到明确分工。它是可选能力；小任务可以用 `assign` 或 `new --assign-to dev --run` 直接派给执行层。
 
+也支持只配置店长和执行猫咪。在源码目录运行 `python -m cater --roles examples/compact_roles.json web`，可使用月亮、罐头、米寇、三角的精简编队。没有外部 driver 配置时仍为本地演示。`organization.cabinet_members: []` 明确关闭固定中间层，并要求移除内阁投票策略；店长负责派发，风险或强制复核按本地规则记录补证/返工，不生成空投票。这不代表独立成果验收或智能店长仲裁已实现。详见 [编队配置](docs/roster-policy.md)。
+
 `path` 会汇总单个任务经过的分发、协作、治理和决策步骤。
 
 `--driver-attempts` 和 `--circuit-breaker-threshold` 可以调节 driver 重试与熔断策略，不需要改 driver 代码。
