@@ -36,7 +36,7 @@ python -m cater.cli web --port 8766
 远程绑定时，Cater 会要求访问令牌和外部 TLS 边界。先设置 `CATER_WEB_ACCESS_TOKEN`，再用
 `--host 0.0.0.0 --allow-remote` 启动；浏览器首次访问可使用
 `https://你的地址/#access_token=你的令牌`。前端会立即移除地址栏里的片段，并只在当前浏览器会话向同源 API
-发送令牌。详情见仓库根目录 README 的安全说明。
+发送令牌。不要分享含令牌的链接；Cater 不提供 TLS，请将远程服务置于 HTTPS 反向代理、VPN 或等效受控网络边界之后。
 
 开发前端时，可以分别运行 `python -m cater.cli web --port 8766` 与 `pnpm dev`，再访问 `http://127.0.0.1:5173`。Vite 会把开发请求代理给 Cater 的 API。
 
