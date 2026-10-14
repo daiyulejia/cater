@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .assignments import latest_assignments_by_owner
 from .events import ChainReport, Event
 from .fold import TaskSnapshot
 
@@ -11,6 +12,9 @@ from .fold import TaskSnapshot
 LENSES = [
     ("product", "Product"),
     ("design", "Design"),
+    ("distribution", "Distribution"),
+    ("collaboration", "Collaboration"),
+    ("cost", "Cost"),
     ("testing", "Testing"),
     ("ui", "UI"),
     ("logic", "Logic"),
@@ -131,7 +135,7 @@ def _design_lens(tasks: list[TaskSnapshot], events: list[Event]) -> dict[str, st
 
 def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     if not tasks:
-        return _lens("design", "needs_attention", "No task distribution pattern exists yet.", "Create one small task before evaluating distribution weight.")
+        return _lens("distribution", "needs_attention", "No task distribution pattern exists yet.", "Create one small task before evaluating distribution weight.")
     direct = [
         task for task in tasks
         if any(item.get("mode") == "direct" for item in task.assignments)
@@ -146,20 +150,19 @@ def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     ]
     overloaded = [
         task for task in tasks
-        if len(task.assignments) > max(
-            3,
-            len({str(item.get("owner")) for item in task.assignments if item.get("owner")}) + 1,
-            len(task.messages) + 2,
-        )
+        if task.status == "done" and len([
+            item for item in latest_assignments_by_owner(task.assignments)
+            if item.get("status", "assigned") == "assigned"
+        ]) > max(3, len(task.messages) + 2)
     ]
     if overloaded:
-        return _lens("design", "watch", "Some tasks may be carrying more assignment structure than useful output.", "Review whether dispatch is adding ceremony, extra agents, or token cost instead of clarity.")
+        return _lens("distribution", "watch", "Some completed tasks may be carrying more active assignments than useful output.", "Review whether dispatch is adding ceremony, extra agents, or token cost instead of clarity.")
     if unassigned_active:
-        return _lens("design", "watch", "Some executed tasks have no visible assignment path.", "Use direct assign or dispatch when ownership would clarify the work.")
+        return _lens("distribution", "watch", "Some executed tasks have no visible assignment path.", "Use direct assign or dispatch when ownership would clarify the work.")
     if direct and full:
-        return _lens("design", "ok", "Both direct worker assignment and cabinet dispatch are represented.", "Keep lightweight and full distribution paths available; periodically prune redundant layers.")
+        return _lens("distribution", "ok", "Both direct worker assignment and cabinet dispatch are represented.", "Keep lightweight and full distribution paths available; periodically prune redundant layers.")
     if direct:
-        return _lens("design", "watch", "Only direct worker assignment is represented.", "Run one cabinet dispatch on a complex task to verify upper-layer oversight.")
+        return _lens("distribution", "ok", "Only direct worker assignment is represented.", "Keep the lightweight path when ownership is clear; use dispatch only when task dependencies justify it.")
     if full:
         has_dependencies = any(
             item.get("depends_on")
@@ -167,9 +170,11 @@ def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
             for item in task.assignments
         )
         if has_dependencies:
-            return _lens("design", "watch", "Only full cabinet dispatch is represented, with visible dependency structure.", "Use direct assignment for a small task to avoid over-governance and unnecessary token spend.")
-        return _lens("design", "watch", "Only full cabinet dispatch is represented, but no dependency structure is visible.", "Review whether dispatch is adding real sequencing or only ceremony.")
-    return _lens("design", "watch", "Tasks exist but no distribution path is visible.", "Choose direct assignment for simple work or dispatch for complex work.")
+            return _lens("distribution", "ok", "Only full cabinet dispatch is represented, with visible dependency structure.", "Keep dispatch proportional to the dependencies in the actual task.")
+        return _lens("distribution", "watch", "Only full cabinet dispatch is represented, but no dependency structure is visible.", "Review whether dispatch is adding real sequencing or only ceremony.")
+    if any(task.assignments for task in tasks):
+        return _lens("distribution", "ok", "Leader or command assignments record visible ownership.", "Keep the task's current ownership clear; do not require cabinet dispatch merely for coverage.")
+    return _lens("distribution", "watch", "Tasks exist but no distribution path is visible.", "Choose direct assignment for simple work or dispatch for complex work.")
 
 
 def _collaboration_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
@@ -178,13 +183,13 @@ def _collaboration_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
         if len({message.get("actor") for message in task.messages}) > 1
     ]
     if not multi_agent:
-        return _lens("logic", "watch", "No multi-agent exchange is visible yet.", "Run at least two roles before judging third-layer collaboration quality.")
+        return _lens("collaboration", "ok", "No multi-agent exchange is visible; that alone is not a collaboration defect.", "Use additional roles only when the task needs collaboration or independent checking.")
     linked = [
         task for task in multi_agent
         if any(message.get("target") or message.get("reply_to") for message in task.messages)
     ]
     if linked:
-        return _lens("logic", "ok", "At least one worker exchange uses explicit reply metadata.", "Keep replies purposeful; do not turn ordinary work into unnecessary chatter.")
+        return _lens("collaboration", "ok", "At least one worker exchange uses explicit reply metadata.", "Keep replies purposeful; do not turn ordinary work into unnecessary chatter.")
     dependent = [
         task
         for task in multi_agent
@@ -192,13 +197,13 @@ def _collaboration_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     ]
     if dependent:
         return _lens(
-            "logic",
+            "collaboration",
             "watch",
             "Dependent multi-agent work has no explicit worker-to-worker reply.",
             "Use target/reply_to when one agent continues, corrects, or hands off another agent's work.",
         )
     return _lens(
-        "logic",
+        "collaboration",
         "ok",
         "Multiple agents contributed independently; no worker handoff reply was needed.",
         "Keep replies purposeful; parallel work does not need performative chatter.",
@@ -209,20 +214,20 @@ def _cost_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     messages = sum(len(task.messages) for task in tasks)
     tokens = sum(task.tokens for task in tasks)
     if not messages:
-        return _lens("design", "ok", "No token-bearing agent output is recorded yet.", "Measure token cost once real driver output exists.")
+        return _lens("cost", "ok", "No token-bearing agent output is recorded yet.", "Measure token cost once real driver output exists.")
     sources = {source: sum(task.token_usage.get(source, 0) for task in tasks) for source in ("reported", "estimated", "unavailable")}
     unavailable = sources["unavailable"]
     estimated = sources["estimated"]
     if unavailable:
         return _lens(
-            "design",
+            "cost",
             "watch",
             f"Token usage is unavailable for {unavailable} of {messages} message(s); the recorded {tokens} token(s) is incomplete.",
             "Treat cost as unknown until the connected driver reports verified usage telemetry.",
         )
     if estimated:
         return _lens(
-            "design",
+            "cost",
             "watch",
             f"Token usage is estimated for {estimated} of {messages} message(s); {tokens} token(s) is not a billing total.",
             "Use provider-reported usage before making cost decisions from this workspace.",
@@ -233,14 +238,14 @@ def _cost_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     )
     if failed_attempts:
         return _lens(
-            "design", "watch",
+            "cost", "watch",
             f"Recorded outputs report {tokens} token(s), but usage for {failed_attempts} failed driver attempt(s) is unknown.",
             "Reconcile provider usage for failed attempts before treating recorded output tokens as a complete cost total.",
         )
     average = tokens / messages
     if tokens >= 4000 or average >= 1500:
-        return _lens("design", "watch", f"Agent output used {tokens} token(s) across {messages} message(s).", "Review whether fewer roles, direct assignment, or a smaller prompt would preserve quality with less cost.")
-    return _lens("design", "ok", f"Agent output cost is currently {tokens} token(s) across {messages} message(s).", "Keep monitoring token cost as driver prompts and memory grow.")
+        return _lens("cost", "watch", f"Agent output used {tokens} token(s) across {messages} message(s).", "Review whether fewer roles, direct assignment, or a smaller prompt would preserve quality with less cost.")
+    return _lens("cost", "ok", f"Agent output cost is currently {tokens} token(s) across {messages} message(s).", "Keep monitoring token cost as driver prompts and memory grow.")
 
 
 def _testing_lens(tasks: list[TaskSnapshot], chain: ChainReport) -> dict[str, str]:
@@ -277,9 +282,9 @@ def _logic_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     if governed and skipped:
         return _lens("logic", "ok", "Both normal collaboration and governance paths are represented.", "Keep triggers configurable and explainable.")
     if governed:
-        return _lens("logic", "watch", "Only governance-heavy paths are represented.", "Add or run a low-risk collaboration task that skips cabinet.")
+        return _lens("logic", "watch", "Only governance-heavy paths are represented; trigger proportionality needs review.", "Inspect the recorded risk signals and whether each escalation was necessary; do not manufacture another task for path coverage.")
     if skipped:
-        return _lens("logic", "watch", "Only non-governed collaboration is represented.", "Force one governance round to verify the escalation path.")
+        return _lens("logic", "ok", "Normal collaboration completed without requiring governance.", "Escalate when actual disagreement or risk justifies it; validate escalation behavior in tests, not by forcing a customer task.")
     return _lens("logic", "needs_attention", "No collaboration or governance path has completed.", "Run a task before evaluating the organization logic.")
 
 
@@ -313,7 +318,7 @@ def _adoption_lens(tasks: list[TaskSnapshot], profiles: dict[str, dict[str, Any]
     if not profiles:
         return _lens("adoption", "needs_attention", "No agent profiles exist yet.", "Run the demo or first collaboration round before presenting the project.")
     if len(profiles) < 2:
-        return _lens("adoption", "watch", "Only one active agent profile is visible.", "Use at least two roles to demonstrate team behavior.")
+        return _lens("adoption", "ok", "One active agent profile is visible.", "Choose team size for the actual work, not to manufacture multi-agent coverage.")
     if not tasks:
         return _lens("adoption", "needs_attention", "Profiles exist without task context.", "Export a replay bundle for contributors.")
     return _lens("adoption", "ok", "Multiple agent profiles are visible.", "Keep README examples runnable with zero services.")

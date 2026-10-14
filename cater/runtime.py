@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from importlib import resources
@@ -122,17 +123,27 @@ class DriverHealth:
 
     def __init__(self) -> None:
         self._failures: dict[str, int] = {}
+        self._observations: dict[str, tuple[str, float]] = {}
         self._lock = threading.Lock()
 
     def record_success(self, driver_name: str) -> None:
         with self._lock:
             self._failures[driver_name] = 0
+            self._observations[driver_name] = ("succeeded", time.monotonic())
 
     def record_failure(self, driver_name: str) -> int:
         with self._lock:
             failures = self._failures.get(driver_name, 0) + 1
             self._failures[driver_name] = failures
+            self._observations[driver_name] = ("failed", time.monotonic())
             return failures
+
+    def recent_state(self, driver_name: str, *, max_age: float = 300) -> str:
+        with self._lock:
+            observation = self._observations.get(driver_name)
+            if observation is None or time.monotonic() - observation[1] > max_age:
+                return "unverified"
+            return observation[0]
 
     def is_circuit_open(self, driver_name: str, threshold: int) -> bool:
         with self._lock:

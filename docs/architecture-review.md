@@ -57,6 +57,8 @@ Prefer the lightest path that preserves ownership, observability, and recovery.
 
 ## Desired Shape
 
+Task review is not integration-test coverage. A healthy direct assignment or low-risk collaboration must not create a recommendation to force cabinet dispatch, add extra agents, or manufacture disagreement. Validate escalation with tests; inspect recorded triggers when an actual task needs governance. Generated reviews now use distinct `distribution`, `collaboration`, and `cost` lens IDs rather than reusing `design` or `logic`. Previously recorded reviews remain immutable.
+
 Cater should feel like an autonomous team with proportional process:
 
 - direct when obvious

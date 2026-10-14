@@ -17,6 +17,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .assignments import latest_assignments_by_owner
+from .availability import team_availability
 from .drivers import driver_mode
 from .events import Actor as EventActor, Event
 from .fold import TaskSnapshot
@@ -435,6 +436,7 @@ def make_handler(
                                 else "external_driver" if modes <= {"external"} else "mixed_driver"
                             ),
                             "worker_drivers": worker_drivers,
+                            "availability": team_availability(rt),
                         }
                     )
             if path == "/api/chain":

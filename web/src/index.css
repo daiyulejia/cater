@@ -116,6 +116,17 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible { outline: 2
 .team-roster-full { padding: 18px 14px; }
 
 .artifact-overlay { position: fixed; inset: 0; z-index: 60; background: rgba(34, 53, 45, .32); }
+.team-directory { position: fixed; top: 32px; bottom: 32px; left: 50%; z-index: 61; width: min(1040px, calc(100vw - 64px)); transform: translateX(-50%); border-top: 5px solid #c9745a; border-radius: 8px; background: #f8fbf6; box-shadow: 0 16px 64px rgba(39, 56, 44, .24); }
+.team-directory > header { background: #fffbf4; }
+.team-directory > div { scrollbar-width: thin; scrollbar-color: #c3d7ce transparent; }
+.team-member { border: 1px solid #e4d8c7; border-radius: 8px; background: #fffaf0; box-shadow: 0 3px 0 rgba(135, 105, 72, .08); }
+.team-member:nth-child(2n) { background: #eef6f3; border-color: #d1e3dc; }
+.team-member:nth-child(3n) { background: #eff5fb; border-color: #d5e2ee; }
+.team-member-on_leave { border-style: dashed; }
+.team-state-available { color: #2e7a60; }
+.team-state-demo { color: #a9783c; }
+.team-state-on_leave { color: #ad6254; }
+.team-state-unverified { color: #778b90; }
 .artifact-reader { position: fixed; inset: 0 0 0 auto; z-index: 61; width: min(900px, 100vw); height: 100dvh; background: #fffdf8; color: #2d493e; box-shadow: -12px 0 40px rgba(39, 56, 44, .18); }
 .artifact-toolbar { border-top: 5px solid #c9745a; border-bottom: 1px solid #e4d9cb; background: #fff5eb; }
 .artifact-tool { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid transparent; border-radius: 6px; color: #6b8375; }
@@ -154,6 +165,7 @@ button:focus-visible, summary:focus-visible, textarea:focus-visible { outline: 2
 }
 
 @media (max-width: 639px) {
+  .team-directory { top: 0; bottom: 0; width: 100vw; border-radius: 0; }
   .welcome-scene { height: 180px; }
   .welcome-scene img { object-position: 52% 42%; }
 }

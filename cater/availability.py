@@ -1,0 +1,45 @@
+"""Non-invasive team availability; never probes models or guesses account balances."""
+
+from __future__ import annotations
+
+import os
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
+
+from .drivers import OpenAICompatibleDriver, driver_mode
+from .usage import valid_token_count
+
+if TYPE_CHECKING:
+    from .runtime import Runtime
+
+
+def team_availability(rt: Runtime) -> dict[str, Any]:
+    totals: dict[str, int] = {}
+    for event in rt.log.read():
+        if event.type in {"msg.said", "msg.challenge"} and event.payload.get("token_usage") == "reported" and valid_token_count(event.payload.get("tokens")):
+            name = event.payload.get("driver")
+            if isinstance(name, str):
+                totals[name] = totals.get(name, 0) + event.payload["tokens"]
+    members = [{"role_id": rt.organization.leader.id, "status": "available", "reason": "local_policy"}]
+    states = {}
+    for role in {role.id: role for role in [*rt.cabinet_roles, *rt.worker_roles]}.values():
+        if role.driver not in states:
+            driver = rt.drivers.get(role.driver)
+            budget = getattr(driver, "token_budget", None)
+            if driver is None:
+                state = ("on_leave", "not_configured")
+            elif valid_token_count(budget) and totals.get(role.driver, 0) >= budget:
+                state = ("on_leave", "budget_exhausted")
+            elif isinstance(driver, OpenAICompatibleDriver) and not os.environ.get(driver.api_key_env):
+                state = ("on_leave", "missing_key")
+            elif rt._is_circuit_open(role.driver):
+                state = ("on_leave", "circuit_open")
+            elif driver_mode(driver) == "local_demo":
+                state = ("demo", "local_demo")
+            else:
+                recent = rt._driver_health.recent_state(role.driver)
+                state = ("available", "recent_success") if recent == "succeeded" else ("on_leave", "recent_failure") if recent == "failed" else ("unverified", "not_recently_checked")
+            states[role.driver] = state
+        status, reason = states[role.driver]
+        members.append({"role_id": role.id, "status": status, "reason": reason})
+    return {"checked_at": datetime.now(timezone.utc).isoformat(), "members": members, "all_available": all(item["status"] == "available" for item in members)}

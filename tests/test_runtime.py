@@ -3269,6 +3269,9 @@ class WebTests(unittest.TestCase):
         self.assertTrue(profile["workers"][0]["charter"])
         self.assertEqual(profile["mode"], "local_demo")
         self.assertTrue(all(item["mode"] == "local_demo" for item in profile["worker_drivers"]))
+        self.assertFalse(profile["availability"]["all_available"])
+        self.assertEqual(len(profile["availability"]["members"]), 8)
+        self.assertEqual(sum(item["status"] == "demo" for item in profile["availability"]["members"]), 7)
 
     def test_web_marks_a_partially_connected_team_as_mixed(self):
         with tempfile.TemporaryDirectory() as tmp:

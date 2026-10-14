@@ -10,6 +10,8 @@ import { ArtifactPreview } from './Artifact'
 import type { Artifact } from './Artifact'
 import { WorkboardPanel } from './WorkboardPanel'
 import { MentionInput } from './MentionInput'
+import { TeamDirectory } from './TeamDirectory'
+import type { TeamAvailability } from './TeamDirectory'
 
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
 type Message = { seq: number; actor: string; role: string; type: string; claim?: string; text?: string; stance?: string; target?: string; reply_to?: number }
@@ -22,7 +24,7 @@ type DisciplineFlag = { seq: number; role?: string; message_seq?: number; issues
 type MemoryItem = { seq: number; task_id?: string; actor?: string; title: string; summary: string; kind?: string }
 type OrgRole = { id: string; name: string; role: string; charter?: string }
 type DriverCoverage = { role_id: string; name: string; driver: string; mode: 'local_demo' | 'external' }
-type Organization = { leader: OrgRole; cabinet: OrgRole[]; workers: OrgRole[]; mode?: 'local_demo' | 'mixed_driver' | 'external_driver'; worker_drivers?: DriverCoverage[] }
+type Organization = { leader: OrgRole; cabinet: OrgRole[]; workers: OrgRole[]; mode?: 'local_demo' | 'mixed_driver' | 'external_driver'; worker_drivers?: DriverCoverage[]; availability?: TeamAvailability }
 type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'; active: boolean; error?: string; follow_up?: { action?: string } }
 type Task = {
   id: string; goal: string; acceptance: string[]; status: string; messages: Message[]; assignments: Assignment[]
@@ -125,7 +127,7 @@ function disciplineText(issues?: string[]): string {
 
 const diagnosisStatusText = (status: Diagnosis['status']) => ({ hypothesis: '待证实假设', reported: '成员称已证实，待独立核验', confirmed: '成员称已证实，待独立核验', uncertain: '仍不确定' }[status])
 
-function Portrait({ id, size = 'md' }: { id: string; size?: 'sm' | 'md' | 'lg' }) {
+function Portrait({ id, size = 'md' }: { id: string; size?: 'sm' | 'md' | 'lg' | 'xl' }) {
   const catPosition: Record<string, string> = { product: '0% 0%', test: '100% 0%', dev: '0% 100%', design: '100% 100%' }
   const staffPosition: Record<string, string> = {
     store_manager: '0% 0%', orchestrator: '0% 0%', leader: '0% 0%',
@@ -133,7 +135,7 @@ function Portrait({ id, size = 'md' }: { id: string; size?: 'sm' | 'md' | 'lg' }
     caretaker_engineering: '0% 100%', cabinet_engineering: '0% 100%',
     caretaker_quality: '100% 100%', cabinet_quality: '100% 100%',
   }
-  const dimensions = ({ sm: 'size-8', md: 'size-10', lg: 'size-14' }[size])
+  const dimensions = ({ sm: 'size-8', md: 'size-10', lg: 'size-14', xl: 'size-24' }[size])
   const image = catPosition[id] ? catPortraits : staffPosition[id] ? staffPortraits : null
   const position = catPosition[id] ?? staffPosition[id]
   if (!image) return <span className={`grid ${dimensions} shrink-0 place-items-center rounded-full border-2 border-white bg-[#dce9e4] text-[#247468] shadow-sm`} aria-hidden="true"><Cat size={size === 'lg' ? 22 : 16} /></span>
@@ -299,6 +301,12 @@ function App() {
   const [showMobileBoard, setShowMobileBoard] = useState(false)
   const [tasksCollapsed, setTasksCollapsed] = useState(false)
   const [membersCollapsed, setMembersCollapsed] = useState(false)
+  const [teamOpen, setTeamOpen] = useState(false)
+  const [teamRefreshing, setTeamRefreshing] = useState(false)
+  const [teamError, setTeamError] = useState('')
+  const profileBusy = useRef(false)
+  const profileAbort = useRef<AbortController | null>(null)
+  const profileMounted = useRef(true)
   const [chainStatus, setChainStatus] = useState<ChainStatus | null>(null)
   const [checkingChain, setCheckingChain] = useState(false)
   const [chatFilter, setChatFilter] = useState<'all' | ChatItem['category']>('all')
@@ -365,7 +373,35 @@ function App() {
       setRoles(nextRoles)
     }).catch((err: unknown) => setError(userFacingError(err, '暂时无法读取团队信息。')))
   }, [])
-  useEffect(() => { void api<Organization>('/api/organization/profile').then(setOrganization).catch((err: unknown) => setError(userFacingError(err, '暂时无法读取团队配置。'))) }, [])
+  const refreshOrganization = useCallback(async () => {
+    if (profileBusy.current) return
+    profileBusy.current = true
+    const controller = new AbortController()
+    profileAbort.current = controller
+    const timeout = window.setTimeout(() => controller.abort(), 8000)
+    setTeamRefreshing(true)
+    try {
+      const next = await api<Organization>('/api/organization/profile', { signal: controller.signal })
+      if (profileMounted.current) { setOrganization(next); setTeamError('') }
+    } catch {
+      if (profileMounted.current) {
+        setTeamError('暂时无法读取伙伴状态，请稍后重试。')
+        setOrganization((current) => current ? { ...current, availability: undefined } : current)
+      }
+    } finally {
+      window.clearTimeout(timeout)
+      profileBusy.current = false
+      if (profileMounted.current) setTeamRefreshing(false)
+    }
+  }, [])
+  useEffect(() => {
+    profileMounted.current = true
+    const refreshVisible = () => { if (document.visibilityState !== 'hidden') void refreshOrganization() }
+    const initial = window.setTimeout(refreshVisible, 0)
+    const timer = window.setInterval(refreshVisible, 60000)
+    document.addEventListener('visibilitychange', refreshVisible)
+    return () => { profileMounted.current = false; profileAbort.current?.abort(); window.clearTimeout(initial); window.clearInterval(timer); document.removeEventListener('visibilitychange', refreshVisible) }
+  }, [refreshOrganization])
   useEffect(() => {
     if (!selectedId) return
     let cancelled = false
@@ -493,6 +529,7 @@ function App() {
           <div className="min-w-0"><strong className="block text-[19px] font-extrabold leading-5 text-[#713f34]">Cater</strong><span className="mt-1 block text-[11px] font-semibold text-[#a9604f]">有猫的工作间</span></div>
         </div>
         <div className="flex items-center gap-2 text-xs">
+          <TeamDirectory members={team} availability={organization?.availability} open={teamOpen} onOpenChange={setTeamOpen} refreshing={teamRefreshing} error={teamError} onRefresh={() => void refreshOrganization()} portrait={(id) => <Portrait id={id} size="xl" />} onMention={(name) => { if (task) setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${name} `); else setDraft((current) => `${current.trim()}${current.trim() ? ' ' : ''}@${name} `) }} />
           <span className={`max-w-32 truncate rounded-md px-2.5 py-1.5 text-[11px] font-medium sm:max-w-none ${driverModeStyle(organization?.mode)}`} title="具体成员状态可在工作板查看。">{driverModeText(organization?.mode)}</span>
           <button type="button" onClick={() => void verifyChain()} disabled={checkingChain} className={`inline-flex size-8 items-center justify-center rounded-md hover:bg-[#e7f0ec] sm:w-auto sm:gap-1 sm:px-2 ${chainStatus && !chainStatus.ok ? 'text-rose-700' : 'text-[#34786e]'}`} aria-label={checkingChain ? '正在核验事件链' : chainStatus ? chainStatus.ok ? `上次核验通过，共 ${chainStatus.checked} 条事件` : `事件链异常，事件 #${chainStatus.broken_at ?? '?'}` : '核验事件链'} title={chainStatus?.reason || '点击核验事件链；显示的是上次核验结果'}><ShieldCheck size={17} /><span className="hidden sm:inline">{checkingChain ? '正在核验' : chainStatus ? chainStatus.ok ? `已核验 ${chainStatus.checked} 条` : `链异常 · #${chainStatus.broken_at ?? '?'}` : '核验事件链'}</span></button>
         </div>
@@ -501,7 +538,7 @@ function App() {
         <aside className="task-sidebar min-h-0 lg:flex lg:flex-col lg:overflow-y-auto">
           <div className="flex items-center justify-between px-4 pb-2 pt-4"><div><span className="text-[11px] font-semibold text-[#a56b56]">正在聊</span><h2 className="flex items-center gap-1.5 text-base font-bold"><PawPrint size={17} className="text-[#c36550]" /> 我的任务 <span className="text-xs font-medium text-[#a98e81]">{tasks.length}</span></h2></div><div className="flex gap-2"><button type="button" onClick={() => setTasksCollapsed(!tasksCollapsed)} aria-controls="task-list" aria-expanded={!tasksCollapsed} aria-label={tasksCollapsed ? '展开任务列表' : '收起任务列表'} title={tasksCollapsed ? '展开任务列表' : '收起任务列表'} className="grid size-9 place-items-center rounded-md text-[#a9604f] hover:bg-[#fff5eb] lg:hidden"><ChevronDown size={18} className={tasksCollapsed ? '' : 'rotate-180'} /></button><button className="grid size-9 place-items-center rounded-md border border-[#ead2c5] bg-white text-[#b15342] shadow-sm hover:bg-[#fff0e9]" title="新建任务" aria-label="新建任务" onClick={() => chooseTask(null)}><Plus size={18} /></button></div></div>
           <nav id="task-list" className={`flex gap-2 overflow-x-auto px-3 pb-3 lg:block lg:space-y-2 ${tasksCollapsed ? 'mobile-collapsed' : ''} ${task ? 'lg:min-h-0 lg:flex-1 lg:overflow-x-hidden lg:overflow-y-auto' : 'lg:overflow-visible'}`} aria-label="任务列表">{tasks.slice().reverse().map((item) => <button key={item.id} onClick={() => chooseTask(item.id)} aria-current={item.id === selectedId ? 'page' : undefined} className={`task-item min-w-52 px-3 py-3 text-left lg:min-w-0 lg:w-full ${item.id === selectedId ? 'is-active' : ''}`}><div className="flex items-start gap-2"><CircleDot size={15} className={`mt-0.5 shrink-0 ${item.status === 'done' ? 'text-emerald-600' : 'text-[#c2634d]'}`} /><span className="line-clamp-2 text-[13px] font-semibold leading-5">{item.goal}</span></div><div className="mt-2 flex items-center gap-2 pl-[23px] text-[11px] text-[#7c918b]"><span>{item.messages.length} 条对话 · {taskListStatus(item)}</span>{drafts[item.id]?.trim() && <span title="有未发送内容" role="img" aria-label="有未发送内容" className="text-[#b65f49]"><FilePenLine size={13} /></span>}</div></button>)}</nav>
-          <div className="hidden lg:block">{task ? <TeamRoster members={team} compact /> : <TeamRoster members={team} onMention={(name) => { setDraft((current) => `${current.trim()}${current.trim() ? ' ' : ''}@${name} `); document.getElementById('new-task')?.focus() }} />}</div>
+          <div className="hidden lg:block"><TeamRoster members={team} compact onOpen={() => { setTeamOpen(true); void refreshOrganization() }} /></div>
         </aside>
         <section className="chat-pane flex min-h-0 flex-col">
           {task ? <>
@@ -557,12 +594,12 @@ function ChatBubble({ item }: { item: ChatItem }) {
   </article>
 }
 
-function TeamRoster({ members, compact = false, onMention }: { members: OrgRole[]; compact?: boolean; onMention?: (name: string) => void }) {
+function TeamRoster({ members, compact = false, onMention, onOpen }: { members: OrgRole[]; compact?: boolean; onMention?: (name: string) => void; onOpen?: () => void }) {
   const identity = (id: string) => id === 'store_manager' || id === 'orchestrator' || id === 'leader' ? '店长' : id.startsWith('caretaker_') || id.startsWith('cabinet_') ? '铲屎官' : '猫咪'
   const cats = members.filter((member) => identity(member.id) === '猫咪')
   const staff = members.filter((member) => identity(member.id) !== '猫咪')
   return <section className={compact ? 'team-roster-compact p-4' : 'team-roster-full'}>
-    <div className="mb-3 flex items-center gap-2 text-[#a85643]"><Cat size={18} /><h2 className="text-[13px] font-bold">今天在店里</h2><span className="ml-auto text-[11px] text-[#a99080]">{members.length} 位伙伴</span></div>
+    <button type="button" onClick={onOpen} className="mb-3 flex w-full items-center gap-2 text-[#a85643]" aria-label="打开伙伴页"><Cat size={18} /><span className="text-[13px] font-bold">今天在店里</span><span className="ml-auto text-[11px] text-[#a99080]">{members.length} 位伙伴</span></button>
     {compact ? <><div className="flex flex-wrap gap-1.5">{[...cats, ...staff].map((member) => <span key={member.id} title={`${member.name} · ${identity(member.id)}`}><Portrait id={member.id} size="sm" /></span>)}</div><p className="mt-2 text-[11px] leading-5 text-[#92796b]">{cats.map((member) => member.name).join(' · ') || '猫咪们正在准备'}</p></> : <><div className="grid grid-cols-1 gap-2">{cats.map((member) => <button key={member.id} type="button" onClick={() => onMention?.(member.name)} className="cat-member flex items-center gap-3 px-3 py-2 text-left" title={`在新任务中点名 ${member.name}`} aria-label={`点名 ${member.name}`}><Portrait id={member.id} size="lg" /><div className="min-w-0"><strong className="block text-[13px]">{member.name}</strong><span className="text-[11px] text-[#9d7869]">猫咪 · 点名聊聊</span></div></button>)}</div>{staff.length > 0 && <div className="mt-5 border-t border-[#e3e2d7] pt-3"><h3 className="mb-1 text-[11px] font-semibold text-[#93796b]">店里还有</h3>{staff.map((member) => <div key={member.id} className="flex items-center gap-3 border-b border-[#e6e9dd] py-2 last:border-0"><Portrait id={member.id} size="sm" /><strong className="text-[12px]">{member.name}</strong><span className="ml-auto text-[11px] text-[#9d8e7f]">{identity(member.id)}</span></div>)}</div>}</>}
   </section>
 }
