@@ -517,9 +517,13 @@ def _doctor_report(rt: Runtime, args: argparse.Namespace, *, probe: bool) -> dic
     report = rt.verify_chain()
     role_checks = []
     ok = report.ok
-    for role in rt.roles:
+    roles = list(rt.roles)
+    if rt.organization.leader.driver is not None:
+        roles.insert(0, rt.organization.leader)
+    for role in roles:
         driver = rt.drivers.get(role.driver)
         status = "configured" if driver is not None else "missing"
+        ok = ok and driver is not None
         probe_result = None
         if probe and driver is not None:
             probe_fn = getattr(driver, "probe", None)
@@ -540,7 +544,7 @@ def _doctor_report(rt: Runtime, args: argparse.Namespace, *, probe: bool) -> dic
         "ok": ok,
         "cater": __version__,
         "database": str(Path(args.db or DEFAULT_DB)),
-        "roles": len(rt.roles),
+        "roles": len(roles),
         "drivers": len(rt.drivers),
         "chain": {
             "ok": report.ok,

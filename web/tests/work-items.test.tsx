@@ -14,6 +14,30 @@ const work: WorkState = {
 }
 
 describe('work item progress', () => {
+  it.each<{ label: string; value?: WorkState | null }>([
+    { label: 'missing', value: undefined },
+    { label: 'null', value: null },
+    { label: 'empty', value: { plan_seq: null, stage_accepted: false, items: [] } },
+  ])('keeps the progress heading and an accurate empty state for $label work', ({ value }) => {
+    render(<WorkItems work={value} names={{}} />)
+    expect(screen.getByRole('heading', { name: '工作进展' })).toBeTruthy()
+    expect(screen.getByText('此任务尚无工作项与验收记录')).toBeTruthy()
+    expect(screen.queryByText(/项通过|阶段验收已通过|方向或店规已更新|要求与安排/)).toBeNull()
+    expect(screen.queryByRole('list')).toBeNull()
+    expect(screen.queryByRole('button')).toBeNull()
+  })
+
+  it('replaces the empty state when work arrives and restores it when changing to a task without work', () => {
+    const view = render(<WorkItems work={null} names={{}} />)
+    view.rerender(<WorkItems work={work} names={{}} />)
+    expect(screen.queryByText('此任务尚无工作项与验收记录')).toBeNull()
+    expect(screen.getByText('0 / 2 项通过')).toBeTruthy()
+    view.rerender(<WorkItems work={null} names={{}} />)
+    expect(screen.getByText('此任务尚无工作项与验收记录')).toBeTruthy()
+    expect(screen.queryByText('交付登录入口')).toBeNull()
+    expect(screen.queryByText('0 / 2 项通过')).toBeNull()
+  })
+
   it('keeps independent items owned by the same member and distinguishes submission from acceptance', () => {
     render(<WorkItems work={work} names={{ dev: '米寇', test: '三角' }} />)
     expect(screen.getByText('交付登录入口')).toBeTruthy()

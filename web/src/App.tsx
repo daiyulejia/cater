@@ -557,10 +557,10 @@ function App() {
   return (
     <div className="cater-app text-[#253d38]">
       <header className="app-header flex h-[72px] items-center justify-between px-4 sm:px-6">
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="brand-mark grid size-11 shrink-0 place-items-center rounded-lg text-white"><Cat size={23} strokeWidth={2.2} /></div>
-          <div className="min-w-0"><strong className="block text-[19px] font-extrabold leading-5 text-[#713f34]">Cater</strong><span className="mt-1 block text-[11px] font-semibold text-[#a9604f]">有猫的工作间</span></div>
-        </div>
+        <button type="button" onClick={() => chooseTask(null)} aria-label="Cater · 返回新对话" title="返回新对话" className="brand-home flex min-w-0 items-center gap-3 rounded-lg text-left">
+          <span className="brand-mark grid size-11 shrink-0 place-items-center rounded-lg text-white"><Cat size={23} strokeWidth={2.2} /></span>
+          <span className="min-w-0"><strong className="block text-[19px] font-extrabold leading-5 text-[#713f34]">Cater</strong><span className="mt-1 block text-[11px] font-semibold text-[#a9604f]">有猫的工作间</span></span>
+        </button>
         <div className="flex items-center gap-2 text-xs">
           <TeamDirectory members={team} availability={organization?.availability} open={teamOpen} onOpenChange={setTeamOpen} refreshing={teamRefreshing} error={teamError} onRefresh={() => void refreshOrganization()} portrait={(id) => <Portrait id={id} size="xl" />} onMention={(name) => { if (task) setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${name} `); else setDraft((current) => `${current.trim()}${current.trim() ? ' ' : ''}@${name} `) }} />
           <span className={`max-w-32 truncate rounded-md px-2.5 py-1.5 text-[11px] font-medium sm:max-w-none ${driverModeStyle(organization?.mode)}`} title="具体成员状态可在工作板查看。">{driverModeText(organization?.mode)}</span>
@@ -600,7 +600,7 @@ function App() {
           </> : <><EmptyConversation onChoose={setDraft} members={team} />{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
-        {task && <WorkboardPanel open={showMobileBoard} onOpenChange={setShowMobileBoard}>
+        {task && <WorkboardPanel taskId={task.id} open={showMobileBoard} onOpenChange={setShowMobileBoard}>
           {currentDetail ? <><WorkItems work={task.work} names={names} /><VerificationBoard items={task.verifications ?? []} /><Workboard task={task} detail={currentDetail} names={names} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />{Boolean(currentDetail.organization_memory?.length) && <details className="mt-5 border-t border-[#dce8e1] pt-4"><summary className="cursor-pointer text-xs font-semibold text-[#52766d]">猫咖记忆 · {currentDetail.organization_memory?.length} 项</summary><div className="mt-3"><MemoryBoard items={currentDetail.organization_memory ?? []} names={names} /></div></details>}</> : <p className="text-xs leading-6 text-[#74897d]">正在读取这件事的成果与过程。</p>}
         </WorkboardPanel>}
       </main>

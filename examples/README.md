@@ -154,6 +154,38 @@ cater --roles examples/layered_api_roles.json --drivers examples/layered_api_dri
 同一个 driver 被多个角色引用时，会共享该通道的账户、模型、速率限制和 token 预算；
 是否拆分，取决于权限隔离、成本归属和模型专长，而不是角色数量。
 
+### 店长与全员共用一个 API 通道
+
+成对使用 [`single_api_roles.json`](single_api_roles.json) 和
+[`single_api_driver_config.json`](single_api_driver_config.json)：店长、三位顾问和四位执行成员
+均显式绑定 `shared_api`，只使用 `CATER_SHARED_API_KEY` 一个密钥环境变量。
+店长的绑定位于 `organization.leader.driver`；省略它会走本地规则，不会自动沿用成员的 API。
+这些是独立模板，不改变仓库默认配置；运行时仍会合并保留默认驱动，但这八个角色都使用 `shared_api`。
+
+在项目根目录先执行离线检查（`python` 不可用时换成实际解释器路径）：
+
+```powershell
+python -B -m unittest discover -s tests -p test_single_api_setup.py -v
+python -B -m cater --db :memory: --roles examples/single_api_roles.json --drivers examples/single_api_driver_config.json doctor
+```
+
+回归测试隔离环境变量、阻断网络、使用内存数据库，不读取真实密钥。`doctor` 只检查配置与事件链，
+不验证连通性或供应商余额。缺失或空密钥时全员为 `on_leave / missing_key`，仅设置密钥仍为 `unverified`。
+
+准备实际接入时，将 `endpoint` 换成供应商公开的完整 Chat Completions HTTPS URL（通常以
+`/v1/chat/completions` 结尾，不能只填 base URL），将 `model` 换成模型 ID；模板的 `.invalid`
+地址不可用于真实请求。驱动使用 Bearer 认证，读取 `choices[0].message.content`，模型需按提示返回
+Cater 所需的 JSON。在本机安全设置 `CATER_SHARED_API_KEY`，再启动：
+
+```powershell
+python -B -m cater --roles examples/single_api_roles.json --drivers examples/single_api_driver_config.json web --port 8766
+```
+
+密钥不要写入 JSON、仓库或聊天。实际运行任务会调用模型并可能收费，第一轮接入验收见
+[模型试跑说明](../docs/model-trial.zh-CN.md)。本模板未设置 `token_budget`；如自行添加，
+它只按当前事件库中该通道的已报告 token 用量限制后续调用，店长与全员共用，
+**不是供应商余额，也不是严格成本上限**，具体限制见下一节。
+
 ### Token 统计与预算含义
 
 CLI 明确返回非负整数 `tokens` 时，默认视为适配器报告；可通过 `meta.token_usage: "estimated"` 标为估算。

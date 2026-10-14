@@ -3,6 +3,7 @@ import unittest
 from cater.runtime import Runtime
 from cater.fold import TaskSnapshot
 from cater.review import _distribution_lens
+from test_work import item
 
 
 class ReviewSemanticsTests(unittest.TestCase):
@@ -45,3 +46,37 @@ class ReviewSemanticsTests(unittest.TestCase):
         lens = _distribution_lens([task])
         self.assertEqual(lens["status"], "watch")
         self.assertIn("active assignments", lens["finding"])
+
+    def test_work_plan_ownership_does_not_require_duplicate_legacy_assignments(self):
+        with Runtime(":memory:") as rt:
+            task = rt.create_task("同一成员承担多个工作项")
+            rt.plan_work(task, [item("first"), item("second", deps=["first"])])
+            rt.collaborate(task)
+            snapshot = rt.task(task)
+            self.assertEqual(snapshot.assignments, [])
+            self.assertTrue(snapshot.messages)
+            lens = next(lens for lens in rt.review(task)["lenses"] if lens["id"] == "distribution")
+            self.assertEqual(lens["status"], "ok")
+            self.assertIn("Work items", lens["finding"])
+
+    def test_stale_work_plan_requires_replanning_not_more_legacy_dispatch(self):
+        with Runtime(":memory:") as rt:
+            task = rt.create_task("原始目标")
+            rt.plan_work(task, [item("first")])
+            rt.command(task, "补充一个新要求")
+            lens = next(lens for lens in rt.review(task)["lenses"] if lens["id"] == "distribution")
+            self.assertEqual(lens["status"], "watch")
+            self.assertIn("no longer match", lens["finding"])
+            self.assertNotIn("Use direct assign", lens["action"])
+
+    def test_planning_receipt_does_not_count_as_executed_unassigned_work(self):
+        task = TaskSnapshot(id="planning", messages=[{"actor": "store_manager", "phase": "planning"}])
+        lens = _distribution_lens([task])
+        self.assertNotIn("Some executed tasks", lens["finding"])
+
+    def test_planned_task_does_not_hide_another_unassigned_execution(self):
+        planned = TaskSnapshot(id="planned", work={"items": [item("first")], "scope_current": True})
+        unassigned = TaskSnapshot(id="unassigned", messages=[{"actor": "dev"}])
+        lens = _distribution_lens([planned, unassigned])
+        self.assertEqual(lens["status"], "watch")
+        self.assertIn("no visible assignment path", lens["finding"])

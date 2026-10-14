@@ -4,10 +4,49 @@ import { expect, test, vi } from 'vitest'
 import { WorkboardPanel } from '../src/WorkboardPanel'
 import { ArtifactPreview } from '../src/Artifact'
 
-function Workroom() {
+function Workroom({ taskId = 'task-a' }: { taskId?: string }) {
   const [open, setOpen] = useState(false)
-  return <><button id="workboard-trigger" onClick={() => setOpen(true)}>成果</button><textarea aria-label="草稿" defaultValue="继续看看" /><WorkboardPanel open={open} onOpenChange={setOpen}><ArtifactPreview item={{ seq: 7, title: '猫咖成果', summary: '摘要', content: '这是成果正文', format: 'text' }} /></WorkboardPanel></>
+  return <><button id="workboard-trigger" onClick={() => setOpen(true)}>成果</button><textarea aria-label="草稿" defaultValue="继续看看" /><WorkboardPanel taskId={taskId} open={open} onOpenChange={setOpen}><ArtifactPreview item={{ seq: 7, title: '猫咖成果', summary: '摘要', content: '这是成果正文', format: 'text' }} /></WorkboardPanel></>
 }
+
+test('桌面标题位于滚动区外，同任务更新保留位置，仅切任务时复位', () => {
+  vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })))
+  const onOpenChange = vi.fn()
+  const view = render(<WorkboardPanel taskId="task-a" open={false} onOpenChange={onOpenChange}><p>甲任务成果</p></WorkboardPanel>)
+  const panel = screen.getByRole('complementary', { name: '成果与过程' })
+  const content = screen.getByText('甲任务成果').parentElement!
+  const heading = within(panel).getByRole('heading', { name: '成果与过程' })
+  expect(content.parentElement).toBe(panel)
+  expect(heading.parentElement?.parentElement).toBe(panel)
+  expect(content.contains(heading)).toBe(false)
+  content.scrollTop = 320
+
+  view.rerender(<WorkboardPanel taskId="task-a" open={false} onOpenChange={onOpenChange}><p>甲任务更新后的成果</p></WorkboardPanel>)
+  expect(screen.getByText('甲任务更新后的成果').parentElement).toBe(content)
+  expect(content.scrollTop).toBe(320)
+
+  view.rerender(<WorkboardPanel taskId="task-b" open={false} onOpenChange={onOpenChange}><p>乙任务成果</p></WorkboardPanel>)
+  expect(screen.getByText('乙任务成果').parentElement).toBe(content)
+  expect(content.scrollTop).toBe(0)
+})
+
+test('任务标识变化不重挂手机抽屉，关闭后仍返回原入口', async () => {
+  vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList)
+  const view = render(<Workroom taskId="task-a" />)
+  const trigger = screen.getByRole('button', { name: '成果', exact: true })
+  trigger.focus(); fireEvent.click(trigger)
+  const panel = screen.getByRole('dialog', { name: '成果与过程' })
+  const close = within(panel).getByRole('button', { name: '关闭成果面板' })
+  await waitFor(() => expect(document.activeElement).toBe(close))
+
+  view.rerender(<Workroom taskId="task-b" />)
+  expect(screen.getByRole('dialog', { name: '成果与过程' })).toBe(panel)
+  expect(document.activeElement).toBe(close)
+  fireEvent.click(close)
+  await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+  expect(document.activeElement).toBe(trigger)
+  expect((screen.getByRole('textbox', { name: '草稿' }) as HTMLTextAreaElement).value).toBe('继续看看')
+})
 
 test('成果面板聚焦关闭按钮，Esc 返回聊天入口并保留草稿', async () => {
   vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue([{}] as unknown as DOMRectList)

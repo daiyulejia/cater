@@ -136,6 +136,10 @@ def _design_lens(tasks: list[TaskSnapshot], events: list[Event]) -> dict[str, st
 def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     if not tasks:
         return _lens("distribution", "needs_attention", "No task distribution pattern exists yet.", "Create one small task before evaluating distribution weight.")
+    planned = [task for task in tasks if task.work and task.work.get("items")]
+    if any(task.work.get("scope_current") is False for task in planned):
+        return _lens("distribution", "watch", "Some work-item plans no longer match the current requirements or rules.",
+                     "Reconcile in-flight work and update the affected plan before releasing further work.")
     direct = [
         task for task in tasks
         if any(item.get("mode") == "direct" for item in task.assignments)
@@ -146,7 +150,8 @@ def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     ]
     unassigned_active = [
         task for task in tasks
-        if task.messages and not task.assignments
+        if any(message.get("phase") != "planning" for message in task.messages)
+        and not task.assignments and not (task.work and task.work.get("items"))
     ]
     overloaded = [
         task for task in tasks
@@ -159,6 +164,9 @@ def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
         return _lens("distribution", "watch", "Some completed tasks may be carrying more active assignments than useful output.", "Review whether dispatch is adding ceremony, extra agents, or token cost instead of clarity.")
     if unassigned_active:
         return _lens("distribution", "watch", "Some executed tasks have no visible assignment path.", "Use direct assign or dispatch when ownership would clarify the work.")
+    if planned:
+        return _lens("distribution", "ok", "Work items record explicit ownership, review responsibility and dependencies.",
+                     "Use current work-item acceptance records; extra dispatch or more agents are not required for coverage.")
     if direct and full:
         return _lens("distribution", "ok", "Both direct worker assignment and cabinet dispatch are represented.", "Keep lightweight and full distribution paths available; periodically prune redundant layers.")
     if direct:

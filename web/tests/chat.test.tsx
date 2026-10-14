@@ -43,6 +43,45 @@ const input = () => screen.getByRole('textbox', { name: '向团队发送消息' 
 const write = (text: string) => fireEvent.change(input(), { target: { value: text } })
 const ready = (id: string) => screen.findByText(`${id}任务专属消息 #2`)
 
+test('品牌入口返回同一个新对话，保留各自草稿且不提交或重规划任务', async () => {
+  render(<App />); await ready('乙'); write('乙任务尚未发送的补充')
+  expect(screen.getByText('此任务尚无工作项与验收记录')).toBeTruthy()
+  const brand = screen.getByRole('button', { name: 'Cater · 返回新对话' })
+  expect(brand.getAttribute('type')).toBe('button')
+  expect(brand.getAttribute('title')).toBe('返回新对话')
+  brand.focus(); fireEvent.click(brand)
+  expect(document.activeElement).toBe(brand)
+  expect(screen.getByRole('heading', { name: '欢迎来猫咖，今天想聊什么？' })).toBeTruthy()
+  expect(screen.queryByRole('textbox', { name: '向团队发送消息' })).toBeNull()
+  expect(screen.queryByText('此任务尚无工作项与验收记录')).toBeNull()
+  expect(screen.getAllByRole('textbox', { name: '发起任务对话' })).toHaveLength(1)
+  fireEvent.change(screen.getByRole('textbox', { name: '发起任务对话' }), { target: { value: '新对话的草稿' } })
+
+  select('乙'); await ready('乙')
+  expect(input().value).toBe('乙任务尚未发送的补充')
+  fireEvent.click(brand)
+  fireEvent.click(brand)
+  expect(screen.getAllByRole('textbox', { name: '发起任务对话' })).toHaveLength(1)
+  expect((screen.getByRole('textbox', { name: '发起任务对话' }) as HTMLTextAreaElement).value).toBe('新对话的草稿')
+  expect(fetchMock.mock.calls.some(([, init]) => init.method === 'POST')).toBe(false)
+})
+
+test('切换任务复位桌面成果内容，详情加载期间不冒充空工作项', async () => {
+  render(<App />); await ready('乙')
+  const panel = screen.getByRole('complementary', { name: '成果与过程' })
+  const content = within(panel).getByRole('region', { name: '工作项与验收' }).parentElement!
+  content.scrollTop = 320
+  const pending = deferred<Response>()
+  handler = (url) => url === '/api/tasks/甲' ? pending.promise : undefined
+  select('甲')
+  expect(content.scrollTop).toBe(0)
+  expect(screen.getByText('正在读取这件事的成果与过程。')).toBeTruthy()
+  expect(screen.queryByText('此任务尚无工作项与验收记录')).toBeNull()
+  await act(async () => pending.resolve(json(detail('甲'))))
+  expect(within(panel).getByText('此任务尚无工作项与验收记录')).toBeTruthy()
+  expect(content.scrollTop).toBe(0)
+})
+
 test('店长规划结论出现在聊天中，计费回执不重复成一条发言', async () => {
   handler = (url) => {
     if (url === '/api/tasks/乙') {

@@ -1,0 +1,12 @@
+{
+  "drivers": [
+    {
+      "kind": "openai_compatible",
+      "name": "shared_api",
+      "endpoint": "https://replace-with-provider.example.invalid/v1/chat/completions",
+      "model": "replace-with-model-id",
+      "api_key_env": "CATER_SHARED_API_KEY",
+      "timeout": 120
+    }
+  ]
+}

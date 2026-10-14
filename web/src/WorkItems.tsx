@@ -20,7 +20,12 @@ const labels: Record<string, string> = {
 }
 
 export function WorkItems({ work, names }: { work?: WorkState | null; names: Record<string, string> }) {
-  if (!work?.items.length) return null
+  if (!work?.items.length) return <section className="mb-5 border-b border-[#dce8e1] pb-5" aria-label="工作项与验收">
+    <div className="mb-3 flex items-center justify-between gap-2">
+      <h2 className="flex items-center gap-1.5 text-sm font-semibold"><GitBranch size={16} className="text-teal-700" /> 工作进展</h2>
+    </div>
+    <p className="text-xs leading-5 text-stone-500">此任务尚无工作项与验收记录</p>
+  </section>
   const accepted = work.items.filter((item) => item.status === 'accepted').length
   const titles = Object.fromEntries(work.items.map((item, index) => [item.id, `工作 ${index + 1}`]))
   return <section className="mb-5 border-b border-[#dce8e1] pb-5" aria-label="工作项与验收">

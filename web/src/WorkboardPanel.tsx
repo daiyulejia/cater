@@ -1,9 +1,14 @@
-import { useEffect } from 'react'
+import { useEffect, useLayoutEffect, useRef } from 'react'
 import type { ReactNode } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import { Coffee, X } from 'lucide-react'
 
-export function WorkboardPanel({ open, onOpenChange, children }: { open: boolean; onOpenChange: (open: boolean) => void; children: ReactNode }) {
+export function WorkboardPanel({ taskId, open, onOpenChange, children }: { taskId: string; open: boolean; onOpenChange: (open: boolean) => void; children: ReactNode }) {
+  const desktopContentRef = useRef<HTMLDivElement>(null)
+  useLayoutEffect(() => {
+    if (desktopContentRef.current) desktopContentRef.current.scrollTop = 0
+  }, [taskId])
+
   useEffect(() => {
     const desktop = window.matchMedia('(min-width: 1024px)')
     const closeOnDesktop = () => { if (desktop.matches) onOpenChange(false) }
@@ -13,9 +18,9 @@ export function WorkboardPanel({ open, onOpenChange, children }: { open: boolean
   }, [onOpenChange])
 
   return <>
-    <aside className="workboard-panel hidden min-h-0 overflow-y-auto p-5 lg:block" aria-label="成果与过程">
-      <div className="board-heading mb-5"><p className="flex items-center gap-1.5 text-[11px] font-semibold"><Coffee size={14} /> 猫咖记事板</p><h2 className="mt-1 text-[16px] font-bold">成果与过程</h2></div>
-      {children}
+    <aside className="workboard-panel hidden min-h-0 lg:flex lg:flex-col" aria-label="成果与过程">
+      <div className="board-heading shrink-0"><p className="flex items-center gap-1.5 text-[11px] font-semibold"><Coffee size={14} /> 猫咖记事板</p><h2 className="mt-1 text-[16px] font-bold">成果与过程</h2></div>
+      <div ref={desktopContentRef} className="workboard-content min-h-0 flex-1 overflow-y-auto p-5">{children}</div>
     </aside>
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
