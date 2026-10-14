@@ -26,6 +26,7 @@ from .messages import message_relation
 from .path import organization_path
 from .review import build_review
 from .runtime import DriverHealth, Runtime
+from .rules import RuleConflict
 
 
 MAX_REQUEST_BYTES = 1_048_576
@@ -400,6 +401,20 @@ def make_handler(
                             for task in rt.tasks()
                         ]
                     )
+            if path == "/api/projects":
+                with self._runtime() as rt:
+                    return self._send_json(rt.rulebook.projects())
+            if path == "/api/rules":
+                query = parse_qs(parsed.query)
+                with self._runtime() as rt:
+                    try:
+                        state = rt.rulebook.view(
+                            task_id=query.get("task_id", [None])[0],
+                            project_id=query.get("project_id", [None])[0],
+                        )
+                    except ValueError as exc:
+                        return self._bad_request(str(exc))
+                    return self._send_json(state)
             if path == "/api/organization":
                 with self._runtime() as rt:
                     return self._send_json(
@@ -478,6 +493,31 @@ def make_handler(
                 return self._unauthorized()
             if not self._is_same_origin_write():
                 return self._forbidden("cross-origin writes are not allowed")
+            if path in {"/api/projects", "/api/rules"} or path.startswith("/api/rules/"):
+                data = self._read_json()
+                if data is None:
+                    return
+                with self._runtime() as rt:
+                    try:
+                        if path == "/api/projects":
+                            result = rt.rulebook.create_project(data.get("name"))
+                        elif data.get("enforcement", "guidance_only") != "guidance_only":
+                            return self._bad_request("rule enforcement is not available; only guidance can be recorded")
+                        elif path == "/api/rules":
+                            result = rt.rulebook.record(
+                                data.get("text"), scope=data.get("scope"),
+                                task_id=data.get("task_id"), project_id=data.get("project_id"),
+                            )
+                        else:
+                            result = rt.rulebook.update(
+                                path.split("/")[-1], revision=data.get("revision"),
+                                text=data.get("text"), status=data.get("status"), task_id=data.get("task_id"),
+                            )
+                    except RuleConflict as exc:
+                        return self._conflict(str(exc))
+                    except ValueError as exc:
+                        return self._bad_request(str(exc))
+                    return self._send_json(result, status=HTTPStatus.CREATED if path in {"/api/projects", "/api/rules"} else HTTPStatus.OK)
             if path == "/api/tasks":
                 data = self._read_json()
                 if data is None:
@@ -507,7 +547,7 @@ def make_handler(
                     if assign_owner and assign_owner not in {role.id for role in rt.worker_roles}:
                         return self._bad_request(f"unknown role {assign_owner!r}")
                     try:
-                        task_id = rt.create_task(goal, acceptance)
+                        task_id = rt.create_task(goal, acceptance, project_id=data.get("project_id"))
                     except ValueError as exc:
                         return self._bad_request(str(exc))
                     if requested_route is not None or not _truthy(data.get("dispatch")):
@@ -551,7 +591,11 @@ def make_handler(
                     if rt.task(task_id) is None:
                         return self._not_found()
                     try:
-                        if action == "run":
+                        if action == "project":
+                            if activities.status(task_id)["active"]:
+                                return self._conflict("cannot bind a project while collaboration is active")
+                            rt.rulebook.bind_project(task_id, data.get("project_id"))
+                        elif action == "run":
                             if background:
                                 background_action = "run"
                             else:
@@ -595,6 +639,8 @@ def make_handler(
                             )
                         else:
                             return self._not_found()
+                    except RuleConflict as exc:
+                        return self._conflict(str(exc))
                     except ValueError as exc:
                         return self._bad_request(str(exc))
                 if background_action:
@@ -1138,6 +1184,7 @@ def page(title: str, body: str) -> str:
 def task_to_dict(task: TaskSnapshot, *, include_content: bool = True) -> dict[str, Any]:
     return {
         "id": task.id,
+        "project_id": task.project_id,
         "goal": task.goal,
         "acceptance": task.acceptance,
         "status": task.status,

@@ -12,6 +12,7 @@ from .usage import usage_source, valid_token_count
 @dataclass
 class TaskSnapshot:
     id: str
+    project_id: str | None = None
     goal: str = ""
     acceptance: list[str] = field(default_factory=list)
     status: str = "pending"
@@ -46,9 +47,12 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
         task = tasks.setdefault(event.task_id, TaskSnapshot(id=event.task_id))
         payload = event.payload
         if event.type == "task.created":
+            task.project_id = payload.get("project_id")
             task.goal = str(payload.get("goal", ""))
             task.acceptance = list(payload.get("acceptance", []) or [])
             task.status = "pending"
+        elif event.type == "task.project_bound":
+            task.project_id = payload.get("project_id")
         elif event.type == "human.commanded":
             task.commands.append({"seq": event.seq, **payload})
             if payload.get("goal"):

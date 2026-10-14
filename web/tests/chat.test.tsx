@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, expect, test, vi } from 'vitest'
 import App from '../src/App'
 
@@ -42,6 +42,44 @@ const select = (id: string) => fireEvent.click(screen.getByRole('button', { name
 const input = () => screen.getByRole('textbox', { name: '向团队发送消息' }) as HTMLTextAreaElement
 const write = (text: string) => fireEvent.change(input(), { target: { value: text } })
 const ready = (id: string) => screen.findByText(`${id}任务专属消息 #2`)
+
+test('新对话关联项目后发送任务，项目归属随请求提交', async () => {
+  handler = (url, init) => {
+    if (url === '/api/projects') return json([{ id: 'project-a', name: '作品集' }])
+    if (url.startsWith('/api/rules')) return json({ project_id: null, rules: [], enforcement: 'guidance_only' })
+    if (url === '/api/tasks' && init.method === 'POST') return json(detail('丙'))
+  }
+  render(<App />); await ready('乙')
+  fireEvent.click(screen.getByRole('button', { name: '新建任务' }))
+  fireEvent.click(screen.getByTitle('项目与店规'))
+  await screen.findByRole('option', { name: '作品集' })
+  fireEvent.change(screen.getByLabelText('所属项目'), { target: { value: 'project-a' } })
+  await waitFor(() => expect((screen.getByLabelText('所属项目') as HTMLSelectElement).value).toBe('project-a'))
+  fireEvent.click(screen.getByRole('button', { name: '关闭店规' }))
+  fireEvent.change(screen.getByRole('textbox', { name: '发起任务对话' }), { target: { value: '完善我的作品集' } })
+  fireEvent.click(screen.getByRole('button', { name: '发送新任务' }))
+  await ready('丙')
+  const post = fetchMock.mock.calls.find(([url, init]) => url === '/api/tasks' && init.method === 'POST')!
+  expect(JSON.parse(String(post[1].body)).project_id).toBe('project-a')
+})
+
+test('记录店规不是发送聊天，迟到响应不会清空新输入', async () => {
+  const saved = deferred<Response>()
+  handler = (url, init) => {
+    if (url === '/api/projects') return json([])
+    if (url.startsWith('/api/rules')) return init.method === 'POST' ? saved.promise : json({ project_id: null, rules: [], enforcement: 'guidance_only' })
+  }
+  render(<App />); await ready('乙'); write('不得改写提交历史')
+  fireEvent.click(screen.getByRole('button', { name: '记为店规' }))
+  await screen.findByText('这个范围还没有店规。')
+  fireEvent.click(screen.getByRole('button', { name: '保存店规' }))
+  fireEvent.click(screen.getByRole('button', { name: '关闭店规' }))
+  write('另一个刚想到的要求')
+  await act(async () => saved.resolve(json({ id: 'rule-a' })))
+  expect(input().value).toBe('另一个刚想到的要求')
+  expect(fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1)
+  expect(fetchMock.mock.calls.some(([url]) => url.endsWith('/command'))).toBe(false)
+})
 
 test('筛选隐藏当前任务时仍保留聊天与草稿，恢复不切换任务', async () => {
   render(<App />); await ready('乙'); write('不要丢掉我的补充')

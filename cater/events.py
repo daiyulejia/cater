@@ -19,6 +19,11 @@ from typing import Any, Iterable, Iterator, Mapping
 GENESIS_HASH = "0" * 64
 
 EVENT_CATEGORIES = {
+    "project.created": "planning",
+    "task.project_bound": "planning",
+    "rule.recorded": "policy",
+    "rule.updated": "policy",
+    "rules.applied": "policy",
     "task.created": "lifecycle",
     "task.started": "lifecycle",
     "activity.queued": "lifecycle",
@@ -56,6 +61,10 @@ EVENT_CATEGORIES = {
 
 class UnknownEventType(ValueError):
     pass
+
+
+class HeadChanged(ValueError):
+    """A conditional append must be recomputed from the current event head."""
 
 
 @dataclass(frozen=True)
@@ -147,6 +156,7 @@ class EventLog:
         type: str,
         task_id: str | None = None,
         payload: dict[str, Any] | None = None,
+        expected_head: str | None = None,
     ) -> Event:
         category = EVENT_CATEGORIES.get(type)
         if category is None:
@@ -157,6 +167,8 @@ class EventLog:
         self.db.execute("BEGIN IMMEDIATE")
         try:
             prev = self.head_hash()
+            if expected_head is not None and prev != expected_head:
+                raise HeadChanged("event head changed")
             event_id = uuid.uuid4().hex
             ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
             payload = dict(payload or {})

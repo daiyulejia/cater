@@ -12,6 +12,7 @@ import { WorkboardPanel } from './WorkboardPanel'
 import { MentionInput } from './MentionInput'
 import { TeamDirectory } from './TeamDirectory'
 import { TaskList } from './TaskList'
+import { RulesPanel } from './RulesPanel'
 import type { TeamAvailability } from './TeamDirectory'
 
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
@@ -28,6 +29,7 @@ type DriverCoverage = { role_id: string; name: string; driver: string; mode: 'lo
 type Organization = { leader: OrgRole; cabinet: OrgRole[]; workers: OrgRole[]; mode?: 'local_demo' | 'mixed_driver' | 'external_driver'; worker_drivers?: DriverCoverage[]; availability?: TeamAvailability }
 type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'; active: boolean; error?: string; follow_up?: { action?: string } }
 type Task = {
+  project_id?: string | null
   id: string; goal: string; acceptance: string[]; status: string; messages: Message[]; assignments: Assignment[]
   deliverables: Deliverable[]
   diagnoses?: Diagnosis[]; handoffs?: Handoff[]; verifications?: Verification[]
@@ -119,6 +121,7 @@ function reasonText(value: string): string {
 
 function disciplineText(issues?: string[]): string {
   const labels: Record<string, string> = {
+    invalid_rule_proposal: '店规建议缺少有效依据或已存在',
     invalid_stance: '表达格式不完整', missing_claim: '没有写清结论', challenge_without_evidence: '质疑缺少可复查依据',
     invalid_target: '点名对象不存在', invalid_reply_to: '回复没有对应到可见发言', target_without_visible_reply: '点名缺少回复依据', reply_without_target: '回复缺少明确对象',
   }
@@ -170,6 +173,11 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       ? value.filter((id): id is string => typeof id === 'string').map((id) => identities[id]?.name ?? actorText(id))
       : []
     if (event.type === 'task.created') return [message('新任务', String(payload.goal ?? ''), 'human')]
+    if (event.type === 'rule.recorded' || event.type === 'rule.updated') {
+      const scope = ({ workspace: '猫咖通用', project: '当前项目', task: '本次任务' } as Record<string, string>)[String(payload.scope)] ?? '当前范围'
+      const state = ({ active: '已采用', candidate: '候选，待采用', retired: '已停用' } as Record<string, string>)[String(payload.status)] ?? '已记录'
+      return [message(`店规 · ${state}`, String(payload.text ?? ''), actor.kind === 'human' ? 'human' : 'agent', 'decision', [`适用范围：${scope}`, `版本：${payload.revision}`, '目前作为上下文要求，不代表文件保护或验收已经通过。'])]
+    }
     if (event.type === 'activity.queued') {
       if (hasFinishedActivity) return []
       const followUp = typeof payload.after_activity_id === 'string'
@@ -291,6 +299,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
 }
 
 function App() {
+  const [newProject, setNewProject] = useState<{ id: string; name: string } | null>(null)
   const [tasks, setTasks] = useState<Task[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<TaskDetail | null>(null)
@@ -497,6 +506,7 @@ function App() {
         method: 'POST',
         body: JSON.stringify({
           goal,
+          project_id: newProject?.id,
           run: true, background: true,
         }),
       })
@@ -523,6 +533,13 @@ function App() {
 
   const team = organization ? [...organization.workers, organization.leader, ...organization.cabinet] : roles
   const names = Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))
+  const rulesControl = <RulesPanel key={`rules:${selectedId ?? '$new'}`} request={api} taskId={selectedId ?? undefined} projectId={task ? task.project_id : newProject?.id} draft={task ? message : draft} busy={Boolean(loading || isSending || currentDetail?.activity?.active)} onProjectChange={async (project) => {
+    if (selectedId) {
+      if (!project) return
+      const result = await api<TaskDetail>(`/api/tasks/${selectedId}/project`, { method: 'POST', body: JSON.stringify({ project_id: project.id }) })
+      acceptDetail(result)
+    } else setNewProject(project)
+  }} onRecorded={(text) => { const key = selectedId ?? newKey; setDrafts((current) => current[key]?.trim() === text ? { ...current, [key]: '' } : current) }} onUpdated={() => setReloadToken((value) => value + 1)} />
   return (
     <div className="cater-app text-[#253d38]">
       <header className="app-header flex h-[72px] items-center justify-between px-4 sm:px-6">
@@ -564,8 +581,9 @@ function App() {
               <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>{loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={item.id} item={item} />) : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
               {!loading && unread > 0 && <button onClick={jumpToLatest} className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-md border border-[#d9b9a5] bg-[#fff7eb] px-3 py-2 text-xs font-semibold text-[#915340] shadow-md" title="返回最新消息"><ArrowDown size={15} /> 查看新消息 · {unread}</button>}
             </div>
+            {rulesControl}
             <DirectionComposer key={task.id} members={team} message={message} isSending={isSending} isLoading={loading} onMessageChange={setMessage} onSend={() => void sendDirection()} />
-          </> : <><EmptyConversation onChoose={setDraft} members={team} /><TaskComposer members={team} draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
+          </> : <><EmptyConversation onChoose={setDraft} members={team} />{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
         {task && <WorkboardPanel open={showMobileBoard} onOpenChange={setShowMobileBoard}>
