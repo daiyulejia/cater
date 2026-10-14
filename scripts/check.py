@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 
 def main() -> int:
@@ -11,7 +12,7 @@ def main() -> int:
         print("Cater requires Python 3.11 or newer.", file=sys.stderr)
         return 1
     commands = [
-        [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
+        [sys.executable, str(Path(__file__).with_name("run_tests.py"))],
     ]
     for command in commands:
         print("+ " + " ".join(command), flush=True)

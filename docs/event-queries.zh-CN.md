@@ -23,3 +23,7 @@ python scripts/benchmark_event_queries.py --artifacts 512
 一次本机运行：全库路径的 Python 内存峰值约 8.2 MiB，筛选路径约 9.2 KiB，二者均得到 50 tokens。时间分别约 14.8 ms 和 0.5 ms。该结果只说明这一合成数据与本机环境，不是整个服务的性能保证；`tracemalloc` 不包含 SQLite 的全部原生内存。
 
 完整审计核验、全任务列表与跨任务记忆仍有全库投影成本，需要分别评估。不能因为预算查询变快就宣称所有长历史路径都已优化。
+
+## 跨平台验证
+
+本地验证脚本继续在独立 Python 进程中运行 unittest，不自动重试或忽略失败。GitHub CI 中，失败、异常及子测试还会产生带测试标识和 traceback 的错误注解，便于区分具体问题与单纯退出码。注解文字有长度限制并转义工作流分隔符；本地运行不输出这些命令。机制依据见 [GitHub 官方错误注解说明](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-commands#setting-an-error-message)。
