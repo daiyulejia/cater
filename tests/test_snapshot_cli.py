@@ -241,6 +241,18 @@ class RealSnapshotCliTests(unittest.TestCase):
         later = self.call("parent-after", {"task_id": "parent"})
         self.assertEqual(later, {"pid": first["pid"], "history": ["parent-before", "parent-after"]})
 
+    def test_real_question_calls_have_no_implicit_execution_history_or_shared_process(self):
+        first = self.call("execution-before", {"task_id": "parent"})
+        parent = self.processes[0]
+        for text in ("why-this-change", "what-about-callers"):
+            answer = self.call(text, {"task_id": "parent", "work": {"phase": "explanation"}})
+            self.assertEqual(answer["history"], [text])
+            self.assertNotEqual(answer["pid"], first["pid"])
+            self.assertIsNotNone(self.processes[-1].poll())
+            self.assertIsNone(parent.poll())
+        after = self.call("execution-after", {"task_id": "parent"})
+        self.assertEqual(after, {"pid": first["pid"], "history": ["execution-before", "execution-after"]})
+
 
 if __name__ == "__main__":
     unittest.main()

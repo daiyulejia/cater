@@ -9,6 +9,7 @@
 - [本机检查](local-verification.zh-CN.md)：显式命令核验的证据与进程运行边界。
 - [项目与店规](project-rules.zh-CN.md)：在聊天中保留工作要求、查看来源和版本，以及当前的保证边界。
 - [衍生对话](conversations.zh-CN.md)：从创建时的背景快照开展新工作，原群与新群独立推进。
+- [交付追问](questions.zh-CN.md)：在同一群里提问、查看讲解依据，并区分提问与改要求。
 - [工作项与验收](work-items.zh-CN.md)：执行依赖、阶段审查、版本绑定的本地检查，以及尚未完成的边界。
 - [执行权限设计](execution-permissions.zh-CN.md)：桌面优先、权限预设与沙箱执行边界；目前为未实现的设计提案。
 - [事件查询](event-queries.zh-CN.md)：任务级投影、预算查询边界与可重复运行的内存基准。

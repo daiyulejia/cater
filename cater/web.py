@@ -7,6 +7,7 @@ import html
 import hmac
 import ipaddress
 import json
+import logging
 import mimetypes
 import threading
 import time
@@ -37,6 +38,9 @@ from .work import WorkConflict
 MAX_REQUEST_BYTES = 1_048_576
 MAX_REJECT_DRAIN_BYTES = 65_536
 REJECT_DRAIN_TIMEOUT_SECONDS = 0.25
+MAX_QUESTION_QUEUE_ATTEMPTS = 3
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class ActivityRunner:
@@ -47,6 +51,63 @@ class ActivityRunner:
         self._lock = threading.RLock()
         self._activities: dict[str, dict[str, Any]] = {}
         self._revision = 0
+        self._question_tasks: dict[str, str] = {}
+
+    def answer_questions(self, task_id: str) -> None:
+        with self._lock:
+            if task_id in self._question_tasks:
+                return
+            owner = uuid.uuid4().hex
+            self._question_tasks[task_id] = owner
+        try:
+            threading.Thread(target=self._answer_questions, args=(task_id, owner), name=f"cater-explain-{task_id}", daemon=True).start()
+        except Exception:
+            with self._lock:
+                if self._question_tasks.get(task_id) == owner:
+                    self._question_tasks.pop(task_id, None)
+            raise
+
+    def _answer_questions(self, task_id: str, owner: str) -> None:
+        last_question = None
+        attempts = read_failures = 0
+        try:
+            while True:
+                # Keep the empty-queue decision atomic with new submissions.
+                try:
+                    with self._lock:
+                        with self._runtime_factory() as runtime:
+                            pending = runtime.questions.pending(task_id)
+                        if not pending:
+                            if self._question_tasks.get(task_id) == owner:
+                                self._question_tasks.pop(task_id, None)
+                            return
+                except Exception:
+                    read_failures += 1
+                    _LOGGER.exception("Cannot read question queue for %s (%d/%d)",
+                                      task_id, read_failures, MAX_QUESTION_QUEUE_ATTEMPTS)
+                    if read_failures >= MAX_QUESTION_QUEUE_ATTEMPTS:
+                        return
+                    continue
+                read_failures = 0
+                if pending[0] != last_question:
+                    last_question, attempts = pending[0], 0
+                if attempts >= MAX_QUESTION_QUEUE_ATTEMPTS:
+                    _LOGGER.error("Question queue for %s stopped without progress at question %s",
+                                  task_id, last_question)
+                    return
+                attempts += 1
+                try:
+                    with self._runtime_factory() as runtime:
+                        runtime.questions.answer_next(task_id)
+                except Exception:
+                    # Re-read durable state before proceeding: a started call is
+                    # never pending again, even if recording its result failed.
+                    _LOGGER.exception("Question queue attempt failed for %s at question %s",
+                                      task_id, last_question)
+        finally:
+            with self._lock:
+                if self._question_tasks.get(task_id) == owner:
+                    self._question_tasks.pop(task_id, None)
 
     def snapshot(self) -> tuple[int, dict[str, dict[str, Any]]]:
         with self._lock:
@@ -59,6 +120,9 @@ class ActivityRunner:
         call could duplicate side effects against stale task context. Record a
         durable, visible failure instead; the customer can then continue from
         the latest command with a freshly assembled round.
+
+        Never-started questions are resumed separately. The return value still
+        counts only interrupted execution activities, not question queues.
         """
         pending: dict[str, tuple[str, str]] = {}
         with self._runtime_factory() as runtime:
@@ -93,7 +157,30 @@ class ActivityRunner:
                     "finished_at": _now_iso(),
                 }
                 self._revision += 1
+        self._recover_pending_questions()
         return len(pending)
+
+    def _recover_pending_questions(self) -> None:
+        """Wake pending question queues without replaying started/uncertain calls.
+
+        Discover work from the log, not the previous process's thread registry.
+        A failure in one task must not prevent recovery of other task queues.
+        """
+        with self._runtime_factory() as runtime:
+            task_ids = {event.task_id for event in runtime.log.iter_events(event_types=("question.asked",))
+                        if event.task_id and event.actor == EventActor.human()}
+            pending_tasks = []
+            for task_id in sorted(task_ids):
+                try:
+                    if runtime.questions.pending(task_id):
+                        pending_tasks.append(task_id)
+                except Exception:
+                    _LOGGER.exception("Cannot recover question queue for %s", task_id)
+        for task_id in pending_tasks:
+            try:
+                self.answer_questions(task_id)
+            except Exception:
+                _LOGGER.exception("Cannot start recovered question queue for %s", task_id)
 
     def status(self, task_id: str) -> dict[str, Any]:
         with self._lock:
@@ -639,7 +726,13 @@ def make_handler(
                     if rt.task(task_id) is None:
                         return self._not_found()
                     try:
-                        if action == "derive":
+                        if action == "questions":
+                            if set(data) - {"question", "request_id", "role_id"}:
+                                return self._bad_request("提问只接收问题、请求标识与已配置的伙伴。")
+                            rt.questions.ask(task_id, data.get("question"), request_id=data.get("request_id"), role_id=data.get("role_id"))
+                            activities.answer_questions(task_id)
+                            return self._send_json(self._task_payload(task_id, activities), status=HTTPStatus.ACCEPTED)
+                        elif action == "derive":
                             if set(data) - {"goal", "acceptance", "request_id", "run", "background"}:
                                 return self._bad_request("来源背景与项目由服务器确定，不能由请求替换。")
                             result = rt.derive_task(task_id, data.get("goal"),
@@ -692,7 +785,9 @@ def make_handler(
                                     else None
                                 ),
                             )
-                            if _truthy(data.get("continue")) and command.payload.get("next_action") != "none":
+                            if command.type == "question.asked":
+                                activities.answer_questions(task_id)
+                            elif _truthy(data.get("continue")) and command.payload.get("next_action") != "none":
                                 background_action = str(command.payload.get("next_action") or "run")
                         elif action == "decide":
                             rt.decide(
@@ -806,7 +901,9 @@ def make_handler(
                         )
                     except ValueError as exc:
                         return self._bad_request(str(exc))
-                    if data.get("run_now", [""])[0] == "on" and command.payload.get("next_action") != "none":
+                    if command.type == "question.asked":
+                        activities.answer_questions(task_id)
+                    elif data.get("run_now", [""])[0] == "on" and command.payload.get("next_action") != "none":
                         if command.payload.get("next_action") == "battle":
                             rt.battle(task_id)
                         else:
@@ -1370,6 +1467,7 @@ def _event_version(rt: Runtime) -> int:
 # One record per bubble in App.conversationFor's unfiltered conversation.
 # Keep its conditional suppression rules in sync when adding chat event types.
 _CHAT_TYPES = {
+    "question.asked", "question.finished",
     "task.created", "rule.recorded", "rule.updated", "activity.failed", "human.commanded",
     "task.progress_reported", "planning.started", "planning.finished", "delivery.review_started",
     "delivery.review_finished", "task.interpreted", "cabinet.convened",
@@ -1455,6 +1553,7 @@ def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | N
         "events": [event_to_dict(e) for e in events],
         "organization_memory": rt.shared_memory(exclude_task_id=task_id),
         "background": rt.conversation_background(task_id),
+        "questions": rt.questions.view(task_id),
         "decision_ladder": decision_ladder(events),
         "organization_path": organization_path(task, events),
         "review": rt.review(task_id),

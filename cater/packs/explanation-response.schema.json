@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "answer", "evidence", "limits"],
+  "properties": {
+    "status": {"type": "string", "enum": ["explained", "insufficient"]},
+    "answer": {"type": "string", "minLength": 1, "maxLength": 8000},
+    "evidence": {
+      "type": "array", "maxItems": 16,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["source_seq", "quote"],
+        "properties": {
+          "source_seq": {"type": "integer", "minimum": 1},
+          "quote": {"type": "string", "minLength": 1, "maxLength": 2000}
+        }
+      }
+    },
+    "limits": {"type": "array", "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 2000}}
+  }
+}

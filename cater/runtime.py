@@ -29,6 +29,7 @@ from .rules import RuleBook, RuleConflict
 from .work import WorkLedger, WorkConflict, validate_items
 from .verification import run_check, validate_check
 from .delivery import DeliveryService
+from .explanations import ExplanationService
 
 
 MAX_TASK_GOAL_CHARS = 12_000
@@ -188,6 +189,7 @@ class Runtime:
         self.log = EventLog(db_path, audit_key=audit_key, key_id=audit_key_id, audit_keys=audit_keys)
         self.rulebook = RuleBook(self.log)
         self.work = WorkLedger(self.log, self.rulebook)
+        self.questions = ExplanationService(self)
         self.delivery = DeliveryService(self)
         self.driver_attempts = max(1, driver_attempts)
         self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
@@ -1172,6 +1174,8 @@ class Runtime:
         aliases = [alias for role in self.roles for alias in (role.id, role.name)]
         aliases.extend((self.organization.leader.id, self.organization.leader.name))
         intent = "direction" if goal is not None or acceptance is not None else command_intent(instruction, aliases)
+        if intent == "question":
+            return self.questions.ask(task_id, instruction, request_id="question_" + uuid.uuid4().hex)
         if intent != "direction":
             command = self.log.emit(actor=Actor.human("human"), type="human.commanded", task_id=task_id,
                                     payload={"instruction": instruction, "intent": intent,
@@ -1615,8 +1619,15 @@ class Runtime:
         # Do not replay it without a tool-specific idempotency/reconciliation contract.
         attempts = 1 if work_context is not None else self.driver_attempts
         for attempt in range(1, attempts + 1):
-            if work_context is not None and self.work.scope(task_id) != work_context["scope"]:
-                return self._contained_driver_failure(role, "work scope changed before invocation", invocation_started=False)
+            if work_context is not None:
+                current_scope = self.work.scope(task_id)
+                if work_context.get("phase") == "explanation":
+                    # Historical explanations cannot apply results, but must honor current rules.
+                    changed = current_scope["rules"] != work_context["scope"]["rules"]
+                else:
+                    changed = current_scope != work_context["scope"]
+                if changed:
+                    return self._contained_driver_failure(role, "work scope changed before invocation", invocation_started=False)
             if (attempt > 1 and rule_snapshot is not None
                     and self.rulebook.current_snapshot(task_id)["fingerprint"] != rule_snapshot["fingerprint"]):
                 break
@@ -1652,7 +1663,7 @@ class Runtime:
         """Count only provider-reported usage; unknown telemetry cannot be safely capped."""
         return sum(
             event.payload["tokens"]
-            for event in self.log.iter_events(event_types=("msg.said", "msg.challenge"))
+            for event in self.log.iter_events(event_types=("msg.said", "msg.challenge", "question.finished"))
             if event.payload.get("driver") == driver_name
             and event.payload.get("token_usage") == "reported"
             and valid_token_count(event.payload.get("tokens"))

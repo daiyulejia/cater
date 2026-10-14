@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowDown, Cat, CheckCircle2, ChevronDown,
+  ArrowDown, Cat, CheckCircle2, ChevronDown, CircleHelp,
   CornerDownRight, FileText, GitBranch, GitFork, LoaderCircle, PawPrint, Plus, RefreshCw, Search, ShieldCheck,
 } from 'lucide-react'
 import catPortraits from './assets/cat-portraits.jpg'
@@ -18,6 +18,7 @@ import { DeliveryPanel } from './DeliveryPanel'
 import { ConversationMembers } from './ConversationMembers'
 import { ConversationOrigin, DerivationDraftBar } from './ConversationOrigin'
 import type { ConversationBackground } from './ConversationOrigin'
+import { QuestionComposerBar } from './QuestionComposerBar'
 import { conversationParticipants } from './participants'
 import type { WorkState } from './WorkItems'
 import type { TeamAvailability } from './TeamDirectory'
@@ -53,9 +54,13 @@ type Task = {
   route?: { route?: string; reason?: string }
 }
 type Event = { seq: number; type: string; category: string; actor: { id: string; role: string; kind: string }; payload: Record<string, unknown> }
-type TaskDetail = { task: Task; events: Event[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
+type QuestionBasis = { seq: number; anchor: unknown; source_seqs: { seq: number; kind: string }[]; history_seqs: number[] }
+type QuestionResult = { question_seq?: number; answer?: string; evidence?: { source_seq: number; quote: string }[]; limits?: string[]; reason?: string; speaker_id?: string; driver?: string; tokens?: number; token_usage?: string }
+type Question = QuestionResult & { seq: number; status: string; question: string; role_id: string; basis: QuestionBasis; outdated: boolean }
+type QuestionContext = { basis?: QuestionBasis; outdated?: boolean; questionSeq?: number; recipient?: string; progress?: string; evidence?: { source_seq: number; quote: string }[]; limits?: string[]; reason?: string }
+type TaskDetail = { task: Task; events: Event[]; questions?: Question[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
 type DerivationSource = { id: string; goal: string }
-type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; targets: string[]; replyTo?: number; evidence: Event }
+type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; question?: QuestionContext; targets: string[]; replyTo?: number; evidence: Event }
 
 const accessToken = (() => {
   const fragment = new URLSearchParams(window.location.hash.slice(1))
@@ -117,7 +122,7 @@ const statusText = (value?: string) => ({
   assigned: '已指派', accepted: '已定下', rejected: '未通过', recommended: '已建议', vetoed: '已否决', needs_supreme: '待最高决策', needs_human: '待人工处理',
 }[value ?? ''] ?? value ?? '未知')
 
-const actorText = (value: string) => ({ human: '你', orchestrator: '店长', leader: '店长', cabinet: '铲屎官们', supreme: '最高决策者', store_manager: '店长', reviewer: '复盘员', driver_gateway: '驱动网关', cabinet_product: '白露', cabinet_engineering: '阿程', cabinet_quality: '知夏', caretaker_product: '白露', caretaker_engineering: '阿程', caretaker_quality: '知夏', product: '月亮', design: '罐头', dev: '米寇', test: '三角' }[value] ?? value)
+const actorText = (value: string) => ({ human: '你', system: '系统', orchestrator: '店长', leader: '店长', cabinet: '铲屎官们', supreme: '最高决策者', store_manager: '店长', reviewer: '复盘员', driver_gateway: '驱动网关', cabinet_product: '白露', cabinet_engineering: '阿程', cabinet_quality: '知夏', caretaker_product: '白露', caretaker_engineering: '阿程', caretaker_quality: '知夏', product: '月亮', design: '罐头', dev: '米寇', test: '三角' }[value] ?? value)
 
 const activityText = (activity?: Activity) => {
   if (activity?.active && activity.follow_up?.action === 'run') return '已收下新方向，当前轮结束后继续'
@@ -191,9 +196,12 @@ function publicIdentity(actorId: string, organization: Organization | null): str
   return actorId === 'cabinet' ? '' : '猫咖'
 }
 
-function conversationFor(events: Event[], identities: Record<string, OrgRole>, organization: Organization | null): ChatItem[] {
+function conversationFor(events: Event[], identities: Record<string, OrgRole>, organization: Organization | null, questions: Question[] = []): ChatItem[] {
   const hasAutonomousDecision = events.some((event) => event.type === 'agent.decided' || event.type === 'supreme.decided')
   const hasFinishedActivity = events.some((event) => event.type === 'activity.completed' || event.type === 'activity.failed')
+  const questionRows = new Map(questions.map((question) => [question.seq, question]))
+  const askedEvents = new Map(events.filter((event) => event.type === 'question.asked').map((event) => [event.seq, event]))
+  const finishedQuestions = new Set(events.filter((event) => event.type === 'question.finished').map((event) => event.payload.question_seq))
   return events.flatMap((event) => {
     const payload = event.payload
     const actor = event.actor
@@ -209,6 +217,37 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     const memberNames = (value: unknown) => Array.isArray(value)
       ? value.filter((id): id is string => typeof id === 'string').map((id) => identities[id]?.name ?? actorText(id))
       : []
+    if (event.type === 'question.started') return []
+    if (event.type === 'question.asked' || event.type === 'question.finished') {
+      const asked = event.type === 'question.asked'
+      const questionSeq = asked ? event.seq : typeof payload.question_seq === 'number' ? payload.question_seq : undefined
+      const row = questionSeq === undefined ? undefined : questionRows.get(questionSeq)
+      const basis = row?.basis ?? (asked ? payload.basis : askedEvents.get(questionSeq ?? -1)?.payload.basis) as QuestionBasis | undefined
+      const labels: Record<string, string> = { answered: '讲解回答', insufficient: '依据不足', blocked: '提问受阻', invalid: '问题未能处理', uncertain: '回答待确认' }
+      const reason = typeof payload.reason === 'string' ? payload.reason : undefined
+      const hasAnswer = typeof payload.answer === 'string' && Boolean(payload.answer.trim())
+      const speaker = !asked && hasAnswer && typeof payload.speaker_id === 'string' && payload.speaker_id ? payload.speaker_id : undefined
+      const system = actor.kind === 'system' || actor.id === 'system' || actor.id === 'explainer'
+      const item = message(asked ? '提问' : labels[String(payload.status)] ?? '提问结果',
+        asked ? String(payload.question ?? '') : hasAnswer ? String(payload.answer) : reason || '暂无回答。',
+        asked ? 'human' : speaker || !system ? 'agent' : 'system', 'collaboration')
+      if (!asked && (speaker || system)) {
+        item.actor = speaker ?? 'system'
+        item.display = speaker ? identities[speaker]?.name ?? actorText(speaker) : '系统'
+        item.role = publicIdentity(item.actor, organization)
+      }
+      const recipient = row?.role_id ?? (asked ? payload.role_id : askedEvents.get(questionSeq ?? -1)?.payload.role_id)
+      const progress = asked && row && !finishedQuestions.has(event.seq)
+        ? ({ pending: '等待回答', answering: '正在回答', uncertain: '回答结果待确认' } as Record<string, string>)[row.status] : undefined
+      item.question = { basis, outdated: row?.outdated, questionSeq, recipient: typeof recipient === 'string' ? identities[recipient]?.name ?? actorText(recipient) : undefined,
+        progress,
+        evidence: !asked && Array.isArray(payload.evidence) ? payload.evidence.filter((entry): entry is { source_seq: number; quote: string } => Boolean(entry) && typeof entry === 'object' && typeof entry.source_seq === 'number' && typeof entry.quote === 'string') : [],
+        limits: !asked && Array.isArray(payload.limits) ? payload.limits.filter((limit): limit is string => typeof limit === 'string') : [], reason: asked ? undefined : reason }
+      // Only public answer fields belong in the question audit shown in chat.
+      const fields = asked ? ['question', 'role_id', 'request_id', 'basis'] : ['question_seq', 'status', 'answer', 'evidence', 'limits', 'reason', 'speaker_id', 'driver', 'tokens', 'token_usage']
+      item.evidence = { ...event, payload: Object.fromEntries(fields.filter((field) => field in payload).map((field) => [field, payload[field]])) }
+      return [item]
+    }
     if (event.type === 'task.created') return [message('新任务', String(payload.goal ?? ''), 'human')]
     if (event.type === 'rule.recorded' || event.type === 'rule.updated') {
       const scope = ({ workspace: '猫咖通用', project: '当前项目', task: '本次任务' } as Record<string, string>)[String(payload.scope)] ?? '当前范围'
@@ -354,6 +393,9 @@ function App() {
   const [detail, setDetail] = useState<TaskDetail | null>(null)
   const [drafts, setDrafts] = useState<Record<string, string>>({})
   const [derivation, setDerivation] = useState<DerivationSource | null>(null)
+  const [questionMode, setQuestionMode] = useState(false)
+  const questionModeRef = useRef(false)
+  const questionRequests = useRef<Record<string, { text: string; requestId: string }>>({})
   const derivationRef = useRef<DerivationSource | null>(null)
   const derivationRequests = useRef<Record<string, { text: string; requestId: string }>>({})
   const focusComposerRef = useRef(false)
@@ -393,7 +435,7 @@ function App() {
   const versionsRef = useRef<Record<string, { summary: TaskSummary; order: number }>>({})
   const detailOrderRef = useRef(0)
   const newKey = '$new'
-  const composerKey = derivation ? `$derive:${derivation.id}` : selectedId ?? newKey
+  const composerKey = derivation ? `$derive:${derivation.id}` : questionMode && selectedId ? `$question:${selectedId}` : selectedId ?? newKey
   const draft = drafts[newKey] ?? ''
   const message = selectedId ? drafts[composerKey] ?? '' : ''
   const isSending = pending.has(composerKey)
@@ -409,10 +451,16 @@ function App() {
       delete derivationRequests.current[composerKey]
       setSendErrors((current) => ({ ...current, [composerKey]: '' }))
     }
+    if (questionMode && value !== message) {
+      delete questionRequests.current[composerKey]
+      setSendErrors((current) => ({ ...current, [composerKey]: '' }))
+    }
     updateDraft(composerKey, value)
   }
 
   const chooseTask = useCallback((id: string | null) => {
+    questionModeRef.current = false
+    setQuestionMode(false)
     derivationRef.current = null
     setDerivation(null)
     focusComposerRef.current = false
@@ -444,7 +492,7 @@ function App() {
     const version = next.summary?.version ?? seq
     const item = next.summary ?? { id, goal: next.task.goal, project_id: next.task.project_id,
       status: next.task.status, status_label: taskListStatus({ ...next.task, activity: next.activity }),
-      activity: next.activity, conversation_count: conversationFor(next.events, {}, null).length, latest_seq: seq, version }
+      activity: next.activity, conversation_count: conversationFor(next.events, {}, null, next.questions).length, latest_seq: seq, version }
     const previous = versionsRef.current[id]
     const comparison = previous ? summaryOrder(item, previous.summary) : 1
     if (comparison < 0 || (comparison === 0 && previous && order < previous.order)) return
@@ -588,7 +636,7 @@ function App() {
     return Object.fromEntries(members.map((member) => [member.id, member]))
   }, [organization, roles])
   const currentDetail = detail?.task.id === selectedId ? detail : null
-  const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization) : [], [currentDetail, identities, organization])
+  const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization, currentDetail.questions) : [], [currentDetail, identities, organization])
   const visibleConversation = useMemo(() => chatFilter === 'all' ? conversation : conversation.filter((item) => item.category === chatFilter), [chatFilter, conversation])
   const selectedSummary = tasks.find((item) => item.id === selectedId)
   const task: Task | undefined = selectedId ? currentDetail?.task ?? (selectedSummary
@@ -670,6 +718,8 @@ function App() {
   const beginDerivation = () => {
     if (!currentDetail || !selectedId || derivationRef.current) return
     const source = { id: selectedId, goal: currentDetail.task.goal }
+    questionModeRef.current = false
+    setQuestionMode(false)
     derivationRef.current = source
     navigationRef.current += 1
     focusComposerRef.current = true
@@ -681,6 +731,42 @@ function App() {
     navigationRef.current += 1
     focusComposerRef.current = true
     setDerivation(null)
+  }
+
+  const toggleQuestion = () => {
+    if (!currentDetail || !selectedId) return
+    derivationRef.current = null
+    setDerivation(null)
+    questionModeRef.current = !questionModeRef.current
+    setQuestionMode(questionModeRef.current)
+    navigationRef.current += 1
+    focusComposerRef.current = true
+  }
+
+  const sendQuestion = async () => {
+    const id = selectedId
+    const submitted = message
+    const key = composerKey
+    if (!id || !questionModeRef.current || derivationRef.current || selectedRef.current !== id || loading || !submitted.trim() || pendingRef.current.has(key)) return
+    const previous = questionRequests.current[key]
+    const attempt = previous?.text === submitted ? previous : { text: submitted, requestId: creationRequestId() }
+    questionRequests.current[key] = attempt
+    pendingRef.current.add(key); setPending(new Set(pendingRef.current))
+    setSendErrors((current) => ({ ...current, [key]: '' }))
+    try {
+      const { next: result, order } = await requestDetail(`/api/tasks/${encodeURIComponent(id)}/questions`, {
+        method: 'POST', body: JSON.stringify({ question: submitted.trim(), request_id: attempt.requestId }),
+      })
+      if (questionRequests.current[key] === attempt) {
+        delete questionRequests.current[key]
+        setDrafts((current) => current[key] === submitted ? { ...current, [key]: '' } : current)
+      }
+      acceptDetail(result, order)
+    } catch (err) {
+      if (questionRequests.current[key] === attempt) setSendErrors((current) => ({ ...current, [key]: userFacingError(err, '提问发送失败，请重试。') }))
+    } finally {
+      pendingRef.current.delete(key); setPending(new Set(pendingRef.current))
+    }
   }
 
   const deriveTask = async () => {
@@ -716,7 +802,7 @@ function App() {
   const sendDirection = async () => {
     const id = selectedId
     const submitted = message
-    if (!id || derivationRef.current || selectedRef.current !== id || loading || !submitted.trim() || pendingRef.current.has(id)) return
+    if (!id || questionModeRef.current || derivationRef.current || selectedRef.current !== id || loading || !submitted.trim() || pendingRef.current.has(id)) return
     pendingRef.current.add(id); setPending(new Set(pendingRef.current))
     setSendErrors((current) => ({ ...current, [id]: '' }))
     try {
@@ -729,7 +815,7 @@ function App() {
 
   const team = organization ? [...organization.workers, organization.leader, ...organization.cabinet] : roles
   const names = Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))
-  const participants = task ? conversationParticipants(task, organization?.leader.id ?? 'store_manager', team.map((member) => member.id)) : []
+  const participants = task ? conversationParticipants(task, organization?.leader.id ?? 'store_manager', team.map((member) => member.id), currentDetail?.questions?.map((question) => question.role_id)) : []
   const rulesControl = <RulesPanel key={`rules:${selectedId ?? '$new'}`} request={api} taskId={selectedId ?? undefined} projectId={task ? task.project_id : newProject?.id} draft={task ? message : draft} busy={Boolean(loading || isSending || currentDetail?.activity?.active)} onProjectChange={async (project) => {
     if (selectedId) {
       if (!project) return
@@ -772,6 +858,7 @@ function App() {
               <div className="flex max-w-full flex-wrap items-center gap-2">
                 <ConversationMembers key={task.id} members={team} participants={participants} portrait={(id, size) => <Portrait id={id} size={size} />} onMention={(id) => setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${names[id] ?? id} `)} onOpenDirectory={() => { setTeamOpen(true); void refreshOrganization() }} />
                 {currentDetail?.background && <ConversationOrigin key={`origin:${task.id}`} background={currentDetail.background} onNavigate={(id) => { chooseTask(id); focusComposerRef.current = true }} />}
+                <button type="button" className="origin-tool" aria-label="提问" title={questionMode ? '取消提问，返回协作草稿' : '向当前对话提问'} aria-pressed={questionMode} disabled={loading} onClick={toggleQuestion}><CircleHelp size={17} aria-hidden="true" /></button>
                 <button type="button" className="origin-tool" aria-label="基于此对话开新任务" title="基于此对话开新任务" aria-pressed={Boolean(derivation)} disabled={loading || Boolean(derivation)} onClick={beginDerivation}><GitFork size={17} aria-hidden="true" /></button>
                 {task.work?.items.length ? <button ref={graphTriggerRef} id="task-graph-trigger" type="button" aria-haspopup="dialog" aria-expanded={graphOpen} aria-busy={graphLoading} disabled={graphLoading} onClick={() => void openTaskGraph()} className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-semibold text-[#34786e] hover:bg-[#e7f0ec]">{graphLoading ? <LoaderCircle size={15} className="motion-safe:animate-spin" /> : <GitBranch size={15} />}任务脉络</button> : null}
               </div>
@@ -781,8 +868,8 @@ function App() {
               <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>{loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={item.id} item={item} />) : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
               {!loading && unread > 0 && <button onClick={jumpToLatest} className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-md border border-[#d9b9a5] bg-[#fff7eb] px-3 py-2 text-xs font-semibold text-[#915340] shadow-md" title="返回最新消息"><ArrowDown size={15} /> 查看新消息 · {unread}</button>}
             </div>
-            {derivation ? <DerivationDraftBar goal={derivation.goal} onCancel={cancelDerivation} /> : rulesControl}
-            <DirectionComposer key={composerKey} members={team} message={message} isSending={isSending} isLoading={loading} deriving={Boolean(derivation)} onMessageChange={setMessage} onSend={() => void (derivation ? deriveTask() : sendDirection())} />
+            {derivation ? <DerivationDraftBar goal={derivation.goal} onCancel={cancelDerivation} /> : questionMode ? <QuestionComposerBar onCancel={toggleQuestion} /> : rulesControl}
+            <DirectionComposer key={composerKey} members={team} message={message} isSending={isSending} isLoading={loading} deriving={Boolean(derivation)} questioning={questionMode} onMessageChange={setMessage} onSend={() => void (derivation ? deriveTask() : questionMode ? sendQuestion() : sendDirection())} />
           </> : <><EmptyConversation onChoose={setDraft} />{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
@@ -798,13 +885,33 @@ function ChatWaiting({ error, onRetry }: { error: string; onRetry: () => void })
   return <div className="flex items-start gap-3 py-5"><Portrait id="store_manager" /><div className="min-w-0 text-sm leading-6 text-[#6e8175]"><p role={error ? 'alert' : 'status'} className="flex items-center gap-2">{!error && <LoaderCircle size={16} className="shrink-0 motion-safe:animate-spin" />}{error || '正在接上这段对话'}</p>{error && <button onClick={onRetry} className="mt-3 inline-flex items-center gap-2 rounded-md border border-[#dec8b8] bg-white px-3 py-1.5 text-xs text-[#9e5946]"><RefreshCw size={14} /> 重新连接</button>}</div></div>
 }
 
-function DirectionComposer({ members, message, isSending, isLoading, deriving = false, onMessageChange, onSend }: { members: OrgRole[]; message: string; isSending: boolean; isLoading: boolean; deriving?: boolean; onMessageChange: (value: string) => void; onSend: () => void }) {
-  const sendLabel = deriving ? '创建衍生任务' : '发送消息'
-  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput value={message} label={deriving ? '衍生任务目标' : '向团队发送消息'} placeholder={deriving ? '说说新任务要完成什么，可直接 @一位伙伴' : '继续说吧，补充想法、改目标，或直接 @一位伙伴'} members={members} onChange={onMessageChange} onSubmit={onSend} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={isSending || isLoading || !message.trim()} onClick={onSend} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isLoading ? '正在接上对话' : isSending ? '正在发送' : deriving ? sendLabel : '发送消息并安排下一轮协作'} aria-label={sendLabel} aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
+function DirectionComposer({ members, message, isSending, isLoading, deriving = false, questioning = false, onMessageChange, onSend }: { members: OrgRole[]; message: string; isSending: boolean; isLoading: boolean; deriving?: boolean; questioning?: boolean; onMessageChange: (value: string) => void; onSend: () => void }) {
+  const sendLabel = deriving ? '创建衍生任务' : questioning ? '发送提问' : '发送消息'
+  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput value={message} label={deriving ? '衍生任务目标' : questioning ? '向当前对话提问' : '向团队发送消息'} placeholder={deriving ? '说说新任务要完成什么，可直接 @一位伙伴' : questioning ? '想了解什么？' : '继续说吧，补充想法、改目标，或直接 @一位伙伴'} members={members} onChange={onMessageChange} onSubmit={onSend} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={isSending || isLoading || !message.trim()} onClick={onSend} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isLoading ? '正在接上对话' : isSending ? '正在发送' : deriving || questioning ? sendLabel : '发送消息并安排下一轮协作'} aria-label={sendLabel} aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
 }
 
 function TaskComposer({ members, draft, isSending, onDraftChange, onCreate }: { members: OrgRole[]; draft: string; isSending: boolean; onDraftChange: (value: string) => void; onCreate: () => void }) {
   return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput id="new-task" value={draft} label="发起任务对话" placeholder="和店长说说，今天想做什么？" members={members} onChange={onDraftChange} onSubmit={onCreate} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={isSending || !draft.trim()} onClick={onCreate} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isSending ? '正在发送新任务' : '发送新任务'} aria-label="发送新任务" aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
+}
+
+function QuestionDetails({ question }: { question: QuestionContext }) {
+  const { basis, questionSeq, recipient, evidence, limits, reason } = question
+  const sourceNames: Record<string, string> = { task: '任务背景', goal: '目标', requirement: '顾客要求', member_artifact: '成员成果', execution_record: '实际检查', member_review: '成员说明', work_state: '工作状态' }
+  return <details className="mt-3 border-t border-current/20 pt-2 text-xs">
+    <summary className="cursor-pointer font-semibold">查看引用、版本与限制</summary>
+    <div className="mt-2 space-y-2 whitespace-pre-wrap [overflow-wrap:anywhere]">
+      {questionSeq !== undefined && <p>对应提问 · 事件 #{questionSeq}</p>}
+      {recipient && <p>提问对象：@{recipient}</p>}
+      {basis && <div>
+        <p>提问时版本 · 截至事件 #{basis.seq}</p>
+        <p>来源事件：{basis.source_seqs?.map((source) => `#${source.seq}（${sourceNames[source.kind] ?? '来源记录'}）`).join('、') || '无'}</p>
+        <p>历史问答事件：{basis.history_seqs?.map((seq) => `#${seq}`).join('、') || '无'}</p>
+      </div>}
+      {evidence?.map((entry, index) => <div key={index}><p className="font-semibold">原文引用 · 来源事件 #{entry.source_seq}</p><blockquote className="mt-1 border-l-2 border-current/30 pl-3">{entry.quote}</blockquote></div>)}
+      {limits?.length ? <div><p className="font-semibold">限制</p><ul className="mt-1 list-disc space-y-1 pl-4">{limits.map((limit, index) => <li key={index}>{limit}</li>)}</ul></div> : null}
+      {reason && <p>说明：{reason}</p>}
+    </div>
+  </details>
 }
 
 function ChatBubble({ item }: { item: ChatItem }) {
@@ -814,6 +921,9 @@ function ChatBubble({ item }: { item: ChatItem }) {
     <div className={`message-bubble max-w-[min(86%,700px)] px-4 py-3 ${human ? 'is-human text-white' : system ? 'is-system' : 'is-agent'}`} data-actor={item.actor}>
       <div className={`mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${human ? 'text-[#fff0e8]' : 'text-[#6e8981]'}`}><strong className={human ? 'text-white' : 'text-[#28433d]'}>{human ? '你' : item.display}</strong><span>{item.role}</span>{item.title && <span className={`text-[11px] font-semibold ${human ? 'text-[#fff4d9]' : 'text-[#a56049]'}`}>· {item.title}</span>}</div>
       <p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>
+      {item.question?.progress && <p role="status" className="mt-2 text-xs">{item.question.progress}</p>}
+      {item.question?.outdated && !human && <p className="mt-2 text-xs font-semibold text-[#a56049]">历史版本 · 回答基于提问时的任务版本</p>}
+      {item.question && <QuestionDetails question={item.question} />}
       {item.evidence.type === 'deliverable.published' && <ArtifactPreview item={{ ...item.evidence.payload, seq: item.id } as Artifact} publisher={item.display} showSummary={false} />}
       {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
       {item.details?.length ? <details className={`mt-3 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#dfeae5] text-[#52766d]'}`}><summary className="cursor-pointer font-semibold">查看判断与依据</summary><ul className="mt-2 space-y-1.5 leading-5">{item.details.map((detail, index) => <li key={`${item.id}-${index}`}>{detail}</li>)}</ul></details> : null}

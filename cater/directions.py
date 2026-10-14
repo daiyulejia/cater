@@ -23,6 +23,8 @@ def command_intent(instruction: str, aliases: Iterable[str] = ()) -> str:
         return "status"
     if text in {"继续", "继续吧", "请继续", "继续执行", "继续推进", "继续任务", "接着做", "接着做吧", "continue", "resume"}:
         return "resume"
+    if text in {"为什么这么改", "为什么这样改", "为什么这样做", "为什么改这里", "怎么验证", "如何验证", "如何复查", "我没看懂", "解释一下", "请解释一下"} or re.match(r"^(?:请讲解|讲解|提问)\s*[:：]", text):
+        return "question"
     # Mixed sentences, unknown phrases, and historical events remain changes.
     return "direction"
 

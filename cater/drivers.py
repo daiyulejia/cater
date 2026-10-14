@@ -262,7 +262,10 @@ class CliDriver:
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
         task_id = context.get("task_id") if isinstance(context, dict) else None
-        if isinstance(task_id, str) and task_id and isinstance(context.get("background"), dict):
+        work = context.get("work") if isinstance(context, dict) else None
+        isolated = isinstance(context.get("background"), dict) if isinstance(context, dict) else False
+        isolated = isolated or isinstance(work, dict) and work.get("phase") == "explanation"
+        if isinstance(task_id, str) and task_id and isolated:
             # Snapshot calls carry explicit context and must not reuse process history.
             worker = CliDriver(
                 self.name, self.command, cwd=self.cwd, timeout=self.timeout,

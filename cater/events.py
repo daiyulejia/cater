@@ -71,6 +71,9 @@ EVENT_CATEGORIES = {
     "brief.generated": "decision",
     "human.commanded": "decision",
     "task.progress_reported": "dialogue",
+    "question.asked": "dialogue",
+    "question.started": "lifecycle",
+    "question.finished": "dialogue",
     "human.decided": "decision",
     "review.generated": "review",
 }
