@@ -24,7 +24,9 @@
               "properties": {
                 "id": {"type": "string", "minLength": 1, "maxLength": 100},
                 "kind": {"type": "string", "enum": ["review", "local_check"]},
-                "text": {"type": "string", "minLength": 1, "maxLength": 2000}
+                "text": {"type": "string", "minLength": 1, "maxLength": 2000},
+                "obligation_id": {"type": ["string", "null"], "maxLength": 100},
+                "subject": {"type": ["string", "null"], "maxLength": 12000}
               }
             }
           }

@@ -34,6 +34,7 @@ EVENT_CATEGORIES = {
     "delivery.review_finished": "review",
     "delivery.check_started": "review",
     "work.check_started": "review",
+    "checks.contract_revised": "policy",
     "project.created": "planning",
     "task.project_bound": "planning",
     "rule.recorded": "policy",

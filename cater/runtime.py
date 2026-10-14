@@ -695,6 +695,12 @@ class Runtime:
             raise WorkConflict("in-flight work must be reconciled before replanning")
         return self.work.plan(task_id, normalized, role_ids={role.id for role in self.roles}, source_seq=0)
 
+    def revise_checks(self, task_id: str, changes: object, *, reason: str, expected_revision: int | None) -> Event:
+        """Explicit trusted contract edit; a model planning response cannot do this."""
+        if self.task(task_id) is None:
+            raise KeyError(task_id)
+        return self.work.revise_checks(task_id, changes, reason=reason, expected_revision=expected_revision)
+
     def _ensure_work_plan(self, task: TaskSnapshot) -> dict[str, Any]:
         view = self.work.view(task.id)
         assert task.plan is not None

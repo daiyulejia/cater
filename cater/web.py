@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import hmac
 import ipaddress
 import json
 import mimetypes
 import threading
+import time
 import uuid
+from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,6 +45,11 @@ class ActivityRunner:
         self._runtime_factory = runtime_factory
         self._lock = threading.RLock()
         self._activities: dict[str, dict[str, Any]] = {}
+        self._revision = 0
+
+    def snapshot(self) -> tuple[int, dict[str, dict[str, Any]]]:
+        with self._lock:
+            return self._revision, {task_id: self.status(task_id) for task_id in self._activities}
 
     def recover_interrupted(self) -> int:
         """Close activities left open by a previous Web process.
@@ -82,14 +91,19 @@ class ActivityRunner:
                     "error": message,
                     "finished_at": _now_iso(),
                 }
+                self._revision += 1
         return len(pending)
 
     def status(self, task_id: str) -> dict[str, Any]:
         with self._lock:
             activity = dict(self._activities.get(task_id, {}))
+            if isinstance(activity.get("follow_up"), dict):
+                activity["follow_up"] = dict(activity["follow_up"])
+            revision = self._revision
         if not activity:
-            return {"state": "idle", "active": False}
+            return {"state": "idle", "active": False, "revision": revision}
         activity["active"] = activity["state"] in {"queued", "running"}
+        activity["revision"] = revision
         return activity
 
     def submit(self, task_id: str, action: str) -> dict[str, Any]:
@@ -120,6 +134,7 @@ class ActivityRunner:
                         current["follow_up"] = queued
                         try:
                             self._record_queued(task_id, queued, after_activity_id=current["id"])
+                            self._revision += 1
                         except Exception:
                             current.pop("follow_up", None)
                             raise
@@ -134,6 +149,7 @@ class ActivityRunner:
                                 after_activity_id=current["id"],
                                 replaces_action=previous_action,
                             )
+                            self._revision += 1
                         except Exception:
                             queued["action"] = previous_action
                             queued.pop("revised_at", None)
@@ -146,6 +162,7 @@ class ActivityRunner:
                 "queued_at": _now_iso(),
             }
             self._activities[task_id] = activity
+            self._revision += 1
 
         try:
             self._record_queued(task_id, activity)
@@ -231,6 +248,7 @@ class ActivityRunner:
             if activity and activity["id"] == activity_id:
                 activity["state"] = "running"
                 activity["started_at"] = _now_iso()
+                self._revision += 1
 
     def _finish(self, task_id: str, activity_id: str, state: str, *, error: str | None = None) -> None:
         follow_up: dict[str, Any] | None = None
@@ -246,6 +264,7 @@ class ActivityRunner:
             if state == "completed" and isinstance(queued, dict):
                 follow_up = {**queued, "state": "queued"}
                 self._activities[task_id] = follow_up
+            self._revision += 1
         if follow_up is not None:
             self._start(task_id, follow_up)
 
@@ -375,6 +394,11 @@ def make_handler(
 
     activities = ActivityRunner(build_runtime)
     activities.recover_interrupted()
+    summaries_lock = threading.Lock()
+    summaries_head: str | None = None
+    summaries_base: list[dict[str, Any]] = []
+    summaries_lease_version = 0.0
+    summaries_deadline = float("inf")
 
     class CaterHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -393,6 +417,8 @@ def make_handler(
                 return self._unauthorized()
             if path == "/":
                 return self._send_html(render_index(self._runtime()))
+            if path == "/api/task-summaries":
+                return self._send_task_summaries()
             if path == "/api/tasks":
                 with self._runtime() as rt:
                     return self._send_json(
@@ -793,6 +819,67 @@ def make_handler(
         def _runtime(self) -> Runtime:
             return build_runtime()
 
+        def _send_task_summaries(self) -> None:
+            nonlocal summaries_head, summaries_base, summaries_lease_version, summaries_deadline
+            # Cache only small rows. Stable requests read the indexed event head
+            # and activity state, never task history or delivery manifests.
+            with summaries_lock, self._runtime() as rt, _read_snapshot(rt):
+                activity_revision, activity_rows = activities.snapshot()
+                head = rt.log.head_hash()
+                now = time.time()
+                lease_version, deadline = summaries_lease_version, summaries_deadline
+                if summaries_head != head or now > deadline:
+                    # Lease expiry changes work/delivery views even without an append.
+                    row = rt.log.db.execute("""
+                        SELECT MAX(CASE WHEN lease < ? THEN lease END) AS expired,
+                               MIN(CASE WHEN lease >= ? THEN lease END) AS upcoming
+                        FROM (SELECT json_extract(payload_json, '$.lease_until') AS lease FROM events
+                              WHERE type IN ('work.claimed', 'work.check_started',
+                                             'delivery.review_started', 'delivery.check_started'))
+                    """, (now, now)).fetchone()
+                    lease_version, deadline = row["expired"] or 0.0, row["upcoming"] or float("inf")
+                # evaluated_at may differ across handler lifetimes; validate
+                # semantic row state rather than byte-identical JSON.
+                etag = 'W/"' + hashlib.sha256(
+                    f"summaries-v1:{head}:{activity_revision}:{lease_version}".encode()
+                ).hexdigest() + '"'
+                supplied = self.headers.get("If-None-Match", "")
+                if any(tag.strip().removeprefix("W/") in {etag.removeprefix("W/"), "*"}
+                       for tag in supplied.split(",")):
+                    self.send_response(HTTPStatus.NOT_MODIFIED)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control", "private, no-cache")
+                    self.end_headers()
+                    return
+                if summaries_head != head or summaries_lease_version != lease_version:
+                    version = _event_version(rt)
+                    stats: dict[str, Counter] = {}
+                    latest: dict[str, int] = {}
+                    # Extract only the receipt discriminator, not message/body text.
+                    for row in rt.log.db.execute("""
+                        SELECT task_id, type,
+                            CASE WHEN type = 'msg.said' AND json_extract(payload_json, '$.phase')
+                                IN ('planning', 'delivery_receipt')
+                                THEN json_extract(payload_json, '$.phase') END AS phase,
+                            COUNT(*) AS n, MAX(seq) AS latest
+                        FROM events WHERE task_id IS NOT NULL GROUP BY task_id, type, phase
+                    """):
+                        stats.setdefault(row["task_id"], Counter())[(row["type"], row["phase"])] = row["n"]
+                        latest[row["task_id"]] = max(latest.get(row["task_id"], 0), row["latest"])
+                    rows = [
+                        _task_summary(task, version=version, latest_seq=latest[task.id],
+                                      conversation_count=_conversation_count(stats[task.id]))
+                        for task in rt.tasks()
+                    ]
+                    summaries_base, summaries_head = rows, head
+                    summaries_lease_version, summaries_deadline = lease_version, deadline
+                rows = [
+                    _summary_activity(row, activity_rows.get(row["id"],
+                                      {"state": "idle", "active": False, "revision": activity_revision}))
+                    for row in summaries_base
+                ]
+            self._send_json({"tasks": rows}, etag=etag)
+
         def _task_payload(self, task_id: str, runner: ActivityRunner) -> dict[str, Any]:
             with self._runtime() as runtime:
                 return task_api_payload(runtime, task_id, activity=runner.status(task_id))
@@ -806,11 +893,13 @@ def make_handler(
             self.end_headers()
             self.wfile.write(raw)
 
-        def _send_json(self, body: Any, *, status: HTTPStatus = HTTPStatus.OK) -> None:
+        def _send_json(self, body: Any, *, status: HTTPStatus = HTTPStatus.OK, etag: str | None = None) -> None:
             raw = json.dumps(body, ensure_ascii=False, indent=2).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", "private, no-cache" if etag else "no-store")
+            if etag:
+                self.send_header("ETag", etag)
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -1246,17 +1335,106 @@ def _role_to_dict(role: Any) -> dict[str, str]:
     }
 
 
+@contextmanager
+def _read_snapshot(rt: Runtime):
+    owned = not rt.log.db.in_transaction
+    if owned:
+        rt.log.db.execute("BEGIN")
+    try:
+        yield
+    finally:
+        if owned:
+            rt.log.db.rollback()
+
+
+def _event_version(rt: Runtime) -> int:
+    return rt.log.db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
+
+
+# One record per bubble in App.conversationFor's unfiltered conversation.
+# Keep its conditional suppression rules in sync when adding chat event types.
+_CHAT_TYPES = {
+    "task.created", "rule.recorded", "rule.updated", "activity.failed", "human.commanded",
+    "task.progress_reported", "planning.started", "planning.finished", "delivery.review_started",
+    "delivery.review_finished", "task.interpreted", "cabinet.convened",
+    "task.decomposed", "plan.amended", "msg.said", "msg.challenge", "diagnosis.recorded",
+    "deliverable.published", "handoff.published", "verification.completed", "cabinet.voted",
+    "agent.decided", "supreme.decided", "agent.discipline_flagged", "driver.budget_exhausted", "driver.failed",
+}
+
+
+def _conversation_count(counts: Counter) -> int:
+    count = sum(n for (kind, phase), n in counts.items() if kind in _CHAT_TYPES
+                and not (kind == "msg.said" and phase in {"planning", "delivery_receipt"}))
+    if not (counts[("activity.completed", None)] or counts[("activity.failed", None)]):
+        count += counts[("activity.queued", None)]
+    if not (counts[("agent.decided", None)] or counts[("supreme.decided", None)]):
+        count += counts[("brief.generated", None)]
+    return count
+
+
+def _task_status_label(task: TaskSnapshot) -> str:
+    work = task.work or {}
+    if work.get("items"):
+        statuses = {item["status"] for item in work["items"]}
+        delivery_status = (work.get("delivery") or {}).get("status")
+        if "uncertain" in statuses:
+            return "结果待核实"
+        if not work.get("scope_current"):
+            return "需要重新核对"
+        if delivery_status == "accepted":
+            return "已交付"
+        if delivery_status == "uncertain":
+            return "复核结果待确认"
+        if work.get("stage_accepted"):
+            return "阶段通过，待整体验收"
+        return "等待验收" if "submitted" in statuses else "待补充成果"
+    if task.status == "running" and task.brief:
+        return "等待下一轮"
+    return {"pending": "待开始", "running": "进行中", "rework": "需返工", "decided": "已定下",
+            "done": "已完成", "escalated": "待处理"}.get(task.status, task.status)
+
+
+def _task_summary(task: TaskSnapshot, *, version: int, latest_seq: int, conversation_count: int) -> dict[str, Any]:
+    return {"id": task.id, "goal": task.goal, "project_id": task.project_id, "status": task.status,
+            "status_label": _task_status_label(task), "conversation_count": conversation_count,
+            "latest_seq": latest_seq, "version": version, "evaluated_at": time.time()}
+
+
+def _summary_activity(row: dict[str, Any], activity: dict[str, Any]) -> dict[str, Any]:
+    state = {key: activity[key] for key in ("state", "active", "revision") if key in activity}
+    if activity.get("follow_up"):
+        state["follow_up"] = {"action": activity["follow_up"]["action"]}
+    label = row["status_label"]
+    if activity.get("active"):
+        label = ("已收下新方向，当前轮结束后继续" if state.get("follow_up", {}).get("action") == "run"
+                 else "协作已排队" if state["state"] == "queued" else "正在协作")
+    return {**row, "activity": state, "status_label": label}
+
+
 def task_api_payload(
     rt: Runtime,
     task_id: str,
     *,
     activity: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    with _read_snapshot(rt):
+        return _task_api_payload(rt, task_id, activity=activity)
+
+
+def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | None) -> dict[str, Any]:
+    version = _event_version(rt)
     task = rt.task(task_id)
     if task is None:
         raise KeyError(task_id)
     events = rt.log.read(task_id=task_id)
     payload = {
+        "summary": _summary_activity(
+            _task_summary(task, version=version, latest_seq=events[-1].seq if events else 0,
+                          conversation_count=_conversation_count(Counter(
+                              (e.type, e.payload.get("phase") if e.type == "msg.said"
+                               and e.payload.get("phase") in ("planning", "delivery_receipt") else None)
+                              for e in events))), activity or {"state": "idle", "active": False}),
         "task": task_to_dict(task),
         "events": [event_to_dict(e) for e in events],
         "organization_memory": rt.shared_memory(exclude_task_id=task_id),

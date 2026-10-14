@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown, Cat, CheckCircle2, ChevronDown,
-  CornerDownRight, FileText, LoaderCircle, PawPrint, Plus, RefreshCw, Search, ShieldCheck,
+  CornerDownRight, FileText, GitBranch, LoaderCircle, PawPrint, Plus, RefreshCw, Search, ShieldCheck,
 } from 'lucide-react'
 import catPortraits from './assets/cat-portraits.jpg'
 import staffPortraits from './assets/staff-portraits.jpg'
@@ -15,8 +15,12 @@ import { TaskList } from './TaskList'
 import { RulesPanel } from './RulesPanel'
 import { WorkItems } from './WorkItems'
 import { DeliveryPanel } from './DeliveryPanel'
+import { ConversationMembers } from './ConversationMembers'
+import { conversationParticipants } from './participants'
 import type { WorkState } from './WorkItems'
 import type { TeamAvailability } from './TeamDirectory'
+
+const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
 
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
 type Message = { seq: number; actor: string; role: string; type: string; claim?: string; text?: string; stance?: string; target?: string; reply_to?: number }
@@ -30,7 +34,8 @@ type MemoryItem = { seq: number; task_id?: string; actor?: string; title: string
 type OrgRole = { id: string; name: string; role: string; charter?: string }
 type DriverCoverage = { role_id: string; name: string; driver: string; mode: 'local_demo' | 'external' }
 type Organization = { leader: OrgRole; cabinet: OrgRole[]; workers: OrgRole[]; mode?: 'local_demo' | 'mixed_driver' | 'external_driver'; worker_drivers?: DriverCoverage[]; availability?: TeamAvailability }
-type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'; active: boolean; error?: string; follow_up?: { action?: string } }
+type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'; active: boolean; revision?: number; error?: string; follow_up?: { action?: string } }
+type TaskSummary = { id: string; goal: string; project_id?: string | null; status: string; status_label: string; conversation_count: number; latest_seq: number; version: number; evaluated_at?: number; activity?: Activity }
 type Task = {
   work?: WorkState | null
   project_id?: string | null
@@ -46,7 +51,7 @@ type Task = {
   route?: { route?: string; reason?: string }
 }
 type Event = { seq: number; type: string; category: string; actor: { id: string; role: string; kind: string }; payload: Record<string, unknown> }
-type TaskDetail = { task: Task; events: Event[]; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
+type TaskDetail = { task: Task; events: Event[]; summary?: TaskSummary; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
 type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; targets: string[]; replyTo?: number; evidence: Event }
 
 const accessToken = (() => {
@@ -61,7 +66,12 @@ const accessToken = (() => {
 })()
 
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
-  const response = await fetch(path, {
+  const response = await apiResponse(path, init)
+  if (!response.ok) throw new Error(await response.text())
+  return response.json() as Promise<T>
+}
+
+const apiResponse = (path: string, init?: RequestInit) => fetch(path, {
     ...init,
     headers: {
       'Content-Type': 'application/json',
@@ -69,9 +79,10 @@ const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
       ...(init?.headers ?? {}),
     },
   })
-  if (!response.ok) throw new Error(await response.text())
-  return response.json() as Promise<T>
-}
+
+const summaryOrder = (next: TaskSummary, current: TaskSummary) => next.version - current.version
+  || (next.activity?.revision ?? 0) - (current.activity?.revision ?? 0)
+  || (next.evaluated_at ?? 0) - (current.evaluated_at ?? 0)
 
 function userFacingError(error: unknown, fallback: string): string {
   const message = error instanceof Error ? error.message.trim() : ''
@@ -325,7 +336,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
 
 function App() {
   const [newProject, setNewProject] = useState<{ id: string; name: string } | null>(null)
-  const [tasks, setTasks] = useState<Task[]>([])
+  const [tasks, setTasks] = useState<TaskSummary[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<TaskDetail | null>(null)
   const [drafts, setDrafts] = useState<Record<string, string>>({})
@@ -336,7 +347,9 @@ function App() {
   const [showMobileBoard, setShowMobileBoard] = useState(false)
   const [tasksCollapsed, setTasksCollapsed] = useState(false)
   const [taskSearchOpen, setTaskSearchOpen] = useState(false)
-  const [membersCollapsed, setMembersCollapsed] = useState(false)
+  const [graphOpen, setGraphOpen] = useState(false)
+  const [graphLoaded, setGraphLoaded] = useState(false)
+  const [graphLoading, setGraphLoading] = useState(false)
   const [teamOpen, setTeamOpen] = useState(false)
   const [teamRefreshing, setTeamRefreshing] = useState(false)
   const [teamError, setTeamError] = useState('')
@@ -347,6 +360,7 @@ function App() {
   const [checkingChain, setCheckingChain] = useState(false)
   const [chatFilter, setChatFilter] = useState<'all' | ChatItem['category']>('all')
   const [error, setError] = useState('')
+  const [taskListError, setTaskListError] = useState('')
   const [sendErrors, setSendErrors] = useState<Record<string, string>>({})
   const [loadErrors, setLoadErrors] = useState<Record<string, string>>({})
   const [reloadToken, setReloadToken] = useState(0)
@@ -357,7 +371,8 @@ function App() {
   const selectedRef = useRef<string | null>(null)
   const navigationRef = useRef(0)
   const pendingRef = useRef(new Set<string>())
-  const versionsRef = useRef<Record<string, number>>({})
+  const versionsRef = useRef<Record<string, { summary: TaskSummary; order: number }>>({})
+  const detailOrderRef = useRef(0)
   const newKey = '$new'
   const composerKey = selectedId ?? newKey
   const draft = drafts[newKey] ?? ''
@@ -367,7 +382,7 @@ function App() {
   const updateDraft = (key: string, value: string | ((current: string) => string)) => {
     setDrafts((current) => ({ ...current, [key]: typeof value === 'function' ? value(current[key] ?? '') : value }))
   }
-  const setDraft = (value: string | ((current: string) => string)) => updateDraft(newKey, value)
+  const setDraft = (value: string | ((current: string) => string)) => { navigationRef.current += 1; updateDraft(newKey, value) }
   const setMessage = (value: string) => { if (selectedId) updateDraft(selectedId, value) }
 
   const chooseTask = useCallback((id: string | null) => {
@@ -379,30 +394,85 @@ function App() {
     setSelectedId(id)
     setChatFilter('all')
     setShowMobileBoard(false)
+    setGraphOpen(false)
   }, [])
 
-  const acceptDetail = useCallback((next: TaskDetail) => {
+  const requestDetail = useCallback(async (path: string, init?: RequestInit) => {
+    const order = ++detailOrderRef.current
+    return { next: await api<TaskDetail>(path, init), order }
+  }, [])
+
+  const acceptDetail = useCallback((next: TaskDetail, order: number) => {
     const id = next.task.id
     const seq = next.events.at(-1)?.seq ?? 0
-    if (seq < (versionsRef.current[id] ?? 0)) return
-    versionsRef.current[id] = seq
+    const version = next.summary?.version ?? seq
+    const item = next.summary ?? { id, goal: next.task.goal, project_id: next.task.project_id,
+      status: next.task.status, status_label: taskListStatus({ ...next.task, activity: next.activity }),
+      activity: next.activity, conversation_count: conversationFor(next.events, {}, null).length, latest_seq: seq, version }
+    const previous = versionsRef.current[id]
+    const comparison = previous ? summaryOrder(item, previous.summary) : 1
+    if (comparison < 0 || (comparison === 0 && previous && order < previous.order)) return
+    versionsRef.current[id] = { summary: item, order }
     setTasks((current) => {
-      const item = { ...next.task, activity: next.activity }
-      return current.some((task) => task.id === id) ? current.map((task) => task.id === id ? item : task) : [...current, item]
+      return current.some((task) => task.id === id)
+        ? current.map((task) => task.id === id && summaryOrder(item, task) >= 0 ? item : task) : [...current, item]
     })
     if (selectedRef.current === id) setDetail(next)
   }, [])
 
   useEffect(() => {
     let cancelled = false
-    void api<Task[]>('/api/tasks').then((nextTasks) => {
-      if (cancelled) return
-      setTasks((current) => [...nextTasks.filter((task) => !current.some((item) => item.id === task.id)), ...current])
-      if (navigationRef.current === 0) chooseTask(nextTasks.at(-1)?.id ?? null)
-    }).catch((err: unknown) => {
-      if (!cancelled) setError(userFacingError(err, '暂时无法读取任务。'))
-    })
-    return () => { cancelled = true }
+    let fetching = false
+    let initialized = false
+    let etag = ''
+    let timer: number | undefined
+    let controller: AbortController | undefined
+    const pageVisible = () => document.visibilityState !== 'hidden'
+    const poll = async () => {
+      if (cancelled || fetching || !pageVisible()) return
+      fetching = true
+      controller = new AbortController()
+      const signal = controller.signal
+      const timeout = window.setTimeout(() => controller?.abort(), 8000)
+      try {
+        const response = await apiResponse('/api/task-summaries', { signal, cache: 'no-store',
+          headers: etag ? { 'If-None-Match': etag } : {} })
+        if (response.status === 304) return
+        if (!response.ok) throw new Error(await response.text())
+        const next = await response.json() as { tasks: TaskSummary[] }
+        if (cancelled || signal.aborted || !pageVisible()) return
+        if (!Array.isArray(next.tasks)) throw new Error('暂时无法读取任务列表，请稍后重试。')
+        etag = response.headers.get('ETag') ?? ''
+        setTaskListError('')
+        setTasks((current) => {
+          const received = new Map(next.tasks.map((task) => [task.id, task]))
+          return [...current.map((task) => {
+            const item = received.get(task.id)
+            received.delete(task.id)
+            return item && summaryOrder(item, task) >= 0 ? item : task
+          }), ...received.values()]
+        })
+        if (!initialized && navigationRef.current === 0) chooseTask(next.tasks.at(-1)?.id ?? null)
+        initialized = true
+      } catch (err) {
+        if (!cancelled && !signal.aborted && !initialized) setTaskListError(userFacingError(err, '暂时无法读取任务。'))
+      } finally {
+        window.clearTimeout(timeout)
+        fetching = false
+        if (!cancelled && pageVisible()) timer = window.setTimeout(() => void poll(), 4000)
+      }
+    }
+    const visibilityChanged = () => {
+      window.clearTimeout(timer)
+      if (pageVisible()) void poll()
+      else controller?.abort()
+    }
+    void poll()
+    document.addEventListener('visibilitychange', visibilityChanged)
+    return () => {
+      cancelled = true; controller?.abort(); window.clearTimeout(timer)
+      document.removeEventListener('visibilitychange', visibilityChanged)
+    }
   }, [chooseTask])
   useEffect(() => {
     void api<OrgRole[]>('/api/organization').then((nextRoles) => {
@@ -451,9 +521,9 @@ function App() {
       controller = new AbortController()
       let delay = 4000
       try {
-        const next = await api<TaskDetail>(`/api/tasks/${selectedId}`, { signal: controller.signal })
+        const { next, order } = await requestDetail(`/api/tasks/${selectedId}`, { signal: controller.signal })
         if (cancelled) return
-        acceptDetail(next)
+        acceptDetail(next, order)
         setLoadErrors((current) => ({ ...current, [selectedId]: '' }))
         delay = next.activity?.active ? 800 : 4000
       } catch (err) {
@@ -475,7 +545,7 @@ function App() {
       controller?.abort()
       document.removeEventListener('visibilitychange', visibilityChanged)
     }
-  }, [selectedId, reloadToken, acceptDetail])
+  }, [selectedId, reloadToken, acceptDetail, requestDetail])
 
   const identities = useMemo(() => {
     const members = organization ? [organization.leader, ...organization.cabinet, ...organization.workers] : roles
@@ -484,10 +554,12 @@ function App() {
   const currentDetail = detail?.task.id === selectedId ? detail : null
   const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization) : [], [currentDetail, identities, organization])
   const visibleConversation = useMemo(() => chatFilter === 'all' ? conversation : conversation.filter((item) => item.category === chatFilter), [chatFilter, conversation])
-  const task = selectedId ? currentDetail?.task ?? tasks.find((item) => item.id === selectedId) : undefined
+  const selectedSummary = tasks.find((item) => item.id === selectedId)
+  const task: Task | undefined = selectedId ? currentDetail?.task ?? (selectedSummary
+    ? { ...selectedSummary, acceptance: [], messages: [], assignments: [], deliverables: [] } : undefined) : undefined
   const loading = selectedId !== null && currentDetail === null
   const loadError = selectedId ? loadErrors[selectedId] ?? '' : ''
-  const visibleError = sendErrors[composerKey] || error
+  const visibleError = sendErrors[composerKey] || error || taskListError
 
   const jumpToLatest = () => {
     const stream = streamRef.current
@@ -519,6 +591,23 @@ function App() {
     finally { setCheckingChain(false) }
   }
 
+  const openTaskGraph = async () => {
+    const id = selectedId
+    if (!id || graphLoading) return
+    setGraphLoading(true)
+    try {
+      await import('./TaskGraph')
+      if (selectedRef.current === id) {
+        setGraphLoaded(true); setGraphOpen(true)
+        setError((current) => current.startsWith('任务脉络暂时无法打开') ? '' : current)
+      }
+    } catch {
+      if (selectedRef.current === id) setError('任务脉络暂时无法打开，聊天和草稿仍保留。请稍后重试。')
+    } finally {
+      setGraphLoading(false)
+    }
+  }
+
   const createTask = async () => {
     const submitted = draft
     const goal = submitted.trim()
@@ -527,7 +616,7 @@ function App() {
     pendingRef.current.add(newKey); setPending(new Set(pendingRef.current))
     setSendErrors((current) => ({ ...current, [newKey]: '' }))
     try {
-      const result = await api<TaskDetail>('/api/tasks', {
+      const { next: result, order } = await requestDetail('/api/tasks', {
         method: 'POST',
         body: JSON.stringify({
           goal,
@@ -537,7 +626,7 @@ function App() {
       })
       setDrafts((current) => current[newKey] === submitted ? { ...current, [newKey]: '' } : current)
       if (navigationRef.current === navigation && selectedRef.current === null) chooseTask(result.task.id)
-      acceptDetail(result)
+      acceptDetail(result, order)
     } catch (err) { setSendErrors((current) => ({ ...current, [newKey]: userFacingError(err, '创建任务失败') })) }
     finally { pendingRef.current.delete(newKey); setPending(new Set(pendingRef.current)) }
   }
@@ -549,20 +638,21 @@ function App() {
     pendingRef.current.add(id); setPending(new Set(pendingRef.current))
     setSendErrors((current) => ({ ...current, [id]: '' }))
     try {
-      const result = await api<TaskDetail>(`/api/tasks/${id}/command`, { method: 'POST', body: JSON.stringify({ instruction: submitted.trim(), continue: true }) })
+      const { next: result, order } = await requestDetail(`/api/tasks/${id}/command`, { method: 'POST', body: JSON.stringify({ instruction: submitted.trim(), continue: true }) })
       setDrafts((current) => current[id] === submitted ? { ...current, [id]: '' } : current)
-      acceptDetail(result)
+      acceptDetail(result, order)
     } catch (err) { setSendErrors((current) => ({ ...current, [id]: userFacingError(err, '发送指令失败') })) }
     finally { pendingRef.current.delete(id); setPending(new Set(pendingRef.current)) }
   }
 
   const team = organization ? [...organization.workers, organization.leader, ...organization.cabinet] : roles
   const names = Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))
+  const participants = task ? conversationParticipants(task, organization?.leader.id ?? 'store_manager', team.map((member) => member.id)) : []
   const rulesControl = <RulesPanel key={`rules:${selectedId ?? '$new'}`} request={api} taskId={selectedId ?? undefined} projectId={task ? task.project_id : newProject?.id} draft={task ? message : draft} busy={Boolean(loading || isSending || currentDetail?.activity?.active)} onProjectChange={async (project) => {
     if (selectedId) {
       if (!project) return
-      const result = await api<TaskDetail>(`/api/tasks/${selectedId}/project`, { method: 'POST', body: JSON.stringify({ project_id: project.id }) })
-      acceptDetail(result)
+      const { next: result, order } = await requestDetail(`/api/tasks/${selectedId}/project`, { method: 'POST', body: JSON.stringify({ project_id: project.id }) })
+      acceptDetail(result, order)
     } else setNewProject(project)
   }} onRecorded={(text) => { const key = selectedId ?? newKey; setDrafts((current) => current[key]?.trim() === text ? { ...current, [key]: '' } : current) }} onUpdated={() => setReloadToken((value) => value + 1)} />
   return (
@@ -588,8 +678,7 @@ function App() {
               <button className="grid size-9 place-items-center rounded-md border border-[#ead2c5] bg-white text-[#b15342] shadow-sm hover:bg-[#fff0e9]" title="新建任务" aria-label="新建任务" onClick={() => chooseTask(null)}><Plus size={18} /></button>
             </div>
           </div>
-          <TaskList tasks={tasks} selectedId={selectedId} drafts={drafts} collapsed={tasksCollapsed} searchOpen={taskSearchOpen} onChoose={chooseTask} statusLabel={taskListStatus} />
-          <div className="hidden lg:block"><TeamRoster members={team} compact onOpen={() => { setTeamOpen(true); void refreshOrganization() }} /></div>
+          <TaskList tasks={tasks} selectedId={selectedId} drafts={drafts} collapsed={tasksCollapsed} searchOpen={taskSearchOpen} onChoose={chooseTask} statusLabel={(item) => item.status_label} />
         </aside>
         <section className="chat-pane flex min-h-0 flex-col">
           {task ? <>
@@ -597,18 +686,20 @@ function App() {
               <div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div>
               <div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${currentDetail?.activity?.active ? 'is-running' : ''}`}>{loading ? '接入对话中' : activityText(currentDetail?.activity) || taskListStatus(task)}</span><button id="workboard-trigger" onClick={() => setShowMobileBoard(true)} aria-label="打开成果与过程" title="打开成果与过程" aria-haspopup="dialog" aria-expanded={showMobileBoard} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div>
             </div>
-            <div className="member-bar flex shrink-0 items-center gap-2 px-4 sm:px-7">
-              <button type="button" onClick={() => setMembersCollapsed(!membersCollapsed)} aria-controls="member-seats" aria-expanded={!membersCollapsed} aria-label={membersCollapsed ? '展开伙伴栏' : '收起伙伴栏'} title={membersCollapsed ? '展开伙伴栏' : '收起伙伴栏'} className={`flex shrink-0 items-center gap-1 text-[#5f8172] lg:hidden ${membersCollapsed ? 'h-8' : 'h-12'}`}><Cat size={17} />{membersCollapsed && <span className="text-[11px]">{team.length} 位伙伴</span>}<ChevronDown size={13} className={membersCollapsed ? '' : 'rotate-180'} /></button>
-              <div id="member-seats" className={`member-seats flex min-w-0 flex-1 gap-2 overflow-x-auto py-2 ${membersCollapsed ? 'mobile-collapsed' : ''}`} role="group" aria-label="点名伙伴">{team.map((member) => <button key={member.id} type="button" className="member-seat flex h-10 shrink-0 items-center gap-2 px-2" aria-label={`点名 ${member.name}`} title={`在当前对话中点名 ${member.name}`} onClick={() => { setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${member.name} `); document.querySelector<HTMLTextAreaElement>('textarea[aria-label="向团队发送消息"]')?.focus() }}><Portrait id={member.id} size="sm" /><span className="max-w-24 truncate text-xs font-semibold">{member.name}</span></button>)}</div>
+            <div className="filter-strip flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-7"><div className="flex gap-1 overflow-x-auto" role="group" aria-label="对话筛选">{([{ id: 'all', label: '全部' }, { id: 'collaboration', label: '协作' }, { id: 'decision', label: '决策' }, { id: 'deliverable', label: '成果' }] as const).map((filter) => <button key={filter.id} onClick={() => setChatFilter(filter.id)} aria-pressed={chatFilter === filter.id} className={`filter-button shrink-0 px-3 py-1.5 text-xs font-semibold ${chatFilter === filter.id ? 'is-active' : ''}`}>{filter.label}</button>)}</div>
+              <div className="flex items-center gap-2">
+                <ConversationMembers key={task.id} members={team} participants={participants} portrait={(id, size) => <Portrait id={id} size={size} />} onMention={(id) => setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${names[id] ?? id} `)} onOpenDirectory={() => { setTeamOpen(true); void refreshOrganization() }} />
+                {task.work?.items.length ? <button id="task-graph-trigger" type="button" aria-haspopup="dialog" aria-expanded={graphOpen} aria-busy={graphLoading} disabled={graphLoading} onClick={() => void openTaskGraph()} className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-semibold text-[#34786e] hover:bg-[#e7f0ec]">{graphLoading ? <LoaderCircle size={15} className="motion-safe:animate-spin" /> : <GitBranch size={15} />}任务脉络</button> : null}
+              </div>
             </div>
-            <div className="filter-strip px-4 py-2 sm:px-7"><div className="flex gap-1 overflow-x-auto" role="group" aria-label="对话筛选">{([{ id: 'all', label: '全部' }, { id: 'collaboration', label: '协作' }, { id: 'decision', label: '决策' }, { id: 'deliverable', label: '成果' }] as const).map((filter) => <button key={filter.id} onClick={() => setChatFilter(filter.id)} aria-pressed={chatFilter === filter.id} className={`filter-button shrink-0 px-3 py-1.5 text-xs font-semibold ${chatFilter === filter.id ? 'is-active' : ''}`}>{filter.label}</button>)}</div></div>
+            {graphLoaded && task.work?.items.length ? <Suspense fallback={<p role="status" className="px-4 py-2 text-xs text-[#52766d]">正在打开任务脉络…</p>}><TaskGraph key={task.id} work={task.work} open={graphOpen} onOpenChange={setGraphOpen} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></Suspense> : null}
             <div className="relative flex min-h-0 flex-1 flex-col">
               <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>{loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={item.id} item={item} />) : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
               {!loading && unread > 0 && <button onClick={jumpToLatest} className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-md border border-[#d9b9a5] bg-[#fff7eb] px-3 py-2 text-xs font-semibold text-[#915340] shadow-md" title="返回最新消息"><ArrowDown size={15} /> 查看新消息 · {unread}</button>}
             </div>
             {rulesControl}
             <DirectionComposer key={task.id} members={team} message={message} isSending={isSending} isLoading={loading} onMessageChange={setMessage} onSend={() => void sendDirection()} />
-          </> : <><EmptyConversation onChoose={setDraft} members={team} />{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
+          </> : <><EmptyConversation onChoose={setDraft} />{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
         {task && <WorkboardPanel taskId={task.id} open={showMobileBoard} onOpenChange={setShowMobileBoard}>
@@ -646,16 +737,6 @@ function ChatBubble({ item }: { item: ChatItem }) {
   </article>
 }
 
-function TeamRoster({ members, compact = false, onMention, onOpen }: { members: OrgRole[]; compact?: boolean; onMention?: (name: string) => void; onOpen?: () => void }) {
-  const identity = (id: string) => id === 'store_manager' || id === 'orchestrator' || id === 'leader' ? '店长' : id.startsWith('caretaker_') || id.startsWith('cabinet_') ? '铲屎官' : '猫咪'
-  const cats = members.filter((member) => identity(member.id) === '猫咪')
-  const staff = members.filter((member) => identity(member.id) !== '猫咪')
-  return <section className={compact ? 'team-roster-compact p-4' : 'team-roster-full'}>
-    <button type="button" onClick={onOpen} className="mb-3 flex w-full items-center gap-2 text-[#a85643]" aria-label="打开伙伴页"><Cat size={18} /><span className="text-[13px] font-bold">今天在店里</span><span className="ml-auto text-[11px] text-[#a99080]">{members.length} 位伙伴</span></button>
-    {compact ? <><div className="flex flex-wrap gap-1.5">{[...cats, ...staff].map((member) => <span key={member.id} title={`${member.name} · ${identity(member.id)}`}><Portrait id={member.id} size="sm" /></span>)}</div><p className="mt-2 text-[11px] leading-5 text-[#92796b]">{cats.map((member) => member.name).join(' · ') || '猫咪们正在准备'}</p></> : <><div className="grid grid-cols-1 gap-2">{cats.map((member) => <button key={member.id} type="button" onClick={() => onMention?.(member.name)} className="cat-member flex items-center gap-3 px-3 py-2 text-left" title={`在新任务中点名 ${member.name}`} aria-label={`点名 ${member.name}`}><Portrait id={member.id} size="lg" /><div className="min-w-0"><strong className="block text-[13px]">{member.name}</strong><span className="text-[11px] text-[#9d7869]">猫咪 · 点名聊聊</span></div></button>)}</div>{staff.length > 0 && <div className="mt-5 border-t border-[#e3e2d7] pt-3"><h3 className="mb-1 text-[11px] font-semibold text-[#93796b]">店里还有</h3>{staff.map((member) => <div key={member.id} className="flex items-center gap-3 border-b border-[#e6e9dd] py-2 last:border-0"><Portrait id={member.id} size="sm" /><strong className="text-[12px]">{member.name}</strong><span className="ml-auto text-[11px] text-[#9d8e7f]">{identity(member.id)}</span></div>)}</div>}</>}
-  </section>
-}
-
 function MemoryBoard({ items, names }: { items: MemoryItem[]; names: Record<string, string> }) {
   if (!items.length) return null
   return <section className="mb-5 border-b border-[#eaded1] pb-5"><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">猫咖记忆</h2><span className="text-xs text-stone-400">已发布成果</span></div><div className="space-y-2">{items.map((item) => <div key={item.seq} className="border-l-2 border-sky-600 pl-3 py-1"><strong className="block text-xs text-stone-800">{item.title}</strong><p className="mt-1 text-xs leading-5 text-stone-600">{item.summary}</p><span className="mt-1 block text-[11px] text-stone-400">{names[item.actor ?? ''] ?? actorText(item.actor ?? '猫咖')} · 事件 #{item.seq}</span></div>)}</div></section>
@@ -679,14 +760,13 @@ function Workboard({ task, detail, names, driverCoverage, showEvidence, onToggle
   return <div className="space-y-5 border-t border-[#eaded1] pt-5">{driverCoverage && <section><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">协作通道</h2><span className="text-xs text-stone-400">不展示密钥</span></div><div className="space-y-1.5">{driverCoverage.map((item) => <div key={item.role_id} className="flex items-center justify-between gap-2 text-xs"><span className="truncate text-stone-600">{item.name}</span><span className={item.mode === 'external' ? 'text-teal-700' : 'text-amber-700'}>{item.mode === 'external' ? '外部模型' : '本地演示'}</span></div>)}</div></section>}<section><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">本轮参与</h2><span className="text-xs text-stone-400">{participants.length} 位伙伴</span></div><div className="space-y-2">{participants.map((owner) => <div key={owner} className="flex items-center gap-2 border-l-2 border-[#cb6e4e] py-1 pl-3"><Portrait id={owner} size="sm" /><strong className="text-xs">{names[owner] ?? actorText(owner)}</strong><span className="text-xs text-stone-400">{assignments.length ? '已接下这一轮安排' : '已参与本轮协作'}</span></div>)}</div></section><section><div className="mb-2 flex items-center justify-between gap-2"><h2 className="text-sm font-semibold">已发布成果</h2><span className="text-xs text-stone-400">{deliverables.length} 项</span></div>{deliverables.length ? <div className="space-y-2">{deliverables.map((item) => <div key={item.seq} className="border-l-2 border-emerald-600 pl-3 py-1"><ArtifactPreview item={item} publisher={names[item.actor ?? ''] ?? actorText(item.actor ?? '猫咖')} /></div>)}</div> : <p className="text-xs leading-5 text-stone-400">猫咪们尚未发布可复用的成果。</p>}</section><section><div className="mb-2 flex items-center justify-between gap-2"><h2 className="text-sm font-semibold">自证与交接</h2><span className="text-xs text-stone-400">{diagnoses.length + handoffs.length} 条</span></div>{diagnoses.length || handoffs.length ? <div className="space-y-3">{diagnoses.map((item) => <div key={`diagnosis-${item.seq}`} className="border-l-2 border-amber-500 pl-3 py-1"><strong className="block text-xs text-stone-800">诊断 · {diagnosisStatusText(item.status)}</strong><p className="mt-1 text-xs leading-5 text-stone-600">{item.symptom}</p><p className="mt-1 text-xs leading-5 text-stone-500">{item.cause}</p></div>)}{handoffs.map((item) => <div key={`handoff-${item.seq}`} className="border-l-2 border-sky-600 pl-3 py-1"><strong className="block text-xs text-stone-800">交接卡</strong><p className="mt-1 text-xs leading-5 text-stone-600">{item.summary}</p><p className="mt-1 text-xs leading-5 text-stone-500">为什么：{item.why}</p></div>)}</div> : <p className="text-xs leading-5 text-stone-400">尚未留下诊断或交接卡；完成关键改动时，伙伴会说明证据、验证与未覆盖范围。</p>}</section><section><div className="mb-2 flex items-center gap-2"><CheckCircle2 size={16} className="text-teal-700" /><h2 className="text-sm font-semibold">当前结论</h2></div><p className="text-sm leading-6 text-stone-600">{reasonText(task.decision?.reason ?? task.brief?.dispute ?? '团队正在形成下一步可交付结果。')}</p>{task.decision && <span className="mt-2 inline-block rounded-full bg-teal-50 px-2 py-1 text-xs text-teal-800">{actorText(task.decision.source ?? '团队')} · {statusText(task.decision.resolution)}</span>}</section><section className="border-t border-[#eaded1] pt-4"><button onClick={onToggleEvidence} className="flex w-full items-center justify-between text-left text-sm font-semibold"><span className="flex items-center gap-2"><FileText size={16} className="text-stone-500" /> 过程证据</span><ChevronDown size={16} className={showEvidence ? 'rotate-180 transition' : 'transition'} /></button>{showEvidence && <div className="mt-3 max-h-52 overflow-auto rounded-lg bg-[#fcf5ee] p-3 text-xs text-stone-500"><p>{detail?.events.length ?? 0} 条不可变事件已记录。</p><a className="mt-2 inline-block text-teal-700 hover:underline" href={`/tasks/${task.id}`}>打开完整审计回放</a></div>}</section></div>
 }
 
-function EmptyConversation({ onChoose, members }: { onChoose: (value: string) => void; members: OrgRole[] }) {
+function EmptyConversation({ onChoose }: { onChoose: (value: string) => void }) {
   const examples = ['帮我梳理一页活动说明', '帮我复盘一个难定位的 Bug', '聊聊一个新产品想法']
   return <div className="welcome-view flex-1 overflow-y-auto">
     <div className="welcome-scene"><img src={cafeWelcome} alt="月亮、三角、米寇和罐头在温暖的猫咖里" /></div>
     <div className="welcome-content mx-auto max-w-2xl px-5 pb-6 pt-5 sm:px-8">
       <div className="flex items-start gap-3"><Portrait id="store_manager" size="lg" /><div className="min-w-0"><span className="text-[11px] font-bold text-[#2a8075]">店长</span><h1 className="mt-1 text-xl font-bold leading-snug text-[#23433b] sm:text-2xl">欢迎来猫咖，今天想聊什么？</h1><p className="mt-2 text-[13px] leading-6 text-[#5e796e]">先说说你心里那件事。月亮、罐头、米寇和三角都在。</p></div></div>
       <div className="mt-5 flex gap-2 overflow-x-auto pb-2 sm:flex-wrap" aria-label="任务示例">{examples.map((example) => <button key={example} onClick={() => { onChoose(example); document.getElementById('new-task')?.focus() }} className="example-prompt shrink-0 border border-[#c9ddd5] bg-white px-3 py-2 text-left text-xs font-medium text-[#356d61] shadow-sm">{example}</button>)}</div>
-      {members.length > 0 && <div className="mt-6 flex items-center gap-2 border-t border-[#e5d7c8] pt-4"><div className="flex -space-x-2">{members.filter((member) => ['product', 'design', 'dev', 'test'].includes(member.id)).map((member) => <Portrait key={member.id} id={member.id} size="sm" />)}</div><span className="text-[11px] text-[#92796b]">月亮、罐头、米寇和三角都在</span></div>}
     </div>
   </div>
 }

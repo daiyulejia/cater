@@ -11,9 +11,14 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              name: 'graph-vendor',
+              test: /[\\/]node_modules[\\/](?:@xyflow[\\/]|@dagrejs[\\/]|d3-[^\\/]+[\\/]|zustand[\\/])/,
+              priority: 30,
+            },
+            {
               name: 'react-vendor',
               test: /[\\/]node_modules[\\/](?:react|react-dom|scheduler)[\\/]/,
-              priority: 20,
+              priority: 40,
             },
             {
               name: 'vendor',

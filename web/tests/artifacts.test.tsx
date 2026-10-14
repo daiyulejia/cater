@@ -89,7 +89,7 @@ test('旧摘要和超限正文不会制造空阅读器，本地路径不变成�
 test('聊天成果和成果板都能打开同一份事件正文', async () => {
   const task = { id: 'task', goal: '猫咖页面', status: 'pending', acceptance: [], messages: [], assignments: [], deliverables: [artifact] }
   vi.stubGlobal('fetch', vi.fn(async (url: string) => {
-    const body = url === '/api/tasks' ? [task] : url === '/api/organization' ? [] : url === '/api/organization/profile' ? { leader: { id: 'store_manager', name: '店长' }, cabinet: [], workers: [], mode: 'local_demo' } : { task, events: [{ seq: 7, type: 'deliverable.published', actor: { id: 'design' }, payload: artifact }], review: {}, activity: { active: false, state: 'idle' } }
+    const body = url === '/api/task-summaries' ? { tasks: [{ ...task, status_label: '待开始', conversation_count: 1, latest_seq: 7, version: 7 }] } : url === '/api/organization' ? [] : url === '/api/organization/profile' ? { leader: { id: 'store_manager', name: '店长' }, cabinet: [], workers: [], mode: 'local_demo' } : { task, events: [{ seq: 7, type: 'deliverable.published', actor: { id: 'design' }, payload: artifact }], review: {}, activity: { active: false, state: 'idle' } }
     return new Response(JSON.stringify(body))
   }))
   render(<App />)

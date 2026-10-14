@@ -28,6 +28,35 @@ def _text(value: object, label: str, limit: int = 12000) -> str:
     return value.strip()
 
 
+def obligation_id(item_id: str, criterion_id: str) -> str:
+    return "check_" + digest([item_id, criterion_id])
+
+
+def check_obligations(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"id": c.get("obligation_id") or obligation_id(i["id"], c["id"]),
+             "work_item_id": i["id"], "criterion_id": c["id"], "text": c["text"],
+             "subject": c.get("subject") or i["objective"], "status": "active"}
+            for i in items for c in i["criteria"] if c["kind"] == "local_check"]
+
+
+def preserve_check_obligations(items: list[dict[str, Any]], contract: dict[str, Any]) -> list[dict[str, Any]]:
+    incoming = check_obligations(items)
+    if len({c["id"] for c in incoming}) != len(incoming):
+        raise ValueError("同一检查义务不能绑定多个对象或标准。")
+    by_id = {c["id"]: c for c in incoming}
+    current = contract.get("obligations", [])
+    for required in current:
+        replacement = by_id.get(required["id"])
+        if required["status"] == "retired":
+            if replacement or any((r["work_item_id"], r["criterion_id"]) ==
+                                  (required["work_item_id"], required["criterion_id"]) for r in incoming):
+                raise ValueError("已停用检查不能在规划中静默恢复，需要显式修订契约。")
+        elif replacement != required:
+            raise ValueError("重新规划不能删改、合并或转移必需实际检查及其对象，需要显式修订检查契约。")
+    # Existing retired definitions stay in the registry, not in executable criteria.
+    return [*current, *(c for c in incoming if c["id"] not in {r["id"] for r in current})]
+
+
 def validate_items(items: object, role_ids: set[str]) -> list[dict[str, Any]]:
     if not isinstance(items, list) or not 1 <= len(items) <= 64:
         raise ValueError("work plan requires 1 to 64 items")
@@ -63,8 +92,17 @@ def validate_items(items: object, role_ids: set[str]) -> list[dict[str, Any]]:
                                "kind": criterion["kind"]})
         if len({c["id"] for c in normalized}) != len(normalized):
             raise ValueError("duplicate criterion id")
+        objective = _text(raw.get("objective"), "work objective")
+        for criterion, original in zip(normalized, criteria):
+            if criterion["kind"] == "local_check":
+                check_id = original.get("obligation_id")
+                subject = original.get("subject")
+                criterion["obligation_id"] = _text(obligation_id(item_id, criterion["id"]) if check_id is None else check_id, "check obligation id", 100)
+                criterion["subject"] = _text(objective if subject is None else subject, "check subject")
+            elif original.get("obligation_id") is not None or original.get("subject") is not None:
+                raise ValueError("review criterion cannot impersonate a local check obligation")
         result.append({"id": item_id, "owner": owner, "reviewer": reviewer,
-                       "objective": _text(raw.get("objective"), "work objective"),
+                       "objective": objective,
                        "depends_on": dependencies, "criteria": normalized})
     by_id = {item["id"]: item for item in result}
     visited, visiting = set(), set()
@@ -91,6 +129,73 @@ class WorkLedger:
     def __init__(self, log: EventLog, rules: RuleBook):
         self.log, self.rules = log, rules
 
+    def check_contract(self, task_id: str) -> dict[str, Any]:
+        events = list(self.log.iter_events(task_id=task_id, event_types=("work.plan_created", "checks.contract_revised")))
+        for event in reversed(events):
+            if event.type == "checks.contract_revised" and event.actor == Actor.human():
+                return {"revision": event.seq, "obligations": event.payload["obligations"]}
+            if event.type == "work.plan_created" and event.actor == Actor.system("work_scheduler"):
+                obligations = (event.payload["check_contract"]["obligations"] if "check_contract" in event.payload
+                               else check_obligations(event.payload["items"]))
+                return {"revision": event.seq, "obligations": obligations}
+        return {"revision": None, "obligations": []}
+
+    def revise_checks(self, task_id: str, changes: object, *, reason: str, expected_revision: int | None) -> Event:
+        reason = _text(reason, "check revision reason", 4000)
+        if (not isinstance(changes, list) or not 1 <= len(changes) <= 128
+                or (expected_revision is not None and type(expected_revision) is not int)):
+            raise ValueError("invalid check contract revision")
+
+        def build():
+            contract = self.check_contract(task_id)
+            if contract["revision"] != expected_revision:
+                raise WorkConflict("检查契约已经更新，请重新核对当前版本。")
+            if any(i.get("in_flight") for i in self.view(task_id)["items"]):
+                raise WorkConflict("在途工作或检查需要先核对，不能修订检查义务。")
+            events = list(self.log.iter_events(task_id=task_id, event_types=(
+                "delivery.check_started", "verification.completed", "delivery.review_started", "delivery.review_finished")))
+            for started in events:
+                if started.type == "delivery.check_started" and started.actor == Actor.system("local_verifier"):
+                    ended = any(e.type == "verification.completed" and e.actor == started.actor and e.seq > started.seq
+                        and e.payload.get("check_attempt_seq") == started.seq
+                        and e.payload.get("delivery_digest") == started.payload["delivery_digest"]
+                        and e.payload.get("criterion_id") == started.payload["criterion_id"] for e in events)
+                    if not ended:
+                        raise WorkConflict("整体检查尚未核对结束，不能修订检查义务。")
+                elif started.type == "delivery.review_started" and started.actor.role == "delivery_reviewer":
+                    ended = next((e for e in events if e.type == "delivery.review_finished" and e.actor == started.actor
+                        and e.seq > started.seq and e.payload.get("attempt_seq") == started.seq
+                        and e.payload.get("delivery_digest") == started.payload["delivery_digest"]), None)
+                    if ended is None or ended.payload.get("status") == "uncertain":
+                        raise WorkConflict("整体复核尚未核对结束，不能修订检查义务。")
+            rows = {r["id"]: dict(r) for r in contract["obligations"]}
+            seen = set()
+            for change in changes:
+                if not isinstance(change, dict):
+                    raise ValueError("check change must be an object")
+                row_id = change.get("id")
+                if not isinstance(row_id, str) or row_id not in rows or row_id in seen:
+                    raise ValueError("check obligation is missing or duplicated")
+                seen.add(row_id)
+                action = change.get("action")
+                fields = set(change) - {"id", "action"}
+                if action in {"retire", "restore"}:
+                    if fields:
+                        raise ValueError("retire or restore cannot also replace a definition")
+                    rows[row_id]["status"] = "retired" if action == "retire" else "active"
+                elif action == "update" and fields and fields <= {"work_item_id", "criterion_id", "text", "subject"}:
+                    for field in fields:
+                        rows[row_id][field] = _text(change[field], "check " + field,
+                                                    100 if field == "criterion_id" else 200 if field == "work_item_id" else 2000 if field == "text" else 12000)
+                else:
+                    raise ValueError("unknown or incomplete check change")
+            active = [r for r in rows.values() if r["status"] == "active"]
+            if len({(r["work_item_id"], r["criterion_id"]) for r in active}) != len(active):
+                raise ValueError("active check obligations cannot share a binding")
+            return "checks.contract_revised", {"base_revision": expected_revision, "changes": changes,
+                                               "obligations": list(rows.values()), "reason": reason}, Actor.human()
+        return self._write(task_id, build)
+
     def scope(self, task_id: str) -> dict[str, Any]:
         events = list(self.log.iter_events(task_id=task_id, event_types=("task.created", "human.commanded", "human.decided", "plan.proposed", "plan.amended", "planning.requested")))
         directions = [e for e in events if e.type == "task.created"
@@ -99,8 +204,13 @@ class WorkLedger:
         if not directions:
             raise KeyError(task_id)
         plans = [e.seq for e in events if e.type in {"plan.proposed", "plan.amended", "planning.requested"}]
-        return {"direction_seq": directions[-1].seq, "planning_seq": plans[-1] if plans else None,
-                "rules": self.rules.current_snapshot(task_id)["fingerprint"]}
+        scope = {"direction_seq": directions[-1].seq, "planning_seq": plans[-1] if plans else None,
+                 "rules": self.rules.current_snapshot(task_id)["fingerprint"]}
+        revisions = [e.seq for e in self.log.iter_events(task_id=task_id, event_types=("checks.contract_revised",))
+                     if e.actor == Actor.human()]
+        if revisions:
+            scope["checks_revision"] = revisions[-1]
+        return scope
 
     def directions(self, task_id: str, through_seq: int) -> list[dict[str, Any]]:
         return [{"seq": e.seq, **({"instruction": e.payload.get("reason", "顾客要求返工")}
@@ -132,7 +242,11 @@ class WorkLedger:
             scope = self.scope(task_id)
             if expected_scope is not None and (scope != expected_scope or current["plan_seq"] != expected_plan_seq):
                 raise WorkConflict("planning inputs changed before installation")
+            obligations = preserve_check_obligations(normalized, self.check_contract(task_id))
+            if len(obligations) > 4096:
+                raise ValueError("check contract capacity exceeded; split the task")
             return "work.plan_created", {"items": normalized, "source_seq": source_seq, "scope": scope,
+                                         "check_contract": {"obligations": obligations},
                                          "planning": planning,
                                          "customer_directions": self.directions(task_id, scope["direction_seq"])}, Actor.system("work_scheduler")
         return self._write(task_id, build)
@@ -265,7 +379,7 @@ class WorkLedger:
         for item_id in items:
             resolve(item_id)
         return {"plan_seq": plan.seq, "source_seq": plan.payload["source_seq"], "scope": plan.payload["scope"],
-                "planning": plan.payload.get("planning"),
+                "planning": plan.payload.get("planning"), "check_contract": self.check_contract(task_id),
                 "scope_current": scope_current, "items": list(items.values()),
                 "customer_directions": (plan.payload["customer_directions"] if "customer_directions" in plan.payload
                                         else self.directions(task_id, plan.payload["scope"]["direction_seq"])),

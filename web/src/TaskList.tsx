@@ -5,7 +5,7 @@ type ListedTask = {
   id: string
   goal: string
   status: string
-  messages: unknown[]
+  conversation_count?: number
   activity?: { active: boolean }
 }
 type Filter = 'all' | 'unfinished' | 'done'
@@ -46,7 +46,7 @@ export function TaskList<T extends ListedTask>({ tasks, selectedId, drafts, coll
     <nav className="flex gap-2 overflow-x-auto px-3 pb-3 lg:min-h-0 lg:flex-1 lg:block lg:space-y-2 lg:overflow-x-hidden lg:overflow-y-auto" aria-label="任务列表">
       {matches.map((item) => <button key={item.id} onClick={() => onChoose(item.id)} aria-current={item.id === selectedId ? 'page' : undefined} className={`task-item w-56 shrink-0 px-3 py-3 text-left lg:w-full ${item.id === selectedId ? 'is-active' : ''}`}>
         <div className="flex items-start gap-2"><CircleDot size={15} className={`mt-0.5 shrink-0 ${item.status === 'done' && !item.activity?.active ? 'text-emerald-600' : 'text-[#c2634d]'}`} /><span className="line-clamp-2 min-w-0 break-words text-[13px] font-semibold leading-5">{item.goal}</span></div>
-        <div className="mt-2 flex items-center gap-2 pl-[23px] text-[11px] text-[#7c918b]"><span>{item.messages.length} 条对话 · {statusLabel(item)}</span>{drafts[item.id]?.trim() && <span title="有未发送内容" role="img" aria-label="有未发送内容" className="text-[#b65f49]"><FilePenLine size={13} /></span>}</div>
+        <div className="mt-2 flex items-center gap-2 pl-[23px] text-[11px] text-[#7c918b]"><span>{item.conversation_count === undefined ? '对话待同步' : `${item.conversation_count} 条对话`} · {statusLabel(item)}</span>{drafts[item.id]?.trim() && <span title="有未发送内容" role="img" aria-label="有未发送内容" className="text-[#b65f49]"><FilePenLine size={13} /></span>}</div>
       </button>)}
       {!matches.length && <div className="w-full py-3 text-xs leading-5 text-[#7b8a7a]">
         <p>{tasks.length ? '没有匹配的任务。' : '还没有任务，先和店长聊聊吧。'}</p>

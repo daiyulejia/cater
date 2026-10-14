@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from .directions import changes_direction
 from .events import Actor
 from .usage import valid_token_count
-from .work import WorkConflict, validate_items
+from .work import WorkConflict, validate_items, check_obligations, preserve_check_obligations
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -91,10 +91,7 @@ def validate_plan(raw: object, context: dict[str, Any]) -> dict[str, Any]:
     if set(by_id) != covered_items:
         raise ValueError("不能下发与顾客要求没有关联的工作")
     old = context["previous_plan"]
-    required_checks = {c["text"] for i in old["items"] for c in i["criteria"] if c["kind"] == "local_check"}
-    new_checks = {c["text"] for i in items for c in i["criteria"] if c["kind"] == "local_check"}
-    if not required_checks <= new_checks:
-        raise ValueError("重新规划不能删掉或改写既有的必需实际检查")
+    preserve_check_obligations(items, old.get("check_contract") or {"obligations": check_obligations(old["items"])})
     reuse = raw["reuse"]
     if not isinstance(reuse, list) or len(reuse) > len(items):
         raise ValueError("候选成果列表无效")
@@ -180,7 +177,12 @@ class Planner:
             "Use real prerequisite dependencies, a worker owner and a different reviewer for every item. "
             "Assign a small task directly; do not create meetings or extra work for ceremony. Honor requested assignees when feasible. "
             "Include reproducible local_check criteria for code behavior and test claims; narrative review cannot prove execution. "
-            "Preserve all previous local_check texts verbatim. If they cannot be satisfied, return blocked with an explanation. "
+            "Preserve every active local_check obligation: its obligation_id, work item binding, criterion id, subject and text. "
+            "Copy existing obligation_id and subject explicitly, even if the business objective description changes. "
+            "Do not merge identical check texts, move checks to unrelated work, restore retired bindings or silently downgrade them. "
+            "The check_contract registry is authoritative; only a separate trusted revision can change it. "
+            "You may add work and checks. Keep a checked work item's identity while splitting helper work. "
+            "If obligations cannot be satisfied, return blocked with an explanation. "
             "Reuse only listed same-owner submission candidates when still relevant; all reused bytes will be independently "
             "reviewed and checked again. Never claim a plan, quote or previous success proves the result works. "
             "Do not call tools, execute commands or publish artifacts during planning.\n"

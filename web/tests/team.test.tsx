@@ -72,7 +72,7 @@ test('真实页面刷新失败后撤回营业声明，点名回原任务草稿',
     }
     if (url === '/api/organization') return json([])
     const task = { id: 'task', goal: '这项工作', messages: [], assignments: [], status: 'pending' }
-    return json(url === '/api/tasks' ? [task] : { task, events: [], activity: { active: false, state: 'idle' } })
+    return json(url === '/api/task-summaries' ? { tasks: [{ ...task, status_label: '待开始', conversation_count: 0, latest_seq: 0, version: 0 }] } : { task, events: [], activity: { active: false, state: 'idle' } })
   })
   const json = (body: unknown) => new Response(JSON.stringify(body))
   vi.stubGlobal('fetch', fetch)

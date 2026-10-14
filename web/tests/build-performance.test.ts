@@ -31,4 +31,13 @@ test('production chunks stay within loading budgets with complete acyclic import
     visited.add(name)
   }
   for (const chunk of chunks) visit(chunk.fileName)
+
+  const graphVendor = chunks.find((chunk) => chunk.fileName.includes('graph-vendor'))
+  expect(graphVendor, 'graph libraries must have an on-demand chunk').toBeDefined()
+  visited.clear()
+  visit(entries[0].fileName)
+  expect(visited.has(graphVendor!.fileName), 'chat entry must not eagerly import graph libraries').toBe(false)
+  const graph = chunks.find((chunk) => chunk.fileName.includes('TaskGraph-'))
+  expect(graph, 'the graph view must be loaded through a dynamic import').toBeDefined()
+  expect(entries[0].dynamicImports).toContain(graph!.fileName)
 }, 30_000)

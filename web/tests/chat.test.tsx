@@ -29,7 +29,9 @@ beforeEach(() => {
   fetchMock = vi.fn((url: string, init: RequestInit = {}) => {
     const override = handler(url, init)
     if (override) return override
-    if (url === '/api/tasks') return Promise.resolve(json([detail('甲').task, detail('乙').task]))
+    if (url === '/api/task-summaries') return Promise.resolve(json({ tasks: ['甲', '乙'].map((id) => ({
+      id, goal: `${id}任务`, status: 'pending', status_label: '待开始', conversation_count: 2, latest_seq: 2, version: 2,
+    })) }))
     if (url === '/api/organization') return Promise.resolve(json([]))
     if (url === '/api/organization/profile') return Promise.resolve(json({ leader: { id: 'store_manager', name: '店长' }, cabinet: [], workers: [], mode: 'local_demo' }))
     if (url.startsWith('/api/tasks/')) return Promise.resolve(json(detail(url.split('/')[3])))
@@ -90,13 +92,16 @@ test('店长规划结论出现在聊天中，计费回执不重复成一条发�
         { seq: 3, type: 'planning.started', actor: { id: 'store_manager' }, payload: {} },
         { seq: 4, type: 'msg.said', actor: { id: 'store_manager' }, payload: { text: '规划计费回执', phase: 'planning' } },
         { seq: 5, type: 'planning.finished', actor: { id: 'store_manager' }, payload: { status: 'installed', reason: '先实现中文入口，再核对旧接口兼容性。' } },
+        { seq: 6, type: 'msg.said', actor: { id: 'store_manager' }, payload: { text: '交付计费回执', phase: 'delivery_receipt' } },
       ] })
     }
   }
   render(<App />); await ready('乙')
   expect(screen.getByText('先实现中文入口，再核对旧接口兼容性。')).toBeTruthy()
   expect(screen.queryByText('规划计费回执')).toBeNull()
+  expect(screen.queryByText('交付计费回执')).toBeNull()
   expect(screen.getByText(/店长在整理安排/)).toBeTruthy()
+  expect(within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /乙任务.*4 条对话/ })).toBeTruthy()
 })
 
 test('进度问答在聊天中显示，不冒充方向变更或再次排队', async () => {
@@ -205,9 +210,10 @@ test('已有完成记录的任务重新执行时，列表显示正在协作而�
 test('聊天内点名保留草稿并聚焦，既不发送也不污染其他任务', async () => {
   render(<App />); await ready('乙')
   write('补充一下')
+  fireEvent.click(screen.getByRole('button', { name: /本次伙伴/ }))
   fireEvent.click(screen.getByRole('button', { name: '点名 店长' }))
-  expect(input().value).toBe('补充一下 @店长 ')
-  expect(document.activeElement).toBe(input())
+  await waitFor(() => expect(input().value).toBe('补充一下 @店长 '))
+  await waitFor(() => expect(document.activeElement).toBe(input()))
   expect(fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0)
   select('甲'); await ready('甲')
   expect(input().value).toBe('')
@@ -229,19 +235,21 @@ test('输入框点名建议随任务关闭，草稿仍归属于原任务', async
   expect(fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0)
 })
 
-test('任务和伙伴栏分别收起，不改变当前任务或草稿', async () => {
+test('任务列表可收起，伙伴按需打开，不改变当前任务或草稿', async () => {
   render(<App />); await ready('乙'); write('保留这段方向')
   fireEvent.click(screen.getByRole('button', { name: '收起任务列表' }))
   expect(screen.getByRole('button', { name: '展开任务列表' }).getAttribute('aria-expanded')).toBe('false')
   expect(document.getElementById('task-list')?.classList.contains('mobile-collapsed')).toBe(true)
-  fireEvent.click(screen.getByRole('button', { name: '收起伙伴栏' }))
-  expect(document.getElementById('member-seats')?.classList.contains('mobile-collapsed')).toBe(true)
+  expect(document.getElementById('member-seats')).toBeNull()
+  expect(screen.getAllByRole('button', { name: '今天在店里' })).toHaveLength(1)
+  expect(screen.queryByRole('button', { name: '打开伙伴页' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: /本次伙伴/ }))
+  expect(screen.getByRole('dialog', { name: '本次伙伴' })).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '关闭本次伙伴' }))
   expect(input().value).toBe('保留这段方向')
   expect(screen.getByRole('heading', { name: '乙任务', exact: true })).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '展开任务列表' }))
-  fireEvent.click(screen.getByRole('button', { name: '展开伙伴栏' }))
   expect(document.getElementById('task-list')?.classList.contains('mobile-collapsed')).toBe(false)
-  expect(document.getElementById('member-seats')?.classList.contains('mobile-collapsed')).toBe(false)
 })
 
 test('任务详情未到达时不展示旧消息，也不能向新任务发送', async () => {

@@ -501,6 +501,22 @@ def cmd_path(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_checks(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        if rt.task(args.task_id) is None:
+            raise KeyError(args.task_id)
+        if args.changes:
+            if not args.reason or args.expected_revision is None:
+                raise ValueError("修改检查契约需要 --reason 和 --expected-revision")
+            changes = json.loads(Path(args.changes).read_text(encoding="utf-8"))
+            event = rt.revise_checks(args.task_id, changes, reason=args.reason, expected_revision=args.expected_revision)
+            print(f"检查契约修订已记录 #{event.seq}")
+        elif args.reason or args.expected_revision is not None:
+            raise ValueError("修订参数需要配合 --changes")
+        print(json.dumps(rt.work.check_contract(args.task_id), ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         data = _doctor_report(rt, args, probe=bool(args.probe))
@@ -764,6 +780,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("--criterion", help="local_check criterion id for --work-item or --delivery")
     p_verify.add_argument("--record-output", action="store_true", help="persist bounded output excerpts; may expose secrets")
     p_verify.set_defaults(func=cmd_verify, command_args=[])
+
+    p_checks = sub.add_parser("checks", help="inspect or explicitly revise trusted check obligations")
+    p_checks.add_argument("task_id")
+    p_checks.add_argument("--changes", help="JSON file containing explicit retire, restore or update changes")
+    p_checks.add_argument("--reason", help="why the check contract is being changed")
+    p_checks.add_argument("--expected-revision", type=int, help="current check contract revision from the read command")
+    p_checks.set_defaults(func=cmd_checks)
 
     p_export = sub.add_parser("export", help="export replay data as JSON or JSONL")
     p_export.add_argument("task_id", nargs="?")

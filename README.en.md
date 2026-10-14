@@ -32,7 +32,7 @@ Available today:
 
 - **Chat collaboration**: create tasks, mention teammates, add directions, and follow progress.
 - **Readable deliverables**: open, copy, or download published text, Markdown, and code bodies.
-- **Inspectable records**: replay collaboration events and distinguish agent reports from explicitly executed local checks.
+- **Inspectable records**: explore subtask dependencies, replay collaboration events, and distinguish agent reports from actual check receipts.
 - **Versioned acceptance**: execute work in dependency order and download artifact bodies, a manifest, and handoff notes after whole-task acceptance.
 - **Configurable teammates**: customize names, responsibilities, and model connections through local CLI drivers or Chat Completions-compatible APIs.
 
