@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, expect, test, vi } from 'vitest'
 import App from '../src/App'
 
@@ -43,6 +43,35 @@ const input = () => screen.getByRole('textbox', { name: '向团队发送消息' 
 const write = (text: string) => fireEvent.change(input(), { target: { value: text } })
 const ready = (id: string) => screen.findByText(`${id}任务专属消息 #2`)
 
+test('筛选隐藏当前任务时仍保留聊天与草稿，恢复不切换任务', async () => {
+  render(<App />); await ready('乙'); write('不要丢掉我的补充')
+  fireEvent.click(screen.getByRole('button', { name: '查找任务' }))
+  expect(screen.getByRole('button', { name: '收起任务查找' }).getAttribute('aria-expanded')).toBe('true')
+  fireEvent.change(screen.getByRole('searchbox'), { target: { value: '甲' } })
+  fireEvent.click(screen.getByRole('button', { name: '收起任务列表' }))
+  fireEvent.click(screen.getByRole('button', { name: '查找任务' }))
+  expect(screen.getByRole('button', { name: '收起任务查找' }).getAttribute('aria-expanded')).toBe('true')
+  expect(document.getElementById('task-list')?.classList.contains('mobile-collapsed')).toBe(false)
+  expect(screen.queryByRole('button', { name: /^乙任务/ })).toBeNull()
+  expect(screen.getByRole('heading', { name: '乙任务', exact: true })).toBeTruthy()
+  expect(input().value).toBe('不要丢掉我的补充')
+  fireEvent.change(screen.getByRole('searchbox'), { target: { value: '不存在的标题' } })
+  fireEvent.click(screen.getByRole('button', { name: '恢复全部任务' }))
+  expect(screen.getByRole('button', { name: /^乙任务/ }).getAttribute('aria-current')).toBe('page')
+  expect(input().value).toBe('不要丢掉我的补充')
+  expect(fetchMock.mock.calls.some(([, init]) => init.method === 'POST')).toBe(false)
+})
+
+test('已有完成记录的任务重新执行时，列表显示正在协作而非已完成', async () => {
+  const next = { ...detail('乙'), task: { ...detail('乙').task, status: 'done' }, activity: { active: true, state: 'running' } }
+  handler = (url) => url === '/api/tasks/乙' ? Promise.resolve(json(next)) : undefined
+  render(<App />); await ready('乙')
+  const nav = within(screen.getByRole('navigation', { name: '任务列表' }))
+  expect(nav.getByRole('button', { name: /乙任务.*正在协作/ })).toBeTruthy()
+  fireEvent.click(within(screen.getByRole('group', { name: '任务状态筛选' })).getByRole('button', { name: '未完成' }))
+  expect(nav.getByRole('button', { name: /乙任务.*正在协作/ })).toBeTruthy()
+})
+
 test('聊天内点名保留草稿并聚焦，既不发送也不污染其他任务', async () => {
   render(<App />); await ready('乙')
   write('补充一下')
@@ -54,7 +83,7 @@ test('聊天内点名保留草稿并聚焦，既不发送也不污染其他任�
   expect(input().value).toBe('')
   select('乙'); await ready('乙')
   expect(input().value).toBe('补充一下 @店长 ')
-  expect(screen.getByRole('button', { name: '全部' }).getAttribute('aria-pressed')).toBe('true')
+  expect(within(screen.getByRole('group', { name: '对话筛选' })).getByRole('button', { name: '全部' }).getAttribute('aria-pressed')).toBe('true')
 })
 
 test('输入框点名建议随任务关闭，草稿仍归属于原任务', async () => {

@@ -42,12 +42,33 @@ test('休假、演示与未知状态不冒充全员营业', () => {
   expect(screen.getByText('演示营业')).toBeTruthy()
 })
 
+test('全员营业须覆盖当前每位伙伴，缺失与未知状态不能被局部成功掩盖', () => {
+  const view = render(<Directory state={{ ...available, members: [available.members[0]] }} refresh={vi.fn()} mention={vi.fn()} />)
+  expect(screen.queryByText('全员营业')).toBeNull()
+  expect(screen.getByText('状态待确认')).toBeTruthy()
+  view.unmount()
+  render(<Directory state={{ ...available, members: [{ role_id: 'product', status: 'demo', reason: 'local_demo' }, { role_id: 'design', status: 'new_status', reason: 'unknown' }] }} refresh={vi.fn()} mention={vi.fn()} />)
+  expect(screen.queryByText('演示营业')).toBeNull()
+  expect(screen.getByText('状态待确认')).toBeTruthy()
+})
+
+test('休假人数只统计当前名单，重复状态和离店成员不重复计数', () => {
+  const state: TeamAvailability = { ...available, all_available: false, members: [
+    { role_id: 'product', status: 'on_leave', reason: 'missing_key' },
+    { role_id: 'product', status: 'on_leave', reason: 'missing_key' },
+    { role_id: 'design', status: 'available', reason: 'recent_success' },
+    { role_id: 'former_member', status: 'on_leave', reason: 'missing_key' },
+  ] }
+  render(<Directory state={state} refresh={vi.fn()} mention={vi.fn()} />)
+  expect(screen.getByText('1 位休假')).toBeTruthy()
+})
+
 test('真实页面刷新失败后撤回营业声明，点名回原任务草稿', async () => {
   let failed = false
   const fetch = vi.fn(async (url: string) => {
     if (url === '/api/organization/profile') {
       if (failed) throw new Error('offline')
-      return json({ leader: { id: 'store_manager', name: '店长' }, workers: members, cabinet: [], availability: available })
+      return json({ leader: { id: 'store_manager', name: '店长' }, workers: members, cabinet: [], availability: { ...available, members: [...available.members, { role_id: 'store_manager', status: 'available', reason: 'local_policy' }] } })
     }
     if (url === '/api/organization') return json([])
     const task = { id: 'task', goal: '这项工作', messages: [], assignments: [], status: 'pending' }

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
-  ArrowDown, Cat, CheckCircle2, ChevronDown, CircleDot,
-  CornerDownRight, FilePenLine, FileText, LoaderCircle, PawPrint, Plus, RefreshCw, ShieldCheck,
+  ArrowDown, Cat, CheckCircle2, ChevronDown,
+  CornerDownRight, FileText, LoaderCircle, PawPrint, Plus, RefreshCw, Search, ShieldCheck,
 } from 'lucide-react'
 import catPortraits from './assets/cat-portraits.jpg'
 import staffPortraits from './assets/staff-portraits.jpg'
@@ -11,6 +11,7 @@ import type { Artifact } from './Artifact'
 import { WorkboardPanel } from './WorkboardPanel'
 import { MentionInput } from './MentionInput'
 import { TeamDirectory } from './TeamDirectory'
+import { TaskList } from './TaskList'
 import type { TeamAvailability } from './TeamDirectory'
 
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
@@ -97,7 +98,7 @@ const activityText = (activity?: Activity) => {
   return ''
 }
 
-const taskListStatus = (task: Task) => task.status === 'running' && !task.activity?.active && task.brief
+const taskListStatus = (task: Task) => task.activity?.active ? activityText(task.activity) || '正在协作' : task.status === 'running' && task.brief
   ? '等待下一轮'
   : statusText(task.status)
 
@@ -300,6 +301,7 @@ function App() {
   const [showEvidence, setShowEvidence] = useState(false)
   const [showMobileBoard, setShowMobileBoard] = useState(false)
   const [tasksCollapsed, setTasksCollapsed] = useState(false)
+  const [taskSearchOpen, setTaskSearchOpen] = useState(false)
   const [membersCollapsed, setMembersCollapsed] = useState(false)
   const [teamOpen, setTeamOpen] = useState(false)
   const [teamRefreshing, setTeamRefreshing] = useState(false)
@@ -536,8 +538,15 @@ function App() {
       </header>
       <main className={`app-layout grid grid-cols-1 ${task ? 'lg:grid-cols-[252px_minmax(0,1fr)_318px]' : 'lg:grid-cols-[252px_minmax(0,1fr)]'}`}>
         <aside className="task-sidebar min-h-0 lg:flex lg:flex-col lg:overflow-y-auto">
-          <div className="flex items-center justify-between px-4 pb-2 pt-4"><div><span className="text-[11px] font-semibold text-[#a56b56]">正在聊</span><h2 className="flex items-center gap-1.5 text-base font-bold"><PawPrint size={17} className="text-[#c36550]" /> 我的任务 <span className="text-xs font-medium text-[#a98e81]">{tasks.length}</span></h2></div><div className="flex gap-2"><button type="button" onClick={() => setTasksCollapsed(!tasksCollapsed)} aria-controls="task-list" aria-expanded={!tasksCollapsed} aria-label={tasksCollapsed ? '展开任务列表' : '收起任务列表'} title={tasksCollapsed ? '展开任务列表' : '收起任务列表'} className="grid size-9 place-items-center rounded-md text-[#a9604f] hover:bg-[#fff5eb] lg:hidden"><ChevronDown size={18} className={tasksCollapsed ? '' : 'rotate-180'} /></button><button className="grid size-9 place-items-center rounded-md border border-[#ead2c5] bg-white text-[#b15342] shadow-sm hover:bg-[#fff0e9]" title="新建任务" aria-label="新建任务" onClick={() => chooseTask(null)}><Plus size={18} /></button></div></div>
-          <nav id="task-list" className={`flex gap-2 overflow-x-auto px-3 pb-3 lg:block lg:space-y-2 ${tasksCollapsed ? 'mobile-collapsed' : ''} ${task ? 'lg:min-h-0 lg:flex-1 lg:overflow-x-hidden lg:overflow-y-auto' : 'lg:overflow-visible'}`} aria-label="任务列表">{tasks.slice().reverse().map((item) => <button key={item.id} onClick={() => chooseTask(item.id)} aria-current={item.id === selectedId ? 'page' : undefined} className={`task-item min-w-52 px-3 py-3 text-left lg:min-w-0 lg:w-full ${item.id === selectedId ? 'is-active' : ''}`}><div className="flex items-start gap-2"><CircleDot size={15} className={`mt-0.5 shrink-0 ${item.status === 'done' ? 'text-emerald-600' : 'text-[#c2634d]'}`} /><span className="line-clamp-2 text-[13px] font-semibold leading-5">{item.goal}</span></div><div className="mt-2 flex items-center gap-2 pl-[23px] text-[11px] text-[#7c918b]"><span>{item.messages.length} 条对话 · {taskListStatus(item)}</span>{drafts[item.id]?.trim() && <span title="有未发送内容" role="img" aria-label="有未发送内容" className="text-[#b65f49]"><FilePenLine size={13} /></span>}</div></button>)}</nav>
+          <div className="flex items-center justify-between px-4 pb-2 pt-4">
+            <div><span className="text-[11px] font-semibold text-[#a56b56]">正在聊</span><h2 className="flex items-center gap-1.5 text-base font-bold"><PawPrint size={17} className="text-[#c36550]" /> 我的任务 <span className="text-xs font-medium text-[#a98e81]">{tasks.length}</span></h2></div>
+            <div className="flex gap-1">
+              <button type="button" onClick={() => { setTaskSearchOpen(!(taskSearchOpen && !tasksCollapsed)); setTasksCollapsed(false) }} aria-label={taskSearchOpen && !tasksCollapsed ? '收起任务查找' : '查找任务'} title={taskSearchOpen && !tasksCollapsed ? '收起任务查找' : '查找任务'} aria-controls="task-search" aria-expanded={taskSearchOpen && !tasksCollapsed} className="grid size-9 place-items-center rounded-md text-[#a9604f] hover:bg-[#fff5eb] lg:hidden"><Search size={17} /></button>
+              <button type="button" onClick={() => setTasksCollapsed(!tasksCollapsed)} aria-controls="task-list" aria-expanded={!tasksCollapsed} aria-label={tasksCollapsed ? '展开任务列表' : '收起任务列表'} title={tasksCollapsed ? '展开任务列表' : '收起任务列表'} className="grid size-9 place-items-center rounded-md text-[#a9604f] hover:bg-[#fff5eb] lg:hidden"><ChevronDown size={18} className={tasksCollapsed ? '' : 'rotate-180'} /></button>
+              <button className="grid size-9 place-items-center rounded-md border border-[#ead2c5] bg-white text-[#b15342] shadow-sm hover:bg-[#fff0e9]" title="新建任务" aria-label="新建任务" onClick={() => chooseTask(null)}><Plus size={18} /></button>
+            </div>
+          </div>
+          <TaskList tasks={tasks} selectedId={selectedId} drafts={drafts} collapsed={tasksCollapsed} searchOpen={taskSearchOpen} onChoose={chooseTask} statusLabel={taskListStatus} />
           <div className="hidden lg:block"><TeamRoster members={team} compact onOpen={() => { setTeamOpen(true); void refreshOrganization() }} /></div>
         </aside>
         <section className="chat-pane flex min-h-0 flex-col">
