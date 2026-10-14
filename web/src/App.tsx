@@ -201,6 +201,9 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     if (event.type === 'activity.failed') return [message('协作异常', String(payload.message ?? '后台协作未能完成。'), 'system')]
     if (event.type === 'human.commanded') return [message(payload.intent === 'status' ? '查看进度' : payload.intent === 'resume' ? '继续推进' : '方向更新', String(payload.instruction ?? ''), 'human')]
     if (event.type === 'task.progress_reported') return [message('当前进展', String(payload.text ?? ''), 'system', 'collaboration')]
+    if (event.type === 'planning.started') return [message('店长在整理安排', '我先核对这次的要求、已有成果和前后依赖，再把具体工作交给伙伴。', 'system', 'collaboration')]
+    if (event.type === 'planning.finished') return [message(payload.status === 'installed' ? '这次这样安排' : '计划先不下发', String(payload.reason ?? ''), 'system', 'decision')]
+    if (event.type === 'msg.said' && payload.phase === 'planning') return []
     if (event.type === 'task.interpreted') {
       const scope = Array.isArray(payload.scope) ? payload.scope.filter((item): item is string => typeof item === 'string') : []
       const risks = Array.isArray(payload.risks) ? payload.risks.filter((item): item is string => typeof item === 'string') : []

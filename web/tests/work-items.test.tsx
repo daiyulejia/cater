@@ -41,4 +41,15 @@ describe('work item progress', () => {
     render(<WorkItems work={accepted} names={{}} />)
     expect(screen.getByText('阶段验收已通过，尚不代表整体交付完成。')).toBeTruthy()
   })
+
+  it('shows requirement coverage and candidate provenance without inheriting approval', () => {
+    const planned = structuredClone(work)
+    planned.planning = { summary: '先实现，再验证', coverage: [{ source_id: '1:goal:0', item_ids: ['first'], superseded_by: null, reason: '验证登录入口', quote: '保留接口' }] }
+    planned.items[0].submission = { seq: 10, artifact_seqs: [6], reused_from: 7 }
+    render(<WorkItems work={planned} names={{}} />)
+    expect(screen.getByText('要求与安排')).toBeTruthy()
+    expect(screen.getByText('工作 1 · 验证登录入口')).toBeTruthy()
+    expect(screen.getByText('沿用候选成果 #7，本轮验收独立记录。')).toBeTruthy()
+    expect(screen.getByText('0 / 2 项通过')).toBeTruthy()
+  })
 })

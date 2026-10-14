@@ -20,9 +20,11 @@ def team_availability(rt: Runtime) -> dict[str, Any]:
         name = event.payload.get("driver")
         if isinstance(name, str) and name in budgeted and event.payload.get("token_usage") == "reported" and valid_token_count(event.payload.get("tokens")):
             totals[name] = totals.get(name, 0) + event.payload["tokens"]
-    members = [{"role_id": rt.organization.leader.id, "status": "available", "reason": "local_policy"}]
+    leader = rt.organization.leader
+    members = [] if leader.driver else [{"role_id": leader.id, "status": "available", "reason": "local_policy"}]
     states = {}
-    for role in {role.id: role for role in [*rt.cabinet_roles, *rt.worker_roles]}.values():
+    roles = [*([leader] if leader.driver else []), *rt.cabinet_roles, *rt.worker_roles]
+    for role in {role.id: role for role in roles}.values():
         if role.driver not in states:
             driver = rt.drivers.get(role.driver)
             budget = getattr(driver, "token_budget", None)

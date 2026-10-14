@@ -173,8 +173,8 @@ def cmd_battle(args: argparse.Namespace) -> int:
 def cmd_dispatch(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         result = rt.dispatch(args.task_id)
-        print(f"mission dispatched for {args.task_id}")
-        print(json.dumps(result["plan"], ensure_ascii=False, indent=2))
+        print(f"规划已排队: {args.task_id}" if "route" in result else f"mission dispatched for {args.task_id}")
+        print(json.dumps(result.get("plan", result), ensure_ascii=False, indent=2))
     return 0
 
 

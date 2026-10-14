@@ -12,6 +12,18 @@ python -m cater --roles examples/compact_roles.json web
 
 在源码目录运行；端口占用时加 `--port` 选择其他端口。未指定 `--drivers` 时使用本地演示，不会调用付费模型。角色可以接到既有 API/CLI driver，但角色卡本身不会提供工具权限或独立验收。如何比较与配置不同编队，见 [编队说明](../docs/roster-policy.md)。
 
+## 可选店长模型规划
+
+在自己的角色配置中，保留 `organization` 的其他字段，只给 `leader` 增加 `driver`：
+
+```json
+{"id": "store_manager", "name": "店长", "role": "猫咖店长", "driver": "product"}
+```
+
+这是 `organization.leader` 的字段示例，不是完整配置。`product` 应指向你已配置且支持规划响应的真实通道，也可另设 `planner` 通道；不填 `driver` 时继续使用默认本地规则，不产生模型费用。不要将默认演示 driver 误当成智能规划器。
+
+用原来的 `--roles ... --drivers ... web` 启动，在同一聊天中发布任务、补充要求即可。店长返回工作项、依赖、验收标准和需求覆盖关系，系统检查后才下发。更换驱动不自动扩大工具或文件权限；运行边界与恢复限制见 [工作项与阶段验收](../docs/work-items.zh-CN.md#店长规划通道)。
+
 ## Web API 客户端
 
 先启动 Cater：

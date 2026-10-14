@@ -91,12 +91,12 @@ class WorkLedger:
         self.log, self.rules = log, rules
 
     def scope(self, task_id: str) -> dict[str, Any]:
-        events = list(self.log.iter_events(task_id=task_id, event_types=("task.created", "human.commanded", "plan.proposed", "plan.amended")))
+        events = list(self.log.iter_events(task_id=task_id, event_types=("task.created", "human.commanded", "plan.proposed", "plan.amended", "planning.requested")))
         directions = [e for e in events if e.type == "task.created"
                       or (e.type == "human.commanded" and changes_direction(e.payload))]
         if not directions:
             raise KeyError(task_id)
-        plans = [e.seq for e in events if e.type in {"plan.proposed", "plan.amended"}]
+        plans = [e.seq for e in events if e.type in {"plan.proposed", "plan.amended", "planning.requested"}]
         return {"direction_seq": directions[-1].seq, "planning_seq": plans[-1] if plans else None,
                 "rules": self.rules.current_snapshot(task_id)["fingerprint"]}
 
@@ -115,7 +115,9 @@ class WorkLedger:
                 continue
         raise WorkConflict("work state changed; retry from the latest state")
 
-    def plan(self, task_id: str, items: list[dict[str, Any]], *, role_ids: set[str], source_seq: int) -> Event:
+    def plan(self, task_id: str, items: list[dict[str, Any]], *, role_ids: set[str], source_seq: int,
+             expected_scope: dict[str, Any] | None = None, expected_plan_seq: int | None = None,
+             planning: dict[str, Any] | None = None) -> Event:
         normalized = validate_items(items, role_ids)
 
         def build():
@@ -123,7 +125,10 @@ class WorkLedger:
             if any(item.get("in_flight") for item in current["items"]):
                 raise WorkConflict("running work must be reconciled before replacing the plan")
             scope = self.scope(task_id)
+            if expected_scope is not None and (scope != expected_scope or current["plan_seq"] != expected_plan_seq):
+                raise WorkConflict("planning inputs changed before installation")
             return "work.plan_created", {"items": normalized, "source_seq": source_seq, "scope": scope,
+                                         "planning": planning,
                                          "customer_directions": self.directions(task_id, scope["direction_seq"])}, Actor.system("work_scheduler")
         return self._write(task_id, build)
 
@@ -134,6 +139,9 @@ class WorkLedger:
             return {"plan_seq": None, "source_seq": None, "items": [], "stage_accepted": False}
         items = {item["id"]: {**item, "status": "planned", "attempt_id": None, "submission": None,
                                "checks": [], "reason": ""} for item in plan.payload["items"]}
+        for candidate in (plan.payload.get("planning") or {}).get("reuse", []):
+            if candidate["work_item_id"] in items:
+                items[candidate["work_item_id"]]["reuse_candidate"] = candidate
         for event in events:
             p = event.payload
             if event.seq <= plan.seq or p.get("plan_seq") != plan.seq:
@@ -183,6 +191,7 @@ class WorkLedger:
         for item_id in items:
             resolve(item_id)
         return {"plan_seq": plan.seq, "source_seq": plan.payload["source_seq"], "scope": plan.payload["scope"],
+                "planning": plan.payload.get("planning"),
                 "scope_current": scope_current, "items": list(items.values()),
                 "customer_directions": (plan.payload["customer_directions"] if "customer_directions" in plan.payload
                                         else self.directions(task_id, plan.payload["scope"]["direction_seq"])),
@@ -250,6 +259,65 @@ class WorkLedger:
             payload["digest"] = digest(payload)
             return "work.submitted", payload, Actor.agent(item["owner"], "worker")
         return self._write(task_id, build)
+
+    def resubmit_candidate(self, task_id: str, claim: Event) -> Event | None:
+        """Reuse bytes, never previous acceptance or local verification receipts."""
+        for _ in range(8):
+            head = self.log.head_hash()
+            view, item = self._item(task_id, claim.payload["work_item_id"])
+            if (item["status"] != "running" or view["plan_seq"] != claim.payload["plan_seq"]
+                    or item["attempt_id"] != claim.payload["attempt_id"]):
+                raise WorkConflict("reuse claim is expired or stale")
+            candidate = item.get("reuse_candidate")
+            if not candidate:
+                return None
+            events = self.log.read(task_id=task_id)
+            claims = [e for e in events if e.type == "work.claimed" and e.payload["plan_seq"] == view["plan_seq"]
+                      and e.payload["work_item_id"] == item["id"]]
+            # A rejected candidate must not be submitted again on every retry.
+            if len(claims) != 1:
+                return None
+            old = next((e for e in events if e.seq == candidate["submission_seq"] and e.type == "work.submitted"), None)
+            if old is None or old.payload["work_item_id"] != item["id"] or old.seq >= claim.seq:
+                return None
+            submissions = {e.payload["digest"]: e.payload for e in events if e.type == "work.submitted"}
+            artifacts = {e.seq: e for e in events if e.type == "deliverable.published"}
+
+            def signature(submission):
+                if submission is None or any(seq not in artifacts for seq in submission["artifact_seqs"]):
+                    return None
+                return [(submission["hashes"][str(seq)], artifacts[seq].payload.get("filename"),
+                         artifacts[seq].payload.get("format"), artifacts[seq].payload.get("kind"))
+                        for seq in submission["artifact_seqs"]]
+
+            old_inputs = old.payload["inputs"]
+            if set(old_inputs) != set(item["inputs"]):
+                return None
+            for dep, previous in old_inputs.items():
+                prior, current = signature(submissions.get(previous)), signature(submissions.get(item["inputs"][dep]))
+                if prior is None or current is None or prior != current:
+                    return None
+            for seq in old.payload["artifact_seqs"]:
+                artifact = artifacts.get(seq)
+                if (artifact is None or artifact.actor.id != item["owner"]
+                        or artifact.payload.get("work_item_id") != item["id"]
+                        or not isinstance(artifact.payload.get("content"), str)
+                        or hashlib.sha256(artifact.payload["content"].encode("utf-8")).hexdigest()
+                        != old.payload["hashes"].get(str(seq))):
+                    return None
+            if not old.payload["artifact_seqs"]:
+                return None
+            payload = {"plan_seq": view["plan_seq"], "work_item_id": item["id"],
+                       "attempt_id": item["attempt_id"], "artifact_seqs": old.payload["artifact_seqs"],
+                       "hashes": old.payload["hashes"], "inputs": item["inputs"], "scope": view["scope"],
+                       "reused_from": old.seq}
+            payload["digest"] = digest(payload)
+            try:
+                return self.log.emit(type="work.submitted", task_id=task_id, actor=Actor.system("work_scheduler"),
+                                     payload=payload, expected_head=head)
+            except HeadChanged:
+                continue
+        raise WorkConflict("work state changed during candidate reuse")
 
     def fail(self, task_id: str, claim: Event, reason: str, *, uncertain: bool) -> Event:
         def build():

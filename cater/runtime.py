@@ -82,6 +82,7 @@ class Leader:
     id: str
     name: str
     role: str
+    driver: str | None = None
 
 
 @dataclass(frozen=True)
@@ -177,7 +178,10 @@ class Runtime:
             configured_drivers.update(load_drivers(drivers_path))
         if drivers is not None:
             configured_drivers.update(drivers)
-        missing = sorted({role.driver for role in config.roles} - set(configured_drivers))
+        required_drivers = {role.driver for role in config.roles}
+        if config.organization.leader.driver is not None:
+            required_drivers.add(config.organization.leader.driver)
+        missing = sorted(required_drivers - set(configured_drivers))
         if missing:
             raise ValueError(f"missing driver(s) for roles: {', '.join(missing)}")
         self.log = EventLog(db_path, audit_key=audit_key, key_id=audit_key_id, audit_keys=audit_keys)
@@ -241,9 +245,8 @@ class Runtime:
     ) -> dict[str, Any]:
         """Turn a human request into an inspectable execution route.
 
-        This deliberately records a compact decision summary instead of exposing
-        hidden model reasoning. A future leader driver can replace the local
-        policy without changing the event contract seen by the UI.
+        A configured leader driver plans during execution; otherwise use the
+        local policy. Neither path exposes private model reasoning.
         """
         if requested_route not in {"auto", "direct"}:
             raise ValueError("requested_route must be auto or direct")
@@ -252,6 +255,16 @@ class Runtime:
             raise KeyError(task_id)
         if preferred_owner:
             self._worker_by_id(preferred_owner)
+        preferred_objective = _optional_text(preferred_objective, "assignment objective", MAX_ASSIGNMENT_TEXT_CHARS)
+        preferred_acceptance = _optional_text(preferred_acceptance, "assignment acceptance", MAX_ACCEPTANCE_CHARS)
+
+        if self.organization.leader.driver is not None:
+            event = self.log.emit(actor=self._leader_actor(), type="planning.requested", task_id=task_id,
+                                 payload={"requested_route": requested_route, "preferred_owner": preferred_owner,
+                                          "preferred_objective": preferred_objective,
+                                          "preferred_acceptance": preferred_acceptance})
+            return {"task_id": task_id, "interpretation": None,
+                    "route": {"route": "planning", "reason": "等待店长核对目标与工作计划。", "seq": event.seq}}
 
         interpretation = self._interpret_task(task)
         self.log.emit(
@@ -313,6 +326,8 @@ class Runtime:
         return self._run_round(task_id, force_governance=True)
 
     def dispatch(self, task_id: str) -> dict[str, Any]:
+        if self.organization.leader.driver is not None:
+            return self.intake(task_id)
         source = "cabinet" if self.cabinet_roles else "leader"
         return self._publish_execution_plan(task_id, source=source)
 
@@ -443,6 +458,19 @@ class Runtime:
         task = self.task(task_id)
         if task is None:
             raise KeyError(task_id)
+
+        if self.organization.leader.driver is not None:
+            from .planning import Planner
+            planner = Planner(self)
+            if planner.needed(task_id):
+                outcome = planner.run(task_id)
+                if not outcome["installed"]:
+                    brief = {"dispute": outcome["reason"], "root_cause": outcome["reason"],
+                             "consensus": [], "options": [], "planning": outcome}
+                    event = self.log.emit(actor=self._leader_actor(), type="brief.generated", task_id=task_id,
+                                          payload={"brief": brief, "reason": "planning_checkpoint"})
+                    return {"task_id": task_id, "brief_event": event.seq, "brief": brief}
+                task = self.task(task_id)
 
         if task.plan and task.plan.get("subtasks"):
             return self._run_work_round(task, force_governance=force_governance)
@@ -725,6 +753,14 @@ class Runtime:
                     self.work.fail(task.id, claim, "认领后要求有变化，尚未调用成员；需要重新核对计划。", uncertain=False)
                     break
                 candidate = next(i for i in view["items"] if i["id"] == claim.payload["work_item_id"])
+                try:
+                    reused = self.work.resubmit_candidate(task.id, claim)
+                except WorkConflict:
+                    self.work.fail(task.id, claim, "候选成果核对期间要求有变化，尚未调用成员。", uncertain=False)
+                    break
+                if reused is not None:
+                    view = self.work.view(task.id)
+                    continue
                 inputs = {i["id"]: self.work.artifacts(task.id, i["submission"]) for i in view["items"]
                           if i["id"] in candidate["depends_on"]}
                 context = {**claim.payload, "contract": candidate, "accepted_inputs": inputs,
@@ -1093,7 +1129,7 @@ class Runtime:
             if intent == "status":
                 self.report_progress(task_id, command_seq=command.seq)
             return command
-        inferred_goal = self._command_goal(instruction) if goal is None else None
+        inferred_goal = self._command_goal(instruction) if goal is None and self.organization.leader.driver is None else None
         effective_goal = goal if goal is not None else inferred_goal
         payload: dict[str, Any] = {"instruction": instruction, "intent": "direction"}
         mentions = self._mentioned_roles(instruction)
@@ -1119,6 +1155,8 @@ class Runtime:
             task_id=task_id,
             payload=payload,
         )
+        if self.organization.leader.driver is not None:
+            return command
         if effective_goal is not None:
             updated_task = self.task(task_id)
             if updated_task is not None:
@@ -2444,6 +2482,7 @@ def _organization_fingerprint(config: RuntimeConfig) -> str:
                 "id": config.organization.leader.id,
                 "name": config.organization.leader.name,
                 "role": config.organization.leader.role,
+                **({"driver": config.organization.leader.driver} if config.organization.leader.driver is not None else {}),
             },
             "cabinet_members": sorted(config.organization.cabinet_members),
             "worker_members": sorted(config.organization.worker_members),
@@ -2483,13 +2522,17 @@ def _load_organization(data: Any, roles: list[Role]) -> Organization:
     }
     if not all(isinstance(value, str) and value.strip() for value in leader_values.values()):
         raise ValueError("organization.leader requires non-empty id, name, and role")
+    leader_driver = leader_raw.get("driver")
+    if leader_driver is not None and (not isinstance(leader_driver, str) or not leader_driver.strip()):
+        raise ValueError("organization.leader.driver requires a non-empty driver name")
 
     cabinet_members = _organization_members(
         data.get("cabinet_members"), "cabinet_members", role_ids, allow_empty=True,
     )
     worker_members = _organization_members(data.get("worker_members"), "worker_members", role_ids)
     return Organization(
-        leader=Leader(**{key: value.strip() for key, value in leader_values.items()}),
+        leader=Leader(**{key: value.strip() for key, value in leader_values.items()},
+                      driver=leader_driver.strip() if leader_driver is not None else None),
         cabinet_members=frozenset(cabinet_members),
         worker_members=frozenset(worker_members),
     )

@@ -43,6 +43,23 @@ const input = () => screen.getByRole('textbox', { name: '向团队发送消息' 
 const write = (text: string) => fireEvent.change(input(), { target: { value: text } })
 const ready = (id: string) => screen.findByText(`${id}任务专属消息 #2`)
 
+test('店长规划结论出现在聊天中，计费回执不重复成一条发言', async () => {
+  handler = (url) => {
+    if (url === '/api/tasks/乙') {
+      const data = detail('乙')
+      return json({ ...data, events: [...data.events,
+        { seq: 3, type: 'planning.started', actor: { id: 'store_manager' }, payload: {} },
+        { seq: 4, type: 'msg.said', actor: { id: 'store_manager' }, payload: { text: '规划计费回执', phase: 'planning' } },
+        { seq: 5, type: 'planning.finished', actor: { id: 'store_manager' }, payload: { status: 'installed', reason: '先实现中文入口，再核对旧接口兼容性。' } },
+      ] })
+    }
+  }
+  render(<App />); await ready('乙')
+  expect(screen.getByText('先实现中文入口，再核对旧接口兼容性。')).toBeTruthy()
+  expect(screen.queryByText('规划计费回执')).toBeNull()
+  expect(screen.getByText(/店长在整理安排/)).toBeTruthy()
+})
+
 test('进度问答在聊天中显示，不冒充方向变更或再次排队', async () => {
   handler = (url, init) => {
     if (url === '/api/tasks/乙/command' && init.method === 'POST') {

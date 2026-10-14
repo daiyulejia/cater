@@ -69,6 +69,8 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
             task.interpretation = {"seq": event.seq, **payload}
         elif event.type == "task.routed":
             task.route = {"seq": event.seq, **payload}
+        elif event.type == "planning.requested":
+            task.route = {"seq": event.seq, "route": "planning", "reason": "等待店长核对工作计划。"}
         elif event.type == "mission.created":
             task.mission = {"seq": event.seq, **payload}
         elif event.type == "task.decomposed":

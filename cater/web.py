@@ -440,6 +440,9 @@ def make_handler(
                         for role in rt.worker_roles
                     ]
                     modes = {item["mode"] for item in worker_drivers}
+                    leader_driver = rt.organization.leader.driver
+                    if leader_driver is not None:
+                        modes.add(_driver_mode(rt.drivers[leader_driver]))
                     return self._send_json(
                         {
                             "leader": _role_to_dict(rt.organization.leader),
@@ -451,6 +454,7 @@ def make_handler(
                                 else "external_driver" if modes <= {"external"} else "mixed_driver"
                             ),
                             "worker_drivers": worker_drivers,
+                            "planning_mode": "local_rules" if leader_driver is None else _driver_mode(rt.drivers[leader_driver]),
                             "availability": team_availability(rt),
                         }
                     )

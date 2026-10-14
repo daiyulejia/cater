@@ -4,12 +4,13 @@ export type WorkState = {
   plan_seq: number | null
   stage_accepted: boolean
   scope_current?: boolean
+  planning?: { summary: string; coverage: { source_id: string; item_ids: string[]; superseded_by: string | null; reason: string; quote: string }[] } | null
   items: {
     id: string; owner: string; reviewer: string | null; objective: string; status: string; reason: string
     depends_on: string[]
     criteria: { id: string; text: string; kind: string }[]
     checks: { id: string; status: string; reason: string; quote?: string; artifact_seq?: number; receipt_seq?: number }[]
-    submission: { seq: number; artifact_seqs: number[] } | null
+    submission: { seq: number; artifact_seqs: number[]; reused_from?: number } | null
   }[]
 }
 
@@ -28,6 +29,14 @@ export function WorkItems({ work, names }: { work?: WorkState | null; names: Rec
       <span className="text-xs text-stone-500">{accepted} / {work.items.length} 项通过</span>
     </div>
     {work.scope_current === false && <p className="mb-3 text-xs leading-5 text-amber-800">方向或店规已更新，旧结果暂不放行。</p>}
+    {work.planning && <details className="mb-3 text-xs leading-5 text-stone-600">
+      <summary className="cursor-pointer font-semibold">要求与安排</summary>
+      <p className="mt-2 break-words">{work.planning.summary}</p>
+      <ul className="mt-2 space-y-2">{work.planning.coverage.map((entry) => <li key={entry.source_id} className="border-l-2 border-teal-200 pl-2">
+        <blockquote className="break-words">“{entry.quote}”</blockquote>
+        <p className="break-words">{entry.superseded_by ? '已按后续要求调整' : entry.item_ids.map((id) => titles[id] ?? id).join('、')} · {entry.reason}</p>
+      </li>)}</ul>
+    </details>}
     <ol className="divide-y divide-[#e6e4db]">
       {work.items.map((item, index) => {
         const Icon = item.status === 'accepted' ? CheckCircle2 : item.status === 'running' ? LoaderCircle
@@ -47,6 +56,7 @@ export function WorkItems({ work, names }: { work?: WorkState | null; names: Rec
               {item.depends_on.length > 0 && <p>前置：{item.depends_on.map((id) => titles[id] ?? id).join('、')}</p>}
               {item.reason && <p className="break-words text-amber-800">{item.reason}</p>}
               {item.submission && <p>成果记录：{item.submission.artifact_seqs.map((seq) => `#${seq}`).join('、')}</p>}
+              {item.submission?.reused_from && <p className="text-teal-800">沿用候选成果 #{item.submission.reused_from}，本轮验收独立记录。</p>}
               <ul className="space-y-2">
                 {item.criteria.map((criterion) => {
                   const result = item.checks.find((check) => check.id === criterion.id)
