@@ -200,6 +200,31 @@ class ConversationTests(unittest.TestCase):
                 self.assertEqual(len(self.driver.calls), before + 1)
                 self.assert_no_actions()
 
+    def test_fenced_resume_suggestion_is_adopted_once_without_changing_requirements(self):
+        self.suggest("resume_task", "推动流程")
+        self.driver.output = json.dumps(self.driver.output, ensure_ascii=False) + "\n```"
+        _, result = self.resolve("推动流程", continue_work=True)
+        self.assertEqual(result["status"], "finished")
+        self.assertEqual(result["next_action"], "run")
+        self.assertEqual(len(self.events("human.commanded")), 1)
+        self.assertEqual(self.rt.work.scope(self.task), self.scope)
+
+    def test_invalid_reply_retains_a_visible_cause_and_current_progress(self):
+        self.driver.output = "not valid json"
+        _, result = self.resolve("哪里卡住了")
+        self.assertEqual(result["error_code"], "invalid_response")
+        self.assertIn("格式有误", result["reply"])
+        self.assertIn("当前记录", result["reply"])
+        self.assertEqual(result["progress"]["state"], "unplanned")
+        self.assert_no_actions()
+
+    def test_manager_receives_registered_submission_and_checkpoint_facts(self):
+        self.resolve("为什么没人继续")
+        conversation = self.driver.calls[-1]["context"]["conversation"]
+        progress = conversation["tasks"][0]["progress"]
+        self.assertEqual(progress["checkpoint"]["state"], "unplanned")
+        self.assertIn("成员聊天是自报", self.driver.calls[-1]["prompt"])
+
     def test_scope_changed_before_resolution_skips_model(self):
         self.service.receive(self.task, "继续")
         self.rt.command(self.task, "增加计时", goal="新的明确目标")

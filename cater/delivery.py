@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from .artifacts import safe_filename
 from .events import Actor
 from .planning import requirement_sources
+from .responses import load_response_object
 from .usage import valid_token_count
 from .verification import run_check, validate_check
 from .work import WorkConflict, digest
@@ -407,7 +408,7 @@ class DeliveryService:
                     else:
                         if len(response.text) > 262144:
                             raise ValueError("整体复核输出过大。")
-                        verdict = self._verdict(json.loads(response.text), context)
+                        verdict = self._verdict(load_response_object(response.text), context)
         except (ValueError, TypeError, RecursionError) as exc:
             verdict = {"status": "invalid", "reason": "整体复核未通过证据检查：" + str(exc)[:500]}
         event = self._finish(task_id, started, context, verdict)

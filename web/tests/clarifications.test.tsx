@@ -43,7 +43,11 @@ beforeEach(() => {
   })
   vi.stubGlobal('fetch', fetchMock)
 })
-const mount = async () => { render(<App />); await screen.findByRole('form', { name: `补充信息：${prompt}` }) }
+const mount = async () => {
+  await act(async () => { render(<App />) })
+  await act(async () => { await vi.dynamicImportSettled() })
+  screen.getByRole('form', { name: `补充信息：${prompt}` })
+}
 const form = () => screen.getByRole('form', { name: `补充信息：${prompt}` })
 const posts = () => fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')
 const body = (index = 0) => JSON.parse(posts()[index][1].body as string)

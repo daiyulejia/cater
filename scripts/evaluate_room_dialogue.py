@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT))
 from cater.drivers import (CliDriver, Driver, DriverProtocolError, DriverUnavailable,
                            driver_mode, load_drivers)
 from cater.room_dialogue import ACTIONS, build_request, validate_response
+from cater.responses import load_response_object
 from cater.usage import usage_source, valid_token_count
 
 
@@ -165,7 +166,7 @@ def evaluate(driver: Driver, cases: list[dict[str, Any]], *, limit: int = 3,
                 row["status"] = "provider_incomplete"
             else:
                 try:
-                    raw = json.loads(response.text)
+                    raw = load_response_object(response.text)
                 except (ValueError, TypeError) as exc:
                     row.update(status="parse_error", error_type=safe_exception_type(exc))
                 else:

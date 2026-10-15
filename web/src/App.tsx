@@ -211,6 +211,11 @@ function isSystemActor(actor: Event['actor'], identities: Record<string, OrgRole
   return !Object.hasOwn(identities, actor.id) && (actor.kind === 'system' || (!actor.kind && legacySystemActors.has(actor.id)))
 }
 
+function isResponseFormatError(event: Event): boolean {
+  return event.type === 'msg.said' && event.payload.phase === 'response_format_error'
+    && event.payload.speech_source === 'system_receipt' && event.payload.error_code === 'invalid_response'
+}
+
 function conversationFor(events: Event[], identities: Record<string, OrgRole>, organization: Organization | null, questions: Question[] = [], clarifications: Clarification[] = [], receipts: ConversationReceipt[] = []): ChatItem[] {
   const hasAutonomousDecision = events.some((event) => event.type === 'agent.decided' || event.type === 'supreme.decided')
   const hasFinishedActivity = events.some((event) => event.type === 'activity.completed' || event.type === 'activity.failed')
@@ -319,11 +324,19 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       const receipt = payload.action === 'update_task' ? '补充要求已记入当前任务。'
         : payload.action === 'resume_task' ? '继续请求已记入，沿用当前要求。'
           : `已将这个问题交给 @${displayName(question?.role_id ?? organization?.leader.id ?? 'store_manager')}，核对现有成果后回答。`
-      const item = message(undefined, routed ? receipt : String(payload.reply ?? ''), speaker ? 'agent' : 'system', 'collaboration')
+      const invalidResponse = payload.error_code === 'invalid_response'
+      const needsAttention = ['clarification', 'outdated', 'invalid', 'blocked', 'uncertain'].includes(String(payload.status))
+      const hasCheckpointReply = payload.progress !== null && typeof payload.progress === 'object' && !Array.isArray(payload.progress)
+        && typeof payload.reply === 'string' && Boolean(payload.reply.trim())
+      const reply = invalidResponse && !hasCheckpointReply
+        ? '这条消息已保存，但店长的回应未通过格式校验，暂未形成有效回复，也未按这条消息更改安排。你可以重新发送，或用上方“提问”入口追问已有成果。'
+        : String(payload.reply ?? '')
+      const item = message(needsAttention ? '店长回应需要跟进' : undefined, routed ? receipt : reply, speaker ? 'agent' : 'system', 'collaboration')
       item.actor = speaker ?? 'system'
       item.display = speaker ? displayName(speaker) : '系统'
       item.role = publicIdentity(item.actor, organization)
       item.systemActor = !speaker
+      if (needsAttention && typeof payload.conversation_seq === 'number') item.details = [`对应你的消息 · 事件 #${payload.conversation_seq}`]
       if (question && !finishedQuestions.has(question.seq)) {
         const progress = ({ pending: '等待回答', answering: '正在核对成果并回答', uncertain: '回答结果待确认' } as Record<string, string>)[question.status]
         if (progress) item.details = [progress]
@@ -390,6 +403,15 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     if (event.type === 'planning.started') return [message('店长在整理安排', '我先核对这次的要求、已有成果和前后依赖，再把具体工作交给伙伴。', 'system', 'collaboration')]
     if (event.type === 'planning.finished') {
       const item = message(payload.status === 'installed' ? '这次这样安排' : '计划先不下发', String(payload.reason ?? ''), 'system', 'decision')
+      return [item]
+    }
+    if (isResponseFormatError(event)) {
+      const item = message('成员回应格式异常', typeof payload.text === 'string' && payload.text.trim()
+        ? payload.text : '成员的回应未通过格式校验，当前工作结果仍需核对。', 'system')
+      item.actor = 'system'
+      item.display = '系统'
+      item.role = ''
+      item.systemActor = true
       return [item]
     }
     if (event.type === 'msg.said' && ['planning', 'delivery_receipt', 'clarification_receipt', 'collaboration_request'].includes(String(payload.phase))) return []
@@ -946,6 +968,7 @@ function App() {
     const submitted = message
     const key = composerKey
     if (!id || !questionModeRef.current || derivationRef.current || selectedRef.current !== id || loading || !submitted.trim() || pendingRef.current.has(key)) return
+    setChatFilter('all')
     const previous = questionRequests.current[key]
     const attempt = previous?.text === submitted ? previous : { text: submitted, requestId: creationRequestId() }
     questionRequests.current[key] = attempt
@@ -1001,6 +1024,7 @@ function App() {
     const id = selectedId
     const submitted = message
     if (!id || questionModeRef.current || derivationRef.current || selectedRef.current !== id || loading || !submitted.trim() || pendingRef.current.has(id)) return
+    setChatFilter('all')
     const previous = conversationRequests.current[id]
     const attempt = previous?.text === submitted ? previous : { text: submitted, requestId: creationRequestId() }
     conversationRequests.current[id] = attempt
@@ -1144,7 +1168,9 @@ function SystemRecord({ item, taskId, controls }: { item: ChatItem; taskId: stri
   const technical = checking || planning || item.evidence.type === 'agent.discipline_flagged' || item.title === '复核记录整理中'
   const failed = (checking && !passed) || (item.evidence.type === 'verification.planned' && !['ready', 'correcting'].includes(String(item.evidence.payload.status)))
   const [expanded, setExpanded] = useState(failed)
-  const attention = failed || ['activity.failed', 'driver.failed', 'driver.budget_exhausted'].includes(item.evidence.type)
+  const responseAttention = isResponseFormatError(item.evidence) || (item.evidence.type === 'conversation.finished'
+    && ['clarification', 'outdated', 'invalid', 'blocked', 'uncertain'].includes(String(item.evidence.payload.status)))
+  const attention = responseAttention || failed || ['activity.failed', 'driver.failed', 'driver.budget_exhausted'].includes(item.evidence.type)
   const Icon = attention ? TriangleAlert : passed ? CheckCircle2 : Info
   const heading = <><strong>系统</strong>{item.title && <span> · {item.title}</span>}</>
   const body = <>
@@ -1156,7 +1182,7 @@ function SystemRecord({ item, taskId, controls }: { item: ChatItem; taskId: stri
     <MessageContext item={item} taskId={taskId} controls={controls} />
     <AuditTrail item={item} />
   </>
-  return <article className={`system-record-row${attention ? ' needs-attention' : ''}`}>
+  return <article role={responseAttention ? 'alert' : undefined} className={`system-record-row${attention ? ' needs-attention' : ''}`}>
     <Icon size={16} aria-hidden="true" />
     <div data-actor="system" className="message-bubble is-system system-record">
       {technical ? <details open={failed} onToggle={(event) => setExpanded(event.currentTarget.open)}>

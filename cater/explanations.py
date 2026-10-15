@@ -13,6 +13,7 @@ from .events import Actor, HeadChanged
 from .fold import fold
 from .usage import valid_token_count
 from .work import WorkConflict
+from .responses import load_response_object
 
 if TYPE_CHECKING:
     from .runtime import Runtime
@@ -261,7 +262,7 @@ class ExplanationService:
                     else:
                         if len(response.text) > 65536:
                             raise ValueError("讲解响应过大。")
-                        result = self._validate(json.loads(response.text), sources)
+                        result = self._validate(load_response_object(response.text), sources)
         except (ValueError, TypeError, KeyError, RecursionError) as exc:
             result = {"status": "invalid", "reason": "讲解尚未通过来源核对：" + str(exc)[:500]}
         self.rt.log.emit(type="question.finished", task_id=task_id, actor=Actor.system("explainer"),

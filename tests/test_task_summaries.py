@@ -39,6 +39,7 @@ class TaskSummaryTests(unittest.TestCase):
         handler.request_version = "HTTP/1.1"
         handler.requestline = f"GET {path} HTTP/1.1"
         handler.headers = Message()
+        handler.headers["Host"] = "localhost"
         if token is not None:
             handler.headers["X-Cater-Access-Token"] = token
         if etag is not None:

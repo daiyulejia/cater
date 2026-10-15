@@ -45,6 +45,34 @@ const input = () => screen.getByRole('textbox', { name: '向团队发送消息' 
 const write = (text: string) => fireEvent.change(input(), { target: { value: text } })
 const ready = (id: string) => screen.findByText(`${id}任务专属消息 #2`)
 
+test.each(['决策', '成果'])('从%s筛选发送追问回到全部，执行中仍可发送并看见真实消息和失败回执', async (filter) => {
+  handler = (url, init) => {
+    if (url === '/api/tasks/乙' && init.method !== 'POST') return json({ ...detail('乙'), activity: { active: true, state: 'running' } })
+    if (url === '/api/tasks/乙/command' && init.method === 'POST') return json({ ...detail('乙'),
+      activity: { active: true, state: 'running' }, events: [...detail('乙').events,
+        { seq: 316, type: 'conversation.received', actor: { id: 'human', kind: 'human' }, payload: { instruction: '群里有人接着处理吗？' } },
+        { seq: 317, type: 'conversation.finished', actor: { id: 'conversation', kind: 'system' }, payload: {
+          conversation_seq: 316, status: 'clarification', error_code: 'invalid_response', speaker_id: 'store_manager', reply: '原始兜底回应',
+        } },
+      ] })
+  }
+  render(<App />); await ready('乙')
+  const filters = screen.getByRole('group', { name: '对话筛选' })
+  fireEvent.click(within(filters).getByRole('button', { name: filter }))
+  write('群里有人接着处理吗？')
+  const send = screen.getByRole('button', { name: '发送消息' })
+  expect(send.hasAttribute('disabled')).toBe(false)
+  fireEvent.click(send)
+  await screen.findByText('群里有人接着处理吗？')
+  expect(within(filters).getByRole('button', { name: '全部' }).getAttribute('aria-pressed')).toBe('true')
+  expect(within(screen.getByRole('alert')).getByText(/回应未通过格式校验/)).toBeTruthy()
+  expect(input().value).toBe('')
+  const posts = fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')
+  expect(posts).toHaveLength(1)
+  expect(posts[0][0]).toBe('/api/tasks/乙/command')
+  expect(JSON.parse(String(posts[0][1].body)).instruction).toBe('群里有人接着处理吗？')
+})
+
 test('品牌入口返回同一个新对话，保留各自草稿且不提交或重规划任务', async () => {
   render(<App />); await ready('乙'); write('乙任务尚未发送的补充')
   expect(screen.getByText('此任务尚无工作项与验收记录')).toBeTruthy()

@@ -9,6 +9,7 @@ from importlib.resources import files
 from typing import TYPE_CHECKING, Any
 
 from .directions import changes_direction
+from .responses import load_response_object
 from .events import Actor
 from .usage import valid_token_count
 from .work import WorkConflict, validate_items, check_obligations, preserve_check_obligations
@@ -260,7 +261,7 @@ class Planner:
                 if not meta.get("contained"):
                     if len(response.text) > 262144:
                         raise ValueError("规划输出过大，需要缩小单次计划")
-                    parsed = validate_plan(json.loads(response.text), context)
+                    parsed = validate_plan(load_response_object(response.text), context)
                     reason = parsed["summary"]
                     if parsed["status"] == "ready":
                         event = self.rt.work.plan(task_id, parsed["items"], role_ids={r.id for r in self.rt.roles}, source_seq=0,

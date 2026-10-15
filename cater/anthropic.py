@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 from urllib.request import Request
 
 from .drivers import (MAX_API_RESPONSE_BYTES, DriverProtocolError, DriverResponse,
-                      DriverUnavailable, TextTransportFailure, _open_api_request, _safe_api_endpoint,
+                      DriverUnavailable, TextRequestRejected, TextTransportFailure, _open_api_request, _safe_api_endpoint,
                       _text_only_request, _token_budget)
 from .usage import valid_token_count
 
@@ -79,6 +79,9 @@ class AnthropicMessagesDriver:
                 phase = "response read"
                 raw = response.read(MAX_API_RESPONSE_BYTES + 1)
         except HTTPError as exc:
+            if exc.code == 429 and _text_only_request(body):
+                raise TextRequestRejected(f"{self.name} API request failed with HTTP {exc.code}",
+                                          status_code=exc.code) from None
             raise DriverUnavailable(f"{self.name} API request failed with HTTP {exc.code}") from None
         except (URLError, TimeoutError, OSError) as exc:
             reason = exc.reason if isinstance(exc, URLError) else exc

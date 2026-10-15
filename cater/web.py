@@ -76,9 +76,21 @@ class ActivityRunner:
             while True:
                 try:
                     with self._lock:
+                        if self._conversation_tasks.get(task_id) != owner:
+                            return
+                        wait_seconds = None
                         with self._runtime_factory() as runtime:
                             pending = runtime.conversation.pending(task_id)
-                        if not pending:
+                            if not pending:
+                                rows = runtime.conversation.view(task_id)
+                                if any(row["status"] == "pending" for row in rows):
+                                    answering = {row["attempt_seq"] for row in rows if row["status"] == "answering"}
+                                    leases = [event.payload["lease_until"] for event in runtime.log.iter_events(
+                                        task_id=task_id, event_types=("conversation.started",))
+                                        if event.actor == EventActor.system("conversation") and event.seq in answering]
+                                    wait_seconds = min(1.0, max(0.01,
+                                        max(leases, default=time.time()) - time.time() + 0.001))
+                        if not pending and wait_seconds is None:
                             if self._conversation_tasks.get(task_id) == owner:
                                 self._conversation_tasks.pop(task_id, None)
                             return
@@ -89,6 +101,11 @@ class ActivityRunner:
                         return
                     continue
                 read_failures = 0
+                if wait_seconds is not None:
+                    # Keep one consumer until later messages can run; never replay the old call.
+                    # Wait outside the runner lock so other tasks and sends remain independent.
+                    time.sleep(wait_seconds)
+                    continue
                 if pending[0] != last_message:
                     last_message, attempts = pending[0], 0
                 if attempts >= MAX_QUESTION_QUEUE_ATTEMPTS:
@@ -618,6 +635,8 @@ def make_handler(
 
     class CaterHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            if not self._has_valid_request_host():
+                return self._forbidden("untrusted Host header")
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
             if static_root is not None and (path == "/" or path.startswith("/assets/") or path == "/favicon.svg"):
@@ -752,6 +771,8 @@ def make_handler(
             return self._not_found()
 
         def do_POST(self) -> None:
+            if not self._has_valid_request_host():
+                return self._forbidden("untrusted Host header")
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/")
             if self._requires_access_token(path) and not self._has_valid_access_token():
@@ -1322,6 +1343,25 @@ def make_handler(
                 or path.startswith("/tasks")
                 or (path == "/" and static_root is None)
             )
+
+        def _has_valid_request_host(self) -> bool:
+            # A loopback bind alone does not prevent DNS rebinding. Remote
+            # names are usable only with the explicitly authenticated server.
+            hosts = self.headers.get_all("Host", [])
+            if len(hosts) != 1:
+                return False
+            host = hosts[0]
+            if not host or any(char.isspace() for char in host):
+                return False
+            try:
+                parsed = urlparse("//" + host)
+                parsed.port
+                if (not parsed.hostname or parsed.username is not None or parsed.password is not None
+                        or parsed.path or parsed.query or parsed.fragment):
+                    return False
+                return access_token is not None or _is_loopback_host(parsed.hostname)
+            except ValueError:
+                return False
 
         def _has_valid_access_token(self) -> bool:
             if access_token is None:

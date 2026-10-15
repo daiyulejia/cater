@@ -68,6 +68,14 @@ class TextTransportFailure(DriverUnavailable):
     """Network failure of a text-only call; no tool effects, remote billing unknown."""
 
 
+class TextRequestRejected(DriverUnavailable):
+    """HTTP rejection of a text-only request; remote billing remains unknown."""
+
+    def __init__(self, message: str, *, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def _text_only_request(body: dict[str, Any]) -> bool:
     """Fail closed on tool declarations, tool history or new request capabilities."""
     return (not set(body) - {"model", "messages", "system", "max_tokens", "stream", "thinking", "temperature"}
@@ -519,6 +527,9 @@ class OpenAICompatibleDriver:
             with _open_api_request(request, timeout=self.timeout) as response:
                 raw = response.read(MAX_API_RESPONSE_BYTES + 1)
         except HTTPError as exc:
+            if exc.code == 429 and _text_only_request(payload):
+                raise TextRequestRejected(f"{self.name} API request failed with HTTP {exc.code}",
+                                          status_code=exc.code) from None
             raise DriverUnavailable(f"{self.name} API request failed with HTTP {exc.code}") from exc
         except (URLError, TimeoutError, OSError):
             # Adding any local or server-side tools must remove the text-only

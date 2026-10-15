@@ -2,15 +2,33 @@
 import { Buffer } from 'node:buffer'
 import { fileURLToPath } from 'node:url'
 import { build } from 'vite'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 
 test('production chunks stay within loading budgets with complete acyclic imports', async () => {
   const root = fileURLToPath(new URL('../', import.meta.url))
-  const result = await build({ root, mode: 'production', logLevel: 'silent', build: { write: false } })
+  const nodeEnv = process.env.NODE_ENV
+  let result: Awaited<ReturnType<typeof build>>
+  // Vite's production mode does not override Vitest's NODE_ENV=test.
+  vi.stubEnv('NODE_ENV', 'production')
+  try {
+    result = await build({ root, mode: 'production', logLevel: 'silent', build: { write: false }, plugins: [{
+      name: 'verify-production-environment',
+      configResolved(config) {
+        expect(config.mode).toBe('production')
+        expect(config.isProduction).toBe(true)
+      },
+    }] })
+  } finally {
+    vi.unstubAllEnvs()
+  }
+  expect(process.env.NODE_ENV).toBe(nodeEnv)
   const outputs = Array.isArray(result) ? result : [result]
   const chunks = outputs.flatMap((output) => output.output).filter((item) => item.type === 'chunk')
   const entries = chunks.filter((chunk) => chunk.isEntry)
 
+  const developmentModules = chunks.flatMap((chunk) => Object.keys(chunk.modules))
+    .filter((id) => /[/\\]react(?:-dom)?[^/\\]*\.development\.js$|[/\\]jsx-dev-runtime\.js$/.test(id))
+  expect(developmentModules, 'production output must not include React development runtimes').toEqual([])
   expect(entries).toHaveLength(1)
   for (const chunk of chunks) {
     const budget = chunk.isEntry ? 150_000 : 500_000

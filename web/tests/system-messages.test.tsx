@@ -42,6 +42,79 @@ function openDetails(details: HTMLDetailsElement) {
   expect(details.open).toBe(true)
 }
 
+test('317/320 无效店长回应保留为醒目的系统失败回执，关联真实消息且不冒充成员产出', async () => {
+  await mount([
+    event(316, 'conversation.received', 'human', { instruction: '月亮为什么没有往下交接？' }, 'human'),
+    event(317, 'conversation.finished', 'conversation', { conversation_seq: 316, status: 'clarification',
+      error_code: 'invalid_response', speaker_id: 'store_manager', reply: '这条消息已保留，但我这次没能得到有效回应。' }, 'system'),
+    event(319, 'conversation.received', 'human', { instruction: '有人回应吗？' }, 'human'),
+    event(320, 'conversation.finished', 'conversation', { conversation_seq: 319, status: 'clarification',
+      error_code: 'invalid_response', speaker_id: 'store_manager', reply: '这条消息已保留，但我这次没能得到有效回应。' }, 'system'),
+  ])
+  for (const [seq, source] of [[317, 316], [320, 319]]) {
+    const row = record(seq)
+    expect(row.getAttribute('role')).toBe('alert')
+    expect(row.classList.contains('needs-attention')).toBe(true)
+    expect(row.querySelector('[data-actor="system"]')).toBeTruthy()
+    expect(row.querySelector('[data-actor="store_manager"]')).toBeNull()
+    expect(visibleText(row)).toContain('店长回应需要跟进')
+    expect(visibleText(row)).toContain('这条消息已保存')
+    expect(visibleText(row)).toContain('回应未通过格式校验')
+    expect(visibleText(row)).toContain('未按这条消息更改安排')
+    expect(visibleText(row)).toContain('你可以重新发送')
+    expect(visibleText(row)).toContain(`对应你的消息 · 事件 #${source}`)
+  }
+  expect(screen.getByText('月亮为什么没有往下交接？')).toBeTruthy()
+  expect(screen.getByText('有人回应吗？')).toBeTruthy()
+  expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+})
+
+test('无效店长回应优先保留后端 progress 对应的具体检查点原因', async () => {
+  const reply = '这条消息已保存，但回应格式暂未通过。月亮已提交说明，当前停在复核回复校正，尚未交给米寇继续；不是没有产出。'
+  await mount([
+    event(321, 'conversation.received', 'human', { instruction: '现在究竟卡在哪里？' }, 'human'),
+    event(322, 'conversation.finished', 'conversation', { conversation_seq: 321, status: 'clarification',
+      error_code: 'invalid_response', speaker_id: 'store_manager', reply,
+      progress: { state: 'waiting_review', summary: '当前停在复核回复校正' } }, 'system'),
+  ])
+  const row = record(322)
+  expect(row.getAttribute('role')).toBe('alert')
+  expect(row.classList.contains('needs-attention')).toBe(true)
+  expect(visibleText(row)).toContain(reply)
+  expect(visibleText(row)).not.toContain('你可以重新发送')
+  expect(visibleText(row)).toContain('对应你的消息 · 事件 #321')
+  expect(row.querySelector('[data-actor="system"]')).toBeTruthy()
+  expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+})
+
+test.each([
+  { progress: null, reply: '没有检查点对象的回应' },
+  { progress: [], reply: '数组不是检查点对象' },
+  { progress: {}, reply: '   ' },
+])('无效 progress 或空 reply 继续显示明确的旧回执兜底：%j', async (payload) => {
+  await mount([event(317, 'conversation.finished', 'conversation', {
+    status: 'clarification', error_code: 'invalid_response', ...payload,
+  }, 'system')])
+  expect(visibleText(record(317))).toContain('这条消息已保存，但店长的回应未通过格式校验')
+})
+
+test.each(['agent', 'system'])('response_format_error 即使记录在成员名下也显示醒目系统故障（kind=%s）', async (kind) => {
+  const text = '月亮的回应未通过格式校验，已保留本次调用记录；当前等待重新核对响应。'
+  await mount([event(318, 'msg.said', member.id, {
+    phase: 'response_format_error', speech_source: 'system_receipt', error_code: 'invalid_response', text,
+  }, kind)])
+  const row = record(318)
+  expect(row.getAttribute('role')).toBe('alert')
+  expect(row.classList.contains('needs-attention')).toBe(true)
+  expect(row.querySelector('.lucide-triangle-alert')).toBeTruthy()
+  expect(row.querySelector('[data-actor="system"]')).toBeTruthy()
+  expect(row.querySelector(`[data-actor="${member.id}"]`)).toBeNull()
+  expect(within(row).queryByRole('img')).toBeNull()
+  expect(visibleText(row)).toContain('成员回应格式异常')
+  expect(visibleText(row)).toContain(text)
+  expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+})
+
 test.each([false, true])('缺少实际检查的checkpoint明确显示系统阻塞，不冒充店长或被旧决策隐藏（decision=%s）', async (decision) => {
   await mount([
     ...(decision ? [event(2, 'agent.decided', 'store_manager', { reason: '此前的决策' }, 'system')] : []),

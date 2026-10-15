@@ -323,6 +323,12 @@ class EventLog:
         return row["hash"] if row else GENESIS_HASH
 
     def verify_chain(self) -> ChainReport:
+        """Allow unsigned history only before signing starts.
+
+        With verification keys, a nonempty log must contain signatures. This
+        intentionally rejects fully unsigned history until a signed event is
+        appended, rather than accepting a log whose signatures were stripped.
+        """
         prev = GENESIS_HASH
         checked = 0
         signed = 0
@@ -362,7 +368,12 @@ class EventLog:
                 expected_signature = self._sign_with(signing_key, event.hash)
                 if not hmac.compare_digest(event.signature, expected_signature):
                     return ChainReport(False, checked, event.seq, "signature mismatch", prev, signed)
+            elif signed:
+                return ChainReport(False, checked, event.seq, "missing signature after signed event", prev, signed)
             prev = event.hash
+        if checked and self.audit_keys and not signed:
+            return ChainReport(False, checked, rows[0]["seq"],
+                               "audit key supplied but log contains no signatures", prev, signed)
         return ChainReport(True, checked, head_hash=prev, signed=signed)
 
     def _init_schema(self) -> None:
@@ -455,6 +466,8 @@ class EventLog:
 def _normalize_audit_key(value: str | bytes | None) -> bytes | None:
     if value is None:
         return None
+    if not value:
+        raise ValueError("audit key must be non-empty")
     if isinstance(value, bytes):
         return value
     return value.encode("utf-8")
@@ -467,7 +480,7 @@ def _normalize_audit_keys(values: Mapping[str, str | bytes] | None) -> dict[str,
     for key_id, value in values.items():
         normalized = _normalize_audit_key(value)
         if normalized is None:
-            raise ValueError("audit keyring values must not be null")
+            raise ValueError("audit keyring values must be non-empty")
         keys[_normalize_key_id(key_id)] = normalized
     return keys
 

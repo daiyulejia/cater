@@ -12,6 +12,7 @@ from .directions import changes_direction
 from .events import Actor, Event, HeadChanged
 from .explanations import ExplanationService
 from .room_dialogue import build_request, validate_response
+from .responses import load_response_object
 from .usage import valid_token_count
 from .work import WorkConflict
 
@@ -30,6 +31,9 @@ GUIDANCE = (
     "实际变更须由后续规划结合原始要求处理。状态和成果摘要不是运行或部署成功证明。\n"
     "需要结合成果解释时必须用explain_task交给来源讲解，不得以discuss绕过成果来源核对。"
     "没有progress.items或计划记录表示没有执行证据，不得声称正在开发。"
+    "成员聊天是自报，只有progress中的提交与验收记录才表示成果已登记或已放行。"
+    "检查点及失败原因是当前工作记录；询问停滞时据此说明已知事实，不猜测所在阶段或根因，"
+    "已有执行委托不应只因为一次回应格式错误就反问顾客是否还想推进。"
     "new_task本轮仍不会自动创建新任务，必须向顾客说明尚未创建。\n"
 )
 
@@ -188,6 +192,7 @@ class ConversationService:
                 history.append({"seq": event.seq, "actor": event.payload.get("speaker_id", event.actor.id),
                                 "kind": event.actor.kind, "text": text[:2000]})
         work = self.rt.work.view(received.task_id)
+        checkpoint = self.rt._work_checkpoint(received.task_id, work, (task.work or {}).get("delivery", {}))
         candidate = {
             "id": task.id, "goal": task.goal, "acceptance": list(task.acceptance),
             "status": task.status, "scope": received.payload["scope"],
@@ -195,7 +200,13 @@ class ConversationService:
                       for role in (self.rt.organization.leader, *self.rt.roles)],
             "progress": {"plan_seq": work.get("plan_seq"), "scope_current": work.get("scope_current"),
                          "stage_accepted": work.get("stage_accepted"),
-                         "items": [{k: item.get(k) for k in ("id", "owner", "status", "reason")}
+                         "checkpoint": {key: checkpoint.get(key) for key in ("state", "summary")},
+                         "items": [{**{k: item.get(k) for k in ("id", "owner", "status", "reason")},
+                                    "submission_seq": (item.get("submission") or {}).get("seq"),
+                                    "artifact_seqs": (item.get("submission") or {}).get("artifact_seqs", []),
+                                    "checks": [{key: check.get(key) for key in
+                                                ("id", "status", "execution_status", "response_issue", "receipt_seq")}
+                                               for check in item.get("checks", [])]}
                                    for item in work.get("items", [])]},
             "artifacts": [{k: artifact.get(k) for k in ("seq", "title", "filename", "summary", "work_item_id")}
                           for artifact in task.deliverables[-12:]],
@@ -261,12 +272,28 @@ class ConversationService:
             if meta.get("contained") or not isinstance(response.text, str) or len(response.text) > 65536:
                 raise ValueError("理解调用未正常完成。")
             failure_code = "invalid_response"
-            suggestion = validate_response(json.loads(response.text), message=received.payload["instruction"], task_ids={task_id})
+            suggestion = validate_response(load_response_object(response.text), message=received.payload["instruction"], task_ids={task_id})
         except WorkConflict:
             result.update(status="outdated", reply="这条消息的任务依据已变化，本次理解未执行操作。")
         except Exception:
             # Never expose transport errors, raw model output or credentials as a reply.
             result["error_code"] = failure_code
+            messages = {"invalid_response": "我收到了这条消息，但本次模型回应格式有误，没能采用处理建议。",
+                        "model_unavailable": "我收到了这条消息，但本次模型调用没有正常完成。",
+                        "context_unavailable": "我收到了这条消息，但当前理解条件不满足。"}
+            result["reply"] = messages[failure_code] + "本次没有修改任务或启动新工作。"
+            try:
+                current = self.rt.task(task_id)
+                checkpoint = self.rt._work_checkpoint(task_id, self.rt.work.view(task_id),
+                                                       (current.work or {}).get("delivery", {}))
+                result["progress"] = {key: checkpoint.get(key) for key in ("state", "summary")}
+                result["reply"] += "\n\n当前记录：" + checkpoint["summary"]
+                reasons = list(dict.fromkeys(row["source_reason"] for row in checkpoint.get("details", [])
+                                             if row.get("source_reason")))
+                if reasons:
+                    result["reply"] += "\n保留的原因：" + "；".join(reasons[:2])
+            except (ValueError, KeyError):
+                pass
 
         if suggestion is not None:
             try:

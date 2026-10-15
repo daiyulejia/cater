@@ -19,7 +19,8 @@ from .artifacts import normalize_deliverables, safe_filename
 from .usage import usage_source, valid_token_count
 from .cabinet import CabinetPolicy, tally_votes
 from .clarifications import ClarificationService, normalize_question
-from .drivers import Driver, DriverResponse, OpenAICompatibleDriver, TextTransportFailure, driver_mode, load_drivers
+from .drivers import (Driver, DriverResponse, OpenAICompatibleDriver, TextRequestRejected,
+                      TextTransportFailure, driver_mode, load_drivers)
 from .anthropic import AnthropicMessagesDriver
 from .directions import changes_direction, command_intent
 from .events import Actor, Event, EventLog, HeadChanged
@@ -37,6 +38,7 @@ from .conversation import ConversationService
 from .collaboration import ConsultationService, normalize_request
 from .browser_checks import BrowserChecks, PLAN_FILE, normalize_plan
 from .review_contract import assessment, browser_observations, response_schema
+from .responses import load_response_object
 from .checkpoints import work_checkpoint
 
 
@@ -48,10 +50,11 @@ MAX_ASSIGNMENT_TEXT_CHARS = 12_000
 
 # Only these reviewed text-only implementations qualify. Remove this exemption
 # if either adapter gains tools; subclasses, wrappers and replaced methods do not
-# inherit it. The adapter must explicitly attest a TextTransportFailure.
+# inherit it. The adapter must explicitly attest a text transport failure or rejection.
 _TEXT_ONLY_CALLS = {AnthropicMessagesDriver: AnthropicMessagesDriver.complete,
                     OpenAICompatibleDriver: OpenAICompatibleDriver.complete}
 _TEXT_TRANSPORT_FAILURE = object()
+_TEXT_REQUEST_REJECTED = object()
 
 
 class ExecutionScopeChanged(WorkConflict):
@@ -164,6 +167,10 @@ class DriverHealth:
             self._failures[driver_name] = failures
             self._observations[driver_name] = ("failed", time.monotonic())
             return failures
+
+    def record_rejection(self, driver_name: str) -> None:
+        with self._lock:
+            self._observations[driver_name] = ("failed", time.monotonic())
 
     def recent_state(self, driver_name: str, *, max_age: float = 300) -> str:
         with self._lock:
@@ -875,17 +882,21 @@ class Runtime:
                             utterances.extend(outputs)
                         if output["contained"]:
                             invoked = output["invocation_started"]
-                            recoverable = (invoked and output.get("text_transport_failure") is _TEXT_TRANSPORT_FAILURE
+                            rejected = output.get("text_request_rejected") is _TEXT_REQUEST_REJECTED
+                            recoverable = (invoked and (rejected or output.get("text_transport_failure") is _TEXT_TRANSPORT_FAILURE)
                                            and not output["artifact_seqs"] and not any(
                                 e.seq > claim.seq and e.payload.get("work_item_id") == candidate["id"]
                                 for e in self.log.iter_events(task_id=task.id, event_types=(
                                     "deliverable.published", "work.submitted", "work.check_started", "verification.completed"))))
-                            self.work.fail(task.id, claim,
-                                           "纯文本模型调用因传输失败暂停；本地无工具副作用，尚无成果提交。"
-                                           "远端是否计费未知，等待用户继续后再尝试；本轮不会自动重试。" if recoverable else
-                                           "调用未正常返回，需核对副作用后再继续。" if invoked else
-                                           "调用尚未发出，当前条件不允许执行；调整条件后可继续。",
-                                           uncertain=invoked and not recoverable)
+                            if recoverable:
+                                reason = ("纯文本模型请求被拒绝：" + str(output["payload"].get("text", "")) + "；"
+                                          if rejected else "纯文本模型调用因传输失败暂停；")
+                                reason += ("本地无工具副作用，尚无成果提交。"
+                                           "远端是否计费未知，等待用户继续后再尝试；本轮不会自动重试。")
+                            else:
+                                reason = ("调用未正常返回，需核对副作用后再继续。" if invoked else
+                                          "调用尚未发出，当前条件不允许执行；调整条件后可继续。")
+                            self.work.fail(task.id, claim, reason, uncertain=invoked and not recoverable)
                         elif output.get("clarification_seq"):
                             self.work.fail(task.id, claim, "已向顾客询问必要信息，回答或跳过后再整理安排。", uncertain=False)
                             break
@@ -894,6 +905,8 @@ class Runtime:
                         elif self._governance_trigger([output], force_governance=False)["status"] != "not_needed":
                             self.work.fail(task.id, claim, "成员报告了风险或缺乏把握，需要先补证或修改成果："
                                            + str(output["payload"].get("claim", ""))[:500], uncertain=False)
+                        elif output.get("response_error"):
+                            self.work.fail(task.id, claim, "成员回应格式未通过解析，尚未登记成果；下游没有启动。", uncertain=False)
                         elif not output["artifact_seqs"]:
                             self.work.fail(task.id, claim, "成员尚未提交可读取的内联成果。", uncertain=False)
                         else:
@@ -1244,9 +1257,14 @@ class Runtime:
                 for event in [item.get("event")]
                 if isinstance(getattr(event, "seq", None), int)
             )
-            parsed, discipline_issues = self._discipline_response(
-                self._parse_response(response.text), role_ids, visible_refs
-            )
+            response_error = False
+            try:
+                parsed = load_response_object(response.text) if work_context is not None else self._parse_response(response.text)
+            except ValueError:
+                response_error = True
+                parsed = {"stance": "assert", "claim": "本次回应格式未能解析，尚未登记成果。",
+                          "text": f"{role.name}的本次回应未能解析为完整成果，下游尚未启动；原任务和已保存的成果仍保留。"}
+            parsed, discipline_issues = self._discipline_response(parsed, role_ids, visible_refs)
             consultation, collaboration_error = None, None
             if (work_context is not None and parsed.get("collaboration_request") is not None
                     and not (isinstance(response.meta, dict) and response.meta.get("contained"))):
@@ -1286,6 +1304,10 @@ class Runtime:
             binding = ({key: work_context[key] for key in ("work_item_id", "attempt_id", "plan_seq")}
                        if work_context else {})
             payload.update(binding)
+            if response_error:
+                payload.update(phase="response_format_error", speech_source="system_receipt", error_code="invalid_response")
+                payload["response_summary"] = {"chars": len(response.text),
+                    "sha256": hashlib.sha256(response.text.encode("utf-8")).hexdigest()}
             if clarification:
                 payload["phase"] = "clarification_receipt"
             if consultation:
@@ -1342,10 +1364,13 @@ class Runtime:
                     payload={**handoff, "message_seq": event.seq},
                 )
             item = {"event": event, "payload": payload, "role": role, "artifact_seqs": artifact_seqs,
+                    "response_error": response_error,
                     "collaboration_request": consultation, "collaboration_error": collaboration_error,
                     "clarification_seq": clarification.seq if clarification else None,
                     "contained": isinstance(response.meta, dict) and bool(response.meta.get("contained")),
                     "text_transport_failure": (response.meta or {}).get("_text_transport_failure")
+                    if isinstance(response.meta, dict) else None,
+                    "text_request_rejected": (response.meta or {}).get("_text_request_rejected")
                     if isinstance(response.meta, dict) else None,
                     "invocation_started": not isinstance(response.meta, dict) or response.meta.get("invocation_started") is not False}
             self._record_rule_suggestions(task_id, parsed.get("rule_suggestions"), event)
@@ -1941,22 +1966,31 @@ class Runtime:
                     # metadata cannot turn an actual invocation into a safe retry.
                     meta = {**meta, "invocation_started": True}
                 return DriverResponse(text=response.text, tokens=response.tokens,
-                                      meta={**meta, "_text_transport_failure": None})
+                                      meta={**meta, "_text_transport_failure": None, "_text_request_rejected": None})
             except Exception as exc:
                 last_error = exc
-                failures = self._driver_health.record_failure(role.driver)
+                implementation = _TEXT_ONLY_CALLS.get(type(driver))
+                rejected = (implementation is not None and getattr(driver.complete, "__func__", None) is implementation
+                            and type(exc) is TextRequestRejected and exc.status_code == 429)
+                # A trusted rate-limit refusal must not prevent an explicit later retry.
+                # Preserve any circuit state established by other failures.
+                if rejected:
+                    self._driver_health.record_rejection(role.driver)
+                    circuit_open = self._is_circuit_open(role.driver)
+                else:
+                    circuit_open = self._driver_health.record_failure(role.driver) >= self.circuit_breaker_threshold
                 self._emit_driver_failure(
                     task_id=task_id,
                     role=role,
                     attempt=attempt,
                     exc=exc,
-                    circuit_open=failures >= self.circuit_breaker_threshold,
+                    circuit_open=circuit_open,
                 )
                 # Do not let a retry budget overrule an already-open circuit.
                 # The failed attempt is recorded above, then subsequent roles
                 # receive the contained circuit-open response without another
                 # call into an unhealthy model or tool process.
-                if failures >= self.circuit_breaker_threshold:
+                if rejected or circuit_open:
                     break
         assert last_error is not None
         response = self._contained_driver_failure(role, str(last_error))
@@ -1965,6 +1999,10 @@ class Runtime:
                 and type(last_error) is TextTransportFailure):
             response = DriverResponse(text=response.text, tokens=response.tokens,
                                       meta={**response.meta, "_text_transport_failure": _TEXT_TRANSPORT_FAILURE})
+        elif (implementation is not None and getattr(driver.complete, "__func__", None) is implementation
+              and type(last_error) is TextRequestRejected and last_error.status_code == 429):
+            response = DriverResponse(text=response.text, tokens=response.tokens,
+                                      meta={**response.meta, "_text_request_rejected": _TEXT_REQUEST_REJECTED})
         return response
 
     def _reported_driver_tokens(self, driver_name: str) -> int:
@@ -2660,8 +2698,8 @@ class Runtime:
     @staticmethod
     def _parse_response(text: str) -> dict[str, Any]:
         try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
+            data = load_response_object(text)
+        except ValueError:
             return {"stance": "assert", "claim": "", "text": text, "evidence": []}
         return data if isinstance(data, dict) else {"stance": "assert", "text": text}
 

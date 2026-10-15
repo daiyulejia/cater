@@ -79,7 +79,7 @@ def open_runtime(args: argparse.Namespace) -> Runtime:
 
 
 def resolve_audit_key(args: argparse.Namespace) -> str | None:
-    if args.audit_key:
+    if args.audit_key is not None:
         return args.audit_key
     if args.audit_key_file:
         return Path(args.audit_key_file).read_text(encoding="utf-8").strip()

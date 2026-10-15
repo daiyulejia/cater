@@ -178,7 +178,7 @@ class EventBatchTests(unittest.TestCase):
 
     def test_expected_head_is_global_and_stale_batch_writes_nothing(self):
         first = self.log.emit(**self.entry(task_id="task-a"))
-        other = EventLog(self.path)
+        other = EventLog(self.path, audit_key="batch-secret", key_id="batch-key")
         try:
             concurrent = other.emit(**self.entry(task_id="task-b"))
         finally:
@@ -238,7 +238,7 @@ class EventBatchTests(unittest.TestCase):
         barrier = threading.Barrier(2)
 
         def write(writer):
-            log = EventLog(self.path)
+            log = EventLog(self.path, audit_key="batch-secret", key_id="batch-key")
             try:
                 head = log.head_hash()
                 barrier.wait(timeout=5)
