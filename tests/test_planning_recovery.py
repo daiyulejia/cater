@@ -340,7 +340,7 @@ class PlanningRecoveryTests(unittest.TestCase):
 
     def test_unclassified_failure_uses_persisted_contract_only_after_expiry(self):
         rt, task, _ = self.runtime()
-        error = HTTPError("https://fixture.invalid", 503, "fixture", {}, io.BytesIO())
+        error = HTTPError("https://fixture.invalid", 501, "fixture", {}, io.BytesIO())
         with patch(self.transport(AnthropicMessagesDriver), side_effect=error) as opened:
             Planner(rt).run(task, lease_seconds=1)
             Planner(rt).run(task)

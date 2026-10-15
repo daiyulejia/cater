@@ -67,6 +67,34 @@ class WorkTests(unittest.TestCase):
     def statuses(self):
         return {i["id"]: i["status"] for i in self.rt.work.view(self.task)["items"]}
 
+    def test_report_and_repair_receive_actual_upstream_receipts_and_transitive_source(self):
+        self.rt.plan_work(self.task, [item("code", local=True),
+            item("report", owner="test", reviewer="product", deps=["code"]),
+            item("repair", deps=["report"])])
+        self.rt.collaborate(self.task)
+        receipt, _ = self.rt.verify_work(self.task, "code", "behavior",
+                                         [sys.executable, "-c", "print('actual-observation')"], record_output=True)
+        self.rt.collaborate(self.task)
+        work_calls = [c for c in self.driver.calls if c.get("phase") != "review"]
+        report = next(c for c in work_calls if c["work_item_id"] == "report")
+        repair = next(c for c in work_calls if c["work_item_id"] == "repair")
+        self.assertEqual(report["accepted_check_receipts"]["code"]["behavior"]["seq"], receipt.seq)
+        self.assertIn("actual-observation", report["accepted_check_receipts"]["code"]["behavior"]["stdout"]["excerpt"])
+        self.assertEqual(set(repair["accepted_inputs"]), {"code", "report"})
+        self.assertEqual(repair["accepted_check_receipts"]["code"]["behavior"]["seq"], receipt.seq)
+        self.assertEqual(repair["accepted_inputs"]["code"][0]["content"], "assert 2 + 2 == 4\n")
+
+    def test_explicit_invalidation_keeps_prior_source_for_the_repair_owner(self):
+        self.rt.plan_work(self.task, [item("code")])
+        self.rt.collaborate(self.task)
+        previous = self.rt.work.view(self.task)["items"][0]
+        self.rt.work.rework(self.task, "code", "Correct a concrete source defect")
+        self.driver.calls.clear()
+        self.rt.collaborate(self.task)
+        work = next(c for c in self.driver.calls if c.get("phase") != "review")
+        self.assertEqual(work["previous_attempt"]["artifacts"][0]["seq"], previous["submission"]["artifact_seqs"][0])
+        self.assertEqual(work["previous_attempt"]["review_checks"], previous["checks"])
+
     def test_control_recognition_is_exact_and_mixed_messages_remain_changes(self):
         for text in ("进度怎么样？", "@店长 现在做到哪了", "@米寇：汇报进度", "status"):
             self.assertEqual(command_intent(text, ["店长", "米寇"]), "status", text)

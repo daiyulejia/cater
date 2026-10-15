@@ -9,7 +9,8 @@
       "reason": {"type": "string", "minLength": 1, "maxLength": 2000},
       "artifact_seq": {"type": ["integer", "null"]},
       "quote": {"type": "string", "maxLength": 2000, "description": "An exact contiguous excerpt, not a paraphrase or ellipsis. Cite source text using artifact_seq, or a browser receipt's observed_quotes using null artifact_seq and its exact receipt_seq. For unknown with no available citation, use empty quote and null artifact_seq."},
-      "receipt_seq": {"type": ["integer", "null"], "description": "Exact current local-check receipt for relevance assessment, null for review-only criteria."}
+      "receipt_seq": {"type": ["integer", "null"], "description": "Exact current local-check receipt for relevance assessment, null for review-only criteria."},
+      "next_action": {"type": "string", "enum": ["revise_check"], "description": "Optional, omit by default. Only request revise_check with independent judgment unknown and a valid current complete browser receipt observation, when the generated test is wrong or omits specific required behavior, even if execution passed. Explain the exact test defect or missing behavior to test. Application defects must be failed; vague uncertainty alone does not authorize retry. This requests revised testing, never acceptance."}
     }
   }}}
 }

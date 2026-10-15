@@ -8,6 +8,19 @@ from importlib.resources import files
 
 
 SCHEMA = json.loads(files("cater.packs").joinpath("review-response.schema.json").read_text(encoding="utf-8"))
+
+
+def receipt_context(event) -> dict:
+    """Avoid sending the same parsed browser report twice; retain the immutable receipt link."""
+    value = {**event.payload, "seq": event.seq, "event_hash": event.hash}
+    if (value.get("check_kind") == "browser" and isinstance(value.get("browser_report"), dict)
+            and value["browser_report"].get("outcome") in {"passed", "failed"}
+            and value.get("stdout", {}).get("complete") is True
+            and value.get("stdout", {}).get("truncated") is False):
+        value["stdout"] = {k: v for k, v in value["stdout"].items() if k != "excerpt"}
+    return value
+
+
 ISSUES = {
     "missing_result": "复核回复缺少这项标准的结果，需要复核人补全回复。",
     "duplicate_result": "复核回复重复填写同一项标准，需要复核人整理回复。",
@@ -99,6 +112,21 @@ def execution_observations(receipt: dict | None) -> list[str]:
     return observations
 
 
+def _receipt_judgment(row: dict, receipt: dict, quote: str) -> dict:
+    judgment = {"status": row["status"], "reason": row["reason"], "quote": quote, "artifact_seq": None}
+    report = receipt.get("browser_report")
+    if (row.get("next_action") == "revise_check" and row["status"] == "unknown"
+            and receipt.get("check_kind") == "browser" and receipt.get("outcome") in {"passed", "failed"}
+            and isinstance(report, dict) and report.get("outcome") == receipt["outcome"]
+            and type(receipt.get("exit_code")) is int
+            and receipt["exit_code"] == (0 if receipt["outcome"] == "passed" else 1)
+            and all(isinstance(receipt.get(stream), dict) and receipt[stream].get("complete") is True
+                    and not receipt[stream].get("truncated", False) for stream in ("stdout", "stderr"))
+            and report.get("phase", "execution") == "execution" and report.get("truncated", False) is False):
+        judgment["next_action"] = "revise_check"
+    return judgment
+
+
 def assessment(results: list, criterion_id: str, artifacts: dict,
                receipt: dict | None = None) -> tuple[dict | None, str | None, dict | None]:
     rows = [r for r in results if isinstance(r, dict) and r.get("id") == criterion_id]
@@ -120,7 +148,7 @@ def assessment(results: list, criterion_id: str, artifacts: dict,
             return None, "missing_quote", row
         if not any(quote in observed for observed in execution_observations(receipt)):
             return None, "quote_not_found", row
-        return {"status": status, "reason": reason, "quote": quote, "artifact_seq": None}, None, row
+        return _receipt_judgment(row, receipt, quote), None, row
     if type(seq) is not int or seq not in artifacts:
         return None, "invalid_artifact", row
     if not isinstance(quote, str) or not quote.strip() or len(quote) > 2000:

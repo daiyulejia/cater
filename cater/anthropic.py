@@ -106,6 +106,8 @@ class AnthropicMessagesDriver:
             if exc.code == 429 and _text_only_request(body):
                 raise TextRequestRejected(f"{self.name} API request failed with HTTP {exc.code}",
                                           status_code=exc.code) from None
+            if exc.code in {408, 500, 502, 503, 504} and _text_only_request(body):
+                raise TextTransportFailure(f"{self.name} API request failed with HTTP {exc.code}") from None
             raise DriverUnavailable(f"{self.name} API request failed with HTTP {exc.code}") from None
         except (URLError, TimeoutError, OSError) as exc:
             reason = exc.reason if isinstance(exc, URLError) else exc

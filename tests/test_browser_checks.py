@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from cater.anthropic import AnthropicMessagesDriver
 from cater.artifacts import normalize_deliverables
-from cater.browser_checks import BrowserChecks, PLAN_FILE, normalize_plan
+from cater.browser_checks import BrowserChecks, PLAN_FILE, expand_browser_report, normalize_plan
 from cater.drivers import CliDriver
 from cater.events import Actor
 from cater.runtime import Runtime
@@ -31,6 +31,25 @@ PLAN = {"entrypoint": "index.html", "steps": [
 
 
 class BrowserPlanTests(unittest.TestCase):
+    def test_compact_report_restores_only_hash_bound_metadata_and_keeps_actual_results(self):
+        plan = normalize_plan(PLAN, ["index.html"])
+        report = {"steps_encoding": "plan_index_v1", "plan_sha256": hashlib.sha256(
+            json.dumps(plan, ensure_ascii=False).encode()).hexdigest(), "steps": [
+                {"index": 1, "status": "passed"}, {"index": 2, "status": "failed", "actual": False,
+                                                       "error": "Observed different text", "observed": "Actual content"}]}
+        restored = expand_browser_report(report, plan)
+        self.assertEqual(restored["steps"][0]["action"], "click")
+        self.assertEqual(restored["steps"][1]["actual"], False)
+        self.assertEqual(restored["steps"][1]["error"], "Observed different text")
+        self.assertEqual(restored["steps"][1]["observed"], "Actual content")
+        self.assertNotIn("action", report["steps"][0])
+        for change in ({"plan_sha256": "wrong"}, {"steps_encoding": "unknown"}, {"steps": []}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                expand_browser_report({**report, **change}, plan)
+        with self.assertRaises(ValueError):
+            expand_browser_report({**report, "steps": [report["steps"][0],
+                {**report["steps"][1], "observed": {"untrusted": "object"}}]}, plan)
+
     def test_invalid_action_fields_report_step_missing_and_extra_without_values(self):
         plan = {**PLAN, "steps": [{"action": "click_at", "label": "Click", "selector": "#board",
                                    "position": {"x": 20, "y": 20, "private": "do-not-echo"}}, PLAN["steps"][1]]}
@@ -96,7 +115,7 @@ class BrowserPlanTests(unittest.TestCase):
             {**PLAN, "steps": [{"action": "wait", "label": "Wait", "ms": True}, PLAN["steps"][1]]},
             {**PLAN, "steps": [{"action": "wait", "label": "Wait", "ms": 2001}, PLAN["steps"][1]]},
             {**PLAN, "steps": [{"action": "assert_js", "label": "Expression", "expression": "x" * 4001}]},
-            {**PLAN, "steps": PLAN["steps"] * 17},
+            {**PLAN, "steps": PLAN["steps"] * 65},
             {**PLAN, "steps": []},
         ]
         for plan in invalid:
@@ -250,6 +269,7 @@ class BrowserCheckTests(unittest.TestCase):
         self.service.run(self.task, self.current())
         self.assertEqual(len(self.requests), 1)
         self.assertEqual(len(self.executions), 1)
+
         execution = self.executions[0]
         self.assertEqual(execution["command"], [*self.command, "--plan", PLAN_FILE])
         self.assertEqual(execution["timeout"], 12)
@@ -276,6 +296,43 @@ class BrowserCheckTests(unittest.TestCase):
             BrowserChecks(restarted, self.config).run(self.task, restarted.work.view(self.task)["items"][0])
         self.assertEqual(len(self.requests), 1)
         self.assertEqual(len(self.executions), 1)
+
+    def test_revised_submission_reuses_instructions_but_executes_and_reviews_afresh(self):
+        self.service.run(self.task, self.current())
+        first = self.events("verification.completed")[-1]
+        old_submission = self.current()["submission"]["seq"]
+        self.rt.work.rework(self.task, "page", "Revise the submitted report")
+        self.submit()
+        self.service.run(self.task, self.current())
+        receipt = self.events("verification.completed")[-1]
+        self.assertEqual(len(self.requests), 1)
+        self.assertEqual(len(self.executions), 2)
+        self.assertNotEqual(receipt.seq, first.seq)
+        self.assertNotEqual(receipt.payload["submission_seq"], old_submission)
+        self.assertEqual(self.events("verification.planned")[-1].payload["reused_plan_receipt_seq"], first.seq)
+        self.assertEqual(self.current()["status"], "submitted")
+
+    def test_whole_plan_reuse_resolves_legacy_bundle_metadata_and_respects_scope(self):
+        self.service.run(self.task, self.current())
+        receipt = self.rt.work.checks(self.task, self.current())["behavior"]
+        self.rt.work.review(self.task, "page", reviewer="test", submission_seq=self.current()["submission"]["seq"],
+                            results=self.review_rows(receipt))
+        delivery = self.rt.delivery.prepare(self.task)
+        self.rt.browser_checks = self.service
+        with patch("cater.delivery.run_check", side_effect=self.execute):
+            whole, _ = self.rt.delivery.verify(self.task, "integration_behavior", [*self.command, "--plan", PLAN_FILE],
+                                               browser_plan=PLAN, record_output=True, expected_digest=delivery["digest"])
+        legacy = {key: value for key, value in whole.payload.items() if key not in {"plan_seq", "scope"}}
+        saved = self.rt.log.emit(type="verification.completed", actor=Actor.system("local_verifier"),
+                                 task_id=self.task, payload=legacy)
+        binding = {"criterion_id": "integration_behavior", "plan_seq": delivery["manifest"]["plan_seq"],
+                   "scope": delivery["manifest"]["scope"], "delivery_digest": "new-version"}
+        reused = self.service._reusable_plan(self.task, binding, ["index.html"])
+        self.assertEqual(reused["reused_plan_receipt_seq"], saved.seq)
+        self.assertEqual(reused["plan"]["steps"], PLAN["steps"])
+        self.assertNotIn("outcome", reused)
+        self.assertIsNone(self.service._reusable_plan(self.task, {**binding, "plan_seq": 999}, ["index.html"]))
+        self.assertIsNone(self.service._reusable_plan(self.task, {**binding, "scope": {}}, ["index.html"]))
 
     def test_invalid_plan_is_charged_but_never_executed(self):
         self.reply["plan"]["steps"] = PLAN["steps"][:1]
@@ -365,11 +422,65 @@ class BrowserCheckTests(unittest.TestCase):
         self.runner.assert_not_called()
 
     def test_longer_bounded_game_check_preserves_all_actions(self):
-        self.reply["plan"]["steps"] = copy.deepcopy(PLAN["steps"] * 16)
+        self.reply["plan"]["steps"] = copy.deepcopy(PLAN["steps"] * 64)
         self.service.run(self.task, self.current())
         self.assertEqual(len(self.executions), 1)
-        self.assertEqual(len(self.executions[0]["plan"]["steps"]), 32)
+        self.assertEqual(len(self.executions[0]["plan"]["steps"]), 128)
         self.assertEqual(self.executions[0]["timeout"], 12)
+
+    def diagnose_test(self):
+        self.browser_report = {"outcome": "failed", "steps": [
+            {"index": 1, "action": "click", "status": "failed", "error": "Wrong test selector"}]}
+        self.exit_code = 1
+        self.service.run(self.task, self.current())
+        receipt = self.rt.work.checks(self.task, self.current())["behavior"]
+        rows = self.review_rows(receipt)
+        rows[-1].update(status="unknown", next_action="revise_check", artifact_seq=None,
+                        quote="Wrong test selector")
+        self.rt.work.review(self.task, "page", reviewer="test", submission_seq=self.current()["submission"]["seq"],
+                            results=rows)
+        return receipt
+
+    def test_diagnosed_test_repair_keeps_source_and_old_failure_then_requires_new_review(self):
+        original_submission = self.current()["submission"]
+        failed = self.diagnose_test()
+        attempted = set()
+        self.browser_report, self.exit_code = None, 0
+        self.reply["plan"]["steps"][0]["selector"] = "button#save"
+        self.assertTrue(self.service.repair(self.task, self.current(), attempted=attempted))
+        self.assertEqual(self.current()["submission"], original_submission)
+        self.assertEqual(self.current()["status"], "submitted")
+        self.assertEqual(len(self.executions), 2)
+        self.assertEqual(self.events("verification.completed")[0].seq, failed.seq)
+        self.assertEqual(self.events("verification.completed")[0].payload["outcome"], "failed")
+        self.assertEqual(self.rt.work.checks(self.task, self.current())["behavior"].payload["outcome"], "passed")
+        self.assertIn("test_diagnosis", self.requests[-1]["messages"][0]["content"])
+        self.assertFalse(self.service.repair(self.task, self.current(), attempted=attempted))
+
+    def test_failed_test_without_explicit_diagnosis_does_not_authorize_reexecution(self):
+        self.diagnose_test()
+        current = self.current()
+        for change in ({"next_action": None}, {"status": "failed"}, {"receipt_seq": 999},
+                       {"source": "runtime_check"}, {"response_issue": "quote_not_found"}):
+            altered = {**current, "checks": [{**c, **change} if c["id"] == "behavior" else c
+                                             for c in current["checks"]]}
+            with self.subTest(change=change):
+                self.assertFalse(self.service.repair(self.task, altered, attempted=set()))
+        self.assertEqual(len(self.executions), 1)
+
+    def test_identical_failed_test_is_not_replayed(self):
+        self.diagnose_test()
+        self.assertFalse(self.service.repair(self.task, self.current(), attempted=set()))
+        self.assertEqual(len(self.executions), 1)
+        self.assertIn("相同", self.events("verification.planned")[-1].payload["reason"])
+
+    def test_scope_change_during_test_repair_prevents_execution(self):
+        self.diagnose_test()
+        self.reply["plan"]["steps"][0]["selector"] = "button#save"
+        self.model_hook = lambda: self.rt.command(self.task, "Changed goal", goal="Different scope")
+        self.assertFalse(self.service.repair(self.task, self.current(), attempted=set()))
+        self.assertEqual(len(self.executions), 1)
+        self.assertFalse(self.rt.work.view(self.task)["scope_current"])
 
     def test_scope_change_during_text_correction_prevents_execution(self):
         valid = copy.deepcopy(self.reply)
@@ -459,19 +570,21 @@ class BrowserCheckTests(unittest.TestCase):
                 self.assertEqual(receipt.payload["outcome"], "unavailable")
                 self.assertFalse(self.rt.work._receipt_passed(receipt))
 
-    def test_report_can_check_only_its_accepted_direct_html_dependency(self):
+    def test_report_checks_its_version_bound_dependency_closure_not_unrelated_work(self):
         code, report = self.dependency_fixture()
         current = self.current()
         artifacts = self.service.artifacts(self.task, current)
-        self.assertEqual({a["seq"] for a in artifacts}, {code.seq, report.seq})
+        ancestor = next(a for a in artifacts if a["filename"] == "ancestor.txt")
+        self.assertEqual({a["seq"] for a in artifacts}, {code.seq, report.seq, ancestor["seq"]})
         self.assertEqual(current["submission"]["inputs"]["code"],
                          next(i for i in self.rt.work.view(self.task)["items"] if i["id"] == "code")["submission"]["digest"])
         self.service.run(self.task, current)
         self.assertEqual(len(self.executions), 1)
-        self.assertEqual(self.executions[0]["files"], {"report.txt": "Review the accepted HTML behavior.", "index.html": HTML})
+        self.assertEqual(self.executions[0]["files"], {"report.txt": "Review the accepted HTML behavior.",
+                         "index.html": HTML, "ancestor.txt": "Transitive input"})
         receipt = self.events("verification.completed")[-1]
         expected = [{k: a.payload[k] if k != "seq" else a.seq for k in ("seq", "filename", "content_sha256")}
-                    for a in (report, code)]
+                    for a in (report, code)] + [{k: ancestor[k] for k in ("seq", "filename", "content_sha256")}]
         self.assertEqual(receipt.payload["checked_artifacts"], expected)
         self.assertEqual(receipt.payload["browser_plan"]["entrypoint"], "index.html")
 

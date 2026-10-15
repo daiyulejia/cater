@@ -65,7 +65,9 @@ class TextCallRecoveryTests(unittest.TestCase):
     def test_transport_failure_can_resume_but_never_retries_within_one_activity(self):
         for cls in (AnthropicMessagesDriver, OpenAICompatibleDriver):
             for error in (TimeoutError("synthetic"), URLError(TimeoutError("synthetic")),
-                          URLError(ConnectionRefusedError("synthetic"))):
+                          URLError(ConnectionRefusedError("synthetic")),
+                          *(HTTPError("https://fixture.invalid", code, "synthetic", {}, None)
+                            for code in (408, 500, 502, 503, 504))):
                 with self.subTest(cls=cls.__name__, error=type(error).__name__):
                     rt, task, _ = self.runtime(cls)
                     with patch(self.transport(cls), side_effect=error) as opened:
@@ -124,7 +126,8 @@ class TextCallRecoveryTests(unittest.TestCase):
     @patch.dict(os.environ, {"CATER_RECOVERY_FIXTURE": "synthetic-key"})
     def test_http_protocol_and_incomplete_responses_are_not_recovery_signals(self):
         for cls in (AnthropicMessagesDriver, OpenAICompatibleDriver):
-            for error in (HTTPError("https://fixture.invalid", 503, "synthetic", {}, None),
+            for error in (*(HTTPError("https://fixture.invalid", code, "synthetic", {}, None)
+                           for code in (400, 401, 403, 404)),
                           DriverUnavailable("API request timed out"), ValueError("invalid headers")):
                 with self.subTest(cls=cls.__name__, error=type(error).__name__):
                     rt, task, _ = self.runtime(cls)
@@ -177,15 +180,16 @@ class TextCallRecoveryTests(unittest.TestCase):
     @patch.dict(os.environ, {"CATER_RECOVERY_FIXTURE": "synthetic-key"})
     def test_tool_enabled_request_shape_does_not_inherit_text_recovery(self):
         for cls in (AnthropicMessagesDriver, OpenAICompatibleDriver):
-            with self.subTest(cls=cls.__name__):
-                rt, task, _ = self.runtime(cls)
-
-                guard = self.transport(cls).rsplit(".", 1)[0] + "._text_only_request"
-                with patch(guard, return_value=False) as checked, \
-                        patch(self.transport(cls), side_effect=TimeoutError("synthetic")):
-                    rt.collaborate(task)
-                checked.assert_called_once()
-                self.assertEqual(self.current(rt, task)["status"], "uncertain")
+            for error in (TimeoutError("synthetic"),
+                          HTTPError("https://fixture.invalid", 502, "synthetic", {}, None)):
+                with self.subTest(cls=cls.__name__, error=type(error).__name__):
+                    rt, task, _ = self.runtime(cls)
+                    guard = self.transport(cls).rsplit(".", 1)[0] + "._text_only_request"
+                    with patch(guard, return_value=False) as checked, \
+                            patch(self.transport(cls), side_effect=error):
+                        rt.collaborate(task)
+                    checked.assert_called_once()
+                    self.assertEqual(self.current(rt, task)["status"], "uncertain")
 
     def test_request_capability_guard_rejects_tools_history_and_unknown_features(self):
         body = {"model": "fixture", "messages": [{"role": "user", "content": "hello"}]}

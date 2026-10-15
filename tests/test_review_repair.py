@@ -154,9 +154,10 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(len(work), 1)
         self.assertEqual(reviews[0]["artifacts"], reviews[1]["artifacts"])
         self.assertEqual(reviews[1]["response_correction"]["issues"][0]["issue"], "quote_not_found")
-        fields = reviews[0]["response_schema"]["properties"]["checks"]["items"]["properties"]
-        self.assertEqual(fields["id"]["enum"], ["meaning"])
-        self.assertEqual(fields["artifact_seq"]["enum"], [None, reviews[0]["artifacts"][0]["seq"]])
+        fields = reviews[0]["response_schema"]["properties"]
+        self.assertEqual(fields["criterion_ids"]["items"]["enum"], ["meaning"])
+        self.assertEqual(reviews[0]["response_schema"]["required"], ["decision", "reason"])
+        self.assertNotIn("checks", fields)
         self.assertEqual(self.rt._reported_driver_tokens("test"), 14)
         events = self.rt.log.read(task_id=self.task)
         messages = [e for e in events if e.type == "msg.said" and e.actor.id == "test"]

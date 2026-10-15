@@ -15,7 +15,7 @@
 仅返回 JSON：
 `{"status":"ready|unsupported","reason":"简短中文覆盖说明或能力缺口","plan":null或{"entrypoint":"从 available_entrypoints 精确选择文件名","steps":[...]}}`
 
-每步包含 `action`、简短中文 `label` 和下述对应字段。1 至 32 步，至少一个断言：
+每步包含 `action`、简短中文 `label` 和下述对应字段。1 至 128 步，至少一个断言：
 
 - `click`: `selector`，Playwright 选择器。
 - `click_at`: `selector`、`x`、`y`，元素内真实鼠标点击，坐标是0至16384的有限数值，必须位于元素实际边界内。
@@ -27,6 +27,6 @@
 - `evaluate`: `expression`，仅在页面内执行的 JavaScript，用于明确标注的测试初态设置。支持表达式、语句或无参函数；函数会在页面内被调用。
 - `assert_js`: `expression`，仅在页面内执行的 JavaScript，必须返回布尔值 true 才算通过。支持表达式或无参函数，例如 `() => document.querySelector('#score').textContent === '0'`。
 
-`evaluate` 会丢弃返回值，即使返回 false 也不算断言失败。所有验证比较必须使用 `assert_js`，不要只给 evaluate 起名“断言”。规划最多 32 步，不需要等待时不加 wait；可以在一个 assert_js 里验证同一操作的多个结果，但不能省略必要的行为。五子棋这类需要连续落子的场景，应先统计真实点击和断言的总步数；总执行时间仍不超过60秒。不要为了满足步数而删掉验收条目。
+`evaluate` 会丢弃返回值，即使返回 false 也不算断言失败。所有验证比较必须使用 `assert_js`，不要只给 evaluate 起名“断言”。规划最多 128 步，不需要等待时不加 wait；可以在一个 assert_js 里验证同一操作的多个结果，但不能省略必要的行为。五子棋这类需要连续落子的场景，应先统计真实点击和断言的总步数；总执行时间仍不超过60秒。不要为了满足步数而删掉验收条目。
 
 选择器不超过 500 字符，表达式不超过 4000 字符，文本不超过 2000 字符。不允许提供未列出的字段、命令或文件路径。网页入口必须是本次提交文件，不能跳转到外部 URL。若所有标准无法在这些能力内检查，返回 unsupported，plan 为 null。

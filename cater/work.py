@@ -496,6 +496,26 @@ class WorkLedger:
                 "previous_lease_until": item["lease_until"], "lease_until": max(item["lease_until"] + 0.001, now + lease_seconds)}, Actor.system("work_scheduler")
         return self._write(task_id, build)
 
+    def accepted_dependencies(self, task_id: str, item: dict[str, Any]) -> list[dict[str, Any]]:
+        """Read the exact accepted dependency closure, including code behind reports."""
+        view = self.view(task_id)
+        if not view.get("scope_current"):
+            raise WorkConflict("工作要求已变化，不能沿用旧依赖。")
+        by_id = {i["id"]: i for i in view["items"]}
+        pending = list((item.get("submission") or item).get("inputs", {}).items())
+        dependencies = {}
+        while pending:
+            identity, expected = pending.pop(0)
+            dependency = by_id.get(identity)
+            if (dependency is None or dependency["status"] != "accepted"
+                    or (dependency.get("submission") or {}).get("digest") != expected):
+                raise WorkConflict("依赖成果已变化，不能将新版本用作旧工作的输入。")
+            if identity in dependencies:
+                continue
+            dependencies[identity] = dependency
+            pending.extend(dependency["submission"].get("inputs", {}).items())
+        return list(dependencies.values())
+
     def artifacts(self, task_id: str, submission: dict[str, Any]) -> list[dict[str, Any]]:
         from .artifacts import content_metrics
 
@@ -887,6 +907,77 @@ class WorkLedger:
                 raise WorkConflict("这次复核没有待核对的调用。")
             return "work.review_reconciled", {**started.payload, "attempt_seq": attempt_seq,
                 "invocation_stopped": True, "reason": reason}, Actor.human()
+        return self._write(task_id, build)
+
+    def review_decision(self, task_id: str, item_id: str, *, reviewer: str, submission_seq: int,
+                        decision: dict, review_attempt_seq: int) -> Event:
+        """Bind a reviewer's judgment to host-owned inputs, without copied quotations."""
+        choice, reason = decision.get("decision"), decision.get("reason")
+        if not isinstance(choice, str) or choice not in {"approve", "revise_artifact", "revise_check", "needs_information"}:
+            raise ValueError("review decision is invalid")
+        reason = _text(reason, "review reason", 4000)
+
+        def build():
+            view, item = self._item(task_id, item_id)
+            if reviewer != item["reviewer"] or reviewer == item["owner"]:
+                raise ValueError("only the assigned independent reviewer may review")
+            self._validate_review_owner(task_id, item, review_attempt_seq)
+            if item["status"] != "submitted" or (item.get("submission") or {}).get("seq") != submission_seq:
+                raise WorkConflict("review must target the current submitted artifact")
+            ids = decision.get("criterion_ids")
+            allowed = {c["id"] for c in item["criteria"]}
+            if ids is not None and (not isinstance(ids, list) or not ids or len(ids) > len(allowed)
+                                    or any(not isinstance(i, str) or i not in allowed for i in ids)
+                                    or len(set(ids)) != len(ids)):
+                raise ValueError("review criterion_ids must identify current criteria")
+            selected = set(ids or allowed)
+            if choice == "revise_check" and not any(c["id"] in selected and c["kind"] == "local_check"
+                                                     for c in item["criteria"]):
+                raise ValueError("revise_check must identify an actual local_check")
+            artifacts = self.artifacts(task_id, item["submission"])
+            binding = [{"seq": a["seq"], "sha256": a["content_sha256"]} for a in artifacts]
+            local = self.checks(task_id, item)
+            checks = []
+            for criterion in item["criteria"]:
+                cid, kind = criterion["id"], criterion["kind"]
+                status = "passed" if choice != "needs_information" else "unknown"
+                if choice == "revise_artifact" and cid in selected:
+                    status = "failed"
+                check = {"id": cid, "kind": kind, "status": status, "reason": reason,
+                         "source": "model_assessment", "review_protocol": "decision_v1",
+                         "evidence_binding": {"artifacts": binding}}
+                if kind == "local_check":
+                    receipt = local.get(cid)
+                    if receipt is None:
+                        check.update(status="unknown", source="runtime_check",
+                                     reason="尚未取得本次成果的实际检查回执，将先补齐检查。")
+                    else:
+                        passed = self._receipt_passed(receipt)
+                        check.update(receipt_seq=receipt.seq,
+                                     execution_status="passed" if passed else receipt.payload.get("outcome", "unknown"))
+                        if choice == "revise_check" and cid in selected:
+                            check["status"] = "unknown"
+                            if (receipt.payload.get("check_kind") == "browser"
+                                    and receipt.payload.get("outcome") in {"passed", "failed"}):
+                                check["next_action"] = "revise_check"
+                        elif not passed and check["status"] == "passed":
+                            check.update(status="unknown", source="runtime_check",
+                                         reason="复核意见不能覆盖失败或不可用的实际检查，需核对检查原因。")
+                checks.append(check)
+            previous = next((e for e in reversed(self.log.read(task_id=task_id))
+                             if e.type == "work.reviewed" and e.payload.get("review_attempt_seq") == review_attempt_seq), None)
+            if previous is not None:
+                prior = {c["id"]: c for c in previous.payload["checks"] if not c.get("response_issue")}
+                severity = {"passed": 0, "unknown": 1, "failed": 2}
+                checks = [dict(prior[c["id"]]) if c["id"] in prior
+                          and severity[c["status"]] <= severity[prior[c["id"]]["status"]] else c for c in checks]
+            status = "accepted" if all(c["status"] == "passed" for c in checks) else (
+                "rework" if any(c["status"] == "failed" for c in checks) else "submitted")
+            return "work.reviewed", {"plan_seq": view["plan_seq"], "work_item_id": item_id,
+                "submission_seq": submission_seq, "review_attempt_seq": review_attempt_seq,
+                "review_protocol": "decision_v1", "decision": choice, "checks": checks,
+                "status": status, "reason": reason}, Actor.agent(reviewer, "reviewer")
+
         return self._write(task_id, build)
 
     def review(self, task_id: str, item_id: str, *, reviewer: str, submission_seq: int,

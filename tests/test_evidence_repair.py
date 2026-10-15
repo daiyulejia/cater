@@ -51,9 +51,13 @@ class EvidenceRepairTests(unittest.TestCase):
         self.assertEqual(len([c for c in rt.log.iter_events(task_id=task, event_types=("work.claimed",))
                               if c.payload["work_item_id"] == "draft"]), 2)
 
-    def test_unresolved_defect_stops_after_one_revision(self):
+    def test_unresolved_defect_stops_when_revised_body_and_failure_repeat(self):
         rt, task, prompts = self.run_case(always_fail=True)
-        self.assertEqual(len(prompts), 2)
+        self.assertEqual(len(prompts), 3)
+        repairs = list(rt.log.iter_events(task_id=task, event_types=("work.repair_requested",)))
+        self.assertEqual([e.payload["revision_attempt"] for e in repairs], [1, 2])
+        self.assertNotEqual(repairs[0].payload["content_hashes"], repairs[1].payload["content_hashes"])
+        self.assertEqual([e.payload["failed_criterion_ids"] for e in repairs], [["meaning"], ["meaning"]])
         rows = rt.work.view(task)["items"]
         self.assertEqual(rows[0]["status"], "ready")
         self.assertEqual(rows[1]["status"], "blocked")

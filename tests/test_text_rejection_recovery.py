@@ -160,9 +160,9 @@ class TextRejectionRecoveryTests(unittest.TestCase):
         self.assertEqual(rt.work.view(task)["items"][0], predecessor)
         self.assertTrue(rt.work.view(task)["stage_accepted"])
 
-    def test_other_http_statuses_keep_uncertain_classification(self):
+    def test_permanent_http_errors_keep_uncertain_classification(self):
         for cls in (AnthropicMessagesDriver, OpenAICompatibleDriver):
-            for status in (400, 401, 403, 408, 409, 422, 500, 503, 504):
+            for status in (400, 401, 403, 404, 409, 422):
                 with self.subTest(cls=cls.__name__, status=status):
                     rt, task, _ = self.runtime(cls)
                     with patch(self.transport(cls), side_effect=self.rejection(status)) as opened:

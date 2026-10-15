@@ -78,7 +78,7 @@ export function validatePlan(plan) {
   requireThat(new Set(folded).size === folded.length, 'files: duplicate basename');
   requireThat(safeBasename(plan.entrypoint) && /\.html?$/i.test(plan.entrypoint)
     && plan.files.includes(plan.entrypoint), 'entrypoint: expected allowlisted HTML basename');
-  requireThat(Array.isArray(plan.steps) && plan.steps.length >= 1 && plan.steps.length <= 32, 'steps: expected 1..32 steps');
+  requireThat(Array.isArray(plan.steps) && plan.steps.length >= 1 && plan.steps.length <= 128, 'steps: expected 1..128 steps');
   for (const [index, step] of plan.steps.entries()) {
     const where = `step ${index + 1}`;
     requireThat(step && typeof step.action === 'string' && Object.hasOwn(ACTIONS, step.action), `${where}: unknown action`);
@@ -193,11 +193,16 @@ export function serializeReport(report) {
   out.truncated = false;
   const encode = () => `${JSON.stringify(out)}\n`;
   if (Buffer.byteLength(encode()) <= 7500) return encode();
+  // Remove recoverable plan metadata before shortening any actual observation.
+  out.steps = out.steps.map(step => Object.fromEntries(
+    ['index', 'status', 'actual', 'error', 'observed'].filter(key => Object.hasOwn(step, key))
+      .map(key => [key, step[key]])));
+  out.steps_encoding = 'plan_index_v1';
+  out.details_compacted = true;
+  if (Buffer.byteLength(encode()) <= 7500) return encode();
   out.truncated = true;
   for (const cap of [120, 72, 36]) {
     for (const step of out.steps) {
-      step.label = clip(step.label, cap);
-      step.check = clip(step.check, cap);
       if (step.error) step.error = clip(step.error, cap);
       if (step.observed) step.observed = clip(step.observed, cap);
     }
@@ -208,9 +213,7 @@ export function serializeReport(report) {
   }
   // All inputs and arrays are already bounded; keep every step even at the final budget tier.
   for (const step of out.steps) {
-    delete step.check;
     delete step.observed;
-    step.label = clip(step.label, 24);
   }
   return encode();
 }

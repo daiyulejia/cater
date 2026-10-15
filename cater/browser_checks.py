@@ -15,10 +15,11 @@ from .events import Actor
 from .usage import valid_token_count
 from .verification import validate_check
 from .work import WorkConflict
+from .review_contract import receipt_context
 
 
 PLAN_FILE = ".cater-browser-check.json"
-MAX_BROWSER_STEPS = 32
+MAX_BROWSER_STEPS = 128
 ACTION_FIELDS = {
     "click": {"selector": 500}, "press": {"key": 50},
     "click_at": {"selector": 500, "x": None, "y": None},
@@ -79,6 +80,28 @@ def normalize_plan(raw: object, filenames: list[str]) -> dict:
     return result
 
 
+def expand_browser_report(report: dict, plan: dict) -> dict:
+    """Restore only plan metadata; outcomes remain the runner's observations."""
+    if "steps_encoding" not in report:
+        return report
+    rows = report.get("steps")
+    if (report["steps_encoding"] != "plan_index_v1" or not isinstance(rows, list)
+            or len(rows) != len(plan["steps"])
+            or report.get("plan_sha256") != hashlib.sha256(
+                json.dumps(plan, ensure_ascii=False).encode("utf-8")).hexdigest()):
+        raise ValueError("invalid compact browser report")
+    restored = []
+    for index, (row, step) in enumerate(zip(rows, plan["steps"]), 1):
+        if (not isinstance(row, dict) or set(row) - {"index", "status", "actual", "error", "observed"}
+                or type(row.get("index")) is not int or row["index"] != index
+                or row.get("status") not in {"passed", "failed", "not_run"}
+                or "actual" in row and type(row["actual"]) is not bool
+                or "observed" in row and not isinstance(row["observed"], str)):
+            raise ValueError("invalid compact browser observation")
+        restored.append({**row, "action": step["action"], "label": step["label"]})
+    return {**report, "steps": restored}
+
+
 def browser_receipt(result, plan: dict) -> dict:
     """Validate the configured runner's attestation, not just its exit status."""
     payload = {"browser_plan": plan, "check_kind": "browser",
@@ -92,6 +115,7 @@ def browser_receipt(result, plan: dict) -> dict:
         if (not isinstance(report, dict) or report.get("outcome") not in ("passed", "failed", "unavailable")
                 or stdout.get("complete") is not True or stdout.get("truncated")):
             raise ValueError("incomplete browser report")
+        report = expand_browser_report(report, plan)
         expected_hash = hashlib.sha256(json.dumps(plan, ensure_ascii=False).encode("utf-8")).hexdigest()
         if report["outcome"] == "passed":
             steps, counts = report.get("steps"), report.get("counts")
@@ -150,15 +174,10 @@ class BrowserChecks:
         return current
 
     def artifacts(self, task_id: str, item: dict) -> list[dict]:
-        artifacts = self.rt.work.artifacts(task_id, item["submission"])
-        for dependency in self.rt.work.view(task_id)["items"]:
-            expected = item["submission"].get("inputs", {}).get(dependency["id"])
-            if expected is None:
-                continue
-            if dependency["status"] != "accepted" or (dependency.get("submission") or {}).get("digest") != expected:
-                raise WorkConflict("检查依赖成果已变化，不能检查新的代码却沿用旧提交。")
-            artifacts.extend(self.rt.work.artifacts(task_id, dependency["submission"]))
-        return artifacts
+        from .artifact_edits import select_artifact_versions
+
+        return select_artifact_versions(self.rt, task_id,
+            [item, *self.rt.work.accepted_dependencies(task_id, item)])
 
     def _planning_retry(self, task_id: str, binding: dict) -> dict:
         events = self.rt.log.read(task_id=task_id)
@@ -187,6 +206,31 @@ class BrowserChecks:
         if authorization is None:
             raise WorkConflict("本轮已尝试检查规划，等待新的明确继续请求后再安排。")
         return {"retry_of": previous.seq, "authorization_seq": authorization.seq}
+
+    def _reusable_plan(self, task_id, binding, filenames):
+        """Reuse test instructions, never their old verdict or execution receipt."""
+        events = self.rt.log.read(task_id=task_id)
+        bundles = {e.payload["digest"]: e.payload["manifest"] for e in events if e.type == "delivery.prepared"}
+
+        def matches(event):
+            payload = event.payload
+            manifest = bundles.get(payload.get("delivery_digest"), {})
+            return all(payload.get(k, manifest.get(k)) == binding.get(k)
+                       for k in ("work_item_id", "criterion_id", "plan_seq", "scope"))
+
+        previous = next((e for e in reversed(events)
+            if e.type == "verification.completed" and e.actor == Actor.system("local_verifier")
+            and e.payload.get("check_kind") == "browser"
+            and matches(e)), None)
+        if previous is None or not self.rt.work._receipt_passed(previous):
+            return None
+        old = previous.payload.get("browser_plan", {})
+        try:
+            plan = normalize_plan({k: old[k] for k in ("entrypoint", "steps")}, filenames)
+        except (KeyError, ValueError, TypeError):
+            return None
+        return {"status": "ready", "plan": plan, "reused_plan_receipt_seq": previous.seq,
+                "reason": "沿用同一验收目标的可重复检查步骤，在当前成果上重新执行；不沿用旧结论。"}
 
     def run(self, task_id: str, item: dict) -> None:
         if not self.command or not item.get("reviewer") or item.get("check_in_flight"):
@@ -221,7 +265,17 @@ class BrowserChecks:
                        "available_entrypoints": [f for f in filenames if isinstance(f, str) and f.lower().endswith((".html", ".htm"))],
                        "artifacts": artifacts,
                        "customer_directions": self.rt.work.directions(task_id, binding["scope"]["direction_seq"])}
-            result = self._plan(task_id, started, context, filenames, role, lambda: self._current(task_id, item))
+            context["regression_findings"] = [
+                {"review_seq": e.seq, "reason": e.payload["reason"], "checks": e.payload["checks"]}
+                for e in self.rt.log.iter_events(task_id=task_id, event_types=("work.reviewed",))
+                if e.payload.get("work_item_id") == item["id"] and e.payload.get("status") == "rework"
+                and e.payload.get("plan_seq") == binding["plan_seq"]][-2:]
+            result = self._reusable_plan(task_id, binding, filenames)
+            if result is None:
+                result = self._plan(task_id, started, context, filenames, role, lambda: self._current(task_id, item))
+            else:
+                self.rt.log.emit(type="verification.planned", actor=Actor.system("local_verifier"), task_id=task_id,
+                    payload={**binding, "request_seq": started.seq, **result})
             if result["status"] != "ready":
                 continue
             try:
@@ -232,6 +286,90 @@ class BrowserChecks:
             except (WorkConflict, ValueError) as exc:
                 self.rt.log.emit(type="verification.planned", actor=Actor.system("local_verifier"), task_id=task_id,
                     payload={**binding, "request_seq": started.seq, "status": "unavailable", "reason": str(exc)[:1000]})
+
+    def repair(self, task_id: str, item: dict, *, attempted: set[str]) -> bool:
+        """Correct a diagnosed test, not the source or an indeterminate invocation."""
+        if not self.command or item.get("in_flight") or item.get("status") != "submitted":
+            return False
+        role = self.rt._role_by_id(item["reviewer"]) if item.get("reviewer") else None
+        if role is None or not text_advice_available(self.rt.drivers[role.driver]):
+            return False
+        local = self.rt.work.checks(task_id, item)
+        for check in item.get("checks", []):
+            criterion_id = check["id"]
+            receipt = local.get(criterion_id)
+            if (criterion_id in attempted or check.get("next_action") != "revise_check"
+                    or check.get("status") != "unknown" or check.get("source") != "model_assessment"
+                    or check.get("response_issue") or receipt is None or check.get("receipt_seq") != receipt.seq
+                    or receipt.payload.get("check_kind") != "browser"
+                    or receipt.payload.get("outcome") not in {"passed", "failed"}):
+                continue
+            report = receipt.payload.get("browser_report", {})
+            if (report.get("outcome") != receipt.payload["outcome"]
+                    or report.get("phase", "execution") != "execution"
+                    or report.get("truncated", False) is not False
+                    or receipt.payload.get("exit_code") != (0 if receipt.payload["outcome"] == "passed" else 1)):
+                continue
+            criterion = next((c for c in item["criteria"] if c["id"] == criterion_id
+                              and c["kind"] == "local_check"), None)
+            if criterion is None:
+                continue
+            attempted.add(criterion_id)
+            binding = {"work_item_id": item["id"], "criterion_id": criterion_id,
+                       "plan_seq": item["submission"]["plan_seq"], "scope": item["submission"]["scope"],
+                       "submission_seq": item["submission"]["seq"], "submission_digest": item["submission"]["digest"]}
+
+            def start():
+                current = self._current(task_id, item)
+                checks = self.rt.work.checks(task_id, current)
+                if (current.get("review_seq") != item.get("review_seq")
+                        or current.get("in_flight")
+                        or check not in current.get("checks", [])
+                        or checks.get(criterion_id) != receipt):
+                    raise WorkConflict("测试修正依据已变化或已处理，不能重复安排。")
+                retry = (self._planning_retry(task_id, binding)
+                         if any(e.payload.get("repair_of_receipt_seq") == receipt.seq
+                                for e in self.rt.log.iter_events(task_id=task_id,
+                                                                event_types=("verification.planning_started",)))
+                         else {})
+                return "verification.planning_started", {**binding, **retry, "review_seq": item["review_seq"],
+                    "repair_of_receipt_seq": receipt.seq, "reason": check["reason"]}, Actor.system("local_verifier")
+
+            try:
+                artifacts = self.artifacts(task_id, item)
+                started = self.rt.work._write(task_id, start)
+            except WorkConflict:
+                continue
+            filenames = [a.get("filename") for a in artifacts]
+            context = {**binding, "phase": "browser_check_plan", "criterion": criterion,
+                       "available_entrypoints": [f for f in filenames if isinstance(f, str)
+                                                  and f.lower().endswith((".html", ".htm"))],
+                       "artifacts": artifacts, "previous_check": receipt_context(receipt),
+                       "test_diagnosis": check, "instruction": (
+                           "The independent reviewer diagnosed a defective or incomplete test. Correct its stated premise, "
+                           "selectors, coordinates or assertions, or add the missing behavior checks against the unchanged "
+                           "submitted source. Preserve the full criterion. "
+                           "Do not remove failing behavior, edit the application, inject expected answers, or claim success."),
+                       "customer_directions": self.rt.work.directions(task_id, binding["scope"]["direction_seq"])}
+            result = self._plan(task_id, started, context, filenames, role, lambda: self._current(task_id, item))
+            if result["status"] != "ready":
+                return False
+            if result["plan"] == receipt.payload.get("browser_plan"):
+                self.rt.log.emit(type="verification.planned", actor=Actor.system("local_verifier"), task_id=task_id,
+                    payload={**binding, "request_seq": started.seq, "status": "invalid",
+                             "reason": "修正方案与失败方案相同，未重复执行；需要明确有效的测试修正。"})
+                return False
+            try:
+                self._current(task_id, item)
+                self.rt.verify_work(task_id, item["id"], criterion_id, [*self.command, "--plan", PLAN_FILE],
+                    timeout=self.timeout, record_output=True, browser_plan=result["plan"],
+                    expected_submission_seq=item["submission"]["seq"])
+            except (WorkConflict, ValueError) as exc:
+                self.rt.log.emit(type="verification.planned", actor=Actor.system("local_verifier"), task_id=task_id,
+                    payload={**binding, "request_seq": started.seq, "status": "unavailable", "reason": str(exc)[:1000]})
+                return False
+            return True
+        return False
 
     def _plan(self, task_id, started, context, filenames, role, current) -> dict:
         context["browser_limits"] = {"max_steps": MAX_BROWSER_STEPS, "max_plan_bytes": 65536,
@@ -334,7 +472,12 @@ class BrowserChecks:
                    "available_entrypoints": [n for n in filenames if n.lower().endswith((".html", ".htm"))],
                    "artifacts": [a for item in delivery["manifest"]["items"] for a in self.rt.work.artifacts(task_id, item["submission"])],
                    "customer_directions": self.rt.work.directions(task_id, binding["scope"]["direction_seq"])}
-        result = self._plan(task_id, started, context, filenames, role, lambda: self._current_delivery(task_id, delivery))
+        result = self._reusable_plan(task_id, binding, filenames)
+        if result is None:
+            result = self._plan(task_id, started, context, filenames, role, lambda: self._current_delivery(task_id, delivery))
+        else:
+            self.rt.log.emit(type="verification.planned", actor=Actor.system("local_verifier"), task_id=task_id,
+                payload={**binding, "request_seq": started.seq, **result})
         if result["status"] != "ready":
             return
         try:

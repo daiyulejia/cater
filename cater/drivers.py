@@ -68,7 +68,7 @@ class DriverUnavailable(DriverError):
 
 
 class TextTransportFailure(DriverUnavailable):
-    """Network failure of a text-only call; no tool effects, remote billing unknown."""
+    """Network/transient HTTP failure of a tool-free call; remote billing unknown."""
 
 
 class TextRequestRejected(DriverUnavailable):
@@ -611,7 +611,9 @@ class OpenAICompatibleDriver:
             if exc.code == 429 and _text_only_request(payload):
                 raise TextRequestRejected(f"{self.name} API request failed with HTTP {exc.code}",
                                           status_code=exc.code) from None
-            raise DriverUnavailable(f"{self.name} API request failed with HTTP {exc.code}") from exc
+            if exc.code in {408, 500, 502, 503, 504} and _text_only_request(payload):
+                raise TextTransportFailure(f"{self.name} API request failed with HTTP {exc.code}") from None
+            raise DriverUnavailable(f"{self.name} API request failed with HTTP {exc.code}") from None
         except (URLError, TimeoutError, OSError):
             # Adding any local or server-side tools must remove the text-only
             # recovery promise, even if their effects are not in this payload.

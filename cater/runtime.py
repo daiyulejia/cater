@@ -37,8 +37,9 @@ from .explanations import ExplanationService
 from .rooms import RoomService
 from .conversation import ConversationService
 from .collaboration import ConsultationService, normalize_request, text_advice_available
-from .browser_checks import BrowserChecks, PLAN_FILE, normalize_plan
+from .browser_checks import BrowserChecks, PLAN_FILE, expand_browser_report, normalize_plan
 from .responses import load_response_object
+from .review_contract import receipt_context
 from .checkpoints import work_checkpoint
 from .execution_control import ExecutionControl
 
@@ -904,11 +905,14 @@ class Runtime:
         visited = set()
         reviewed = set()
         repaired = set()
+        revision_limit = 3
+        revision_attempts = {}
+        revision_failures = {}
         repair_plan, repair_scope = None, None
         delivery_rework = {}
         utterances = []
         profiles = agent_profiles(self._project_events(task.id, ("msg.said", "msg.challenge", "driver.failed")))
-        # A concrete failed review can authorize one new text-only revision.
+        # Concrete failed reviews authorize bounded text-only revisions.
         # Transport failures and unknown evidence never authorize blind retries.
         while (view.get("scope_current") and (not delivery_rework or
                (view.get("plan_seq") == repair_plan and view.get("scope") == repair_scope))
@@ -928,20 +932,47 @@ class Runtime:
                 current = next((i for i in view["items"] if i["id"] == candidate["id"]), None)
                 if current and current["status"] == "submitted" and current["submission"] == candidate["submission"]:
                     self._review_work_item(self.task(task.id), current)
+                    # Independent diagnosis can repair a browser test without
+                    # rerunning the author or confusing test failure with a code bug.
+                    attempted_checks = set()
+                    for _ in current["criteria"]:
+                        current = next((i for i in self.work.view(task.id)["items"] if i["id"] == candidate["id"]), None)
+                        if current is None:
+                            break
+                        if not self.browser_checks.repair(task.id, current, attempted=attempted_checks):
+                            break
+                        current = next((i for i in self.work.view(task.id)["items"] if i["id"] == candidate["id"]), None)
+                        if current is None:
+                            break
+                        self._review_work_item(self.task(task.id), current)
                     after = self.work.view(task.id)
                     rejected = next((i for i in after["items"] if i["id"] == candidate["id"]), None)
                     if (after.get("scope_current") and rejected and rejected["status"] == "ready"
-                            and not rejected.get("in_flight") and rejected["id"] not in repaired
+                            and not rejected.get("in_flight") and rejected["id"] not in delivery_rework
+                            and revision_attempts.get(rejected["id"], 0) < revision_limit
                             and any(c["status"] == "failed" and not c.get("response_issue")
                                     for c in rejected.get("checks", []))
                             and text_advice_available(self.drivers[self._role_by_id(rejected["owner"]).driver])):
-                        self.log.emit(actor=Actor.system("work_scheduler"), type="work.repair_requested", task_id=task.id,
-                                      payload={"work_item_id": rejected["id"], "plan_seq": after["plan_seq"],
-                                               "submission_seq": rejected["submission"]["seq"],
-                                               "review_seq": rejected.get("review_seq"), "scope": after["scope"],
-                                               "reason": "独立复核发现具体缺陷，将原成果和复核依据交回负责人修正一次。"})
-                        repaired.add(rejected["id"])
-                        visited.discard(rejected["id"])
+                        failed = [c for c in rejected["checks"] if c["status"] == "failed" and not c.get("response_issue")]
+                        criterion_ids = sorted(c["id"] for c in failed)
+                        content_hashes = sorted(a["content_sha256"] for a in self.work.artifacts(task.id, rejected["submission"]))
+                        signature = (tuple(content_hashes), tuple(criterion_ids))
+                        seen = revision_failures.setdefault(rejected["id"], set())
+                        # New event IDs or review wording alone are not progress.
+                        if signature not in seen:
+                            attempt = revision_attempts.get(rejected["id"], 0) + 1
+                            self.log.emit(actor=Actor.system("work_scheduler"), type="work.repair_requested", task_id=task.id,
+                                          payload={"work_item_id": rejected["id"], "plan_seq": after["plan_seq"],
+                                                   "submission_seq": rejected["submission"]["seq"],
+                                                   "review_seq": rejected.get("review_seq"), "scope": after["scope"],
+                                                   "revision_attempt": attempt, "revision_limit": revision_limit,
+                                                   "failed_criterion_ids": criterion_ids, "content_hashes": content_hashes,
+                                                   "reason": "独立复核发现具体缺陷，将原成果和失败依据交回负责人修正："
+                                                             + "；".join(c["id"] + "：" + c["reason"] for c in failed)})
+                            revision_attempts[rejected["id"]] = attempt
+                            seen.add(signature)
+                            repaired.add(rejected["id"])
+                            visited.discard(rejected["id"])
             else:
                 candidate = next((i for i in view["items"] if i["status"] == "ready"
                                   and i["id"] not in visited), None)
@@ -955,7 +986,7 @@ class Runtime:
                                 task.id, before, delivery, observed_seq, repaired)
                             if delivery_rework:
                                 repair_plan, repair_scope = before["plan_seq"], before["scope"]
-                                # The stage and delivery paths share one revision per item.
+                                # Delivery still permits only one wave and no further stage revisions.
                                 repaired.update(delivery_rework)
                                 visited.update(i["id"] for i in before["items"])
                                 visited.difference_update(delivery_rework)
@@ -974,6 +1005,17 @@ class Runtime:
                     self.work.fail(task.id, claim, "认领后要求有变化，尚未调用成员；需要重新核对计划。", uncertain=False)
                     break
                 candidate = next(i for i in view["items"] if i["id"] == claim.payload["work_item_id"])
+                if previous is None:
+                    old = next((e for e in reversed(self.log.read(task_id=task.id))
+                                if e.type == "work.submitted" and e.payload.get("work_item_id") == candidate["id"]
+                                and e.payload.get("plan_seq") == claim.payload["plan_seq"]
+                                and e.payload.get("scope") == claim.payload["scope"]), None)
+                    if old is not None:
+                        old_review = next((e for e in reversed(self.log.read(task_id=task.id))
+                            if e.type == "work.reviewed" and e.payload.get("submission_seq") == old.seq), None)
+                        previous = {"submission": {"seq": old.seq, **old.payload},
+                                    "checks": old_review.payload["checks"] if old_review else [],
+                                    "reason": old_review.payload["reason"] if old_review else "保留的上次成果，尚未复核。"}
                 try:
                     reused = self.work.resubmit_candidate(task.id, claim)
                 except WorkConflict:
@@ -983,10 +1025,29 @@ class Runtime:
                     self.persist_artifacts(task.id)
                     view = self.work.view(task.id)
                     continue
-                inputs = {i["id"]: self.work.artifacts(task.id, i["submission"]) for i in view["items"]
-                          if i["id"] in candidate["depends_on"]}
+                dependencies = self.work.accepted_dependencies(task.id, candidate)
+                inputs = {i["id"]: self.work.artifacts(task.id, i["submission"]) for i in dependencies}
                 context = {**claim.payload, "contract": candidate, "accepted_inputs": inputs,
+                           "accepted_check_receipts": {i["id"]: {key: receipt_context(event)
+                               for key, event in self.work.checks(task.id, i).items()}
+                               for i in dependencies},
                            "customer_directions": view["customer_directions"]}
+                final_feedback = next((e for e in reversed(self.log.read(task_id=task.id))
+                    if e.type == "delivery.review_finished" and e.payload.get("status") == "rework"
+                    and candidate["id"] in e.payload.get("affected", [])
+                    and e.payload.get("plan_seq") == claim.payload["plan_seq"]
+                    and e.payload.get("scope") == claim.payload["scope"]), None)
+                if final_feedback is not None:
+                    old_checks = final_feedback.payload.get("evidence_binding", {}).get("local_checks", {})
+                    context["previous_delivery_feedback"] = {
+                        "review_seq": final_feedback.seq, "reason": final_feedback.payload["reason"],
+                        "historical_not_current_execution": True,
+                        "actual_receipts": {key: {
+                            **{k: value[k] for k in ("seq", "outcome", "checked_artifacts", "browser_report") if k in value},
+                            "browser_assertions": [{"index": index, **step} for index, step in enumerate(
+                                value.get("browser_plan", {}).get("steps", []), 1)
+                                if step.get("action", "").startswith("assert_")]}
+                            for key, value in old_checks.items()}}
                 if candidate["id"] in delivery_rework:
                     context.update(delivery_rework[candidate["id"]])
                 if previous and previous["submission"]["plan_seq"] == claim.payload["plan_seq"]:
@@ -1042,7 +1103,8 @@ class Runtime:
                                           "后续继续时先读取实际文件再工作，不重放旧工具批次。远端是否计费未知。")
                             elif recoverable:
                                 reason = ("纯文本模型请求被拒绝：" + str(output["payload"].get("text", "")) + "；"
-                                          if rejected else "纯文本模型调用因传输失败暂停；")
+                                          if rejected else "纯文本模型调用因传输或服务端故障暂停："
+                                          + str(output["payload"].get("text", "")) + "；")
                                 reason += ("本地无工具副作用，尚无成果提交。"
                                            "远端是否计费未知，等待用户继续后再尝试；本轮不会自动重试。")
                             else:
@@ -1120,15 +1182,25 @@ class Runtime:
         artifacts = [a for i in before["items"] for a in self.work.artifacts(task_id, i["submission"])]
         catalog = {a["seq"]: a for a in artifacts}
         evidence = set()
-        for row in failed:
-            cited = row.get("evidence", [])
-            if not cited or any(e["artifact_seq"] not in catalog or not e["quote"].strip()
-                                or e["quote"] not in catalog[e["artifact_seq"]]["content"] for e in cited):
+        if verdict.get("review_protocol") == "decision_v1":
+            roots = set(verdict.get("affected", []))
+            binding = verdict.get("evidence_binding", {})
+            if (verdict.get("decision") != "revise_artifact" or not roots or not roots <= originals.keys()
+                    or binding.get("delivery_digest") != delivery["digest"]
+                    or binding.get("plan_seq") != before["plan_seq"] or binding.get("scope") != before["scope"]
+                    or {a["seq"]: a["sha256"] for a in binding.get("artifacts", [])}
+                    != {a["seq"]: a["content_sha256"] for a in artifacts}):
                 return {}
-            if row.get("model_status", "failed") == "failed":
-                evidence.update(e["artifact_seq"] for e in cited)
-            evidence.update(m["artifact_seq"] for m in row.get("measurements", []) if m["status"] == "failed")
-        roots = {i["id"] for i in before["items"] if set(i["submission"]["artifact_seqs"]) & evidence}
+        else:
+            for row in failed:
+                cited = row.get("evidence", [])
+                if not cited or any(e.get("artifact_seq") not in catalog or not e.get("quote", "").strip()
+                                    or e["quote"] not in catalog[e["artifact_seq"]]["content"] for e in cited):
+                    return {}
+                if row.get("model_status", "failed") == "failed":
+                    evidence.update(e["artifact_seq"] for e in cited)
+                evidence.update(m["artifact_seq"] for m in row.get("measurements", []) if m["status"] == "failed")
+            roots = {i["id"] for i in before["items"] if set(i["submission"]["artifact_seqs"]) & evidence}
         if not roots or roots != set(verdict.get("affected", [])):
             return {}
         affected = set(roots)
@@ -1250,6 +1322,7 @@ class Runtime:
                 if (not isinstance(report, dict) or report.get("outcome") not in ("passed", "failed", "unavailable")
                         or not result.payload["stdout"].get("complete") or result.payload["stdout"].get("truncated")):
                     raise ValueError("incomplete browser report")
+                report = expand_browser_report(report, browser_plan)
                 expected_hash = hashlib.sha256(json.dumps(browser_plan, ensure_ascii=False).encode("utf-8")).hexdigest()
                 if report.get("outcome") == "passed":
                     steps = report.get("steps")
@@ -1300,6 +1373,19 @@ class Runtime:
                 prompt += ("\nCurrent work contract and accepted inputs: " + json.dumps(work_context, ensure_ascii=False)
                            + "\nWork on this item only. Publish actual inline deliverables with content and filename; "
                            "Apply all version-bound customer_directions, not just recent chat excerpts. "
+                           "Use accepted_check_receipts as actual upstream observations; distinguish those from tests "
+                           "you are only proposing. Do not invent a browser run, logs or successful commands. "
+                           "Do not republish unchanged upstream source just to acknowledge it. For a repair item, address "
+                           "concrete defects relevant to the customer goal, not optional features invented by a prior report. "
+                           "If no required defect remains, submit a short specific verification note referring to the accepted "
+                           "source and actual receipts; do not rewrite a working application merely to fill a repair stage. "
+                           "For a small source change, prefer artifact_edits instead of repeating a whole file: "
+                           "[{artifact_seq: input seq, old_text: exact unique original "
+                           "excerpt, new_text: replacement}]. The host applies it only to supplied accepted_inputs or "
+                           "previous_attempt artifacts, binds their immutable hashes, publishes the complete revised file "
+                           "and checks it afresh. An optional expected_sha256 must match if supplied. "
+                           "The host retains other files from your previous_attempt snapshot; explicit deliverables "
+                           "may replace those unchanged files. Do not include a patched filename in deliverables. "
                            "Later explicit directions override earlier conflicting directions, but not unrelated requirements. "
                            "If the item no longer fits the updated requirements, report the conflict instead of pretending it is complete. "
                            "A statement of completion or a URI is not a submission. The runtime controls acceptance. "
@@ -1360,6 +1446,18 @@ class Runtime:
                 parsed = {"stance": "assert", "claim": "本次回应格式未能解析，尚未登记成果。",
                           "text": f"{role.name}的本次回应未能解析为完整成果，下游尚未启动；原任务和已保存的成果仍保留。"}
             parsed, discipline_issues = self._discipline_response(parsed, role_ids, visible_refs)
+            revision_sources = {}
+            if parsed.get("artifact_edits") is not None and not (response.meta or {}).get("contained"):
+                from .artifact_edits import prepare_snapshot
+
+                try:
+                    if work_context is None or parsed.get("clarification") or parsed.get("collaboration_request"):
+                        raise ValueError("局部修改不能与咨询或澄清混在同一次交付中。")
+                    parsed["deliverables"], revision_sources = prepare_snapshot(
+                        self, task_id, role.id, parsed["artifact_edits"], parsed.get("deliverables"), work_context)
+                except ValueError as exc:
+                    response_error = True
+                    parsed.update(deliverables=[], text="局部修改尚未采用：" + str(exc), claim="需要更正局部修改。")
             consultation, collaboration_error = None, None
             if (work_context is not None and parsed.get("collaboration_request") is not None
                     and not (isinstance(response.meta, dict) and response.meta.get("contained"))):
@@ -1441,6 +1539,9 @@ class Runtime:
                 )
             artifact_seqs = []
             for deliverable in ([] if clarification or consultation or collaboration_error else self._deliverables(parsed.get("deliverables"))):
+                revision_source = revision_sources.get(deliverable.get("filename", "").casefold())
+                if revision_source is not None:
+                    deliverable["revision_source"] = revision_source
                 if work_context and isinstance(response.meta, dict):
                     capture_seq = response.meta.get("workspace_capture_seq")
                     capture = next((e for e in self.log.iter_events(task_id=task_id, event_types=("workspace.files_captured",))

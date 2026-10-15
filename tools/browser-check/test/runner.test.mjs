@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
-import { validatePlan, safeBasename } from '../runner.mjs';
+import { validatePlan, safeBasename, serializeReport } from '../runner.mjs';
 
 const RUNNER = fileURLToPath(new URL('../runner.mjs', import.meta.url));
 const PLAN = '.cater-browser-check.json';
@@ -20,6 +20,38 @@ document.querySelector('#name').onkeydown = event => { if (event.key === 'Enter'
 </script></body></html>`;
 const assertion = (expression = 'true', label = '检查实际结果') => ({ action: 'assert_js', label, expression });
 const planFor = (steps = [assertion()], files = ['index.html']) => ({ entrypoint: 'index.html', files, steps });
+
+test('128 observed assertions fit the host capture without losing results', () => {
+  const report = { outcome: 'passed', plan_sha256: 'a'.repeat(64), counts: { page_errors: 0 },
+    console_messages: [], blocked_requests: [], page_errors: [],
+    steps: Array.from({ length: 128 }, (_, index) => ({ index: index + 1, action: 'assert_js',
+      label: '检'.repeat(100), check: 'x'.repeat(1000), status: 'passed', actual: true, expected: true })) };
+  const serialized = serializeReport(report);
+  const result = JSON.parse(serialized);
+  assert.ok(Buffer.byteLength(serialized) <= 7500);
+  assert.equal(result.steps_encoding, 'plan_index_v1');
+  assert.equal(result.truncated, false);
+  assert.equal(result.steps.length, 128);
+  assert.ok(result.steps.every((step, index) => step.index === index + 1 && step.status === 'passed' && step.actual === true));
+  assert.equal(report.steps[0].label.length, 100);
+});
+
+test('failed long plans retain the complete failure and observed text before clipping', () => {
+  const report = { outcome: 'failed', plan_sha256: 'b'.repeat(64), counts: { page_errors: 0 },
+    console_messages: [], blocked_requests: [], page_errors: [],
+    steps: Array.from({ length: 65 }, (_, index) => ({ index: index + 1, action: 'assert_text',
+      label: '检'.repeat(100), check: 'x'.repeat(240), status: index === 3 ? 'failed' : 'not_run',
+      ...(index === 3 ? { actual: false, error: 'The exact expected result was not observed.', observed: 'Actual text' } : {}) })) };
+  const serialized = serializeReport(report);
+  const result = JSON.parse(serialized);
+  assert.ok(Buffer.byteLength(serialized) <= 7500);
+  assert.equal(result.steps_encoding, 'plan_index_v1');
+  assert.equal(result.truncated, false);
+  assert.equal(result.steps.length, 65);
+  assert.equal(result.steps[3].error, report.steps[3].error);
+  assert.equal(result.steps[3].observed, 'Actual text');
+  assert.equal(result.steps[3].actual, false);
+});
 
 async function temporary(t) {
   const directory = await mkdtemp(path.join(tmpdir(), 'cater-browser-test-'));
@@ -277,7 +309,7 @@ test('strict schema rejects extra keys, unsafe names, malformed limits and no as
     { ...planFor(), entrypoint: 'other.html' }, { ...planFor(), files: [] },
     { ...planFor(), files: ['index.html', 'INDEX.HTML'] },
     { ...planFor(), files: ['index.html', 'e\u0301.txt', '\u00e9.txt'] },
-    planFor([]), planFor(Array.from({ length: 33 }, () => assertion())),
+    planFor([]), planFor(Array.from({ length: 129 }, () => assertion())),
     planFor([{ action: 'wait', label: '等待', ms: 1 }]),
     planFor([{ ...assertion(), shell: 'echo no' }]),
     planFor([{ ...assertion(), action: '__proto__' }]),
@@ -437,6 +469,9 @@ test('large labels, expressions, errors and log storms keep all steps within 750
   assert.ok(report.counts.console_messages >= 40);
   assert.ok(report.counts.blocked_requests >= 40);
   assert.ok(Buffer.byteLength(stdout) <= 7500);
-  assert.equal(report.truncated, true);
-  assert.ok(report.steps.every(step => step.action === 'assert_js' && step.label.length > 0));
+  assert.equal(report.steps_encoding, 'plan_index_v1');
+  assert.equal(report.details_compacted, true);
+  assert.ok(report.steps.every((step, index) => step.index === index + 1));
+  assert.equal(report.steps[31].actual, false);
+  assert.match(report.steps[31].error, /did not return exactly true/);
 });

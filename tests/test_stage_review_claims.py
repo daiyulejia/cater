@@ -531,11 +531,11 @@ class StageReviewRecoveryTests(unittest.TestCase):
 
     def test_real_text_failures_resume_after_restart_without_reexecuting_artifact(self):
         for cls in (AnthropicMessagesDriver, OpenAICompatibleDriver):
-            for failure in ("429", "timeout", "urlerror", "read_timeout"):
+            for failure in ("429", "timeout", "urlerror", "read_timeout", "502", "503", "504"):
                 with self.subTest(adapter=cls.__name__, failure=failure):
                     rt, task, _ = self.runtime(cls)
-                    error = (HTTPError("https://fixture.invalid", 429, "fixture", {}, io.BytesIO())
-                             if failure == "429" else URLError(TimeoutError("fixture"))
+                    error = (HTTPError("https://fixture.invalid", int(failure), "fixture", {}, io.BytesIO())
+                             if failure.isdigit() else URLError(TimeoutError("fixture"))
                              if failure == "urlerror" else TimeoutError("fixture"))
                     if failure == "read_timeout":
                         stream = io.BytesIO()
@@ -667,9 +667,9 @@ class StageReviewRecoveryTests(unittest.TestCase):
                     opened.assert_called_once()
                 self.assertTrue(self.current(rt, task)["review_uncertain"])
 
-    def test_other_http_failures_do_not_release_reservation(self):
+    def test_permanent_http_failures_do_not_release_reservation(self):
         for cls in (AnthropicMessagesDriver, OpenAICompatibleDriver):
-            for status in (401, 403, 503):
+            for status in (401, 403, 501):
                 with self.subTest(adapter=cls.__name__, status=status):
                     rt, task, _ = self.runtime(cls)
                     with patch(self.transport(cls), side_effect=HTTPError("https://fixture.invalid", status, "fixture", {}, None)):
