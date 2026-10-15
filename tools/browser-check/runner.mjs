@@ -3,6 +3,7 @@ import { lstat, open, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { Script } from 'node:vm';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const PLAN_NAME = '.cater-browser-check.json';
@@ -15,6 +16,7 @@ const STEP_TIMEOUT = 3_000;
 const RUN_TIMEOUT = 60_000;
 const ACTIONS = {
   click: { selector: 500 },
+  click_at: { selector: 500, x: null, y: null },
   press: { key: 50 },
   fill: { selector: 500, value: 2000 },
   wait: { ms: null },
@@ -76,7 +78,7 @@ export function validatePlan(plan) {
   requireThat(new Set(folded).size === folded.length, 'files: duplicate basename');
   requireThat(safeBasename(plan.entrypoint) && /\.html?$/i.test(plan.entrypoint)
     && plan.files.includes(plan.entrypoint), 'entrypoint: expected allowlisted HTML basename');
-  requireThat(Array.isArray(plan.steps) && plan.steps.length >= 1 && plan.steps.length <= 20, 'steps: expected 1..20 steps');
+  requireThat(Array.isArray(plan.steps) && plan.steps.length >= 1 && plan.steps.length <= 32, 'steps: expected 1..32 steps');
   for (const [index, step] of plan.steps.entries()) {
     const where = `step ${index + 1}`;
     requireThat(step && typeof step.action === 'string' && Object.hasOwn(ACTIONS, step.action), `${where}: unknown action`);
@@ -87,9 +89,17 @@ export function validatePlan(plan) {
     for (const [key, limit] of Object.entries(fields)) {
       if (key === 'ms') {
         requireThat(Number.isInteger(step.ms) && step.ms >= 0 && step.ms <= 2000, `${where}.ms: expected integer 0..2000`);
+      } else if (key === 'x' || key === 'y') {
+        requireThat(typeof step[key] === 'number' && Number.isFinite(step[key]) && step[key] >= 0 && step[key] <= 16384,
+          `${where}.${key}: expected finite coordinate 0..16384`);
       } else {
         textField(step[key], limit, `${where}.${key}`, key === 'value' || (key === 'key' && step.key === ' '));
       }
+    }
+    if (step.action === 'evaluate' || step.action === 'assert_js') {
+      // Parse only. Never run model expressions in the Node host.
+      try { new Script(step.expression); }
+      catch { throw new Error(`${where}: browser expression has invalid JavaScript syntax`); }
     }
   }
   requireThat(plan.steps.some(step => step.action.startsWith('assert_')), 'steps: at least one assertion is required');
@@ -220,6 +230,14 @@ async function bounded(operation, milliseconds, label) {
 async function executeStep(page, step, result) {
   switch (step.action) {
     case 'click': await page.locator(step.selector).click(); break;
+    case 'click_at': {
+      const target = page.locator(step.selector);
+      await target.waitFor({ state: 'visible' });
+      const box = await target.boundingBox();
+      requireThat(box && step.x < box.width && step.y < box.height, 'click_at: position is outside target');
+      await target.click({ position: { x: step.x, y: step.y } });
+      break;
+    }
     case 'press': await page.keyboard.press(step.key); break;
     case 'fill': await page.locator(step.selector).fill(step.value); break;
     case 'wait': await delay(step.ms); break;

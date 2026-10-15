@@ -277,7 +277,7 @@ test('strict schema rejects extra keys, unsafe names, malformed limits and no as
     { ...planFor(), entrypoint: 'other.html' }, { ...planFor(), files: [] },
     { ...planFor(), files: ['index.html', 'INDEX.HTML'] },
     { ...planFor(), files: ['index.html', 'e\u0301.txt', '\u00e9.txt'] },
-    planFor([]), planFor(Array.from({ length: 21 }, () => assertion())),
+    planFor([]), planFor(Array.from({ length: 33 }, () => assertion())),
     planFor([{ action: 'wait', label: '等待', ms: 1 }]),
     planFor([{ ...assertion(), shell: 'echo no' }]),
     planFor([{ ...assertion(), action: '__proto__' }]),
@@ -290,6 +290,8 @@ test('strict schema rejects extra keys, unsafe names, malformed limits and no as
     planFor([{ action: 'press', label: '按键', key: '  ' }, assertion()]),
     planFor([{ action: 'fill', label: '填入', selector: '#name', value: 'x'.repeat(2001) }, assertion()]),
     planFor([{ action: 'assert_text', label: '文本', selector: '#score', text: 'x'.repeat(2001) }]),
+    ...[-1, 16385, NaN, Infinity, true, '10'].map(x => planFor([{ action: 'click_at', label: '坐标', selector: '#start', x, y: 1 }, assertion()])),
+    planFor([assertion('() => {')]),
   ];
   for (const plan of invalid) assert.throws(() => validatePlan(plan));
   for (const filename of ['../index.html', 'a/b', 'a\\b', 'C:foo', '.hidden', 'CON.txt', 'COM1.html',
@@ -299,6 +301,31 @@ test('strict schema rejects extra keys, unsafe names, malformed limits and no as
   }
   assert.doesNotThrow(() => validatePlan(planFor([assertion('true', 'English label')])));
   assert.doesNotThrow(() => validatePlan(planFor([{ action: 'fill', label: '清空', selector: '#name', value: '' }, assertion()])));
+});
+
+test('coordinate clicks use real pointer positions and reject outside targets', async t => {
+  const body = '<!doctype html><div id="board" style="width:300px;height:100px"></div><output id="out"></output>'
+    + '<script>document.querySelector("#board").onclick=e=>document.querySelector("#out").textContent=String(Math.floor(e.offsetX/100));</script>';
+  const steps = [
+    { action: 'click_at', label: '第一格', selector: '#board', x: 50, y: 50 },
+    { action: 'assert_text', label: '第一格结果', selector: '#out', text: '0' },
+    { action: 'click_at', label: '第三格', selector: '#board', x: 250, y: 50 },
+    { action: 'assert_text', label: '第三格结果', selector: '#out', text: '2' },
+  ];
+  const good = await invoke(await fixture(t, planFor(steps), body));
+  assert.equal(good.code, 0);
+  assert.ok(good.report.steps.every(step => step.status === 'passed'));
+  const bad = await invoke(await fixture(t, planFor([{ ...steps[0], x: 300 }, assertion()]), body));
+  assert.equal(bad.code, 1);
+  assert.match(bad.report.steps[0].error, /outside target/);
+});
+
+test('invalid test syntax is a validation failure before Chromium or page actions', async t => {
+  const directory = await fixture(t, planFor([{ action: 'evaluate', label: '错误脚本', expression: '() => {' }, assertion()]));
+  const { code, report } = await invoke(directory);
+  assert.equal(code, 1);
+  assert.equal(report.phase, 'validation');
+  assert.match(report.error, /invalid JavaScript syntax/);
 });
 
 test('validation failures remain failed/1 without launching Chromium', async t => {
@@ -397,7 +424,7 @@ test('dependency absence and Chromium absence are unavailable/2, not assertion f
 });
 
 test('large labels, expressions, errors and log storms keep all steps within 7500 UTF-8 bytes', async t => {
-  const steps = Array.from({ length: 20 }, (_, i) => assertion(`${' '.repeat(3900)}${i < 19 ? 'true' : 'false'}`, '检'.repeat(100)));
+  const steps = Array.from({ length: 32 }, (_, i) => assertion(`${' '.repeat(1900)}${i < 31 ? 'true' : 'false'}`, '检'.repeat(100)));
   const plan = planFor(steps);
   // Keep the input below 64 KiB while still forcing report compaction.
   for (const step of plan.steps) step.expression = step.expression.slice(1000);
@@ -405,8 +432,8 @@ test('large labels, expressions, errors and log storms keep all steps within 750
   const directory = await fixture(t, plan, body);
   const { code, report, stdout } = await invoke(directory);
   assert.equal(code, 1);
-  assert.equal(report.steps.length, 20);
-  assert.equal(report.steps[19].status, 'failed');
+  assert.equal(report.steps.length, 32);
+  assert.equal(report.steps[31].status, 'failed');
   assert.ok(report.counts.console_messages >= 40);
   assert.ok(report.counts.blocked_requests >= 40);
   assert.ok(Buffer.byteLength(stdout) <= 7500);

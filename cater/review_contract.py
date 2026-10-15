@@ -30,7 +30,7 @@ def response_schema(context: dict) -> dict:
 
 
 def browser_observations(receipt: dict | None) -> list[str]:
-    if not receipt or receipt.get("check_kind") != "browser":
+    if not isinstance(receipt, dict) or receipt.get("check_kind") != "browser":
         return []
     report = receipt.get("browser_report")
     if not isinstance(report, dict):
@@ -40,9 +40,34 @@ def browser_observations(receipt: dict | None) -> list[str]:
     if isinstance(steps, list):
         for step in steps:
             if isinstance(step, dict):
-                values.extend((step.get("error"), step.get("actual")))
+                values.append(step.get("error"))
+                if step.get("status") != "passed":
+                    values.append(step.get("actual"))
     # Cite observed output, not a plan label or an assertion's expected value.
-    return list(dict.fromkeys(value for value in values if isinstance(value, str) and value.strip()))
+    observed = [value for value in values if isinstance(value, str) and value.strip()]
+    if (isinstance(steps, list) and receipt.get("outcome") != "unavailable"
+            and report.get("outcome") in ("passed", "failed")
+            and report.get("phase", "execution") == "execution" and report.get("truncated", False) is False):
+        # Import lazily: browser_checks also uses the work ledger's review contract.
+        from .browser_checks import ACTION_FIELDS
+
+        for index, step in enumerate(steps, 1):
+            if (not isinstance(step, dict) or type(step.get("index")) is not int or step["index"] != index
+                    or not isinstance(step.get("action"), str) or step["action"] not in ACTION_FIELDS
+                    or step.get("status") not in ("passed", "failed")):
+                break
+            assertion = step["action"].startswith("assert_")
+            if ("actual" in step and (not assertion or type(step["actual"]) is not bool)
+                    or assertion and step["status"] == "passed" and step.get("actual") is not True
+                    or step["status"] == "passed" and step.get("error")
+                    or step["status"] == "failed" and not (isinstance(step.get("error"), str) and step["error"].strip())):
+                break
+            fields = {key: step[key] for key in ("index", "action", "status", "actual") if key in step}
+            observed.append(json.dumps(fields, ensure_ascii=False))
+            # The runner stops at its first failure; later plan rows were not executed.
+            if step["status"] == "failed":
+                break
+    return list(dict.fromkeys(observed))
 
 
 def assessment(results: list, criterion_id: str, artifacts: dict,
@@ -58,8 +83,9 @@ def assessment(results: list, criterion_id: str, artifacts: dict,
         return None, "missing_reason", row
     if status == "unknown" and seq is None and quote in (None, ""):
         return {"status": status, "reason": reason}, None, row
-    if seq is None and receipt and receipt.get("check_kind") == "browser":
-        if type(row.get("receipt_seq")) is not int or row["receipt_seq"] != receipt.get("seq"):
+    if seq is None and isinstance(receipt, dict) and receipt.get("check_kind") == "browser":
+        if (type(row.get("receipt_seq")) is not int or type(receipt.get("seq")) is not int
+                or receipt["seq"] <= 0 or row["receipt_seq"] != receipt["seq"]):
             return None, "invalid_receipt", row
         if not isinstance(quote, str) or not quote.strip() or len(quote) > 2000:
             return None, "missing_quote", row

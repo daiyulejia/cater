@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, unquote, urlparse
 
 from .assignments import latest_assignments_by_owner
+from .activity_owner import activity_owner
 from .availability import team_availability
 from .drivers import driver_mode
 from .events import Actor as EventActor, Event
@@ -43,10 +44,14 @@ MAX_QUESTION_QUEUE_ATTEMPTS = 3
 _LOGGER = logging.getLogger(__name__)
 
 
+class ActivationSuperseded(WorkConflict):
+    pass
+
+
 class ActivityRunner:
     """Run long collaboration rounds off the request thread, one per task."""
 
-    _BINDING_KEYS = ("conversation_seq", "expected_scope", "finished_seq", "resume_seq")
+    _BINDING_KEYS = ("conversation_seq", "expected_scope", "finished_seq", "resume_seq", "activation_seq")
 
     def __init__(self, runtime_factory: Callable[[], Runtime]):
         self._runtime_factory = runtime_factory
@@ -227,12 +232,11 @@ class ActivityRunner:
                         pending.pop((task_id, followup["id"]), None)
             for (task_id, activity_id), queued in pending.items():
                 action = str(queued.payload.get("action") or "run")
-                message = "Cater 服务在这轮协作结束前重启；请按最新方向重新启动。"
                 try:
-                    with self._runtime_factory() as runtime:
-                        failure = self._control_failure(runtime, task_id, {**queued.payload, "queued_seq": queued.seq})
-                    terminal, created = self._record_failure(task_id, activity_id, action,
-                        **(failure or {"error_type": "InterruptedActivity", "message": message}))
+                    result = self._recover_activity(task_id, queued)
+                    if result is None:
+                        continue
+                    terminal, created = result
                 except Exception:
                     _LOGGER.exception("Cannot recover activity for %s at %s", task_id, activity_id)
                     continue
@@ -271,6 +275,7 @@ class ActivityRunner:
                        and (event.task_id, event.seq) not in claimed_resumes]
             task_ids = {event.task_id for event in runtime.log.iter_events(event_types=("conversation.received",))
                         if event.task_id and event.actor == EventActor.human()}
+            activations = list(runtime.log.iter_events(event_types=("task.activation_requested",)))
         for event in undispatched:
             try:
                 self.dispatch_conversation(event.task_id, {**event.payload, "finish_seq": event.seq})
@@ -281,6 +286,11 @@ class ActivityRunner:
                 self.dispatch_control(event.task_id, event)
             except Exception:
                 _LOGGER.exception("Cannot recover control dispatch for %s at %s", event.task_id, event.seq)
+        for event in activations:
+            try:
+                self.dispatch_activation(event.task_id, event)
+            except Exception:
+                _LOGGER.exception("Cannot recover task activation for %s at %s", event.task_id, event.seq)
         for task_id in sorted(task_ids):
             self.answer_conversations(task_id)
         return recovered
@@ -321,6 +331,126 @@ class ActivityRunner:
 
     def submit(self, task_id: str, action: str) -> dict[str, Any]:
         return self._submit(task_id, action, queue_after_current=False)
+
+    def dispatch_activation(self, task_id: str, intent: Event, *, background: bool = True) -> dict[str, Any]:
+        from .task_requests import activation
+
+        with self._runtime_factory() as runtime:
+            current = activation(runtime, task_id)
+            if current is None or current != intent:
+                return self.status(task_id)
+            if any(e.actor == EventActor.system("orchestrator") and e.payload.get("activation_seq") == intent.seq
+                   for e in runtime.log.iter_events(task_id=task_id, event_types=("activity.queued",))):
+                return self.status(task_id)
+        try:
+            return self._submit(task_id, intent.payload["action"], queue_after_current=False,
+                binding={"activation_seq": intent.seq, "expected_scope": intent.payload["scope"]},
+                run_inline=not background)
+        except WorkConflict:
+            with self._runtime_factory() as runtime:
+                if any(e.actor == EventActor.system("orchestrator") and e.payload.get("activation_seq") == intent.seq
+                       for e in runtime.log.iter_events(task_id=task_id, event_types=("activity.queued",))):
+                    return self.status(task_id)
+            raise
+
+    def _recover_activity(self, task_id: str, queued: Event) -> tuple[Event, bool] | None:
+        activity_id = queued.payload["activity_id"]
+        with self._runtime_factory() as runtime:
+            with ExitStack() as ownership:
+                predecessor = queued.payload.get("after_activity_id")
+                # A live parent owns its queued follow-up until _start reserves
+                # the child's lock. Hold both locks while deciding recovery.
+                if isinstance(predecessor, str) and predecessor:
+                    if not ownership.enter_context(activity_owner(runtime.log.path, task_id, predecessor)):
+                        return None
+                owned = ownership.enter_context(activity_owner(runtime.log.path, task_id, activity_id))
+                if not owned:
+                    return None
+                # Re-read after ownership: a worker may have finished since the scan.
+                if self._activity_terminal(runtime, task_id, activity_id) is not None:
+                    return None
+                if not self._restore_unstarted_activation(task_id, queued):
+                    failure = self._control_failure(runtime, task_id, {**queued.payload, "queued_seq": queued.seq})
+                    return self._record_failure(task_id, activity_id, str(queued.payload.get("action") or "run"),
+                        **(failure or {"error_type": "InterruptedActivity",
+                            "message": "Cater 服务在这轮协作结束前重启；请按最新方向重新启动。"}))
+        # The worker acquires the same lock before inspecting or executing this queue.
+        self._start(task_id, self._activities[task_id])
+        return None
+
+    def _restore_unstarted_activation(self, task_id: str, queued: Event) -> bool:
+        """Only the versioned activation protocol proves no execution has started."""
+        from .task_requests import activation
+
+        if "activation_seq" not in queued.payload:
+            return False
+        try:
+            with self._runtime_factory() as runtime:
+                intent = activation(runtime, task_id)
+                events = runtime.log.read(task_id=task_id)
+                if (intent is None or intent.seq != queued.payload["activation_seq"]
+                        or queued.payload.get("action") != intent.payload["action"]
+                        or queued.payload.get("expected_scope") != intent.payload["scope"]
+                        or any(e.type == "activity.started" and e.actor == EventActor.system("orchestrator")
+                               and e.payload.get("activity_id") == queued.payload["activity_id"] for e in events)):
+                    return False
+                binding = {**queued.payload, "queued_seq": queued.seq}
+                if (self._control_failure(runtime, task_id, binding)
+                        or runtime.work.scope(task_id) != intent.payload["scope"]):
+                    return False
+            activity = {"id": queued.payload["activity_id"], **queued.payload,
+                        "queued_seq": queued.seq, "queued_at": queued.ts, "state": "queued"}
+            self._activities[task_id] = activity
+            self._revision += 1
+            return True
+        except Exception:
+            _LOGGER.exception("Cannot resume never-started task activation for %s", task_id)
+            return False
+
+    @staticmethod
+    def _claim_activation_start(runtime: Runtime, task_id: str, binding: dict[str, Any]) -> bool:
+        from .task_requests import activation
+
+        with runtime.log.atomic():
+            intent = activation(runtime, task_id)
+            queued = next((event for event in runtime.log.iter_events(task_id=task_id, event_types=("activity.queued",))
+                           if event.seq == binding.get("queued_seq")
+                           and event.actor == EventActor.system("orchestrator")), None)
+            if (intent is None or intent.seq != binding.get("activation_seq")
+                    or intent.payload["action"] != binding.get("action")
+                    or intent.payload["scope"] != binding.get("expected_scope") or queued is None
+                    or any(queued.payload.get(key) != binding.get(key)
+                           for key in ("activity_id", "activation_seq", "action", "expected_scope"))):
+                raise WorkConflict("首次执行请求的来源不匹配，未启动执行。")
+            if any(e.actor == EventActor.system("orchestrator")
+                   and e.payload.get("activity_id") == binding["activity_id"]
+                   for e in runtime.log.iter_events(task_id=task_id,
+                       event_types=("activity.started", "activity.completed", "activity.failed"))):
+                return False
+            superseded = ActivityRunner._activation_failure(runtime, task_id, binding)
+            if superseded:
+                raise ActivationSuperseded(superseded["message"])
+            if ActivityRunner._control_failure(runtime, task_id, binding):
+                raise ExecutionScopeChanged("首次执行前任务已暂停或取消。")
+            if runtime.work.scope(task_id) != intent.payload["scope"]:
+                raise ExecutionScopeChanged("首次执行授权的任务范围已变化。")
+            runtime.log.emit(type="activity.started", task_id=task_id, actor=EventActor.system("orchestrator"),
+                payload={"activity_id": binding["activity_id"], "activation_seq": intent.seq,
+                         "queued_seq": binding["queued_seq"], "action": intent.payload["action"]})
+            return True
+
+    @staticmethod
+    def _activation_failure(runtime: Runtime, task_id: str, binding: dict[str, Any]) -> dict[str, str] | None:
+        if "activation_seq" not in binding:
+            return None
+        advanced = any(event.actor.kind != "human" and not (
+            event.type == "activity.queued" and event.payload.get("activity_id") == binding.get("activity_id"))
+            for event in runtime.log.iter_events(task_id=task_id, after_seq=binding["activation_seq"],
+                event_types=("activity.queued", "planning.started", "work.claimed", "agent.working")))
+        if advanced:
+            return {"error_type": "ActivationSuperseded",
+                    "message": "该任务已有后续执行安排，初次启动请求不再重复执行。"}
+        return None
 
     def dispatch_conversation(self, task_id: str, result: dict[str, Any]) -> dict[str, Any]:
         """Adopt only durable execution authorization, once per conversation."""
@@ -405,19 +535,21 @@ class ActivityRunner:
                 raise
 
     def _submit(self, task_id: str, action: str, *, queue_after_current: bool,
-                binding: dict[str, Any] | None = None) -> dict[str, Any]:
+                binding: dict[str, Any] | None = None, run_inline: bool = False) -> dict[str, Any]:
         with self._lock:
             current = self._activities.get(task_id)
             with self._runtime_factory() as runtime:
                 control = self._control_failure(runtime, task_id, binding)
-                if control is None and binding and "resume_seq" in binding:
+                if control is None and binding and any(key in binding for key in ("resume_seq", "activation_seq")):
                     expected_scope = binding.get("expected_scope")
                     if not isinstance(expected_scope, dict) or not expected_scope:
                         control = {"error_type": "MissingExecutionScope",
                                    "message": "旧恢复请求未记录授权范围，本轮未执行；请按当前方向重新明确授权。"}
                     elif expected_scope != runtime.work.scope(task_id):
                         control = {"error_type": "ExecutionScopeChanged",
-                                   "message": "恢复请求授权的任务方向已变化，本轮未执行；请确认最新方向后重新授权。"}
+                                   "message": "执行请求授权的任务方向已变化，本轮未执行；请确认最新方向后重新授权。"}
+                if control is None and binding and "activation_seq" in binding:
+                    control = self._activation_failure(runtime, task_id, binding)
                 queued_control = (self._control_failure(runtime, task_id, current)
                                   if current and current["state"] == "queued" else None)
                 followup_control = (self._control_failure(runtime, task_id, current["follow_up"])
@@ -485,8 +617,13 @@ class ActivityRunner:
             self._record_queued(task_id, activity)
             self._activities[task_id] = activity
             self._revision += 1
+            if activity["state"] == "failed":
+                return self.status(task_id)
 
-        self._start(task_id, activity)
+        if run_inline:
+            self._run(task_id, activity["id"], action)
+        else:
+            self._start(task_id, activity)
         return self.status(task_id)
 
     def _record_queued(
@@ -507,7 +644,7 @@ class ActivityRunner:
                 payload["replaces_action"] = replaces_action
             payload.update({key: activity[key] for key in self._BINDING_KEYS
                             if key in activity})
-            source_key = next((key for key in ("conversation_seq", "resume_seq") if key in payload), None)
+            source_key = next((key for key in ("conversation_seq", "resume_seq", "activation_seq") if key in payload), None)
             if source_key is not None:
                 def claim():
                     if any(event.actor == EventActor.system("orchestrator")
@@ -515,7 +652,16 @@ class ActivityRunner:
                            for event in runtime.log.iter_events(task_id=task_id, event_types=("activity.queued",))):
                         raise WorkConflict("这条消息已排队，不重复执行。")
                     return "activity.queued", payload, EventActor.system("orchestrator")
-                activity["queued_seq"] = runtime.work._write(task_id, claim).seq
+                if source_key == "activation_seq":
+                    with runtime.log.atomic():
+                        rejection = self._activation_failure(runtime, task_id, payload)
+                        activity["queued_seq"] = runtime.work._write(task_id, claim).seq
+                        if rejection:
+                            terminal, _ = self._record_terminal(runtime, task_id, activity["id"],
+                                activity["action"], "activity.failed", **rejection, execution_started=False)
+                            activity.update(state="failed", error=rejection["message"], finished_at=terminal.ts)
+                else:
+                    activity["queued_seq"] = runtime.work._write(task_id, claim).seq
                 return
             activity["queued_seq"] = runtime.log.emit(
                 actor=EventActor.system("orchestrator"),
@@ -525,19 +671,65 @@ class ActivityRunner:
             ).seq
 
     def _start(self, task_id: str, activity: dict[str, Any]) -> None:
+        ownership = ExitStack()
         try:
+            with self._runtime_factory() as runtime:
+                database = runtime.log.path
+            # Reserve before starting the thread: when called by _finish, the
+            # parent's lock is still held. The worker closes this stack.
+            owned = ownership.enter_context(activity_owner(database, task_id, activity["id"]))
             thread = threading.Thread(
                 target=self._run,
                 args=(task_id, activity["id"], activity["action"]),
+                kwargs={"_ownership": (ownership, owned)},
                 name=f"cater-{activity['action']}-{task_id}",
                 daemon=True,
             )
             thread.start()
-        except Exception as exc:
-            self._fail_activity(task_id, activity["id"], activity["action"], exc)
+        except BaseException as exc:
+            ownership.close()
+            if not isinstance(exc, Exception):
+                raise
+            try:
+                with self._runtime_factory() as runtime:
+                    with activity_owner(runtime.log.path, task_id, activity["id"]) as owned:
+                        if owned:
+                            self._fail_activity(task_id, activity["id"], activity["action"], exc)
+            except Exception:
+                _LOGGER.exception("Cannot record thread start failure for %s", task_id)
+            finally:
+                with self._lock:
+                    current = self._activities.get(task_id)
+                    if current and current["id"] == activity["id"] and current["state"] == "queued":
+                        current["state"] = "observing"
+                        self._revision += 1
             raise
 
-    def _run(self, task_id: str, activity_id: str, action: str) -> None:
+    def _run(self, task_id: str, activity_id: str, action: str,
+             *, _ownership: tuple[ExitStack, bool] | None = None) -> None:
+        owned = False
+        try:
+            with ExitStack() as ownership:
+                if _ownership is not None:
+                    ownership.enter_context(_ownership[0])
+                    owned = _ownership[1]
+                else:
+                    with self._runtime_factory() as runtime:
+                        database = runtime.log.path
+                    owned = ownership.enter_context(activity_owner(database, task_id, activity_id))
+                if owned:
+                    self._run_owned(task_id, activity_id, action)
+        finally:
+            # Initialization failure or BaseException must not hide an ownerless
+            # queue from recovery. A contending worker cannot retire a live one.
+            with self._lock:
+                current = self._activities.get(task_id)
+                if (current and current["id"] == activity_id
+                        and (current["state"] == "queued" or (owned and current["state"] == "running"))):
+                    current["state"] = "observing"
+                    self._revision += 1
+
+    def _run_owned(self, task_id: str, activity_id: str, action: str) -> None:
         control = None
         try:
             with self._runtime_factory() as runtime:
@@ -558,13 +750,19 @@ class ActivityRunner:
                     raise ExecutionScopeChanged("这条消息授权的任务方向已变化，本轮未开始执行；请确认最新方向后继续。")
                 if not self._mark_running(task_id, activity_id):
                     return
+                if "activation_seq" in binding and not self._claim_activation_start(runtime, task_id, binding):
+                    self._finish(task_id, activity_id, "observing")
+                    return
                 if action == "run":
                     if "expected_scope" in binding:
                         runtime.collaborate(task_id, expected_scope=binding["expected_scope"])
                     else:
                         runtime.collaborate(task_id)
                 elif action == "battle":
-                    runtime.battle(task_id)
+                    if "expected_scope" in binding:
+                        runtime.battle(task_id, expected_scope=binding["expected_scope"])
+                    else:
+                        runtime.battle(task_id)
                 else:
                     raise ValueError(f"unsupported background action {action!r}")
                 control = self._control_failure(runtime, task_id)
@@ -572,22 +770,18 @@ class ActivityRunner:
                     raise ExecutionScopeChanged(control["message"])
                 # A normal return can still mean planning/review stopped at an unknown call.
                 self._check_reconciliation(runtime, task_id, binding, check_activities=False)
-                runtime.log.emit(
-                    actor=EventActor.system("orchestrator"),
-                    type="activity.completed",
-                    task_id=task_id,
-                    payload={"activity_id": activity_id, "action": action},
-                )
+                terminal, _ = self._record_terminal(runtime, task_id, activity_id, action, "activity.completed")
         except Exception as exc:
             self._fail_activity(task_id, activity_id, action, exc, control=control)
             return
-        self._finish(task_id, activity_id, "completed")
+        self._finish(task_id, activity_id, "completed" if terminal.type == "activity.completed" else "failed",
+                     error=terminal.payload.get("message"))
 
     @staticmethod
     def _control_failure(runtime: Runtime, task_id: str, binding: dict[str, Any] | None = None) -> dict[str, Any] | None:
         control = runtime.execution_control.view(task_id)
         authorization_seq = (binding or {}).get("resume_seq",
-            (binding or {}).get("conversation_seq", (binding or {}).get("queued_seq")))
+            (binding or {}).get("conversation_seq", (binding or {}).get("activation_seq", (binding or {}).get("queued_seq"))))
         if control["state"] == "running" and authorization_seq is not None:
             if binding and "conversation_seq" in binding and "finished_seq" in binding:
                 # FIFO chat may adopt pause and resume after both messages arrived.
@@ -669,29 +863,29 @@ class ActivityRunner:
     def _record_failure(self, task_id: str, activity_id: str, action: str, **details: Any) -> tuple[Event, bool]:
         """Close a queue claim once, retaining the latest authorization and predecessor."""
         with self._runtime_factory() as runtime:
-            def terminal():
-                return next((event for event in runtime.log.iter_events(task_id=task_id,
-                    event_types=("activity.completed", "activity.failed"))
-                    if event.actor == EventActor.system("orchestrator")
-                    and event.payload.get("activity_id") == activity_id), None)
+            return self._record_terminal(runtime, task_id, activity_id, action, "activity.failed", **details)
 
-            def build():
-                if terminal() is not None:
-                    raise WorkConflict("活动已有终态。")
-                queued = [event for event in runtime.log.iter_events(task_id=task_id, event_types=("activity.queued",))
-                          if event.actor == EventActor.system("orchestrator")
-                          and event.payload.get("activity_id") == activity_id]
-                payload = {**queued[-1].payload, "queued_seq": queued[-1].seq} if queued else {}
-                payload.update(activity_id=activity_id, action=action, **details)
-                return "activity.failed", payload, EventActor.system("orchestrator")
+    @staticmethod
+    def _activity_terminal(runtime: Runtime, task_id: str, activity_id: str) -> Event | None:
+        return next((event for event in runtime.log.iter_events(task_id=task_id,
+            event_types=("activity.completed", "activity.failed"))
+            if event.actor == EventActor.system("orchestrator")
+            and event.payload.get("activity_id") == activity_id), None)
 
-            try:
-                return runtime.work._write(task_id, build), True
-            except WorkConflict:
-                existing = terminal()
-                if existing is None:
-                    raise
+    @staticmethod
+    def _record_terminal(runtime: Runtime, task_id: str, activity_id: str, action: str,
+                         kind: str, **details: Any) -> tuple[Event, bool]:
+        with runtime.log.atomic():
+            existing = ActivityRunner._activity_terminal(runtime, task_id, activity_id)
+            if existing is not None:
                 return existing, False
+            queued = [event for event in runtime.log.iter_events(task_id=task_id, event_types=("activity.queued",))
+                      if event.actor == EventActor.system("orchestrator")
+                      and event.payload.get("activity_id") == activity_id]
+            payload = {**queued[-1].payload, "queued_seq": queued[-1].seq} if queued else {}
+            payload.update(activity_id=activity_id, action=action, **details)
+            return runtime.log.emit(type=kind, task_id=task_id, actor=EventActor.system("orchestrator"),
+                                    payload=payload), True
 
     def _fail_activity(self, task_id: str, activity_id: str, action: str, exc: Exception,
                        *, control: dict[str, Any] | None = None) -> None:
@@ -1111,8 +1305,8 @@ def make_handler(
                     if requested_route is not None and requested_route not in {"auto", "direct"}:
                         return self._bad_request("requested_route must be auto or direct")
                     try:
-                        from .task_requests import create
-                        task_id, created = create(rt, {
+                        from .task_requests import prepare
+                        task_id, created, activation = prepare(rt, {
                             "goal": goal, "acceptance": acceptance, "project_id": data.get("project_id"),
                             "requested_route": requested_route, "assign_to": assign_owner,
                             "assign_objective": _optional_text(data.get("assign_objective")),
@@ -1124,32 +1318,13 @@ def make_handler(
                         return self._conflict(str(exc))
                     except ValueError as exc:
                         return self._bad_request(str(exc))
-                    if not created:
-                        # A lost HTTP response is not permission to repeat intake or execution.
-                        return self._send_json(self._task_payload(task_id, activities))
-                    if requested_route is not None or not _truthy(data.get("dispatch")):
-                        try:
-                            rt.intake(
-                                task_id,
-                                requested_route=requested_route or "auto",
-                                preferred_owner=assign_owner or None,
-                                preferred_objective=_optional_text(data.get("assign_objective")),
-                                preferred_acceptance=_optional_text(data.get("assign_acceptance")),
-                            )
-                        except ValueError as exc:
-                            return self._bad_request(str(exc))
-                    elif _truthy(data.get("dispatch")):
-                        rt.dispatch(task_id)
-                    if run_now and not background:
-                        rt.collaborate(task_id)
-                    elif force_battle and not background:
-                        rt.battle(task_id)
                 background_action = "run" if run_now else "battle" if force_battle else None
-                if background and background_action:
-                    activities.submit(task_id, background_action)
+                if activation is not None:
+                    activities.dispatch_activation(task_id, activation, background=background)
                 return self._send_json(
                     self._task_payload(task_id, activities),
-                    status=HTTPStatus.ACCEPTED if background and background_action else HTTPStatus.CREATED,
+                    status=(HTTPStatus.OK if not created else
+                            HTTPStatus.ACCEPTED if background and background_action else HTTPStatus.CREATED),
                 )
             if path.startswith("/api/tasks/"):
                 parts = path.split("/")

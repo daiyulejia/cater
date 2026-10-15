@@ -2,11 +2,12 @@ import { useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Check, Copy, Download, ExternalLink, FileText, X } from 'lucide-react'
+import { Check, Copy, Download, ExternalLink, FileText, HardDrive, X } from 'lucide-react'
 
 export type Artifact = {
   seq: number; title: string; summary: string; kind?: string; uri?: string; message_seq?: number
   actor?: string; source?: string; content?: string; format?: string; filename?: string; content_error?: string
+  local_path?: string; local_save_error?: string
 }
 
 function externalUrl(value?: string): string | undefined {
@@ -26,6 +27,22 @@ function downloadName(item: Artifact): string {
 
 const sourceText = (source?: string) => source === 'local_demo' ? '演示样例' : source === 'external' ? '成员发布' : '来源未记录'
 const bodyError = (reason?: string) => ({ too_large: '正文太大，需要拆分后重新发布。', invalid_format: '正文格式不支持，摘要已保留。', invalid_encoding: '正文编码异常，摘要已保留。', invalid_content: '没有收到可阅读的正文。' }[reason ?? ''] ?? '没有收到可阅读的正文。')
+
+function LocalSaveStatus({ path, error, hasBody }: { path?: string; error?: string; hasBody: boolean }) {
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  if (error) return <p role="status" className="mt-2 break-words text-[11px] leading-5 text-amber-800">本机保存失败，{hasBody ? '正文仍可查看和下载' : '已发布内容仍保留'}。{error}</p>
+  if (!path) return null
+  const copyPath = async () => {
+    try { await navigator.clipboard.writeText(path); setCopyState('copied') }
+    catch { setCopyState('failed') }
+  }
+  return <details className="mt-2 text-[11px] leading-5 text-[#52766d]">
+    <summary className="cursor-pointer"><HardDrive size={13} className="mr-1 inline" aria-hidden="true" />已保存到本机</summary>
+    <div className="mt-1 flex min-w-0 items-start gap-2"><code className="min-w-0 flex-1 whitespace-pre-wrap break-all">{path}</code><button type="button" className="artifact-tool shrink-0" title="复制本机路径" aria-label="复制本机路径" onClick={() => void copyPath()}>{copyState === 'copied' ? <Check size={15} /> : <Copy size={15} />}</button></div>
+    {copyState !== 'idle' && <p role="status">{copyState === 'copied' ? '已复制路径' : '路径复制未完成，可手动选择复制。'}</p>}
+    <p className="text-[#839087]">文件已保存，不代表验收通过。</p>
+  </details>
+}
 
 export function ArtifactPreview({ item, publisher, showSummary = true }: { item: Artifact; publisher?: string; showSummary?: boolean }) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
@@ -82,6 +99,7 @@ export function ArtifactPreview({ item, publisher, showSummary = true }: { item:
       </Dialog.Root>}
       {source && <a href={source} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[#377d70]"><ExternalLink size={13} /> 打开来源</a>}
     </div>
+    <LocalSaveStatus key={`${item.local_path ?? ''}:${item.local_save_error ?? ''}`} path={item.local_path} error={item.local_save_error} hasBody={hasBody} />
     {item.uri && !source && <p className="mt-2 break-all text-[11px] leading-5 text-[#86968c]">资源引用：{item.uri}</p>}
     {downloadError && <p role="alert" className="mt-2 text-xs text-rose-700">下载未完成，请重试。</p>}
     {item.content_error && <p className="mt-2 text-[11px] leading-5 text-[#a3704a]">{bodyError(item.content_error)}</p>}

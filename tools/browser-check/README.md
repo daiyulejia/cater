@@ -41,13 +41,14 @@ node C:\work\cater\tools\browser-check\runner.mjs --plan .cater-browser-check.js
 
 `files` 是宿主授权的完整文件清单，包含入口，数量 1..128。入口必须以 `.html` 或 `.htm` 结尾。文件名最多 180 个 UTF-8 字节，必须是安全 basename：不能以点开头、以点结尾、带首尾空白、路径分隔符、Windows 设备名、控制字符、DEL、`%`、`#` 或 `/:*?"<>|`；NFC 规范化及转小写后不能重名。支持中文、内部空格等文件名。拒绝目录、符号链接、junction、硬链接及真实路径不匹配的文件。单文件最多 16 MiB，总计 32 MiB；先完成全部校验并读入内存，再启动浏览器。
 
-步骤数量 1..20，至少一个 `assert_*`。`label` 是 1..100 个 Unicode 字符的非空说明，不能含控制字符；生成计划时建议使用中文，英文同样合法。字符串必须是完整 Unicode，其他非空参数不能只有空白；`press.key` 恰好为单个空格时例外，表示空格键。
+步骤数量 1..32，至少一个 `assert_*`；总执行时限仍为60秒。`label` 是 1..100 个 Unicode 字符的非空说明，不能含控制字符；生成计划时建议使用中文，英文同样合法。字符串必须是完整 Unicode，其他非空参数不能只有空白；`press.key` 恰好为单个空格时例外，表示空格键。
 
 | action | 额外字段及上限 | 行为 |
 | --- | --- | --- |
 | `click` | `selector` <= 500 字符 | 点击唯一匹配的元素，使用 Playwright 可操作性等待 |
 | `press` | `key` <= 50 字符 | `page.keyboard.press`，如 `Enter`、`ArrowLeft` |
 | `fill` | `selector` <= 500，`value` <= 2000 | 填写输入框，允许空值以清空 |
+| `click_at` | `selector` <= 500，有限数值 `x/y` 为0..16384 | 在元素内按相对 CSS 像素坐标真实点击，拒绝越出元素的坐标 |
 | `wait` | 整数 `ms`，0..2000 | 有界等待 |
 | `assert_visible` | `selector` <= 500 | 等待元素可见，否则失败 |
 | `assert_text` | `selector` <= 500，`text` <= 2000 | 元素挂载后，检查当时 `textContent` 是否包含指定非空子串；不自动重试文本匹配 |

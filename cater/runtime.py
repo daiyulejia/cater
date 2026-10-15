@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -215,6 +216,7 @@ class Runtime:
         if missing:
             raise ValueError(f"missing driver(s) for roles: {', '.join(missing)}")
         self.log = EventLog(db_path, audit_key=audit_key, key_id=audit_key_id, audit_keys=audit_keys)
+        self._artifact_root = None if self.log.path == ":memory:" else Path(db_path).absolute().parent / "artifacts"
         self.rulebook = RuleBook(self.log)
         self.execution_control = ExecutionControl(self)
         self.work = WorkLedger(self.log, self.rulebook,
@@ -387,9 +389,14 @@ class Runtime:
             if task_id != authorized_task or self.work.scope(task_id) != scope:
                 raise ExecutionScopeChanged("这轮执行授权对应的任务方向已变化，未开始新的模型或工具调用。")
 
-    def battle(self, task_id: str) -> dict[str, Any]:
-        self._check_execution_authorization(task_id)
-        return self._run_round(task_id, force_governance=True)
+    def battle(self, task_id: str, *, expected_scope: dict[str, Any] | None = None) -> dict[str, Any]:
+        previous = self._execution_authorization
+        self._execution_authorization = (task_id, dict(expected_scope)) if expected_scope is not None else None
+        try:
+            self._check_execution_authorization(task_id)
+            return self._run_round(task_id, force_governance=True)
+        finally:
+            self._execution_authorization = previous
 
     def dispatch(self, task_id: str) -> dict[str, Any]:
         if self.organization.leader.driver is not None:
@@ -809,16 +816,82 @@ class Runtime:
         self.work.plan(task.id, items, role_ids={role.id for role in self.roles}, source_seq=task.plan["seq"])
         return self.work.view(task.id)
 
+    def persist_artifacts(self, task_id: str) -> list[Event]:
+        """Verify/materialize current submissions; receipts never imply acceptance.
+
+        Defer under an existing transaction: the next round can backfill after
+        commit without holding a database write lock across filesystem work.
+        """
+        from .artifact_store import materialize
+
+        if self._artifact_root is None or self.log.db.in_transaction:
+            return []
+        actor = Actor.system("artifact_store")
+        kinds = ("artifacts.materialized", "artifacts.materialization_failed")
+        receipts = []
+        for item in self.work.view(task_id)["items"]:
+            submission = item.get("submission")
+            if submission is None:
+                continue
+            binding = {"submission_seq": submission["seq"], "submission_digest": submission["digest"],
+                       "plan_seq": submission["plan_seq"], "work_item_id": submission["work_item_id"],
+                       "attempt_id": submission["attempt_id"], "scope": submission["scope"]}
+
+            def latest_receipt():
+                return next((e for e in reversed(list(self.log.iter_events(task_id=task_id, event_types=kinds)))
+                             if e.actor == actor and all(e.payload.get(k) == v for k, v in binding.items())), None)
+
+            observed = latest_receipt()
+            try:
+                manifest = materialize(self._artifact_root, task_id, submission,
+                                       self.work.artifacts(task_id, submission))
+                directory = self._artifact_root / manifest["directory"]
+                kind = "artifacts.materialized"
+                payload = {**binding, "directory": str(directory), "files": [
+                    {"seq": entry["seq"], "content_sha256": entry["content_sha256"],
+                     "path": str(directory / entry["path"])} for entry in manifest["files"]]}
+            except Exception as exc:
+                # Persistence is an optional copy of immutable event-log evidence.
+                # A disk failure must not fail/replay the production invocation.
+                kind = "artifacts.materialization_failed"
+                payload = {**binding, "reason": f"{type(exc).__name__}: {exc}"[:2000]}
+            try:
+                receipt = None
+                with self.log.atomic():
+                    current = latest_receipt()
+                    if current != observed:
+                        # A concurrent observation wins over this older disk read.
+                        # A later retry verifies again, including tampering.
+                        receipt = current
+                    elif current is not None and current.type == kind and current.payload == payload:
+                        receipt = current
+                    else:
+                        receipt = self.log.emit(actor=actor, type=kind, task_id=task_id, payload=payload)
+                if receipt is not None:
+                    receipts.append(receipt)
+            except Exception:
+                # The submission is already durable. Do not turn receipt failures
+                # into uncertain production or attempt another write to this DB.
+                logging.getLogger(__name__).exception(
+                    "Artifact receipt write failed for task %s submission %s; deferred until next persistence attempt",
+                    task_id, submission["seq"])
+        return receipts
+
     def _run_work_round(self, task: TaskSnapshot, *, force_governance: bool = False) -> dict[str, Any]:
+        self.persist_artifacts(task.id)
         view = self._ensure_work_plan(task)
         visited = set()
         reviewed = set()
         repaired = set()
+        repair_plan, repair_scope = None, None
+        delivery_rework = {}
         utterances = []
         profiles = agent_profiles(self._project_events(task.id, ("msg.said", "msg.challenge", "driver.failed")))
         # A concrete failed review can authorize one new text-only revision.
         # Transport failures and unknown evidence never authorize blind retries.
-        while view.get("scope_current") and self.execution_control.view(task.id)["state"] == "running":
+        while (view.get("scope_current") and (not delivery_rework or
+               (view.get("plan_seq") == repair_plan and view.get("scope") == repair_scope))
+               and self.execution_control.view(task.id)["state"] == "running"):
             candidate = next((i for i in view["items"] if i["status"] == "submitted"
                               and i["submission"]["seq"] not in reviewed), None)
             if candidate:
@@ -847,6 +920,21 @@ class Runtime:
                 candidate = next((i for i in view["items"] if i["status"] == "ready"
                                   and i["id"] not in visited), None)
                 if candidate is None:
+                    if view["stage_accepted"] and not (force_governance and not self.cabinet_roles):
+                        observed_seq = self.log.read(task_id=task.id)[-1].seq
+                        before = view
+                        delivery = self.delivery.run(task.id)
+                        if not delivery_rework:
+                            delivery_rework = self._delivery_rework_context(
+                                task.id, before, delivery, observed_seq, repaired)
+                            if delivery_rework:
+                                repair_plan, repair_scope = before["plan_seq"], before["scope"]
+                                # The stage and delivery paths share one revision per item.
+                                repaired.update(delivery_rework)
+                                visited.update(i["id"] for i in before["items"])
+                                visited.difference_update(delivery_rework)
+                                view = self.work.view(task.id)
+                                continue
                     break
                 visited.add(candidate["id"])
                 previous = candidate if candidate.get("submission") else None
@@ -854,7 +942,9 @@ class Runtime:
                 # Claim rechecks the log atomically and may see a newer plan than
                 # the earlier readiness scan. Build inputs from that claimed plan.
                 view = self.work.view(task.id)
-                if view["plan_seq"] != claim.payload["plan_seq"] or self.work.scope(task.id) != claim.payload["scope"]:
+                if (view["plan_seq"] != claim.payload["plan_seq"] or self.work.scope(task.id) != claim.payload["scope"]
+                        or delivery_rework and (claim.payload["plan_seq"] != repair_plan
+                                                or claim.payload["scope"] != repair_scope)):
                     self.work.fail(task.id, claim, "认领后要求有变化，尚未调用成员；需要重新核对计划。", uncertain=False)
                     break
                 candidate = next(i for i in view["items"] if i["id"] == claim.payload["work_item_id"])
@@ -864,16 +954,20 @@ class Runtime:
                     self.work.fail(task.id, claim, "候选成果核对期间要求有变化，尚未调用成员。", uncertain=False)
                     break
                 if reused is not None:
+                    self.persist_artifacts(task.id)
                     view = self.work.view(task.id)
                     continue
                 inputs = {i["id"]: self.work.artifacts(task.id, i["submission"]) for i in view["items"]
                           if i["id"] in candidate["depends_on"]}
                 context = {**claim.payload, "contract": candidate, "accepted_inputs": inputs,
                            "customer_directions": view["customer_directions"]}
+                if candidate["id"] in delivery_rework:
+                    context.update(delivery_rework[candidate["id"]])
                 if previous and previous["submission"]["plan_seq"] == claim.payload["plan_seq"]:
                     context["previous_attempt"] = {"artifacts": self.work.artifacts(task.id, previous["submission"]),
                                                    "review_checks": previous.get("checks", []),
                                                    "reason": previous.get("reason", "")}
+                submitted = False
                 if len(json.dumps(context, ensure_ascii=False)) > 131072:
                     self.work.fail(task.id, claim, "工作输入过大，需要拆分；未截断证据后继续执行。", uncertain=False)
                 else:
@@ -937,16 +1031,19 @@ class Runtime:
                                 self.work.submit(task.id, claim, output["artifact_seqs"])
                             except ValueError as exc:
                                 self.work.fail(task.id, claim, str(exc), uncertain=False)
+                            else:
+                                submitted = True
                     except Exception:
                         self.work.fail(task.id, claim, "执行中断，结果不明；需要先核查，不能自动重放。", uncertain=True)
                         raise
+                if submitted:
+                    self.persist_artifacts(task.id)
             view = self.work.view(task.id)
         if force_governance and not self.cabinet_roles:
             return self._request_leader_rework(task.id, utterances, {
                 "status": "forced", "reason": "顾客请求复核；阶段验收尚不能由讨论替代。", "signals": ["forced"],
             })
-        delivery = (self.delivery.run(task.id) if view["stage_accepted"]
-                    and self.execution_control.view(task.id)["state"] == "running" else self.delivery.view(task.id))
+        delivery = self.delivery.view(task.id)
         view = self.work.view(task.id)
         checkpoint = self._work_checkpoint(task.id, view, delivery)
         reason = checkpoint["summary"]
@@ -959,6 +1056,93 @@ class Runtime:
         event = self.log.emit(actor=self._leader_actor(), type="brief.generated", task_id=task.id,
                               payload={"brief": brief, "reason": "work_checkpoint", "options": []})
         return {"task_id": task.id, "brief_event": event.seq, "brief": brief}
+
+    def _delivery_rework_context(self, task_id: str, before: dict, delivery: dict,
+                                 observed_seq: int, repaired: set) -> dict:
+        """Authorize one evidence-bound wave; never infer repair from a stale view."""
+        from .delivery import _known_text, _review_state
+
+        events = self.log.read(task_id=task_id)
+        starts, finishes, pending = _review_state(events)
+        finished = next((e for e in finishes.values() if e.seq == delivery.get("review_seq")), None)
+        if (finished is None or finished.seq <= observed_seq or pending
+                or finished.payload.get("status") != "rework"):
+            return {}
+        verdict = finished.payload
+        started = starts[verdict["attempt_seq"]]
+        manifest = delivery["manifest"]
+        originals = {i["id"]: i for i in before["items"]}
+        if (not _known_text(started) or started.seq <= observed_seq
+                or verdict.get("plan_seq") != before["plan_seq"] or verdict.get("scope") != before["scope"]
+                or manifest["plan_seq"] != before["plan_seq"] or manifest["scope"] != before["scope"]
+                or {i["id"]: i["submission"] for i in manifest["items"]}
+                != {i["id"]: i["submission"] for i in before["items"]}):
+            return {}
+        rows = verdict.get("requirements", []) + verdict.get("checks", [])
+        failed = [r for r in rows if r["status"] == "failed"]
+        if not failed or any(r["status"] not in {"passed", "failed", "superseded"} for r in rows):
+            return {}
+        artifacts = [a for i in before["items"] for a in self.work.artifacts(task_id, i["submission"])]
+        catalog = {a["seq"]: a for a in artifacts}
+        evidence = set()
+        for row in failed:
+            cited = row.get("evidence", [])
+            if not cited or any(e["artifact_seq"] not in catalog or not e["quote"].strip()
+                                or e["quote"] not in catalog[e["artifact_seq"]]["content"] for e in cited):
+                return {}
+            if row.get("model_status", "failed") == "failed":
+                evidence.update(e["artifact_seq"] for e in cited)
+            evidence.update(m["artifact_seq"] for m in row.get("measurements", []) if m["status"] == "failed")
+        roots = {i["id"] for i in before["items"] if set(i["submission"]["artifact_seqs"]) & evidence}
+        if not roots or roots != set(verdict.get("affected", [])):
+            return {}
+        affected = set(roots)
+        for _ in originals:
+            affected.update(i["id"] for i in before["items"] if set(i["depends_on"]) & affected)
+        if affected & repaired:
+            return {}
+        reviewer = self.delivery._review_role(delivery["reviewer"])
+        roles = [reviewer] + [self._role_by_id(originals[i][key])
+                              for i in affected for key in ("owner", "reviewer")]
+        if any(role is None or not text_advice_available(self.drivers[role.driver]) for role in roles):
+            return {}
+
+        def authorize():
+            self._check_execution_authorization(task_id)
+            current = self.work.view(task_id)
+            latest = self.delivery.view(task_id)
+            # DeliveryService already invalidated this exact dependency closure.
+            # A partial invalidation or concurrent work must not acquire this budget.
+            if (not current.get("scope_current") or current["plan_seq"] != before["plan_seq"]
+                    or current["scope"] != before["scope"] or self.clarifications.pending(task_id)
+                    or latest.get("review_seq") != finished.seq or latest.get("digest") != delivery["digest"]
+                    or latest.get("check_in_flight") or latest["status"] != "stale"
+                    or any(c["status"] != "passed" for c in latest.get("local_checks", []))
+                    or any(i.get("in_flight") or (i["id"] in affected and
+                           (i["submission"] is not None or i["status"] not in {"ready", "blocked"}))
+                           or (i["id"] not in affected and i != originals[i["id"]]) for i in current["items"])):
+                raise WorkConflict("整体返工的成果、授权或执行状态已变化，不能自动继续。")
+            return "work.repair_requested", {
+                "phase": "delivery", "work_item_id": sorted(roots)[0],
+                "plan_seq": before["plan_seq"], "scope": before["scope"], "review_seq": finished.seq,
+                "delivery_digest": delivery["digest"], "affected": sorted(affected), "roots": sorted(roots),
+                "revision_limit": 1,
+                "reason": "整体复核发现正文缺陷，使用本轮剩余修正额度修正受影响工作和下游，再独立验收。",
+            }, Actor.system("work_scheduler")
+
+        try:
+            authorization = self.work._write(task_id, authorize)
+        except WorkConflict:
+            return {}
+        feedback = {"review_seq": finished.seq, "delivery_digest": delivery["digest"],
+                    "repair_seq": authorization.seq, "affected": sorted(affected), "roots": sorted(roots),
+                    "requirements": verdict["requirements"], "checks": verdict["checks"],
+                    "sources": manifest["sources"], "artifacts": artifacts,
+                    "instruction": "依据整体失败证据修正自己负责的成果，保留顾客要求；下游使用新验收的前置成果。"}
+        return {item_id: {"delivery_rework": feedback, "previous_attempt": {
+            "artifacts": self.work.artifacts(task_id, originals[item_id]["submission"]),
+            "review_checks": originals[item_id]["checks"], "reason": verdict["reason"],
+        }} for item_id in affected}
 
     def _work_checkpoint(self, task_id: str, work: dict, delivery: dict) -> dict:
         names = {role.id: role.name for role in self.roles}

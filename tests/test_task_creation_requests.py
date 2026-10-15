@@ -65,7 +65,7 @@ class TaskCreationRequestsTests(unittest.TestCase):
             with urlopen(request, timeout=5) as response:
                 return response.status, json.load(response)
 
-        with patch.object(ActivityRunner, "submit") as submit:
+        with patch.object(ActivityRunner, "_start") as submit:
             first_status, first = post(payload)
             with Runtime(db) as rt:
                 head = rt.log.head_hash()

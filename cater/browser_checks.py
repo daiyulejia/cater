@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import unicodedata
 from pathlib import Path
@@ -17,8 +18,10 @@ from .work import WorkConflict
 
 
 PLAN_FILE = ".cater-browser-check.json"
+MAX_BROWSER_STEPS = 32
 ACTION_FIELDS = {
     "click": {"selector": 500}, "press": {"key": 50},
+    "click_at": {"selector": 500, "x": None, "y": None},
     "fill": {"selector": 500, "value": 2000}, "wait": {"ms": None},
     "assert_visible": {"selector": 500}, "assert_text": {"selector": 500, "text": 2000},
     "evaluate": {"expression": 4000}, "assert_js": {"expression": 4000},
@@ -41,14 +44,19 @@ def normalize_plan(raw: object, filenames: list[str]) -> dict:
         raise ValueError("检查入口必须是本次提交的 HTML 文件。")
     validate_filenames(filenames)
     steps = raw["steps"]
-    if not isinstance(steps, list) or not 1 <= len(steps) <= 20:
-        raise ValueError("浏览器检查须包含 1 至 20 个具体步骤。")
-    for step in steps:
+    if not isinstance(steps, list) or not 1 <= len(steps) <= MAX_BROWSER_STEPS:
+        observed = len(steps) if isinstance(steps, list) else type(steps).__name__
+        raise ValueError(f"浏览器检查须包含 1 至 {MAX_BROWSER_STEPS} 个具体步骤，实际收到：{observed}。")
+    for index, step in enumerate(steps, 1):
         if not isinstance(step, dict) or not isinstance(step.get("action"), str) or step["action"] not in ACTION_FIELDS:
             raise ValueError("未知浏览器动作。")
         fields = ACTION_FIELDS[step["action"]]
-        if set(step) != {"action", "label", *fields}:
-            raise ValueError("浏览器动作字段不符合接口。")
+        expected = {"action", "label", *fields}
+        if set(step) != expected:
+            missing = sorted(expected - set(step))
+            extra = sorted(set(step) - expected)
+            raise ValueError(f"浏览器动作字段不符合接口：第 {index} 步 {step['action']}，"
+                             f"缺少 {missing}，多出 {extra}；只使用 {sorted(expected)}。")
         if (not isinstance(step["label"], str) or not step["label"].strip() or len(step["label"]) > 100
                 or re.search(r"[\x00-\x1f\x7f]", step["label"])):
             raise ValueError("每步检查需要简短说明。")
@@ -57,6 +65,9 @@ def normalize_plan(raw: object, filenames: list[str]) -> dict:
             if key == "ms":
                 if type(value) is not int or not 0 <= value <= 2000:
                     raise ValueError("单步等待不能超过 2 秒。")
+            elif key in {"x", "y"}:
+                if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 16384:
+                    raise ValueError("点击坐标必须是元素内有限的非负 CSS 像素坐标。")
             elif (not isinstance(value, str) or len(value) > limit
                   or (key != "value" and not value.strip() and not (key == "key" and value == " "))):
                 raise ValueError("浏览器动作参数为空或过长。")
@@ -149,6 +160,34 @@ class BrowserChecks:
             artifacts.extend(self.rt.work.artifacts(task_id, dependency["submission"]))
         return artifacts
 
+    def _planning_retry(self, task_id: str, binding: dict) -> dict:
+        events = self.rt.log.read(task_id=task_id)
+        owner = Actor.system("local_verifier")
+        starts = [e for e in events if e.type == "verification.planning_started" and e.actor == owner
+                  and all(e.payload.get(k) == v for k, v in binding.items())]
+        if not starts:
+            return {}
+        previous = starts[-1]
+        finishes = [e for e in events if e.type == "verification.planned" and e.actor == owner
+                    and e.payload.get("request_seq") == previous.seq
+                    and all(e.payload.get(k) == v for k, v in binding.items())]
+        if not finishes or finishes[-1].payload.get("status") not in {"invalid", "unsupported", "unavailable"}:
+            raise WorkConflict("检查规划尚未结束或已有可执行计划，不重复调用。")
+        if any(e.type in {"work.check_started", "delivery.check_started"} and e.actor == owner
+               and e.seq > previous.seq and e.payload.get("criterion_id") == binding["criterion_id"]
+               and (e.payload.get("submission_seq") == binding.get("submission_seq")
+                    if "submission_seq" in binding else e.payload.get("delivery_digest") == binding["delivery_digest"])
+               for e in events):
+            raise WorkConflict("已有实际检查调用，需要核对原回执，不能重复启动。")
+        authorization = next((e for e in reversed(events) if e.seq > finishes[-1].seq and (
+            e.type == "activity.queued" and e.actor == Actor.system("orchestrator")
+            and e.payload.get("action") in {"run", "battle"}
+            or e.type == "human.commanded" and e.actor == Actor.human()
+            and e.payload.get("intent") == "resume" and e.payload.get("next_action") == "run")), None)
+        if authorization is None:
+            raise WorkConflict("本轮已尝试检查规划，等待新的明确继续请求后再安排。")
+        return {"retry_of": previous.seq, "authorization_seq": authorization.seq}
+
     def run(self, task_id: str, item: dict) -> None:
         if not self.command or not item.get("reviewer") or item.get("check_in_flight"):
             return
@@ -172,11 +211,7 @@ class BrowserChecks:
 
             def start():
                 self._current(task_id, item)
-                # A durable reservation prevents duplicate plans/calls after re-entry or restart.
-                if any(e.type == "verification.planning_started" and all(e.payload.get(k) == v for k, v in binding.items())
-                       for e in self.rt.log.iter_events(task_id=task_id)):
-                    raise WorkConflict("本次成果已安排浏览器检查，不自动重复调用。")
-                return "verification.planning_started", binding, Actor.system("local_verifier")
+                return "verification.planning_started", {**binding, **self._planning_retry(task_id, binding)}, Actor.system("local_verifier")
 
             try:
                 started = self.rt.work._write(task_id, start)
@@ -199,6 +234,8 @@ class BrowserChecks:
                     payload={**binding, "request_seq": started.seq, "status": "unavailable", "reason": str(exc)[:1000]})
 
     def _plan(self, task_id, started, context, filenames, role, current) -> dict:
+        context["browser_limits"] = {"max_steps": MAX_BROWSER_STEPS, "max_plan_bytes": 65536,
+                                     "per_step_wait_ms": 2000, "total_execution_ms": 60000}
         skill = Path(__file__).with_name("packs").joinpath("browser_check.md").read_text(encoding="utf-8")
         prompt = (skill + "\nSelect entrypoint exactly from this allowlist, not from an example: "
                   + json.dumps(context["available_entrypoints"], ensure_ascii=False)
@@ -275,11 +312,7 @@ class BrowserChecks:
 
         def start():
             self._current_delivery(task_id, delivery)
-            if any(e.type == "verification.planning_started" and e.actor == Actor.system("local_verifier")
-                   and all(e.payload.get(k) == v for k, v in binding.items())
-                   for e in self.rt.log.iter_events(task_id=task_id)):
-                raise WorkConflict("本次整包已安排浏览器检查，不自动重复调用。")
-            return "verification.planning_started", binding, Actor.system("local_verifier")
+            return "verification.planning_started", {**binding, **self._planning_retry(task_id, binding)}, Actor.system("local_verifier")
 
         try:
             started = self.rt.work._write(task_id, start)

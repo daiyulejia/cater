@@ -31,6 +31,16 @@ PLAN = {"entrypoint": "index.html", "steps": [
 
 
 class BrowserPlanTests(unittest.TestCase):
+    def test_invalid_action_fields_report_step_missing_and_extra_without_values(self):
+        plan = {**PLAN, "steps": [{"action": "click_at", "label": "Click", "selector": "#board",
+                                   "position": {"x": 20, "y": 20, "private": "do-not-echo"}}, PLAN["steps"][1]]}
+        with self.assertRaises(ValueError) as caught:
+            normalize_plan(plan, ["index.html"])
+        reason = str(caught.exception)
+        for expected in ("click_at", "position", "'x'", "'y'", "1"):
+            self.assertIn(expected, reason)
+        self.assertNotIn("do-not-echo", reason)
+
     def test_receipt_citation_accepts_only_current_observation_not_plan_or_label(self):
         receipt = {"seq": 27, "check_kind": "browser", "browser_report": {
             "error": "Observed page error", "steps": [{"label": "Expected board rendering",
@@ -86,7 +96,7 @@ class BrowserPlanTests(unittest.TestCase):
             {**PLAN, "steps": [{"action": "wait", "label": "Wait", "ms": True}, PLAN["steps"][1]]},
             {**PLAN, "steps": [{"action": "wait", "label": "Wait", "ms": 2001}, PLAN["steps"][1]]},
             {**PLAN, "steps": [{"action": "assert_js", "label": "Expression", "expression": "x" * 4001}]},
-            {**PLAN, "steps": PLAN["steps"] * 11},
+            {**PLAN, "steps": PLAN["steps"] * 17},
             {**PLAN, "steps": []},
         ]
         for plan in invalid:
@@ -309,6 +319,57 @@ class BrowserCheckTests(unittest.TestCase):
         self.service.run(self.task, self.current())
         self.assertEqual(len(self.requests), 2)
         self.assertEqual(len(self.executions), 1)
+
+    def test_explicit_continue_can_replan_invalid_check_without_changing_submission(self):
+        valid = copy.deepcopy(self.reply)
+        self.reply["plan"]["steps"] = []
+        submission = self.current()["submission"]
+        self.service.run(self.task, self.current())
+        first = self.events("verification.planning_started")[0]
+        self.service.run(self.task, self.current())
+        self.assertEqual(len(self.requests), 2)
+        authorization = self.rt.log.emit(type="human.commanded", actor=Actor.human(), task_id=self.task,
+            payload={"instruction": "Continue", "intent": "resume", "next_action": "run"})
+        self.reply = valid
+        self.service.run(self.task, self.current())
+        starts = self.events("verification.planning_started")
+        self.assertEqual(len(starts), 2)
+        self.assertEqual(starts[-1].payload["retry_of"], first.seq)
+        self.assertEqual(starts[-1].payload["authorization_seq"], authorization.seq)
+        self.assertEqual(self.current()["submission"], submission)
+        self.assertEqual(len(self.executions), 1)
+        self.service.run(self.task, self.current())
+        self.assertEqual(len(self.requests), 3)
+
+    def test_unfinished_plan_cannot_be_replayed_by_new_authorization(self):
+        current = self.current()
+        submission = current["submission"]
+        self.rt.log.emit(type="verification.planning_started", actor=Actor.system("local_verifier"), task_id=self.task,
+            payload={"work_item_id": current["id"], "criterion_id": "behavior", "plan_seq": submission["plan_seq"],
+                     "scope": submission["scope"], "submission_seq": submission["seq"], "submission_digest": submission["digest"]})
+        self.rt.log.emit(type="human.commanded", actor=Actor.human(), task_id=self.task,
+            payload={"instruction": "Continue", "intent": "resume", "next_action": "run"})
+        self.service.run(self.task, current)
+        self.transport.assert_not_called()
+        self.runner.assert_not_called()
+
+    def test_new_queue_allows_one_replan_not_unlimited_same_round_calls(self):
+        self.reply["plan"]["steps"] = []
+        self.service.run(self.task, self.current())
+        self.rt.log.emit(type="activity.queued", actor=Actor.system("orchestrator"), task_id=self.task,
+            payload={"activity_id": "new-explicit-round", "action": "run"})
+        self.service.run(self.task, self.current())
+        self.service.run(self.task, self.current())
+        self.assertEqual(len(self.requests), 4)
+        self.assertEqual(len(self.events("verification.planning_started")), 2)
+        self.runner.assert_not_called()
+
+    def test_longer_bounded_game_check_preserves_all_actions(self):
+        self.reply["plan"]["steps"] = copy.deepcopy(PLAN["steps"] * 16)
+        self.service.run(self.task, self.current())
+        self.assertEqual(len(self.executions), 1)
+        self.assertEqual(len(self.executions[0]["plan"]["steps"]), 32)
+        self.assertEqual(self.executions[0]["timeout"], 12)
 
     def test_scope_change_during_text_correction_prevents_execution(self):
         valid = copy.deepcopy(self.reply)

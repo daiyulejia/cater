@@ -12,6 +12,7 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
@@ -49,8 +50,10 @@ EVENT_CATEGORIES = {
     "rules.applied": "policy",
     "task.created": "lifecycle",
     "task.started": "lifecycle",
+    "task.activation_requested": "lifecycle",
     "task.execution_controlled": "lifecycle",
     "activity.queued": "lifecycle",
+    "activity.started": "lifecycle",
     "activity.completed": "lifecycle",
     "activity.failed": "lifecycle",
     "task.interpreted": "planning",
@@ -69,6 +72,8 @@ EVENT_CATEGORIES = {
     "agent.discipline_flagged": "decision",
     "diagnosis.recorded": "analysis",
     "deliverable.published": "outcome",
+    "artifacts.materialized": "outcome",
+    "artifacts.materialization_failed": "outcome",
     "handoff.published": "outcome",
     "verification.completed": "review",
     "verification.planning_started": "review",
@@ -185,6 +190,26 @@ class EventLog:
     def close(self) -> None:
         self.db.close()
 
+    @contextmanager
+    def atomic(self):
+        """Group local event writes only; never hold this lock across external work."""
+        nested = self.db.in_transaction
+        savepoint = "events_" + uuid.uuid4().hex
+        self.db.execute(f"SAVEPOINT {savepoint}" if nested else "BEGIN IMMEDIATE")
+        try:
+            yield
+            if nested:
+                self.db.execute(f"RELEASE SAVEPOINT {savepoint}")
+            else:
+                self.db.commit()
+        except BaseException:
+            if nested:
+                self.db.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                self.db.execute(f"RELEASE SAVEPOINT {savepoint}")
+            else:
+                self.db.rollback()
+            raise
+
     def emit(
         self,
         *,
@@ -219,8 +244,7 @@ class EventLog:
         # Multiple Web requests use independent SQLite connections.  Acquiring
         # the write transaction before reading the previous hash prevents two
         # writers from attaching different events to the same chain head.
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
+        with self.atomic():
             prev = self.head_hash()
             if expected_head is not None and prev != expected_head:
                 raise HeadChanged("event head changed")
@@ -278,10 +302,6 @@ class EventLog:
                     signature,
                 ))
                 prev = fingerprint
-            self.db.commit()
-        except BaseException:
-            self.db.rollback()
-            raise
         return events
 
     def read(self, task_id: str | None = None) -> list[Event]:

@@ -29,6 +29,8 @@ import { readJsonResponse, request } from './request'
 import { TaskControlMenu } from './TaskControlMenu'
 import { controlLabels, executionLabel } from './executionControl'
 import type { ControlAction, ExecutionControl } from './executionControl'
+import { clearCreationRecovery, CREATION_RECOVERY_TTL, loadCreationRecovery, readAccessToken, saveCreationRecovery } from './creationRecovery'
+import type { CreationAttempt } from './creationRecovery'
 
 const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
 const LazyDeliveryPanel = lazy(() => import('./DeliveryPanel').then((module) => ({ default: module.DeliveryPanel })))
@@ -76,16 +78,7 @@ type TaskDetail = { task: Task; events: Event[]; questions?: Question[]; clarifi
 type DerivationSource = { id: string; goal: string }
 type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event }
 
-const accessToken = (() => {
-  const fragment = new URLSearchParams(window.location.hash.slice(1))
-  const supplied = fragment.get('access_token')
-  if (supplied) {
-    window.sessionStorage.setItem('cater.access_token', supplied)
-    window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`)
-    return supplied
-  }
-  return window.sessionStorage.getItem('cater.access_token') ?? ''
-})()
+const accessToken = readAccessToken()
 
 const apiRead = <T,>(path: string, read: (response: Response) => Promise<T>, init?: RequestInit): Promise<T> => {
   const headers = new Headers({ 'Content-Type': 'application/json', ...(accessToken ? { 'X-Cater-Access-Token': accessToken } : {}) })
@@ -593,6 +586,12 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
 }
 
 function App() {
+  // API authentication is fixed for this page; detect changes to its session context too.
+  const [creationSessionToken] = useState(readAccessToken)
+  const [recoveryReady, setRecoveryReady] = useState(false)
+  const [recovery, setRecovery] = useState<CreationAttempt | null>(null)
+  const [recoveryNotice, setRecoveryNotice] = useState('')
+  const creationMounted = useRef(true)
   const [newProject, setNewProject] = useState<{ id: string; name: string } | null>(null)
   const [tasks, setTasks] = useState<TaskSummary[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -603,7 +602,7 @@ function App() {
   const questionModeRef = useRef(false)
   const questionRequests = useRef<Record<string, { text: string; requestId: string }>>({})
   const conversationRequests = useRef<Record<string, { text: string; requestId: string }>>({})
-  const creationRequest = useRef<{ text: string; projectId?: string; requestId: string } | null>(null)
+  const creationRequest = useRef<CreationAttempt | null>(null)
   const [controlRequests, setControlRequests] = useState<Record<string, { action: ControlAction; requestId: string }>>({})
   const controlsRef = useRef<Record<string, ExecutionControl>>({})
   const [executionControls, setExecutionControls] = useState<Record<string, ExecutionControl>>({})
@@ -659,6 +658,7 @@ function App() {
     const next = typeof value === 'function' ? value(draft) : value
     navigationRef.current += 1
     if (next !== draft) {
+      if (creationRequest.current) clearCreationRecovery(creationRequest.current.requestId)
       creationRequest.current = null
       setSendErrors((current) => ({ ...current, [newKey]: '' }))
     }
@@ -694,6 +694,32 @@ function App() {
     setShowMobileBoard(false)
     setGraphOpen(false)
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    creationMounted.current = true
+    void loadCreationRecovery(accessToken).then(({ attempt, notice }) => {
+      if (cancelled) return
+      setRecovery(attempt)
+      setRecoveryNotice(notice)
+      setRecoveryReady(true)
+    })
+    return () => { cancelled = true; creationMounted.current = false }
+  }, [])
+
+  const restoreCreation = async () => {
+    const navigation = navigationRef.current
+    const { attempt, notice } = await loadCreationRecovery(accessToken)
+    if (!creationMounted.current || navigationRef.current !== navigation) return
+    setRecovery(null)
+    setRecoveryNotice(notice)
+    if (!attempt) return
+    creationRequest.current = attempt
+    updateDraft(newKey, attempt.text)
+    setNewProject(attempt.projectId ? { id: attempt.projectId, name: attempt.projectId } : null)
+    setSendErrors((current) => ({ ...current, [newKey]: '上次新建任务的提交结果未知。原草稿已恢复，可核对任务列表后手动重试。' }))
+    chooseTask(null)
+  }
 
   useLayoutEffect(() => {
     if (!focusComposerRef.current) return
@@ -946,15 +972,31 @@ function App() {
   const createTask = async () => {
     const submitted = draft
     const goal = submitted.trim()
-    if (!goal || selectedRef.current !== null || pendingRef.current.has(newKey)) return
+    if (!goal || selectedRef.current !== null || pendingRef.current.has(newKey) || !recoveryReady || recovery) return
+    if (readAccessToken() !== creationSessionToken) {
+      clearCreationRecovery()
+      creationRequest.current = null
+      setRecoveryNotice('账户已变化，请刷新后核对任务列表；本次没有发送。')
+      return
+    }
     const navigation = navigationRef.current
     const previous = creationRequest.current
+    if (previous && Date.now() - previous.createdAt >= CREATION_RECOVERY_TTL) {
+      clearCreationRecovery(previous.requestId)
+      creationRequest.current = null
+      setRecoveryNotice('待确认创建记录已过期，请先核对任务列表；本次没有发送。')
+      return
+    }
     const attempt = previous?.text === submitted && previous.projectId === newProject?.id
-      ? previous : { text: submitted, projectId: newProject?.id, requestId: creationRequestId() }
+      ? previous : { text: submitted, projectId: newProject?.id, requestId: creationRequestId(), createdAt: Date.now() }
     creationRequest.current = attempt
     pendingRef.current.add(newKey); setPending(new Set(pendingRef.current))
     setSendErrors((current) => ({ ...current, [newKey]: '' }))
     try {
+      const current = () => creationMounted.current && creationRequest.current === attempt
+      const notice = await saveCreationRecovery(attempt, accessToken, current)
+      if (!current() || readAccessToken() !== creationSessionToken) return
+      setRecoveryNotice(notice)
       const { next: result, order } = await requestDetail('/api/tasks', {
         method: 'POST',
         body: JSON.stringify({
@@ -964,16 +1006,23 @@ function App() {
           run: true, background: true,
         }),
       })
+      if (!creationMounted.current || readAccessToken() !== creationSessionToken) return
+      if (typeof result?.task?.id !== 'string' || !result.task.id || !Array.isArray(result.events)
+        || !Array.isArray(result.task.messages) || !Array.isArray(result.task.assignments)) {
+        throw new Error('创建响应不完整，提交结果未知。请核对任务列表后手动重试。')
+      }
+      clearCreationRecovery(attempt.requestId)
       if (creationRequest.current === attempt) {
         creationRequest.current = null
+        setRecoveryNotice('')
         setDrafts((current) => current[newKey] === submitted ? { ...current, [newKey]: '' } : current)
       }
       if (navigationRef.current === navigation && selectedRef.current === null) chooseTask(result.task.id)
       acceptDetail(result, order)
     } catch (err) {
-      if (creationRequest.current === attempt) setSendErrors((current) => ({ ...current, [newKey]: userFacingError(err, '创建任务失败') }))
+      if (creationMounted.current && creationRequest.current === attempt) setSendErrors((current) => ({ ...current, [newKey]: userFacingError(err, '创建任务失败') }))
     }
-    finally { pendingRef.current.delete(newKey); setPending(new Set(pendingRef.current)) }
+    finally { pendingRef.current.delete(newKey); if (creationMounted.current) setPending(new Set(pendingRef.current)) }
   }
 
   const beginDerivation = () => {
@@ -1123,6 +1172,7 @@ function App() {
     } else {
       if (project?.id !== newProject?.id) {
         navigationRef.current += 1
+        if (creationRequest.current) clearCreationRecovery(creationRequest.current.requestId)
         creationRequest.current = null
         setSendErrors((current) => ({ ...current, [newKey]: '' }))
       }
@@ -1155,6 +1205,11 @@ function App() {
           <TaskList tasks={tasks} selectedId={selectedId} drafts={drafts} collapsed={tasksCollapsed} searchOpen={taskSearchOpen} onChoose={chooseTask} statusLabel={(item) => executionLabel(executionControls[item.id]?.state) || item.status_label} />
         </aside>
         <section ref={chatPaneRef} className="chat-pane flex min-h-0 flex-col">
+          {recovery && <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[#eaded1] px-4 py-2 text-xs text-[#52766d] sm:px-7" role="status">
+            <span>有一项新建任务结果待确认，可能已经创建。</span>
+            <button type="button" className="inline-flex items-center gap-1 font-semibold text-[#24766b]" onClick={() => void restoreCreation()}><RefreshCw size={14} />恢复待确认任务</button>
+            <button type="button" className="text-stone-500" onClick={() => { clearCreationRecovery(recovery.requestId); setRecovery(null); setRecoveryNotice('已放弃恢复，请先核对任务列表，避免重复创建。') }}>放弃恢复</button>
+          </div>}
           {task ? <>
             <div className="chat-heading flex items-start justify-between gap-3 px-4 py-3 sm:px-7 sm:py-4" style={{ backgroundImage: `linear-gradient(90deg, #fffaf5 0%, rgba(255,250,245,.98) 55%, rgba(255,250,245,.78) 100%), url(${cafeWelcome})` }}>
               <div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div>
@@ -1178,12 +1233,12 @@ function App() {
             </p>}
             {graphLoaded && task.work?.items.length ? <Suspense fallback={<p role="status" className="px-4 py-2 text-xs text-[#52766d]">正在打开任务脉络…</p>}><TaskGraph key={task.id} work={task.work} open={graphOpen} onOpenChange={setGraphOpen} returnFocusRef={graphTriggerRef} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></Suspense> : null}
             <div className="relative flex min-h-0 flex-1 flex-col">
-              <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>{loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={`${task.id}:${item.id}`} item={item} taskId={task.id} controls={clarificationControls} />) : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
+              <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>{loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={`${task.id}:${item.id}`} item={item} artifact={(task.deliverables ?? []).find((artifact) => artifact.seq === item.evidence.seq)} taskId={task.id} controls={clarificationControls} />) : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
               {!loading && unread > 0 && <button onClick={jumpToLatest} className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-md border border-[#d9b9a5] bg-[#fff7eb] px-3 py-2 text-xs font-semibold text-[#915340] shadow-md" title="返回最新消息"><ArrowDown size={15} /> 查看新消息 · {unread}</button>}
             </div>
             {derivation ? <DerivationDraftBar goal={derivation.goal} onCancel={cancelDerivation} /> : questionMode ? <QuestionComposerBar onCancel={toggleQuestion} /> : rulesControl}
             <DirectionComposer key={composerKey} members={team} message={message} isSending={isSending} isLoading={loading} deriving={Boolean(derivation)} questioning={questionMode} onMessageChange={setMessage} onSend={() => void (derivation ? deriveTask() : questionMode ? sendQuestion() : sendDirection())} />
-          </> : <><EmptyConversation onChoose={setDraft} />{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
+          </> : <><EmptyConversation onChoose={setDraft} />{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} disabled={!recoveryReady || Boolean(recovery)} onDraftChange={setDraft} onCreate={() => void createTask()} />{recoveryNotice && <p role="status" className="px-4 pb-2 text-xs text-amber-800 sm:px-7">{recoveryNotice}</p>}</>}
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
         {task && <WorkboardPanel taskId={task.id} open={showMobileBoard} onOpenChange={setShowMobileBoard}>
@@ -1203,8 +1258,8 @@ function DirectionComposer({ members, message, isSending, isLoading, deriving = 
   return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput value={message} label={deriving ? '衍生任务目标' : questioning ? '向当前对话提问' : '向团队发送消息'} placeholder={deriving ? '说说新任务要完成什么，可直接 @一位伙伴' : questioning ? '想了解什么？' : '继续说吧，补充想法、改目标，或直接 @一位伙伴'} members={members} onChange={onMessageChange} onSubmit={onSend} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={isSending || isLoading || !message.trim()} onClick={onSend} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isLoading ? '正在接上对话' : isSending ? '正在发送' : sendLabel} aria-label={sendLabel} aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
 }
 
-function TaskComposer({ members, draft, isSending, onDraftChange, onCreate }: { members: OrgRole[]; draft: string; isSending: boolean; onDraftChange: (value: string) => void; onCreate: () => void }) {
-  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput id="new-task" value={draft} label="发起任务对话" placeholder="和店长说说，今天想做什么？" members={members} onChange={onDraftChange} onSubmit={onCreate} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={isSending || !draft.trim()} onClick={onCreate} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isSending ? '正在发送新任务' : '发送新任务'} aria-label="发送新任务" aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
+function TaskComposer({ members, draft, isSending, disabled, onDraftChange, onCreate }: { members: OrgRole[]; draft: string; isSending: boolean; disabled: boolean; onDraftChange: (value: string) => void; onCreate: () => void }) {
+  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput id="new-task" value={draft} label="发起任务对话" placeholder="和店长说说，今天想做什么？" members={members} onChange={onDraftChange} onSubmit={onCreate} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={disabled || isSending || !draft.trim()} onClick={onCreate} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isSending ? '正在发送新任务' : '发送新任务'} aria-label="发送新任务" aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
 }
 
 function MessageContext({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ClarificationControls }) {
@@ -1280,7 +1335,14 @@ function SystemRecord({ item, taskId, controls }: { item: ChatItem; taskId: stri
   </article>
 }
 
-function ChatBubble({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ClarificationControls }) {
+function untrustedArtifact(event: Event): Artifact {
+  const item = { ...event.payload, seq: event.seq } as Artifact
+  delete item.local_path
+  delete item.local_save_error
+  return item
+}
+
+function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; artifact?: Artifact; taskId: string; controls: ClarificationControls }) {
   if (item.notice) return <article className="collaboration-notice">
     {item.text && <p>{item.text}</p>}
     {item.details?.length ? <details><summary>这次接力的工作</summary>{item.details.map((detail, index) => <p key={index}>{detail}</p>)}</details> : null}
@@ -1296,7 +1358,7 @@ function ChatBubble({ item, taskId, controls }: { item: ChatItem; taskId: string
       <p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>
       <MessageContext item={item} taskId={taskId} controls={controls} />
       {item.progress && <Suspense fallback={null}><WorkProgressPanel events={item.progress} claim={item.id} name={item.display} /></Suspense>}
-      {item.evidence.type === 'deliverable.published' && <ArtifactPreview item={{ ...item.evidence.payload, seq: item.id } as Artifact} publisher={item.display} showSummary={false} />}
+      {item.evidence.type === 'deliverable.published' && <ArtifactPreview item={artifact ?? untrustedArtifact(item.evidence)} publisher={item.display} showSummary={false} />}
       {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
       {item.details?.length ? <details className={`mt-3 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#dfeae5] text-[#52766d]'}`}><summary className="cursor-pointer font-semibold">查看判断与依据</summary><ul className="mt-2 space-y-1.5 leading-5">{item.details.map((detail, index) => <li key={`${item.id}-${index}`}>{detail}</li>)}</ul></details> : null}
       <AuditTrail item={item} />
