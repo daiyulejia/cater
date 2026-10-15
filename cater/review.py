@@ -42,7 +42,7 @@ def build_review(
         _ui_lens(tasks),
         _logic_lens(tasks),
         _discipline_lens(tasks),
-        _reliability_lens(tasks),
+        _reliability_lens(tasks, events),
         _adoption_lens(tasks, profiles),
     ]
     next_steps = _next_steps(tasks, lenses)
@@ -104,6 +104,7 @@ def _next_steps(tasks: list[TaskSnapshot], lenses: list[dict[str, str]]) -> list
                 }
             )
             seen.add(action)
+    steps.sort(key=lambda step: 0 if step["priority"] == "high" else 1)
     return steps
 
 
@@ -321,7 +322,23 @@ def _discipline_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     )
 
 
-def _reliability_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
+def _reliability_lens(tasks: list[TaskSnapshot], events: list[Event]) -> dict[str, str]:
+    uncertain_work = sum(item.get("status") == "uncertain" or bool(item.get("check_uncertain"))
+                         for task in tasks for item in (task.work or {}).get("items", []))
+    uncertain_delivery = sum(((task.work or {}).get("delivery") or {}).get("status") == "uncertain" for task in tasks)
+    latest_planning = {}
+    for event in events:
+        if event.type == "planning.finished":
+            attempt = event.payload.get("attempt_seq")
+            order = attempt if type(attempt) is int else event.seq
+            if order >= latest_planning.get(event.task_id, (0, None))[0]:
+                latest_planning[event.task_id] = (order, event.payload.get("status"))
+    uncertain_planning = sum(status == "uncertain" for _, status in latest_planning.values())
+    if uncertain_work or uncertain_delivery or uncertain_planning:
+        return _lens("reliability", "needs_attention",
+                     f"Unresolved results: {uncertain_work} work/check item(s), {uncertain_delivery} delivery review(s), "
+                     f"{uncertain_planning} planning call(s). Missing driver.failed events do not establish recovery.",
+                     "Inspect the recorded attempt and reconcile its outcome before replaying; do not infer success from a valid audit chain.")
     failures = sum(len(task.driver_failures) for task in tasks)
     if failures:
         return _lens("reliability", "watch", f"{failures} contained driver failure(s) recorded.", "Review circuit breaker thresholds and recovery controls.")
