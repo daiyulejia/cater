@@ -366,6 +366,31 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       item.systemActor = true
       return [item]
     }
+    if (event.type === 'msg.said' && payload.phase === 'review') {
+      const legacyApproval = payload.text === '这一项的阶段标准通过了，可以交给后面的伙伴接着做；整件任务还需要最后核对。'
+      const previous = events.filter((entry) => entry.seq < event.seq).at(-1)
+      const review = events.filter((entry) => entry.type === 'work.reviewed' && entry.seq < event.seq
+        && entry.actor.id === actor.id && typeof payload.work_item_id === 'string'
+        && entry.payload.work_item_id === payload.work_item_id
+        && (typeof payload.review_seq === 'number' ? entry.seq === payload.review_seq
+          : legacyApproval && entry.seq === previous?.seq && entry.payload.status === 'accepted')).at(-1)
+      const checks = review && Array.isArray(review.payload.checks)
+        ? review.payload.checks.filter((check): check is Record<string, unknown> => Boolean(check) && typeof check === 'object') : []
+      if (payload.speech_source === 'system_receipt' || (legacyApproval && !review)) {
+        const item = message('复核回执', legacyApproval && !review
+          ? '历史回执待核对：无法明确关联这条消息对应的复核依据。' : String(payload.text ?? ''), 'system')
+        item.systemActor = true
+        return [item]
+      }
+      if (review && (payload.speech_source === 'review_assessment' || legacyApproval)) {
+        const reasons = checks.filter((check) => !check.response_issue && typeof check.reason === 'string').map((check) => String(check.reason))
+        const label = ({ accepted: '阶段通过', rework: '需要修改', submitted: '仍有待确认项' } as Record<string, string>)[String(review.payload.status)] ?? '待核对'
+        return [message(`复核意见 · ${label}`, [...new Set(reasons)].join('\n\n'), 'agent', 'decision', [
+          `依据复核记录 #${review.seq}；阶段结论不代表整项任务已经交付。`,
+          ...checks.map((check) => `${({ passed: '符合', failed: '不符合', unknown: '待确认' } as Record<string, string>)[String(check.status)] ?? '待确认'}${typeof check.artifact_seq === 'number' ? ` · 成果 #${check.artifact_seq}` : ''}${typeof check.receipt_seq === 'number' ? ` · 检查 #${check.receipt_seq}` : ''}${typeof check.quote === 'string' && check.quote ? `\n原文：${check.quote}` : ''}`),
+        ])]
+      }
+    }
     if (event.type === 'delivery.review_started') return [message('最后一起核对', '各项成果已经过阶段验收。我再检查它们合起来是否满足你现在的要求，再整理交付和复查说明。', 'agent', 'collaboration')]
     if (event.type === 'delivery.review_finished') {
       const handoff = payload.handoff && typeof payload.handoff === 'object' ? payload.handoff as Record<string, unknown> : null

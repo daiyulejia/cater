@@ -61,6 +61,52 @@ test.each(['review_response_correction', 'review'])('内部复核修复 %s 收�
   expect(visibleText(row)).toContain('100')
 })
 
+test.each([true, false])('复核显示具体判断和可展开的依据，兼容历史模板（legacy=%s）', async (legacy) => {
+  await mount([
+    event(2, 'work.reviewed', 'dev', { work_item_id: 'layout', status: 'accepted', checks: [
+      { id: 'focus', status: 'passed', reason: '输入框保留焦点，按钮可以用键盘操作。', artifact_seq: 10, quote: 'tabindex="0"' },
+    ] }, 'agent'),
+    event(3, 'msg.said', 'dev', { phase: 'review', work_item_id: 'layout',
+      ...(legacy ? {} : { review_seq: 2, speech_source: 'review_assessment' }),
+      text: legacy ? '这一项的阶段标准通过了，可以交给后面的伙伴接着做；整件任务还需要最后核对。' : '输入框保留焦点，按钮可以用键盘操作。',
+    }, 'agent'),
+  ])
+  const row = record(3)
+  expect(visibleText(row)).toContain('输入框保留焦点，按钮可以用键盘操作。')
+  expect(visibleText(row)).toContain('复核意见 · 阶段通过')
+  expect(visibleText(row)).not.toContain('这一项的阶段标准通过了')
+  openDetails(within(row).getByText('查看判断与依据').closest('details')!)
+  expect(visibleText(row)).toContain('成果 #10')
+  expect(visibleText(row)).toContain('tabindex="0"')
+})
+
+test('系统复核失败不冒充角色发言，也不挪用其他角色或工作项的判断', async () => {
+  await mount([
+    event(2, 'work.reviewed', 'store_manager', { work_item_id: 'other', status: 'accepted', checks: [
+      { status: 'passed', reason: '这是另一项工作，不应显示在这里。' },
+    ] }, 'agent'),
+    event(3, 'msg.said', 'dev', { phase: 'review', work_item_id: 'layout', speech_source: 'system_receipt', review_seq: 2,
+      text: '复核调用没有完整返回，需要核对。' }, 'agent'),
+  ])
+  const row = record(3)
+  expect(within(row).queryByRole('img')).toBeNull()
+  expect(visibleText(row)).not.toContain('另一项工作')
+  expect(visibleText(row)).toContain('复核调用没有完整返回')
+})
+
+test.each([true, false])('历史通过回执缺少唯一关联时不借用理由（interleaved=%s）', async (interleaved) => {
+  await mount([
+    ...(interleaved ? [
+      event(2, 'work.reviewed', 'dev', { work_item_id: 'layout', status: 'accepted', checks: [{ status: 'passed', reason: '旧版本理由' }] }, 'agent'),
+      event(3, 'work.submitted', 'work_scheduler', { work_item_id: 'layout', plan_seq: 10 }),
+    ] : []),
+    event(4, 'msg.said', 'dev', { phase: 'review', work_item_id: 'layout',
+      text: '这一项的阶段标准通过了，可以交给后面的伙伴接着做；整件任务还需要最后核对。' }, 'agent'),
+  ])
+  expect(visibleText(record(4))).toContain('历史回执待核对')
+  expect(visibleText(record(4))).not.toMatch(/旧版本理由|阶段标准通过了/)
+})
+
 test.each([undefined, 'system'])('纪律记录（kind=%s）不再冒充成员，常规提醒默认收起且未知码只进入审计', async (kind) => {
   vi.useRealTimers()
   await mount([event(2, 'agent.discipline_flagged', 'discipline', { issues: ['missing_claim', 'unknown_internal_issue'], message_seq: 1 }, kind)])

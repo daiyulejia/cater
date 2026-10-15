@@ -159,7 +159,12 @@ class ReviewRepairTests(unittest.TestCase):
         events = self.rt.log.read(task_id=self.task)
         messages = [e for e in events if e.type == "msg.said" and e.actor.id == "test"]
         self.assertEqual([e.payload["phase"] for e in messages], ["review_response_correction", "review"])
-        self.assertIn("这次卡在我的复核回复格式", messages[0].payload["text"])
+        self.assertIn("复核引用或格式正在校正", messages[0].payload["text"])
+        self.assertEqual(messages[0].payload["speech_source"], "system_receipt")
+        self.assertEqual(messages[1].payload["speech_source"], "review_assessment")
+        self.assertNotIn("这一项的阶段标准通过了", messages[1].payload["text"])
+        review = next(e for e in events if e.seq == messages[1].payload["review_seq"])
+        self.assertIn(review.payload["checks"][0]["reason"], messages[1].payload["text"])
         for message in messages:
             self.assertEqual(message.payload["work_item_id"], "draft")
             self.assertEqual(message.payload["driver"], "test")
@@ -208,6 +213,10 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertNotIn("response_issue", check)
         self.assertEqual(self.driver.review_count, 1)
         self.assertEqual(self.repairs(), [])
+        message = [e for e in self.rt.log.read(task_id=self.task)
+                   if e.type == "msg.said" and e.payload.get("phase") == "review"][-1]
+        self.assertEqual(message.payload["speech_source"], "review_assessment")
+        self.assertIn(check["reason"], message.payload["text"])
 
     def test_negative_quality_judgment_is_not_retried_until_it_passes(self):
         self.driver.mode = "failed"
@@ -224,6 +233,27 @@ class ReviewRepairTests(unittest.TestCase):
         check = self.rt.work.view(self.task)["items"][0]["checks"][0]
         self.assertIn("复核调用未完整返回", check["reason"])
         self.assertNotIn("response_issue", check)
+        message = [e for e in self.rt.log.read(task_id=self.task)
+                   if e.type == "msg.said" and e.payload.get("phase") == "review"][-1]
+        self.assertEqual(message.payload["speech_source"], "system_receipt")
+        self.assertIn("复核调用未完整返回", message.payload["text"])
+
+    def test_specific_approval_reasons_are_not_replaced_with_a_success_slogan(self):
+        self.driver.mode = "valid"
+        self.driver.review_count = 1
+        explanation = "按钮保留键盘焦点，错误提示紧邻输入框，覆盖了这次约定的交互要求。"
+
+        def transform(raw, context):
+            for row in raw["checks"]:
+                row["reason"] = explanation
+        self.driver.review_transform = transform
+        self.rt.collaborate(self.task)
+        message = [e for e in self.rt.log.read(task_id=self.task)
+                   if e.type == "msg.said" and e.payload.get("phase") == "review"][-1]
+        self.assertEqual(message.payload["text"], explanation)
+        self.assertEqual(message.payload["speech_source"], "review_assessment")
+        self.assertTrue(self.rt.work.view(self.task)["stage_accepted"])
+        self.assertEqual(self.repairs(), [])
 
     def test_unknown_driver_cannot_enable_repair_through_response_metadata(self):
         self.driver.review_response_repair = False
@@ -241,6 +271,10 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(self.driver.review_count, 1)
         self.assertEqual(self.repairs(), [])
         self.assertFalse(self.rt.work.view(self.task)["scope_current"])
+        message = [e for e in self.rt.log.read(task_id=self.task)
+                   if e.type == "msg.said" and e.payload.get("phase") == "review"][-1]
+        self.assertEqual(message.payload["speech_source"], "system_receipt")
+        self.assertIsNone(message.payload["review_seq"])
 
     def test_brief_and_progress_report_explain_reply_error_without_claiming_live_work(self):
         self.driver.mode = "always_bad"
