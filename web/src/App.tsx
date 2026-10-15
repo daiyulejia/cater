@@ -18,7 +18,7 @@ import { ConversationMembers } from './ConversationMembers'
 import { ConversationOrigin, DerivationDraftBar } from './ConversationOrigin'
 import type { ConversationBackground } from './ConversationOrigin'
 import { QuestionComposerBar } from './QuestionComposerBar'
-import { conversationParticipants } from './participants'
+import { consultationMatches, conversationParticipants } from './participants'
 import type { WorkState } from './WorkItems'
 import type { TeamAvailability } from './TeamDirectory'
 import type { Clarification, ClarificationControls, ClarificationStore } from './ClarificationCard'
@@ -29,6 +29,7 @@ import type { WorkAssignment } from './collaborationProjection'
 const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
 const LazyDeliveryPanel = lazy(() => import('./DeliveryPanel').then((module) => ({ default: module.DeliveryPanel })))
 const EventDetails = lazy(() => import('./EventDetails').then((module) => ({ default: module.EventDetails })))
+const BrowserReport = lazy(() => import('./browserReport').then((module) => ({ default: module.BrowserReport })))
 const WorkProgressPanel = lazy(() => import('./WorkProgressPanel').then((module) => ({ default: module.WorkProgressPanel })))
 const WorkAssignments = lazy(() => import('./WorkProgressPanel').then((module) => ({ default: module.WorkAssignments })))
 const ClarificationCard = lazy(() => import('./ClarificationCard').then((module) => ({ default: module.ClarificationCard })))
@@ -40,7 +41,7 @@ type Message = { seq: number; actor: string; role: string; type: string; claim?:
 type Deliverable = Artifact
 type Diagnosis = { seq: number; status: 'hypothesis' | 'reported' | 'confirmed' | 'uncertain'; symptom: string; cause: string; observations?: string[]; alternatives?: string[]; impact?: string[]; verification_plan?: string[]; message_seq?: number }
 type Handoff = { seq: number; summary: string; why: string; changed?: string[]; verification?: string[]; limits?: string[]; teach_back?: string[]; message_seq?: number }
-type Verification = { seq: number; command: string[]; outcome: 'passed' | 'failed' | 'timeout' | 'launch_error'; exit_code: number | null; for_event?: number; git?: { head?: string | null; dirty?: boolean | null }; stdout?: { bytes?: number; sha256?: string; excerpt?: string }; stderr?: { bytes?: number; sha256?: string; excerpt?: string } }
+type Verification = { seq: number; command: string[]; outcome: 'passed' | 'failed' | 'timeout' | 'launch_error' | 'unavailable'; exit_code: number | null; for_event?: number; git?: { head?: string | null; dirty?: boolean | null }; stdout?: { bytes?: number; sha256?: string; excerpt?: string }; stderr?: { bytes?: number; sha256?: string; excerpt?: string } }
 type ChainStatus = { ok: boolean; checked: number; reason?: string; broken_at?: number }
 type DisciplineFlag = { seq: number; role?: string; message_seq?: number; issues?: string[]; action?: string }
 type MemoryItem = { seq: number; task_id?: string; actor?: string; title: string; summary: string; kind?: string }
@@ -217,6 +218,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
   const askedEvents = new Map(events.filter((event) => event.type === 'question.asked').map((event) => [event.seq, event]))
   const finishedQuestions = new Set(events.filter((event) => event.type === 'question.finished').map((event) => event.payload.question_seq))
   const conversationRows = new Map(receipts.map((row) => [row.seq, row]))
+  const consultationRequests = new Map(events.filter((event) => event.type === 'collaboration.requested').map((event) => [event.seq, event]))
   const explainedMessages = new Set(events.filter((event) => event.type === 'conversation.finished').map((event) => event.payload.question_seq))
   const clarificationRows = new Map(clarifications.map((question) => [question.seq, question]))
   const collaboration = collaborationProjection(events, organization?.leader.id ?? 'store_manager')
@@ -270,6 +272,37 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       if (!projection) return []
       const item = message(undefined, '', 'system', 'collaboration')
       item.notice = true
+      return [item]
+    }
+    if (event.type === 'collaboration.requested') {
+      const item = message('定向咨询', typeof payload.question === 'string' ? payload.question : '咨询问题未记录。', 'agent')
+      item.targets = typeof payload.recipient === 'string' ? [displayName(payload.recipient)] : []
+      item.replyTo = undefined
+      return [item]
+    }
+    if (event.type === 'collaboration.finished') {
+      const request = consultationRequests.get(Number(payload.request_seq))
+      const bound = consultationMatches(request, event)
+      const speaker = typeof payload.speaker_id === 'string' ? payload.speaker_id : undefined
+      const validReply = bound && actor.kind === 'system' && actor.id === 'collaboration' && actor.role === 'collaboration'
+        && (payload.status === 'answered' || payload.status === 'declined') && speaker === payload.recipient
+        && typeof payload.reply === 'string' && Boolean(payload.reply.trim())
+      const labels: Record<string, string> = { invalid: '咨询回复未通过核对', unavailable: '咨询暂不可用', stale: '咨询依据已变化' }
+      const item = message(validReply ? payload.status === 'declined' ? '咨询回应 · 无法提供意见' : '咨询回应'
+        : bound ? labels[String(payload.status)] ?? '咨询回执待核对' : '咨询关联待核对',
+      validReply ? String(payload.reply) : typeof payload.reason === 'string' && payload.reason.trim() ? payload.reason : '本次咨询未取得有效回复。',
+      validReply ? 'agent' : 'system', 'collaboration')
+      item.actor = validReply ? speaker! : 'system'
+      item.display = validReply ? displayName(speaker!) : '系统'
+      item.role = publicIdentity(item.actor, organization)
+      item.systemActor = !validReply
+      item.targets = validReply && typeof payload.requester === 'string' ? [displayName(payload.requester)] : []
+      item.replyTo = bound ? request!.seq : undefined
+      if (validReply) {
+        const evidence = Array.isArray(payload.evidence) ? payload.evidence.filter((entry): entry is { artifact_seq: number; quote: string } => Boolean(entry)
+          && typeof entry === 'object' && Number.isInteger(entry.artifact_seq) && entry.artifact_seq > 0 && typeof entry.quote === 'string') : []
+        item.details = ['只读咨询意见，不代表工具执行或验收通过。', ...evidence.map((entry) => `成果 #${entry.artifact_seq}\n原文：${entry.quote}`)]
+      }
       return [item]
     }
     if (event.type === 'question.started' || event.type === 'conversation.started') return []
@@ -359,7 +392,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       const item = message(payload.status === 'installed' ? '这次这样安排' : '计划先不下发', String(payload.reason ?? ''), 'system', 'decision')
       return [item]
     }
-    if (event.type === 'msg.said' && ['planning', 'delivery_receipt', 'clarification_receipt'].includes(String(payload.phase))) return []
+    if (event.type === 'msg.said' && ['planning', 'delivery_receipt', 'clarification_receipt', 'collaboration_request'].includes(String(payload.phase))) return []
     if (event.type === 'msg.said' && (payload.phase === 'review_response_correction'
       || (payload.phase === 'review' && payload.text === '这次卡在我的复核回复格式或引用上，还不能据此认定成果有错。我会按原成果重新整理一次回复。'))) {
       const item = message('复核记录整理中', '正在校正复核回复的格式与引用，不改动成果，也不代表验收已经通过。', 'system')
@@ -383,11 +416,11 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
         return [item]
       }
       if (review && (payload.speech_source === 'review_assessment' || legacyApproval)) {
-        const reasons = checks.filter((check) => !check.response_issue && typeof check.reason === 'string').map((check) => String(check.reason))
+        const reasons = checks.filter((check) => check.source !== 'runtime_check' && !check.response_issue && typeof check.reason === 'string').map((check) => String(check.reason))
         const label = ({ accepted: '阶段通过', rework: '需要修改', submitted: '仍有待确认项' } as Record<string, string>)[String(review.payload.status)] ?? '待核对'
         return [message(`复核意见 · ${label}`, [...new Set(reasons)].join('\n\n'), 'agent', 'decision', [
           `依据复核记录 #${review.seq}；阶段结论不代表整项任务已经交付。`,
-          ...checks.map((check) => `${({ passed: '符合', failed: '不符合', unknown: '待确认' } as Record<string, string>)[String(check.status)] ?? '待确认'}${typeof check.artifact_seq === 'number' ? ` · 成果 #${check.artifact_seq}` : ''}${typeof check.receipt_seq === 'number' ? ` · 检查 #${check.receipt_seq}` : ''}${typeof check.quote === 'string' && check.quote ? `\n原文：${check.quote}` : ''}`),
+          ...checks.map((check) => `${({ passed: '符合', failed: '不符合', unknown: '待确认' } as Record<string, string>)[String(check.status)] ?? '待确认'}${typeof check.artifact_seq === 'number' ? ` · 成果 #${check.artifact_seq}` : ''}${typeof check.receipt_seq === 'number' ? ` · 检查 #${check.receipt_seq}` : ''}${typeof check.reason === 'string' ? `\n${check.source === 'runtime_check' ? '系统检查依据' : check.status === 'unknown' || (check.source !== undefined && check.source !== 'model_assessment') ? '待确认依据' : '判断依据'}：${check.reason}` : ''}${typeof check.quote === 'string' && check.quote ? `\n原文：${check.quote}` : ''}`),
         ])]
       }
     }
@@ -466,33 +499,67 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
         ...teachBack.map((item) => `你可以追问：${item}`),
       ])]
     }
+    if (event.type === 'verification.planning_started' || event.type === 'verification.planned') {
+      const started = event.type === 'verification.planning_started'
+      const ready = payload.status === 'ready'
+      const correcting = payload.status === 'correcting'
+      const stale = payload.status === 'stale'
+      const title = started ? '正在准备浏览器检查' : correcting ? '检查方案正在校正，尚未执行' : ready ? '浏览器检查方案已准备' : stale ? '检查依据已变化' : '检查能力缺口'
+      const text = started ? '正在根据本次提交与检查要求准备方案，尚无实际执行回执。'
+        : correcting ? '检查方案正在校正，尚未执行。请以后续方案及实际检查回执为准。'
+        : ready ? '方案已准备，是否执行及通过以本机检查回执为准。'
+        : stale ? '成果或要求已变化，未执行这份旧检查方案。'
+        : '本次浏览器检查未能安排；这是检查能力或方案缺口，不能据此认定成果错误。'
+      const details = [typeof payload.reason === 'string' ? payload.reason : '',
+        typeof payload.criterion_id === 'string' ? `检查项：${payload.criterion_id}` : '',
+        ...browserCheckDetails(payload.plan)].filter(Boolean)
+      const item = message(title, text, 'system', 'decision', details)
+      item.systemActor = true
+      return [item]
+    }
     if (event.type === 'verification.completed') {
       const command = Array.isArray(payload.command) ? payload.command.filter((item): item is string => typeof item === 'string') : []
       const outcome = String(payload.outcome ?? '')
-      const label = ({ passed: '命令通过', failed: '命令失败', timeout: '执行超时', launch_error: '无法启动' } as Record<string, string>)[outcome] ?? '检查结束'
+      const label = ({ passed: '命令通过', failed: '命令失败', timeout: '执行超时', launch_error: '无法启动', unavailable: '检查工具不可用' } as Record<string, string>)[outcome] ?? '检查结束'
       const git = payload.git as Record<string, unknown> | undefined
       const details = [
         `退出码：${payload.exit_code ?? '无'}`,
         typeof payload.for_event === 'number' ? `关联自报事件 #${payload.for_event}；并不自动证实其结论` : '',
         git?.head ? `Git 提交：${String(git.head).slice(0, 12)}${git.dirty ? '（工作区有未提交改动，检查未绑定具体文件内容）' : ''}` : '未识别 Git 状态',
         '仅表示这条本地命令的观察结果，不代表根因或整项任务已证实。',
+        ...browserCheckDetails(payload.browser_plan),
       ]
+      if (outcome === 'unavailable') details.push('检查工具不可用或回执不完整，不能据此认定成果错误。')
       for (const [key, label] of [['stdout', '标准输出'], ['stderr', '错误输出']] as const) {
-        const output = payload[key] as { excerpt?: unknown } | undefined
-        if (typeof output?.excerpt === 'string' && output.excerpt) details.push(`${label}：${output.excerpt}`)
+        const output = payload[key] as { excerpt?: unknown; complete?: unknown; truncated?: unknown } | undefined
+        if (!(key === 'stdout' && payload.browser_report) && typeof output?.excerpt === 'string' && output.excerpt) details.push(`${label}：${output.excerpt}`)
+        if (output?.complete === false) details.push(`${label}采集未完成。`)
+        if (output?.truncated === true) details.push(`${label}已截断，当前展示不是完整输出。`)
       }
       if (typeof payload.launch_error === 'string') details.push(`启动错误：${payload.launch_error}`)
       if (typeof payload.cleanup_error === 'string') details.push(`清理错误：${payload.cleanup_error}`)
-      return [message(`本机检查 · ${label}`, command.join(' '), 'system', 'decision', details)]
+      const item = message(`本机检查 · ${label}`, command.join(' '), 'system', 'decision', details)
+      item.systemActor = true
+      return [item]
     }
     if (event.type === 'cabinet.voted') {
       const tally = payload.tally as Record<string, unknown> | undefined
       return [message('伙伴们给出建议', reasonText(String(tally?.reason ?? '几位伙伴已经看过当前选项。')), 'system', 'decision')]
     }
     if (event.type === 'agent.decided' || event.type === 'supreme.decided') return [message('自治决策', reasonText(String(payload.reason ?? '')), 'system', 'decision')]
-    if (event.type === 'brief.generated' && !hasAutonomousDecision) {
+    if (event.type === 'brief.generated') {
       const brief = payload.brief as Record<string, unknown> | undefined
       const checkpoint = brief?.checkpoint as { state?: string } | undefined
+      if (payload.reason === 'work_checkpoint' && checkpoint?.state === 'waiting_local_check') {
+        const summary = typeof brief?.dispute === 'string' ? brief.dispute : '已有成果提交，当前实际检查回执尚未补齐。'
+        const item = message('等待实际检查', `当前没有完整检查回执，具体待查原因以检查记录为准。源码审查可以先进行，但不能替代浏览器等实际运行验证；补齐当前成果的检查回执后才能放行后续工作。\n${summary}`, 'system')
+        item.actor = 'system'
+        item.display = '系统'
+        item.role = ''
+        item.systemActor = true
+        return [item]
+      }
+      if (hasAutonomousDecision) return []
       // Routine handoffs belong to the worker/reviewer, not another manager speech.
       if (payload.reason === 'work_checkpoint' && ['running', 'waiting_check', 'delivery_checking', 'delivery_reviewing', 'ready', 'planned', 'accepted'].includes(checkpoint?.state ?? '')) return []
       return [message('本轮总结', reasonText(String(brief?.dispute ?? '团队已完成一轮协作。')), 'system')]
@@ -950,7 +1017,7 @@ function App() {
 
   const team = organization ? [...organization.workers, organization.leader, ...organization.cabinet] : roles
   const names = Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))
-  const participants = task ? conversationParticipants(task, organization?.leader.id ?? 'store_manager', team.map((member) => member.id), [...(currentDetail?.questions ?? []), ...(currentDetail?.clarifications ?? [])].map((question) => question.role_id)) : []
+  const participants = task ? conversationParticipants(task, organization?.leader.id ?? 'store_manager', team.map((member) => member.id), [...(currentDetail?.questions ?? []), ...(currentDetail?.clarifications ?? [])].map((question) => question.role_id), currentDetail?.events) : []
   const rulesControl = <RulesPanel key={`rules:${selectedId ?? '$new'}`} request={api} taskId={selectedId ?? undefined} projectId={task ? task.project_id : newProject?.id} draft={task ? message : draft} busy={Boolean(loading || isSending || currentDetail?.activity?.active)} onProjectChange={async (project) => {
     if (selectedId) {
       if (!project) return
@@ -1058,24 +1125,41 @@ function ArtifactPreview(props: { item: Artifact; publisher?: string; showSummar
   return <Suspense fallback={<p role="status" className="question-progress">正在读取成果…</p>}><LazyArtifactPreview {...props} /></Suspense>
 }
 
+function browserCheckDetails(planValue: unknown): string[] {
+  const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+  const plan = record(planValue)
+  const details: string[] = []
+  if (typeof plan.entrypoint === 'string') details.push(`浏览器入口：${plan.entrypoint.slice(0, 500)}`)
+  if (Array.isArray(plan.steps)) plan.steps.slice(0, 20).forEach((step, index) => {
+    const label = record(step).label
+    if (typeof label === 'string') details.push(`计划步骤 ${index + 1}：${label.slice(0, 200)}`)
+  })
+  return details
+}
+
 function SystemRecord({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ClarificationControls }) {
   const checking = item.evidence.type === 'verification.completed'
   const passed = checking && item.evidence.payload.outcome === 'passed'
-  const technical = checking || item.evidence.type === 'agent.discipline_flagged' || item.title === '复核记录整理中'
-  const failed = checking && !passed
+  const planning = ['verification.planning_started', 'verification.planned'].includes(item.evidence.type)
+  const technical = checking || planning || item.evidence.type === 'agent.discipline_flagged' || item.title === '复核记录整理中'
+  const failed = (checking && !passed) || (item.evidence.type === 'verification.planned' && !['ready', 'correcting'].includes(String(item.evidence.payload.status)))
+  const [expanded, setExpanded] = useState(failed)
   const attention = failed || ['activity.failed', 'driver.failed', 'driver.budget_exhausted'].includes(item.evidence.type)
   const Icon = attention ? TriangleAlert : passed ? CheckCircle2 : Info
   const heading = <><strong>系统</strong>{item.title && <span> · {item.title}</span>}</>
   const body = <>
     <p className={checking ? 'font-mono' : undefined}>{item.text}</p>
     {item.details?.length ? <ul>{item.details.map((detail, index) => <li key={index}>{detail}</li>)}</ul> : null}
+    {checking && expanded && item.evidence.payload.browser_report !== undefined && <Suspense fallback={<p>正在读取浏览器执行回执…</p>}>
+      <BrowserReport report={item.evidence.payload.browser_report} />
+    </Suspense>}
     <MessageContext item={item} taskId={taskId} controls={controls} />
     <AuditTrail item={item} />
   </>
   return <article className={`system-record-row${attention ? ' needs-attention' : ''}`}>
     <Icon size={16} aria-hidden="true" />
     <div data-actor="system" className="message-bubble is-system system-record">
-      {technical ? <details open={failed}>
+      {technical ? <details open={failed} onToggle={(event) => setExpanded(event.currentTarget.open)}>
         <summary>{heading}</summary>
         <div>{body}</div>
       </details> : <><header>{heading}</header>{body}</>}
@@ -1118,7 +1202,7 @@ function MemoryBoard({ items, names }: { items: MemoryItem[]; names: Record<stri
 
 function VerificationBoard({ items }: { items: Verification[] }) {
   if (!items.length) return null
-  return <section className="mb-5 border-b border-[#eaded1] pb-5"><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">本机检查</h2><span className="text-xs text-stone-400">显式运行 · {items.length} 次</span></div><div className="space-y-3">{[...items].reverse().slice(0, 3).map((item) => <div key={item.seq} className={`border-l-2 pl-3 py-1 ${item.outcome === 'passed' ? 'border-emerald-600' : 'border-rose-600'}`}><strong className="text-xs text-stone-800">{item.outcome === 'passed' ? '命令通过' : item.outcome === 'timeout' ? '执行超时' : item.outcome === 'launch_error' ? '无法启动' : '命令失败'}</strong><p className="mt-1 break-all font-mono text-[11px] leading-5 text-stone-600">{item.command.join(' ')}</p><p className="mt-1 text-[11px] text-stone-500">事件 #{item.seq}{item.for_event ? ` · 关联自报 #${item.for_event}` : ''} · 退出码 {item.exit_code ?? '无'}</p>{item.git?.dirty && <p className="mt-1 text-[11px] text-amber-700">工作区有未提交改动，未绑定具体文件内容</p>}</div>)}</div><p className="mt-2 text-[11px] leading-5 text-stone-500">单条命令通过，不代表诊断或整项任务已证实。</p></section>
+  return <section className="mb-5 border-b border-[#eaded1] pb-5"><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">本机检查</h2><span className="text-xs text-stone-400">显式运行 · {items.length} 次</span></div><div className="space-y-3">{[...items].reverse().slice(0, 3).map((item) => <div key={item.seq} className={`border-l-2 pl-3 py-1 ${item.outcome === 'passed' ? 'border-emerald-600' : 'border-rose-600'}`}><strong className="text-xs text-stone-800">{item.outcome === 'passed' ? '命令通过' : item.outcome === 'timeout' ? '执行超时' : item.outcome === 'launch_error' ? '无法启动' : item.outcome === 'unavailable' ? '检查工具不可用' : '命令失败'}</strong><p className="mt-1 break-all font-mono text-[11px] leading-5 text-stone-600">{item.command.join(' ')}</p><p className="mt-1 text-[11px] text-stone-500">事件 #{item.seq}{item.for_event ? ` · 关联自报 #${item.for_event}` : ''} · 退出码 {item.exit_code ?? '无'}</p>{item.outcome === 'unavailable' && <p className="mt-1 text-[11px] text-amber-700">工具不可用，不能据此认定成果错误。</p>}{item.git?.dirty && <p className="mt-1 text-[11px] text-amber-700">工作区有未提交改动，未绑定具体文件内容</p>}</div>)}</div><p className="mt-2 text-[11px] leading-5 text-stone-500">单条命令通过，不代表诊断或整项任务已证实。</p></section>
 }
 
 function Workboard({ task, detail, names, driverCoverage, showEvidence, onToggleEvidence }: { task: Task; detail: TaskDetail | null; names: Record<string, string>; driverCoverage?: DriverCoverage[]; showEvidence: boolean; onToggleEvidence: () => void }) {

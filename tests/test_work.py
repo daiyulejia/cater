@@ -92,6 +92,20 @@ class WorkTests(unittest.TestCase):
         self.assertEqual(self.rt.work.scope(self.task), scope)
         self.assertEqual(len(list(self.rt.log.iter_events(task_id=self.task, event_types=("work.plan_created",)))), 1)
 
+    def test_rework_owner_receives_prior_body_and_review_instead_of_starting_blind(self):
+        self.rt.plan_work(self.task, [item("a")])
+        self.driver.status = "failed"
+        self.rt.collaborate(self.task)
+        failed = self.rt.work.view(self.task)["items"][0]
+        self.assertEqual(failed["status"], "ready")
+        self.driver.status = "passed"
+        self.rt.collaborate(self.task)
+        work_calls = [c for c in self.driver.calls if c.get("phase") != "review"]
+        prior = work_calls[-1]["previous_attempt"]
+        self.assertEqual(prior["review_checks"], failed["checks"])
+        self.assertEqual(prior["artifacts"][0]["content"], "assert 2 + 2 == 4\n")
+        self.assertTrue(self.rt.work.view(self.task)["stage_accepted"])
+
     def test_progress_report_uses_evidence_not_activity_completion(self):
         self.rt.plan_work(self.task, [item("a"), item("b", deps=["a"])])
         self.submit("a")
@@ -328,8 +342,14 @@ class WorkTests(unittest.TestCase):
     def test_required_checks_are_real_and_bound_to_artifact_copy(self):
         self.rt.plan_work(self.task, [item("a", local=True), item("b", deps=["a"])])
         self.rt.collaborate(self.task)
-        self.assertEqual(len(self.driver.calls), 1)
+        self.assertEqual(len(self.driver.calls), 2)
+        checks = {c["id"]: c for c in self.rt.work.view(self.task)["items"][0]["checks"]}
+        self.assertEqual(checks["meaning"]["status"], "passed")
+        self.assertEqual(checks["behavior"]["status"], "unknown")
+        self.assertEqual(checks["behavior"]["source"], "runtime_check")
         self.assertEqual(self.statuses()["b"], "blocked")
+        self.rt.collaborate(self.task)
+        self.assertEqual(len(self.driver.calls), 2, "No duplicate review without new evidence")
         receipt, _ = self.rt.verify_work(self.task, "a", "behavior", [sys.executable, "check.py"])
         self.assertTrue(receipt.payload["artifacts_unchanged"])
         self.assertEqual(receipt.payload["exit_code"], 0)

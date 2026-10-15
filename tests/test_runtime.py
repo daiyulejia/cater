@@ -2028,8 +2028,20 @@ class DriverTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("task=task_", result.stdout)
-            self.assertIn("messages=1", result.stdout)
+            self.assertIn("messages=2", result.stdout)
             self.assertIn("chain_ok=True", result.stdout)
+            with Runtime(db) as rt:
+                task = rt.tasks()[0]
+                self.assertEqual([message.get("phase") for message in task.messages], [None, "review"])
+                self.assertEqual(task.messages[0]["actor"], "dev")
+                current = rt.work.view(task.id)["items"][0]
+                self.assertEqual(task.messages[1]["actor"], current["reviewer"])
+                self.assertEqual(current["status"], "submitted")
+                self.assertFalse(rt.work.view(task.id)["stage_accepted"])
+                local_checks = [check for check in current["checks"] if check["kind"] == "local_check"]
+                self.assertTrue(local_checks)
+                self.assertTrue(all(check["status"] == "unknown" and check.get("receipt_seq") is None
+                                    and check["source"] == "runtime_check" for check in local_checks))
 
 
 class CliTests(unittest.TestCase):
@@ -3743,8 +3755,16 @@ class WebTests(unittest.TestCase):
                 task = rt.task(task_id)
                 self.assertEqual(task.commands[-1]["instruction"], "@dev propose the smallest next step")
                 self.assertEqual(task.commands[-1]["mentions"], ["dev"])
-                self.assertEqual(len(task.messages), 1)
+                self.assertEqual([message.get("phase") for message in task.messages], [None, "review"])
                 self.assertEqual(task.messages[0]["actor"], "dev")
+                current = rt.work.view(task_id)["items"][0]
+                self.assertEqual(task.messages[1]["actor"], current["reviewer"])
+                self.assertEqual(current["status"], "submitted")
+                self.assertFalse(rt.work.view(task_id)["stage_accepted"])
+                local_checks = [check for check in current["checks"] if check["kind"] == "local_check"]
+                self.assertTrue(local_checks)
+                self.assertTrue(all(check["status"] == "unknown" and check.get("receipt_seq") is None
+                                    and check["source"] == "runtime_check" for check in local_checks))
 
 
 if __name__ == "__main__":

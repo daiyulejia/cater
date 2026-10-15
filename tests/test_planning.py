@@ -106,7 +106,14 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(self.planner.calls[0]["request"]["preferred_owner"], "dev")
         self.assertEqual(len(self.view()["planning"]["coverage"]), 2)
         self.assertEqual(self.rt._reported_driver_tokens("planner"), 11)
-        self.assertEqual(len(self.worker.calls), 1)
+        self.assertEqual([call.get("phase") for call in self.worker.calls], [None, "review"])
+        checks = {check["id"]: check for check in self.view()["items"][0]["checks"]}
+        self.assertEqual(checks["meaning"]["status"], "passed")
+        self.assertEqual(checks["meaning"]["source"], "model_assessment")
+        self.assertEqual(checks["behavior"]["status"], "unknown")
+        self.assertEqual(checks["behavior"]["source"], "runtime_check")
+        self.assertNotIn("receipt_seq", checks["behavior"])
+        self.assertFalse(self.view()["stage_accepted"])
         self.rt.verify_work(self.task, "implement", "behavior", [sys.executable, "check.py"])
         self.rt.collaborate(self.task)
         self.assertTrue(self.view()["stage_accepted"])
@@ -147,7 +154,14 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(current["submission"]["artifact_seqs"], old["artifact_seqs"])
         self.assertNotEqual(current["submission"]["digest"], old["digest"])
         self.assertEqual(current["status"], "submitted")
-        self.assertEqual(current["checks"], [])
+        checks = {check["id"]: check for check in current["checks"]}
+        self.assertEqual(checks["meaning"]["status"], "passed")
+        self.assertEqual(checks["meaning"]["source"], "model_assessment")
+        self.assertEqual(checks["behavior"]["status"], "unknown")
+        self.assertEqual(checks["behavior"]["source"], "runtime_check")
+        self.assertNotIn("receipt_seq", checks["behavior"])
+        self.assertEqual(self.rt.work.checks(self.task, current), {})
+        self.assertFalse(self.view()["stage_accepted"])
         self.assertEqual(len([c for c in self.worker.calls if c.get("phase") != "review"]), 1)
         self.assertEqual(len(self.planner.calls[-1]["sources"]), 3)
         self.rt.verify_work(self.task, "implement", "behavior", [sys.executable, "check.py"])
@@ -445,12 +459,15 @@ class PlanningTests(unittest.TestCase):
         self.assertEqual(len(self.planner.calls), 2)
         self.assertEqual(len(self.planner.dialogue_calls), 1)
         self.assertIn("还必须支持中文错误信息", [s["text"] for s in self.planner.calls[-1]["sources"]])
-        self.assertEqual(len(self.worker.calls), 1)
+        self.assertEqual([call.get("phase") for call in self.worker.calls], [None, "review"])
+        self.assertEqual(self.worker.calls[-1]["missing_local_checks"], ["behavior"])
+        self.assertFalse(data["task"]["work"]["stage_accepted"])
         finishes = [e["payload"]["status"] for e in data["events"] if e["type"] == "planning.finished"]
         self.assertEqual(finishes, ["stale", "installed"])
 
     def test_changed_scope_during_reuse_does_not_lock_uninvoked_work(self):
         self.rt.collaborate(self.task)
+        previous_calls = copy.deepcopy(self.worker.calls)
         self.planner.reuse = True
         self.rt.command(self.task, "新的要求")
         original = self.rt.work.resubmit_candidate
@@ -464,7 +481,7 @@ class PlanningTests(unittest.TestCase):
         current = self.view()["items"][0]
         self.assertFalse(current["in_flight"])
         self.assertEqual(current["status"], "stale")
-        self.assertEqual(len(self.worker.calls), 1)
+        self.assertEqual(self.worker.calls, previous_calls)
 
     def test_large_inputs_are_blocked_without_truncation_or_call(self):
         for index in range(12):

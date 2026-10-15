@@ -8,7 +8,7 @@
       "status": {"type": "string", "enum": ["passed", "failed", "unknown"]},
       "reason": {"type": "string", "minLength": 1, "maxLength": 2000},
       "artifact_seq": {"type": ["integer", "null"]},
-      "quote": {"type": "string", "maxLength": 2000, "description": "An exact contiguous excerpt, not a paraphrase or ellipsis. For unknown with no available citation, use empty quote and null artifact_seq."},
+      "quote": {"type": "string", "maxLength": 2000, "description": "An exact contiguous excerpt, not a paraphrase or ellipsis. Cite source text using artifact_seq, or a browser receipt's observed_quotes using null artifact_seq and its exact receipt_seq. For unknown with no available citation, use empty quote and null artifact_seq."},
       "receipt_seq": {"type": ["integer", "null"], "description": "Exact current local-check receipt for relevance assessment, null for review-only criteria."}
     }
   }}}

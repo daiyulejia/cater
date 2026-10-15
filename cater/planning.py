@@ -174,6 +174,7 @@ class Planner:
                     raise WorkConflict(last.payload["reason"])
             context.clear()
             context.update(phase="planning", scope=scope, sources=requirement_sources(events), previous_plan=previous,
+                           execution_capabilities=self.rt.browser_checks.capabilities(),
                            candidate_artifacts={i["id"]: self.rt.work.artifacts(task_id, i["submission"])
                                                 for i in previous["items"] if i.get("submission")},
                            request=request.payload if request else {},
@@ -223,6 +224,8 @@ class Planner:
             "Keyword matches and arbitrary counts cannot establish semantic quality or completeness; assess those through review. "
             "Prose-only deliverables with no execution claims may use only review criteria when no active check obligation requires otherwise. "
             "Include reproducible local_check criteria for code behavior and test claims; narrative review cannot prove execution. "
+            "Use the supplied execution_capabilities as facts. If automatic checks are unavailable, disclose that gap "
+            "in the plan summary; do not promise autonomous execution or replace required checks with narrative approval. "
             "Preserve every active local_check obligation: its obligation_id, work item binding, criterion id, subject and text. "
             "Copy existing obligation_id and subject explicitly, even if the business objective description changes. "
             "Do not merge identical check texts, move checks to unrelated work, restore retired bindings or silently downgrade them. "

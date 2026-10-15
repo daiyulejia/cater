@@ -182,6 +182,8 @@ class ConversationService:
                 text = event.payload.get("reply")
             elif event.actor == Actor.system("explainer") and event.type == "question.finished":
                 text = event.payload.get("answer")
+            elif event.actor == Actor.system("collaboration") and event.type == "collaboration.finished":
+                text = event.payload.get("reply") or event.payload.get("reason")
             if isinstance(text, str) and text.strip():
                 history.append({"seq": event.seq, "actor": event.payload.get("speaker_id", event.actor.id),
                                 "kind": event.actor.kind, "text": text[:2000]})

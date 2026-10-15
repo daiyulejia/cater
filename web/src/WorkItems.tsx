@@ -11,7 +11,10 @@ export type WorkState = {
     id: string; owner: string; reviewer: string | null; objective: string; status: string; reason: string
     depends_on: string[]
     criteria: { id: string; text: string; kind: string }[]
-    checks: { id: string; status: string; reason: string; quote?: string; artifact_seq?: number; receipt_seq?: number }[]
+    checks: { id: string; status: string; reason: string; quote?: string; artifact_seq?: number | null; receipt_seq?: number }[]
+    check_in_flight?: boolean
+    check_uncertain?: boolean
+    check_lifecycle?: Record<string, { receipt_seqs?: number[] }>
     submission: { seq: number; artifact_seqs: number[]; reused_from?: number } | null
   }[]
 }
@@ -46,6 +49,14 @@ export function WorkItems({ work, names }: { work?: WorkState | null; names: Rec
     </details>}
     <ol className="divide-y divide-[#e6e4db]">
       {work.items.map((item, index) => {
+        const missingChecks = item.status === 'submitted' && item.submission && work.scope_current !== false
+          ? item.criteria.filter((criterion) => criterion.kind === 'local_check'
+            && !item.checks.some((check) => check.id === criterion.id && Number.isInteger(check.receipt_seq) && check.receipt_seq! > 0)
+            && !item.check_lifecycle?.[criterion.id]?.receipt_seqs?.some((seq) => Number.isInteger(seq) && seq > 0)) : []
+        const waitingCheck = missingChecks.length > 0 && !item.check_in_flight && !item.check_uncertain
+        const state = item.status === 'submitted' && item.check_uncertain ? '检查结果待核对'
+          : item.status === 'submitted' && item.check_in_flight ? '正在实际检查'
+            : waitingCheck ? '等待实际检查' : labels[item.status] ?? '状态待核对'
         const Icon = item.status === 'accepted' ? CheckCircle2 : item.status === 'running' ? LoaderCircle
           : item.status === 'submitted' || item.status === 'blocked' ? Clock3
             : item.status === 'uncertain' || item.status === 'stale' ? CircleAlert : Circle
@@ -54,8 +65,9 @@ export function WorkItems({ work, names }: { work?: WorkState | null; names: Rec
             <summary className="flex cursor-pointer list-none items-start gap-2 text-xs [&::-webkit-details-marker]:hidden">
               <Icon size={16} className={`mt-0.5 shrink-0 ${item.status === 'accepted' ? 'text-teal-700' : 'text-amber-700'}`} />
               <div className="min-w-0 flex-1">
-                <span className="flex flex-wrap justify-between gap-1"><strong>{index + 1}. {names[item.owner] ?? item.owner}</strong><span className="text-stone-500">{labels[item.status] ?? '状态待核对'}</span></span>
+                <span className="flex flex-wrap justify-between gap-1"><strong>{index + 1}. {names[item.owner] ?? item.owner}</strong><span className="text-stone-500">{state}</span></span>
                 <p className="mt-1 line-clamp-2 break-words leading-5 text-stone-600 group-open:line-clamp-none">{item.objective}</p>
+                {waitingCheck && <p className="mt-1 break-words leading-5 text-amber-800">成果已提交，尚缺 {missingChecks.length} 项实际检查回执；源码审查不能替代运行验证，后续依赖工作暂不放行。</p>}
               </div><ChevronRight size={14} className="mt-1 shrink-0 text-stone-400 group-open:rotate-90" />
             </summary>
             <div className="ml-6 mt-3 space-y-2 text-xs leading-5 text-stone-600">

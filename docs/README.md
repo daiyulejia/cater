@@ -7,6 +7,7 @@
 - [接入复盘](integration-review.md)：如何在把第三方工具包进 driver 边界前检查它。
 - [可读成果](artifacts.zh-CN.md)：如何发布正文、标明来源，并在对话中阅读、复制和下载。
 - [本机检查](local-verification.zh-CN.md)：显式命令核验的证据与进程运行边界。
+- [自动浏览器检查](browser-checks.zh-CN.md)：可选 Playwright 执行器、按需检查指引与版本绑定回执。
 - [项目与店规](project-rules.zh-CN.md)：在聊天中保留工作要求、查看来源和版本，以及当前的保证边界。
 - [衍生对话](conversations.zh-CN.md)：从创建时的背景快照开展新工作，原群与新群独立推进。
 - [交付追问](questions.zh-CN.md)：在同一群里提问、查看讲解依据，并区分提问与改要求。

@@ -111,7 +111,9 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
         elif event.type == "driver.failed":
             task.driver_failures.append({"seq": event.seq, **payload})
         elif ((event.type == "question.finished" and event.actor.id == "explainer")
-              or (event.type == "conversation.finished" and event.actor.id == "conversation")) and event.actor.kind == "system" and "driver" in payload:
+              or (event.type == "conversation.finished" and event.actor.id == "conversation")
+              or (event.type == "collaboration.finished" and event.actor.id == "collaboration")
+              or (event.type == "verification.planned" and event.actor.id == "local_verifier")) and event.actor.kind == "system" and "driver" in payload:
             tokens = payload.get("tokens")
             task.tokens += tokens if valid_token_count(tokens) else 0
             source = usage_source(tokens, payload.get("token_usage"))

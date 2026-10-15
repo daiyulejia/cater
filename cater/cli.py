@@ -69,6 +69,7 @@ def open_runtime(args: argparse.Namespace) -> Runtime:
         db,
         drivers_path=args.drivers,
         roles_path=args.roles,
+        browser_checker_path=getattr(args, "browser_checker", None),
         driver_attempts=args.driver_attempts,
         circuit_breaker_threshold=args.circuit_breaker_threshold,
         audit_key=resolve_audit_key(args),
@@ -707,6 +708,7 @@ def cmd_web(args: argparse.Namespace) -> int:
         port=args.port,
         drivers_path=args.drivers,
         roles_path=args.roles,
+        browser_checker_path=args.browser_checker,
         driver_attempts=args.driver_attempts,
         circuit_breaker_threshold=args.circuit_breaker_threshold,
         audit_key=resolve_audit_key(args),
@@ -724,6 +726,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--db", help="SQLite database path")
     parser.add_argument("--drivers", help="driver config JSON")
     parser.add_argument("--roles", help="role config JSON")
+    parser.add_argument("--browser-checker", help="trusted optional browser checker config JSON")
     parser.add_argument("--driver-attempts", type=int, default=2, help="driver retry attempts before containment")
     parser.add_argument("--circuit-breaker-threshold", type=int, default=2, help="failures before a driver circuit opens")
     parser.add_argument("--audit-key", help="HMAC audit key")

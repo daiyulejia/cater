@@ -18,4 +18,4 @@ cater = "cater.cli:main"
 include = ["cater*"]
 
 [tool.setuptools.package-data]
-cater = ["packs/*.json", "static/workroom/*", "static/workroom/assets/*"]
+cater = ["packs/*.json", "packs/*.md", "static/workroom/*", "static/workroom/assets/*"]

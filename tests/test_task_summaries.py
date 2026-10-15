@@ -54,6 +54,20 @@ class TaskSummaryTests(unittest.TestCase):
         self.assertEqual(status, 200)
         return json.loads(raw)["tasks"], headers["ETag"]
 
+    def test_consultation_counts_real_request_and_reply_not_hidden_receipt(self):
+        with self.factory() as rt:
+            task_id = rt.create_task("咨询一次再继续")
+            rt.log.emit(type="msg.said", actor=Actor.agent("dev", "worker"), task_id=task_id,
+                        payload={"phase": "collaboration_request", "text": "请帮忙核对"})
+            rt.log.emit(type="collaboration.requested", actor=Actor.agent("dev", "worker"), task_id=task_id,
+                        payload={"recipient": "test", "question": "需要测哪些边界？"})
+            rt.log.emit(type="collaboration.finished", actor=Actor.system("collaboration"), task_id=task_id,
+                        payload={"status": "answered", "reply": "建议覆盖空输入。", "speaker_id": "test"})
+            detail = task_api_payload(rt, task_id)
+        rows, _ = self.rows()
+        self.assertEqual(rows[0]["conversation_count"], 3)
+        self.assertEqual(detail["summary"]["conversation_count"], 3)
+
     def test_empty_then_other_window_create_and_revalidate_without_history(self):
         rows, empty_tag = self.rows()
         self.assertEqual(rows, [])
@@ -107,7 +121,7 @@ class TaskSummaryTests(unittest.TestCase):
                        "delivery.review_started", "delivery.review_finished", "task.interpreted",
                        "cabinet.convened", "task.decomposed", "plan.amended", "msg.said", "msg.challenge",
                        "rule.recorded", "rule.updated", "diagnosis.recorded", "deliverable.published",
-                       "handoff.published", "verification.completed", "cabinet.voted",
+                       "handoff.published", "verification.completed", "verification.planning_started", "verification.planned", "cabinet.voted",
                        "agent.discipline_flagged", "driver.budget_exhausted", "driver.failed"]
             for kind in visible:
                 rt.log.emit(actor=Actor.system(), task_id=task, type=kind, payload={"content": "PRIVATE_BODY"})

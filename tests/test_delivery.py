@@ -476,6 +476,12 @@ class DeliveryTests(unittest.TestCase):
     def test_runtime_concurrent_work_checks_wait_for_the_whole_wave(self):
         self.rt.plan_work(self.task, [item("a", local=True), item("b", deps=["a"])])
         self.rt.collaborate(self.task)
+        self.assertEqual([call.get("phase") for call in self.worker.calls], [None, "review"])
+        before_checks = copy.deepcopy(self.worker.calls)
+        checks = {check["id"]: check for check in self.rt.work.view(self.task)["items"][0]["checks"]}
+        self.assertEqual(checks["behavior"]["status"], "unknown")
+        self.assertEqual(checks["behavior"]["source"], "runtime_check")
+        self.assertNotIn("receipt_seq", checks["behavior"])
         entered = {name: threading.Event() for name in ("pass", "fail")}
         release = {name: threading.Event() for name in entered}
         self.addCleanup(lambda: [e.set() for e in release.values()])
@@ -495,13 +501,22 @@ class DeliveryTests(unittest.TestCase):
                 errors.append(exc)
         with patch("cater.runtime.run_check", side_effect=check):
             first = threading.Thread(target=invoke, args=("pass",)); second = threading.Thread(target=invoke, args=("fail",))
-            first.start(); self.assertTrue(entered["pass"].wait(3))
-            second.start(); self.assertTrue(entered["fail"].wait(3))
-            release["pass"].set(); first.join(5)
-            self.rt.collaborate(self.task)
-            self.assertEqual(self.rt.work.view(self.task)["items"][0]["status"], "submitted")
-            self.assertEqual(len(self.worker.calls), 1)
-            release["fail"].set(); second.join(5)
+            try:
+                first.start(); self.assertTrue(entered["pass"].wait(3))
+                second.start(); self.assertTrue(entered["fail"].wait(3))
+                release["pass"].set(); first.join(5)
+                self.rt.collaborate(self.task)
+                current = self.rt.work.view(self.task)
+                self.assertEqual(current["items"][0]["status"], "submitted")
+                self.assertTrue(current["items"][0]["check_in_flight"])
+                self.assertFalse(current["stage_accepted"])
+                self.assertEqual(self.worker.calls, before_checks)
+            finally:
+                for signal in release.values():
+                    signal.set()
+                for thread in (first, second):
+                    if thread.ident is not None:
+                        thread.join(5)
         self.assertFalse(first.is_alive() or second.is_alive())
         self.assertEqual(errors, [])
         self.rt.collaborate(self.task)

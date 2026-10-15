@@ -43,7 +43,10 @@ describe('work item progress', () => {
     expect(screen.getByText('交付登录入口')).toBeTruthy()
     expect(screen.getByText('完成依赖登录的资料页')).toBeTruthy()
     expect(screen.getByText('0 / 2 项通过')).toBeTruthy()
-    expect(screen.getByText('等待验收')).toBeTruthy()
+    expect(screen.getByText('等待实际检查')).toBeTruthy()
+    const note = screen.getByText(/成果已提交，尚缺 1 项实际检查回执/)
+    expect(note.closest('summary')).toBeTruthy()
+    expect(note.textContent).toContain('源码审查不能替代运行验证')
     expect(screen.getByText('等待前置')).toBeTruthy()
     expect(screen.getByText('前置：工作 1')).toBeTruthy()
   })
@@ -64,6 +67,34 @@ describe('work item progress', () => {
     accepted.items.forEach((item) => { item.status = 'accepted' })
     render(<WorkItems work={accepted} names={{}} />)
     expect(screen.getByText('阶段验收已通过，尚不代表整体交付完成。')).toBeTruthy()
+  })
+
+  it.each(['assessment', 'lifecycle', 'review_only'])('does not claim missing execution receipts for %s', (source) => {
+    const value = structuredClone(work)
+    if (source === 'assessment') value.items[0].checks = [{ id: 'test', status: 'unknown', reason: '等待复核', receipt_seq: 10 }]
+    if (source === 'lifecycle') value.items[0].check_lifecycle = { test: { receipt_seqs: [10] } }
+    if (source === 'review_only') value.items[0].criteria[0].kind = 'review'
+    render(<WorkItems work={value} names={{}} />)
+    expect(screen.queryByText('等待实际检查')).toBeNull()
+    expect(screen.getByText('等待验收')).toBeTruthy()
+    expect(screen.queryByText(/成果已提交，尚缺/)).toBeNull()
+  })
+
+  it.each([false, true])('distinguishes in-flight and uncertain checks from checks not yet run (%s)', (uncertain) => {
+    const value = structuredClone(work)
+    value.items[0].check_in_flight = true
+    value.items[0].check_uncertain = uncertain
+    render(<WorkItems work={value} names={{}} />)
+    expect(screen.getByText(uncertain ? '检查结果待核对' : '正在实际检查')).toBeTruthy()
+    expect(screen.queryByText('等待实际检查')).toBeNull()
+  })
+
+  it('review-only approval without an execution receipt cannot hide missing local checks', () => {
+    const value = structuredClone(work)
+    value.items[0].checks = [{ id: 'test', status: 'passed', reason: '只读源码审查' }]
+    render(<WorkItems work={value} names={{}} />)
+    expect(screen.getByText('等待实际检查')).toBeTruthy()
+    expect(screen.getByText('0 / 2 项通过')).toBeTruthy()
   })
 
   it('shows requirement coverage and candidate provenance without inheriting approval', () => {

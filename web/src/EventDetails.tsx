@@ -1,3 +1,5 @@
+import { BrowserReport } from './browserReport'
+
 export type DetailEvent = {
   seq: number
   type: string
@@ -19,11 +21,13 @@ const titles: Record<string, string> = {
   'delivery.prepared': '交付清单已准备', 'delivery.review_started': '整体验收已开始',
   'delivery.review_finished': '整体验收结果', 'delivery.check_started': '整体检查已开始',
   'verification.completed': '本机验证回执', 'checks.contract_revised': '检查要求已调整',
+  'verification.planning_started': '正在准备浏览器检查', 'verification.planned': '浏览器检查方案',
   'agent.working': '成员正在处理', 'msg.said': '成员发言', 'msg.challenge': '成员提出疑问',
   'deliverable.published': '成果已发布', 'diagnosis.recorded': '诊断记录', 'handoff.published': '交接说明',
   'human.commanded': '用户指令', 'human.decided': '人工决定', 'task.progress_reported': '进度记录',
   'question.asked': '用户提问', 'question.started': '开始讲解', 'question.finished': '讲解结果',
   'conversation.received': '收到聊天消息', 'conversation.started': '正在理解消息', 'conversation.finished': '消息处理结果',
+  'collaboration.requested': '成员发起咨询', 'collaboration.finished': '定向咨询结果',
   'clarification.requested': '等待补充信息', 'activity.queued': '协作已排队',
   'activity.completed': '本轮协作已结束', 'activity.failed': '本轮协作失败',
   'driver.failed': '模型调用异常', 'driver.budget_exhausted': '模型预算已用尽',
@@ -98,11 +102,35 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
     })
     if (value.length > 8) add('其余核对项', `另有 ${value.length - 8} 项未展开。`)
   }
+  const browserPlan = (value: unknown) => {
+    const plan = record(value)
+    add('浏览器入口', plan.entrypoint)
+    if (Array.isArray(plan.steps)) list('计划步骤', plan.steps.slice(0, 20).map((step, index) => {
+      const title = text(record(step).label, 200)
+      return title ? `${index + 1}. ${title}` : ''
+    }))
+  }
 
   // Only known event contracts select fields; unrecognized payloads stay in developer details.
   if (!Object.hasOwn(titles, event.type)) return { fields, status, note: '已保存这条事件记录，暂无对应的中文摘要。' }
   add('工作项', p.work_item_id)
   switch (event.type) {
+    case 'collaboration.requested':
+      status = '已发起咨询'
+      add('咨询成员', member(p.requester)); add('咨询对象', member(p.recipient)); add('问题', p.question)
+      note = '只读咨询，不自动修改任务，也不代表接收成员已经回应。'
+      break
+    case 'collaboration.finished':
+      status = label(p.status, { answered: '已回应', declined: '未提供意见', invalid: '回复未通过核对', unavailable: '咨询暂不可用', stale: '咨询依据已变化' })
+      number('咨询事件', p.request_seq)
+      add('咨询成员', member(p.requester)); add('咨询对象', member(p.recipient))
+      if (event.actor.kind === 'system' && event.actor.id === 'collaboration' && event.actor.role === 'collaboration'
+        && (p.status === 'answered' || p.status === 'declined') && typeof p.speaker_id === 'string' && p.speaker_id === p.recipient && text(p.reply)) {
+        add('回应成员', member(p.speaker_id)); add('真实回应', p.reply)
+      } else if (p.status === 'answered' || p.status === 'declined') status = '咨询回执待核对'
+      add('原因', p.reason)
+      note = '咨询意见不代表工具执行或验收通过。引用依据可在下方展开。'
+      break
     case 'conversation.received':
       add('顾客消息', p.instruction)
       note = '收到消息不代表已修改目标或启动执行。'
@@ -158,6 +186,15 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       const handoff = record(p.handoff)
       add('交付说明', handoff.summary); list('复查步骤', handoff.reproduce); list('未覆盖范围', handoff.limits); break
     }
+    case 'verification.planning_started':
+      status = '准备检查方案'; add('检查项', p.criterion_id)
+      note = '方案准备不代表浏览器已经执行，也不代表成果通过。'; break
+    case 'verification.planned':
+      status = label(p.status, { correcting: '方案校正中', ready: '方案已准备', unsupported: '检查能力缺口', invalid: '检查方案无效', unavailable: '检查规划不可用', stale: '检查依据已变化' })
+      add('检查项', p.criterion_id); add('方案说明', p.reason); browserPlan(p.plan)
+      note = p.status === 'correcting' ? '检查方案正在校正，尚未执行。请以后续方案及实际检查回执为准。'
+        : p.status === 'ready' ? '方案不是执行回执；实际结果以本机检查为准。' : '本次未按该方案执行检查，不能据此认定成果错误。'
+      break
     case 'verification.completed': {
       const trusted = event.actor.kind === 'system' && event.actor.id === 'local_verifier' && event.actor.role === 'local_verifier' && p.source === 'explicit_local_cli'
       const complete = record(p.stdout).complete === true && record(p.stderr).complete === true
@@ -166,8 +203,9 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       const validCommand = Array.isArray(command) && command.length > 0 && command.every(arg => typeof arg === 'string') && Boolean(command[0].trim())
       const passed = p.outcome === 'passed' && p.exit_code === 0 && validCommand && complete && !p.launch_error && !p.cleanup_error && (!bound || p.artifacts_unchanged === true)
       status = !trusted ? '回执来源待核对' : passed ? '命令通过' : p.outcome === 'passed' ? '回执信息不足或不一致'
-        : label(p.outcome, { failed: '命令失败', timeout: '执行超时', launch_error: '无法启动' }, '检查结果待核对')
-      note = '仅说明这条命令的记录结果，不代表整项任务通过，也不代表应用已部署。'
+        : label(p.outcome, { failed: '命令失败', timeout: '执行超时', launch_error: '无法启动', unavailable: '检查工具不可用' }, '检查结果待核对')
+      note = p.outcome === 'unavailable' ? '检查工具不可用或回执不完整，不能据此认定成果错误。' : '仅说明这条命令的记录结果，不代表整项任务通过，也不代表应用已部署。'
+      browserPlan(p.browser_plan)
       if (validCommand) {
         add('命令程序', command[0]); add('命令参数', lines(command.slice(1).map((arg, i) => `${i + 1}. ${arg || '（空参数）'}`), 16))
       } else add('命令', '命令未记录或格式无效。')
@@ -179,7 +217,7 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       if (typeof p.artifacts_unchanged === 'boolean') add('成果正文', p.artifacts_unchanged ? '检查期间未改变' : '检查期间发生变化')
       for (const [key, name] of [['stdout', '标准输出'], ['stderr', '错误输出']]) {
         const output = record(p[key])
-        add(name, text(output.excerpt) || (output.bytes === 0 && output.complete === true ? '无输出。' : '未记录输出正文。'))
+        if (!(key === 'stdout' && p.browser_report)) add(name, text(output.excerpt) || (output.bytes === 0 && output.complete === true ? '无输出。' : '未记录输出正文。'))
         if (output.complete === false || output.truncated === true) add(`${name}采集`, [output.complete === false ? '采集未完成' : '', output.truncated === true ? '输出已截断' : ''].filter(Boolean).join('；'))
       }
       break
@@ -239,7 +277,16 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
     {fields.length > 0 && <dl className="space-y-2">{fields.map((field, index) => <div key={index} className="min-w-0 sm:grid sm:grid-cols-[7rem_minmax(0,1fr)] sm:gap-3">
       <dt className="font-semibold">{field.label}</dt><dd className="min-w-0 whitespace-pre-wrap">{field.value}</dd>
     </div>)}</dl>}
+    {event.type === 'verification.completed' && event.payload.browser_report !== undefined && <BrowserReport report={event.payload.browser_report} />}
     {note && <p className="text-[#728679]">{note}</p>}
+    {event.type === 'collaboration.finished' && ['answered', 'declined'].includes(String(event.payload.status))
+      && event.actor.kind === 'system' && event.actor.id === 'collaboration' && event.actor.role === 'collaboration'
+      && typeof event.payload.speaker_id === 'string' && event.payload.speaker_id === event.payload.recipient && Boolean(text(event.payload.reply)) && Array.isArray(event.payload.evidence)
+      && event.payload.evidence.length > 0 && <details>
+        <summary className="cursor-pointer font-semibold">咨询引用依据</summary>
+        {event.payload.evidence.filter((entry) => entry && Number.isInteger(entry.artifact_seq) && entry.artifact_seq > 0 && typeof entry.quote === 'string')
+          .map((entry, index) => <blockquote key={index} className="mt-2 whitespace-pre-wrap">成果 #{entry.artifact_seq}：{entry.quote}</blockquote>)}
+      </details>}
     <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
       <summary className="cursor-pointer text-[#728679]">开发者详情</summary>
       <pre tabIndex={0} aria-label="原始事件 JSON" className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(event, null, 2)}</pre>

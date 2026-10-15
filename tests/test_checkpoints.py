@@ -83,7 +83,9 @@ class CheckpointTests(unittest.TestCase):
         self.assertEqual(result["counts"]["checking"], 1)
         self.assertIn("等待完整回执", result["summary"])
         self.assertIn("目前没有已确认正在运行", result["summary"])
-        self.assertIn("不能拿模型 API 当执行工具", result["summary"])
+        self.assertIn("代码审查不等于实际运行", result["summary"])
+        self.assertIn("可信本机执行工具", result["summary"])
+        self.assertIn("针对本次成果的完整回执", result["summary"])
 
     def test_local_claims_without_actual_receipts_do_not_pass(self):
         submitted = item(local=True)
@@ -117,7 +119,8 @@ class CheckpointTests(unittest.TestCase):
                 self.assertEqual(result["counts"]["running"], 1)
                 self.assertIn("不能自动重放", result["summary"])
                 if check:
-                    self.assertIn("可信本机执行", result["summary"])
+                    self.assertIn("可信本机执行工具", result["summary"])
+                    self.assertIn("完整回执", result["summary"])
 
     def test_rework_and_ready_remain_distinct(self):
         for status, state, text in (("rework", "rework", "明确需要返工"), ("ready", "ready_pending", "待核对或补正")):
@@ -187,7 +190,8 @@ class CheckpointTests(unittest.TestCase):
             "criteria": [{"id": "behavior", "kind": "local_check", "text": "整体行为检查"}]}}
         result = work_checkpoint(view(item(status="accepted")), delivery, NAMES)
         self.assertEqual(result["state"], "delivery_local_check")
-        self.assertIn("不能拿模型 API 当执行工具", result["summary"])
+        self.assertIn("代码审查不等于实际运行", result["summary"])
+        self.assertIn("反复发送继续不会自动补出回执", result["summary"])
 
     def test_delivery_acceptance_cannot_override_unaccepted_or_stale_work(self):
         for work in (view(item()), view(item(status="accepted"), scope_current=False),
@@ -205,7 +209,9 @@ class CheckpointTests(unittest.TestCase):
         uncertain = item("uncertain", status="uncertain")
         result = work_checkpoint(view(*items, uncertain), {}, NAMES)
         self.assertLessEqual(len(result["summary"].splitlines()), 6)
-        self.assertIn("不能拿模型 API 当执行工具", result["summary"])
+        self.assertIn("代码审查不等于实际运行", result["summary"])
+        self.assertIn("可信本机执行工具", result["summary"])
+        self.assertIn("完整回执", result["summary"])
         self.assertIn("不能自动重放", result["summary"])
         self.assertNotIn("完整且非常长", result["summary"])
         self.assertEqual(len(result["blockers"]), 33)

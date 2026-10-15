@@ -17,6 +17,128 @@ const receipt = (payload: Record<string, unknown> = {}) => event('verification.c
   ...payload,
 }, { id: 'local_verifier', role: 'local_verifier', kind: 'system' })
 
+test.each(['correcting', 'ready', 'unsupported', 'invalid', 'unavailable', 'stale'])('浏览器方案%s呈现中文记录与执行边界', (status) => {
+  const { container } = render(<EventDetails event={event('verification.planned', { status,
+    reason: '检查方案说明。', plan: { entrypoint: 'tetris.html', steps: [{ label: '检查暂停', expression: 'PRIVATE_SCRIPT' }] },
+  })} />)
+  expect(ordinary(container)).toContain('浏览器检查方案')
+  expect(ordinary(container)).toContain('检查方案说明。')
+  expect(ordinary(container)).toContain('tetris.html')
+  expect(ordinary(container)).toContain('检查暂停')
+  expect(ordinary(container)).not.toContain('PRIVATE_SCRIPT')
+  expect(ordinary(container)).toContain(status === 'correcting' ? '检查方案正在校正，尚未执行' : status === 'ready' ? '方案不是执行回执' : '不能据此认定成果错误')
+  if (status === 'correcting') expect(ordinary(container)).not.toMatch(/检查能力缺口|工具不可用|方案无效/)
+  expect(screen.getByText('开发者详情').closest('details')!.open).toBe(false)
+})
+
+test('浏览器回执安全展示已知字段，工具不可用不是成果错误', () => {
+  const { container } = render(<EventDetails event={receipt({ outcome: 'unavailable', exit_code: 2,
+    browser_plan: { entrypoint: 'tetris.html', steps: [null, { label: '<script>alert(1)</script>', expression: 'PRIVATE_SCRIPT' }] },
+    browser_report: { outcome: 'unavailable', error: '未找到浏览器执行器。', private: 'PRIVATE_REPORT' },
+    stdout: { complete: true, excerpt: '{"private":"PRIVATE_REPORT"}' },
+  })} />)
+  expect(ordinary(container)).toContain('检查工具不可用')
+  expect(ordinary(container)).toContain('不能据此认定成果错误')
+  expect(ordinary(container)).toContain('未找到浏览器执行器。')
+  expect(ordinary(container)).toContain('<script>alert(1)</script>')
+  expect(ordinary(container)).not.toMatch(/PRIVATE_SCRIPT|PRIVATE_REPORT|命令失败/)
+  expect(container.querySelector('script')).toBeNull()
+  expect(screen.getByText('开发者详情').closest('details')!.open).toBe(false)
+})
+
+test('浏览器审计显示runner实际步骤、错误、观察与截图摘要，不漏掉隐藏stdout的截断提示', () => {
+  const { container } = render(<EventDetails event={receipt({ outcome: 'failed', exit_code: 1,
+    browser_report: {
+      outcome: 'failed', error: 'page reported uncaught JavaScript errors', truncated: true,
+      steps: [
+        { index: 1, action: 'assert_visible', label: '检查棋盘', status: 'passed', actual: true },
+        { index: 2, action: 'assert_text', label: '检查提示', status: 'failed', actual: false, observed: '', error: '未找到预期文本' },
+        { index: 3, action: 'press', label: '后续操作', status: 'not_run' },
+      ],
+      page_errors: ['<script>throw new Error()</script>'],
+      blocked_requests: [{ kind: 'websocket', url: 'wss://blocked.invalid' }],
+      console_messages: [{ type: 'error', text: '资源加载失败' }],
+      counts: { page_errors: 7, blocked_requests: 2, console_messages: 1 },
+      screenshot: { sha256: 'b'.repeat(64), size: 1234, path: 'TEMP_ONLY.png' },
+      screenshot_error: '截图清理前记录异常', private: 'HIDDEN_REPORT',
+    }, stdout: { excerpt: '{"HIDDEN_REPORT":true}', complete: false, truncated: true },
+  })} />)
+  const visible = ordinary(container)
+  expect(visible).toContain('page reported uncaught JavaScript errors')
+  expect(visible).toContain('检查棋盘')
+  expect(visible).toContain('实际判断：满足')
+  expect(visible).toContain('实际判断：不满足')
+  expect(visible).toContain('实际观察：（空文本）')
+  expect(visible).toContain('未找到预期文本')
+  expect(visible).toContain('未执行')
+  expect(visible).toContain('<script>throw new Error()</script>')
+  expect(visible).toContain('wss://blocked.invalid')
+  expect(visible).toContain('资源加载失败')
+  expect(visible).toContain('已显示 1 条；其余内容已省略或截断')
+  expect(visible).toContain('执行器报告已截断')
+  expect(visible).toContain('采集未完成；输出已截断')
+  expect(visible).toContain(`SHA-256：${'b'.repeat(64)}`)
+  expect(visible).toContain('1234 字节')
+  expect(visible).toContain('截图清理前记录异常')
+  expect(visible).not.toMatch(/TEMP_ONLY|HIDDEN_REPORT/)
+  expect(container.querySelector('img, script, a')).toBeNull()
+  expect(screen.getByText('开发者详情').closest('details')!.open).toBe(false)
+})
+
+test('浏览器报告字段异常不崩溃，界面省略长内容时明确提示', () => {
+  const { container } = render(<EventDetails event={receipt({ browser_report: {
+    outcome: 'passed', steps: [null, { label: '步'.repeat(250), status: '__proto__', actual: {}, observed: {}, error: '错'.repeat(1300) },
+      ...Array.from({ length: 20 }, () => ({ status: 'not_run' }))],
+    page_errors: Array.from({ length: 9 }, () => '页面异常'), blocked_requests: [null],
+    counts: { page_errors: 9 }, screenshot: { sha256: '<img src=x>', size: -1, path: 'TEMP_ONLY' },
+  } })} />)
+  const visible = ordinary(container)
+  expect(visible).toContain('命令通过')
+  expect(visible).toContain('状态待核对')
+  expect(visible).toContain('显示已截断')
+  expect(visible).toContain('仅显示前 20 项，共 22 项')
+  expect(visible).toContain('已显示 8 条；其余内容已省略或截断')
+  expect(visible).not.toMatch(/__proto__|\[object Object\]|<img src=x>|TEMP_ONLY/)
+})
+
+test('浏览器检查规划开始不意味着已经执行', () => {
+  const { container } = render(<EventDetails event={event('verification.planning_started', { criterion_id: 'keyboard' })} />)
+  expect(ordinary(container)).toContain('正在准备浏览器检查')
+  expect(ordinary(container)).toContain('不代表浏览器已经执行')
+})
+
+test('咨询请求只显示实际问题和对象，不假称对方收到或执行', () => {
+  const { container } = render(<EventDetails actorName={names} event={event('collaboration.requested', {
+    requester: 'dev', recipient: 'test', question: '这项约束应如何检查？', scope: { private: 'INTERNAL_SCOPE' },
+  }, { id: 'dev', role: 'dev', kind: 'agent' })} />)
+  expect(ordinary(container)).toContain('@复核伙伴')
+  expect(ordinary(container)).toContain('这项约束应如何检查？')
+  expect(ordinary(container)).not.toMatch(/INTERNAL_SCOPE|对方已收到|工具已执行/)
+})
+
+test('真实咨询回复证据默认收起，恶意文本不会变成HTML', () => {
+  const { container } = render(<EventDetails actorName={names} event={event('collaboration.finished', {
+    request_seq: 100, status: 'answered', recipient: 'test', speaker_id: 'test', reply: '需要对照棋盘源码。',
+    evidence: [{ artifact_seq: 20, quote: '<img src=x onerror=alert(1)>' }],
+  }, { id: 'collaboration', role: 'collaboration', kind: 'system' })} />)
+  expect(ordinary(container)).toContain('需要对照棋盘源码。')
+  const evidence = screen.getByText('咨询引用依据').closest('details')!
+  expect(evidence.open).toBe(false)
+  fireEvent.click(evidence.querySelector('summary')!)
+  expect(evidence.textContent).toContain('成果 #20')
+  expect(evidence.textContent).toContain('<img src=x onerror=alert(1)>')
+  expect(container.querySelector('img')).toBeNull()
+  expect(screen.getByText('开发者详情').closest('details')!.open).toBe(false)
+})
+
+test.each(['invalid', 'unavailable', 'stale'])('咨询%s的无效reply只留在开发者记录', (status) => {
+  const { container } = render(<EventDetails event={event('collaboration.finished', {
+    status, recipient: 'dev', speaker_id: 'dev', reply: 'UNTRUSTED_REPLY', reason: '咨询未完成',
+  }, { id: 'collaboration', role: 'collaboration', kind: 'system' })} />)
+  expect(ordinary(container)).toContain('咨询未完成')
+  expect(ordinary(container)).not.toContain('UNTRUSTED_REPLY')
+})
+
 test('具体工作目标与负责人一一对应，不复制完整工作契约', () => {
   const { container } = render(<EventDetails actorName={names} event={event('work.plan_created', {
     items: [{ id: 'board', owner: 'dev', reviewer: 'test', objective: '实现五子棋棋盘', secret: 'NESTED_PRIVATE' },

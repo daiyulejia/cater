@@ -42,6 +42,26 @@ function openDetails(details: HTMLDetailsElement) {
   expect(details.open).toBe(true)
 }
 
+test.each([false, true])('缺少实际检查的checkpoint明确显示系统阻塞，不冒充店长或被旧决策隐藏（decision=%s）', async (decision) => {
+  await mount([
+    ...(decision ? [event(2, 'agent.decided', 'store_manager', { reason: '此前的决策' }, 'system')] : []),
+    event(3, 'brief.generated', 'store_manager', { reason: 'work_checkpoint', brief: {
+      checkpoint: { state: 'waiting_local_check' }, dispute: '米寇已提交俄罗斯方块，测试工作等待前置成果验收。',
+    } }, 'system'),
+  ])
+  const summary = record(3)
+  expect(summary.querySelector('[data-actor="system"]')).toBeTruthy()
+  expect(summary.querySelector('[data-actor="store_manager"]')).toBeNull()
+  expect(within(summary).queryByRole('img')).toBeNull()
+  expect(visibleText(summary)).toContain('等待实际检查')
+  expect(visibleText(summary)).toContain('当前没有完整检查回执')
+  expect(visibleText(summary)).toContain('具体待查原因以检查记录为准')
+  expect(visibleText(summary)).not.toContain('尚未接通自动实际检查')
+  expect(visibleText(summary)).toContain('源码审查可以先进行')
+  expect(visibleText(summary)).toContain('米寇已提交俄罗斯方块')
+  expect(visibleText(summary)).not.toMatch(/本轮总结|团队已完成一轮协作/)
+})
+
 test.each(['review_response_correction', 'review'])('内部复核修复 %s 收进中性过程记录，但最终失败仍公开', async (phase) => {
   vi.useRealTimers()
   await mount([
@@ -78,6 +98,127 @@ test.each([true, false])('复核显示具体判断和可展开的依据，兼容
   openDetails(within(row).getByText('查看判断与依据').closest('details')!)
   expect(visibleText(row)).toContain('成果 #10')
   expect(visibleText(row)).toContain('tabindex="0"')
+})
+
+test.each([true, false])('模型不确定判断保留，系统强制检查理由仅在依据中显示（含确定判断=%s）', async (hasModel) => {
+  await mount([
+    event(2, 'work.reviewed', 'dev', { work_item_id: 'layout', status: 'submitted', checks: [
+      ...(hasModel ? [{ source: 'model_assessment', status: 'passed', reason: '源码中的键盘事件绑定完整。' }] : []),
+      { source: 'runtime_check', status: 'unknown', reason: '缺少浏览器实际检查回执。', artifact_seq: 10 },
+      { source: 'runtime_check', status: 'failed', reason: '本机检查执行失败。', receipt_seq: 12 },
+      { source: 'model_assessment', status: 'unknown', reason: '尚无足够实际观察。' },
+      { source: 'model_assessment', status: 'unknown', response_issue: true, reason: '复核回复格式待校正。' },
+    ] }, 'agent'),
+    event(3, 'msg.said', 'dev', { phase: 'review', work_item_id: 'layout', review_seq: 2,
+      speech_source: 'review_assessment', text: '缺少浏览器实际检查回执。',
+    }, 'agent'),
+  ])
+  const row = record(3)
+  expect(visibleText(row)).toContain('复核意见 · 仍有待确认项')
+  expect(visibleText(row)).not.toMatch(/缺少浏览器实际检查回执|本机检查执行失败|复核回复格式待校正/)
+  expect(visibleText(row)).toContain('尚无足够实际观察。')
+  if (hasModel) expect(visibleText(row)).toContain('源码中的键盘事件绑定完整。')
+  openDetails(within(row).getByText('查看判断与依据').closest('details')!)
+  expect(visibleText(row)).toContain('系统检查依据：缺少浏览器实际检查回执。')
+  expect(visibleText(row)).toContain('系统检查依据：本机检查执行失败。')
+  expect(visibleText(row)).toContain('成果 #10')
+  expect(visibleText(row)).toContain('检查 #12')
+  expect(visibleText(row)).toContain('待确认依据：尚无足够实际观察。')
+  expect(visibleText(row)).toContain('待确认依据：复核回复格式待校正。')
+})
+
+test.each(['started', 'correcting', 'ready', 'unsupported', 'invalid', 'unavailable', 'stale'])('浏览器检查方案 %s 只作为系统记录展示', async (status) => {
+  await mount([event(2, status === 'started' ? 'verification.planning_started' : 'verification.planned', 'store_manager', {
+    status, reason: '本次检查安排说明。', criterion_id: 'keyboard',
+    plan: { entrypoint: 'tetris.html', steps: [{ label: '检查键盘落块', expression: 'INTERNAL_SCRIPT' }] },
+    speaker_id: 'dev',
+  }, 'system')])
+  const row = record(2)
+  expect(row.querySelector('[data-actor="system"]')).toBeTruthy()
+  expect(within(row).queryByRole('img')).toBeNull()
+  const details = row.querySelector('details')!
+  expect(details.open).toBe(!['started', 'correcting', 'ready'].includes(status))
+  if (status === 'correcting') {
+    expect(visibleText(row)).toContain('检查方案正在校正，尚未执行')
+    expect(visibleText(row)).not.toMatch(/检查能力缺口|工具不可用|方案无效/)
+    expect(row.classList.contains('needs-attention')).toBe(false)
+    expect(row.querySelector('.lucide-triangle-alert')).toBeNull()
+  }
+  if (!details.open) openDetails(details)
+  expect(visibleText(row)).toContain('本次检查安排说明。')
+  expect(visibleText(row)).toContain('浏览器入口：tetris.html')
+  expect(visibleText(row)).toContain('计划步骤 1：检查键盘落块')
+  expect(visibleText(row)).not.toContain('INTERNAL_SCRIPT')
+  if (['unsupported', 'invalid', 'unavailable'].includes(status)) {
+    expect(visibleText(row)).toContain('检查能力缺口')
+    expect(visibleText(row)).toContain('不能据此认定成果错误')
+  }
+  if (status === 'ready') expect(visibleText(row)).toContain('是否执行及通过以本机检查回执为准')
+})
+
+test.each(['passed', 'failed', 'unavailable'])('浏览器%s回执沿用系统检查详情，不直接显示报告JSON', async (outcome) => {
+  await mount([event(2, 'verification.completed', 'local_verifier', {
+    outcome, command: ['browser-check', '--plan', 'plan.json'], exit_code: outcome === 'passed' ? 0 : 2,
+    browser_plan: { entrypoint: 'tetris.html', steps: [{ label: '<img src=x onerror=alert(1)>', expression: 'INTERNAL_SCRIPT' }] },
+    browser_report: { outcome, error: '执行器实际回执说明。', internal: 'PRIVATE_REPORT' },
+    stdout: { excerpt: '{"internal":"PRIVATE_REPORT"}' },
+  }, 'system')])
+  const row = record(2)
+  expect(within(row).queryByRole('img')).toBeNull()
+  if (outcome === 'passed') openDetails(row.querySelector('details')!)
+  await act(async () => { await vi.dynamicImportSettled() })
+  expect(visibleText(row)).toContain('浏览器入口：tetris.html')
+  expect(visibleText(row)).toContain('执行器实际回执说明。')
+  expect(visibleText(row)).toContain('<img src=x onerror=alert(1)>')
+  expect(visibleText(row)).not.toMatch(/PRIVATE_REPORT|INTERNAL_SCRIPT/)
+  if (outcome === 'unavailable') {
+    expect(visibleText(row)).toContain('检查工具不可用')
+    expect(visibleText(row)).toContain('不能据此认定成果错误')
+    expect(visibleText(row)).not.toContain('命令失败')
+  }
+})
+
+test('浏览器真实失败步骤和页面错误可见，截图只有摘要，截断明确提示', async () => {
+  await mount([event(2, 'verification.completed', 'local_verifier', {
+    outcome: 'failed', source: 'explicit_local_cli', command: ['browser-check'], exit_code: 1,
+    browser_plan: { entrypoint: 'tetris.html', steps: [{ label: '方案描述不代表执行结果' }] },
+    browser_report: {
+      outcome: 'failed', error: 'one or more steps failed or were not run', truncated: true,
+      steps: [
+        { index: 1, action: 'click', label: '点击开始', status: 'passed' },
+        { index: 2, action: 'assert_text', label: '检查分数', status: 'failed', actual: false, observed: '分数：0', error: '<img src=x onerror=alert(1)>' },
+        { index: 3, action: 'press', label: '继续按键', status: 'not_run' },
+      ],
+      page_errors: ['ReferenceError: score is not defined'],
+      blocked_requests: [{ kind: 'request', url: 'https://blocked.invalid/data' }],
+      counts: { page_errors: 4, blocked_requests: 1, console_messages: 0 },
+      screenshot: { sha256: 'a'.repeat(64), size: 456, path: 'TEMP_PRIVATE_SCREENSHOT.png' },
+    },
+    stdout: { complete: false, truncated: true, excerpt: '{"RAW_REPORT":"hidden"}' },
+  }, 'system')])
+  const row = record(2)
+  await act(async () => { await vi.dynamicImportSettled() })
+  const visible = visibleText(row)
+  expect(visible).toContain('执行错误：one or more steps failed or were not run')
+  expect(visible).toContain('执行步骤 1：通过')
+  expect(visible).toContain('执行步骤 2：失败')
+  expect(visible).toContain('检查分数')
+  expect(visible).toContain('实际判断：不满足')
+  expect(visible).toContain('实际观察：分数：0')
+  expect(visible).toContain('错误：<img src=x onerror=alert(1)>')
+  expect(visible).toContain('执行步骤 3：未执行')
+  expect(visible).toContain('ReferenceError: score is not defined')
+  expect(visible).toContain('页面错误总数：4')
+  expect(visible).toContain('其余内容已省略或截断')
+  expect(visible).toContain('https://blocked.invalid/data')
+  expect(visible).toContain('执行器报告已截断')
+  expect(visible).toContain('标准输出采集未完成')
+  expect(visible).toContain('标准输出已截断')
+  expect(visible).toContain(`SHA-256：${'a'.repeat(64)}`)
+  expect(visible).toContain('大小：456 字节')
+  expect(visible).toContain('临时文件会清理，不提供打开链接')
+  expect(visible).not.toMatch(/TEMP_PRIVATE_SCREENSHOT|RAW_REPORT/)
+  expect(row.querySelector('img, a[href*="SCREENSHOT"], a[href*="blocked.invalid"]')).toBeNull()
 })
 
 test('系统复核失败不冒充角色发言，也不挪用其他角色或工作项的判断', async () => {

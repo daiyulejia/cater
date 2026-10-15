@@ -1,0 +1,13 @@
+{
+  "name": "cater-browser-check",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Optional isolated Playwright adapter for copied static artifacts",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "install:browser": "playwright install chromium"
+  },
+  "dependencies": { "playwright": "1.64.1" }
+}

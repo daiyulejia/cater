@@ -376,6 +376,15 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(self.events("msg.said"), [])
         self.assertEqual(self.events("activity.queued"), [])
 
+    def test_collaboration_advice_is_in_history_without_claiming_execution(self):
+        advice = self.rt.log.emit(type="collaboration.finished", actor=Actor.system("collaboration"), task_id=self.task,
+            payload={"status": "answered", "speaker_id": "test", "reply": "建议先测边界，尚未执行测试。"})
+        self.resolve("那你们刚才建议怎么做？")
+        history = self.driver.calls[0]["context"]["conversation"]["history"]
+        self.assertEqual(history[-1]["seq"], advice.seq)
+        self.assertEqual(history[-1]["actor"], "test")
+        self.assertIn("尚未执行测试", history[-1]["text"])
+
     def test_progress_reports_are_in_recent_history(self):
         progress = self.rt.report_progress(self.task, command_seq=0)
         self.resolve()

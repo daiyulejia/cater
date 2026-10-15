@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from cater.drivers import DriverResponse
@@ -129,7 +130,8 @@ class ReviewRepairTests(unittest.TestCase):
 
     def test_correction_cannot_upgrade_unknown_check_relevance_with_real_receipt(self):
         self.mixed_review(local=True)
-        self.rt.collaborate(self.task)
+        with patch.object(self.rt, "_review_work_item"):
+            self.rt.collaborate(self.task)
         self.assertEqual(self.driver.review_count, 0)
         receipt, _ = self.rt.verify_work(self.task, "draft", "meaning", [sys.executable, "check.py"])
         self.rt.collaborate(self.task)
@@ -291,10 +293,15 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(len(self.driver.calls), before)
 
     def test_missing_local_receipt_is_not_explained_as_response_format_failure(self):
+        self.driver.review_count = 1
         self.rt.plan_work(self.task, [item("draft", local=True)])
         result = self.rt.collaborate(self.task)
         checkpoint = result["brief"]["checkpoint"]
         self.assertEqual(checkpoint["state"], "waiting_local_check")
         self.assertIn("实际检查回执", checkpoint["summary"])
-        self.assertEqual(self.driver.review_count, 0)
+        self.assertEqual(self.driver.review_count, 2)
+        checks = {c["id"]: c for c in self.rt.work.view(self.task)["items"][0]["checks"]}
+        self.assertEqual(checks["meaning"]["status"], "passed")
+        self.assertEqual(checks["behavior"]["status"], "unknown")
+        self.assertNotIn("response_issue", checks["behavior"])
         self.assertEqual(self.repairs(), [])

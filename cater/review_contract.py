@@ -29,7 +29,24 @@ def response_schema(context: dict) -> dict:
     return schema
 
 
-def assessment(results: list, criterion_id: str, artifacts: dict) -> tuple[dict | None, str | None, dict | None]:
+def browser_observations(receipt: dict | None) -> list[str]:
+    if not receipt or receipt.get("check_kind") != "browser":
+        return []
+    report = receipt.get("browser_report")
+    if not isinstance(report, dict):
+        return []
+    values = [report.get("error")]
+    steps = report.get("steps", [])
+    if isinstance(steps, list):
+        for step in steps:
+            if isinstance(step, dict):
+                values.extend((step.get("error"), step.get("actual")))
+    # Cite observed output, not a plan label or an assertion's expected value.
+    return list(dict.fromkeys(value for value in values if isinstance(value, str) and value.strip()))
+
+
+def assessment(results: list, criterion_id: str, artifacts: dict,
+               receipt: dict | None = None) -> tuple[dict | None, str | None, dict | None]:
     rows = [r for r in results if isinstance(r, dict) and r.get("id") == criterion_id]
     if len(rows) != 1:
         return None, "missing_result" if not rows else "duplicate_result", None
@@ -41,6 +58,14 @@ def assessment(results: list, criterion_id: str, artifacts: dict) -> tuple[dict 
         return None, "missing_reason", row
     if status == "unknown" and seq is None and quote in (None, ""):
         return {"status": status, "reason": reason}, None, row
+    if seq is None and receipt and receipt.get("check_kind") == "browser":
+        if type(row.get("receipt_seq")) is not int or row["receipt_seq"] != receipt.get("seq"):
+            return None, "invalid_receipt", row
+        if not isinstance(quote, str) or not quote.strip() or len(quote) > 2000:
+            return None, "missing_quote", row
+        if not any(quote in observed for observed in browser_observations(receipt)):
+            return None, "quote_not_found", row
+        return {"status": status, "reason": reason, "quote": quote, "artifact_seq": None}, None, row
     if type(seq) is not int or seq not in artifacts:
         return None, "invalid_artifact", row
     if not isinstance(quote, str) or not quote.strip() or len(quote) > 2000:

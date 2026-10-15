@@ -57,6 +57,7 @@ The guides below are primarily in Chinese.
 - [Deliverables and replay](docs/artifacts.zh-CN.md)
 - [Work items and whole-task acceptance](docs/work-items.zh-CN.md)
 - [Local verification and safety](docs/local-verification.zh-CN.md)
+- [Optional automated browser checks](docs/browser-checks.zh-CN.md)
 - [Frontend development and remote access](web/README.md)
 - [Contributing](CONTRIBUTING.md)
 

@@ -661,12 +661,14 @@ class WorkLedger:
             checks = []
             local = self.checks(task_id, item)
             for criterion in item["criteria"]:
-                check = {"id": criterion["id"], "kind": criterion["kind"], "status": "unknown", "reason": "缺少可核对的验收依据。"}
-                judgment, issue, row = assessment(raw_results, criterion["id"], artifacts)
+                check = {"id": criterion["id"], "kind": criterion["kind"], "status": "unknown",
+                         "reason": "缺少可核对的验收依据。", "source": "runtime_check"}
+                receipt = local.get(criterion["id"]) if criterion["kind"] == "local_check" else None
+                judgment, issue, row = assessment(raw_results, criterion["id"], artifacts,
+                                                  {**receipt.payload, "seq": receipt.seq} if receipt else None)
                 if issue:
                     check.update(reason=ISSUES[issue], response_issue=issue)
                 if criterion["kind"] == "local_check":
-                    receipt = local.get(criterion["id"])
                     if receipt:
                         passed = self._receipt_passed(receipt)
                         check.update(execution_status="passed" if passed else "failed", receipt_seq=receipt.seq,
@@ -674,20 +676,42 @@ class WorkLedger:
                                      else "实际检查未通过，成员评价不能覆盖执行结果。")
                         if not passed:
                             check.pop("response_issue", None)
-                            check["status"] = "failed"
+                            if receipt.payload.get("outcome") == "unavailable":
+                                check.update(status="unknown", execution_status="unavailable",
+                                             reason="检查工具未产生有效执行结论，需要恢复工具或补充检查；不据此判定成果错误。")
+                            elif receipt.payload.get("check_kind") == "browser":
+                                check.update(status="unknown", reason="浏览器检查失败，尚未独立判定是成果问题还是测试方案问题。")
+                                if (judgment and judgment["status"] in {"failed", "unknown"}
+                                        and type(row.get("receipt_seq")) is int and row["receipt_seq"] == receipt.seq):
+                                    check.update(judgment, source="model_assessment")
+                                else:
+                                    if issue:
+                                        check.update(response_issue=issue)
+                                    elif judgment and (type(row.get("receipt_seq")) is not int or row["receipt_seq"] != receipt.seq):
+                                        check.update(response_issue="invalid_receipt")
+                                    report = receipt.payload.get("browser_report")
+                                    if isinstance(report, dict):
+                                        steps = report.get("steps", [])
+                                        failed_step = next((s for s in steps if isinstance(s, dict) and s.get("status") == "failed"), None) if isinstance(steps, list) else None
+                                        detail = (str(failed_step.get("label", "")) + "：" + str(failed_step.get("error", ""))
+                                                  if failed_step else str(report.get("error", "")))
+                                        if detail:
+                                            check["reason"] += "实际失败：" + detail[:1200]
+                            else:
+                                check["status"] = "failed"
                         # A successful process is necessary, not sufficient evidence
                         # that the command actually tests this acceptance criterion.
                         elif judgment and type(row.get("receipt_seq")) is int and row["receipt_seq"] == receipt.seq:
-                            check.update(judgment)
+                            check.update(judgment, source="model_assessment")
                         elif judgment and judgment["status"] == "unknown":
-                            check.update(judgment)
+                            check.update(judgment, source="model_assessment")
                         elif judgment:
                             check.update(reason=ISSUES["invalid_receipt"], response_issue="invalid_receipt")
                     else:
                         check.pop("response_issue", None)
                         check["reason"] = "尚未取得本次成果的完整实际检查回执，不能用成员声明代替。"
                 elif judgment:
-                    check.update(judgment)
+                    check.update(judgment, source="model_assessment")
                 checks.append(check)
             status = "accepted" if all(c["status"] == "passed" for c in checks) else (
                 "rework" if any(c["status"] == "failed" for c in checks) else "submitted")

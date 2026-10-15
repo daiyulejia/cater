@@ -497,6 +497,7 @@ def serve(
     port: int = 8765,
     drivers_path: str | Path | None = None,
     roles_path: str | Path | None = None,
+    browser_checker_path: str | Path | None = None,
     driver_attempts: int = 2,
     circuit_breaker_threshold: int = 2,
     audit_key: str | bytes | None = None,
@@ -526,6 +527,7 @@ def serve(
         db_path,
         drivers_path=drivers_path,
         roles_path=roles_path,
+        browser_checker_path=browser_checker_path,
         driver_attempts=driver_attempts,
         circuit_breaker_threshold=circuit_breaker_threshold,
         audit_key=audit_key,
@@ -572,6 +574,7 @@ def make_handler(
     *,
     drivers_path: str | Path | None = None,
     roles_path: str | Path | None = None,
+    browser_checker_path: str | Path | None = None,
     driver_attempts: int = 2,
     circuit_breaker_threshold: int = 2,
     audit_key: str | bytes | None = None,
@@ -594,6 +597,7 @@ def make_handler(
             db_path,
             drivers_path=drivers_path,
             roles_path=roles_path,
+            browser_checker_path=browser_checker_path,
             driver_attempts=driver_attempts,
             circuit_breaker_threshold=circuit_breaker_threshold,
             audit_key=audit_key,
@@ -1197,7 +1201,7 @@ def make_handler(
                     for row in rt.log.db.execute("""
                         SELECT task_id, type,
                             CASE WHEN type = 'msg.said' AND json_extract(payload_json, '$.phase')
-                                IN ('planning', 'delivery_receipt', 'clarification_receipt')
+                                IN ('planning', 'delivery_receipt', 'clarification_receipt', 'collaboration_request')
                                 THEN json_extract(payload_json, '$.phase')
                                 WHEN type = 'human.commanded' AND json_extract(payload_json, '$.conversation_seq') IS NOT NULL
                                 THEN 'conversation_receipt'
@@ -1700,6 +1704,8 @@ _CHAT_TYPES = {
     "clarification.requested",
     "question.asked", "question.finished",
     "conversation.received", "conversation.finished",
+    "collaboration.requested", "collaboration.finished",
+    "verification.planning_started", "verification.planned",
     "task.created", "rule.recorded", "rule.updated", "activity.failed", "human.commanded",
     "task.progress_reported", "planning.started", "planning.finished", "delivery.review_started",
     "delivery.review_finished", "task.interpreted", "cabinet.convened",
@@ -1711,7 +1717,7 @@ _CHAT_TYPES = {
 
 def _conversation_count(counts: Counter) -> int:
     count = sum(n for (kind, phase), n in counts.items() if kind in _CHAT_TYPES
-                and not (kind == "msg.said" and phase in {"planning", "delivery_receipt", "clarification_receipt"})
+                and not (kind == "msg.said" and phase in {"planning", "delivery_receipt", "clarification_receipt", "collaboration_request"})
                 and not (kind == "human.commanded" and phase == "conversation_receipt")
                 and not (kind == "conversation.finished" and phase == "status_receipt"))
     if not (counts[("activity.completed", None)] or counts[("activity.failed", None)]):
@@ -1781,7 +1787,7 @@ def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | N
             _task_summary(task, version=version, latest_seq=events[-1].seq if events else 0,
                           conversation_count=_conversation_count(Counter(
                               (e.type, e.payload.get("phase") if e.type == "msg.said"
-                               and e.payload.get("phase") in ("planning", "delivery_receipt", "clarification_receipt")
+                               and e.payload.get("phase") in ("planning", "delivery_receipt", "clarification_receipt", "collaboration_request")
                                else "conversation_receipt" if e.type == "human.commanded" and e.payload.get("conversation_seq")
                                else "status_receipt" if e.type == "conversation.finished" and e.payload.get("action") == "status_task"
                                and e.payload.get("progress_seq") else None)
