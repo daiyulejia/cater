@@ -267,6 +267,11 @@ class PlanningTests(unittest.TestCase):
             self.rt.collaborate(self.task)
         self.assertEqual(call.call_count, 1)
         self.assertEqual(self.worker.calls, [])
+        receipts = [e.payload["text"] for e in self.rt.log.read(task_id=self.task)
+                    if e.type == "msg.said" and e.payload.get("phase") == "planning"]
+        self.assertEqual(len(receipts), 1)
+        self.assertIn("未正常返回", receipts[0])
+        self.assertNotIn("调用已返回", receipts[0])
 
     def test_unfinished_planning_is_not_replayed_after_restart(self):
         Planner(self.rt)._start(self.task)
@@ -335,14 +340,37 @@ class PlanningTests(unittest.TestCase):
 
     def test_budget_decline_and_leader_availability_are_truthful(self):
         self.planner.token_budget = 0
-        self.rt.collaborate(self.task)
+        result = self.rt.collaborate(self.task)
         self.assertEqual(self.planner.calls, [])
+        reason = result["brief"]["dispute"]
+        self.assertIn("Cater 本地累计 token 预算", reason)
+        self.assertIn("已记录 0，上限 0", reason)
+        self.assertIn("不是服务商余额或 API Key 失效", reason)
+        receipts = [e.payload for e in self.rt.log.read(task_id=self.task)
+                    if e.type == "msg.said" and e.payload.get("phase") == "planning"]
+        self.assertEqual(receipts[-1]["text"], reason)
+        self.assertEqual(receipts[-1]["token_usage"], "unavailable")
+        self.assertNotIn("调用已返回", reason)
         leader = team_availability(self.rt)["members"][0]
         self.assertEqual(leader["reason"], "budget_exhausted")
         self.planner.token_budget = 100
         self.rt.command(self.task, "继续")
         self.rt.collaborate(self.task)
         self.assertTrue(self.view()["items"])
+
+    def test_shared_budget_decline_survives_new_task_and_restart(self):
+        self.planner.token_budget = 11
+        self.assertTrue(Planner(self.rt).run(self.task)["installed"])
+        other = self.rt.create_task("另一个任务", [])
+        self.rt.intake(other)
+        with Runtime(self.db, roles_path=self.roles, drivers=self.drivers) as reopened:
+            result = Planner(reopened).run(other)
+            self.assertFalse(result["installed"])
+            self.assertIn("已记录 11，上限 11", result["reason"])
+            self.assertIn("所有角色和任务合计计数", result["reason"])
+            self.assertEqual(reopened._reported_driver_tokens("planner"), 11)
+            self.assertTrue(reopened.verify_chain().ok)
+        self.assertEqual(len(self.planner.calls), 1)
 
     def test_adapter_uses_planning_contract_without_real_model(self):
         from examples import codex_cli_driver as adapter

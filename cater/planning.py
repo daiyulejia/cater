@@ -241,15 +241,20 @@ class Planner:
                 response = self.rt._complete_with_containment(task_id=task_id, task=self.rt.task(task_id), role=role,
                     driver=self.rt.drivers[leader.driver], prompt=prompt, rule_snapshot=snapshot, work_context=context)
                 meta = response.meta if isinstance(response.meta, dict) else {}
-                # Record usage even if JSON validation or installation subsequently fails.
-                self.rt.log.emit(type="msg.said", task_id=task_id, actor=self.rt._leader_actor(),
-                    payload={"text": "店长规划调用已返回，正在核对计划。", "phase": "planning", "driver": leader.driver,
-                             "tokens": response.tokens if valid_token_count(response.tokens) else 0,
-                             "token_usage": self.rt._token_usage(response), "attempt_seq": started.seq})
+                receipt = "店长规划调用已返回，正在核对计划。"
                 if meta.get("contained"):
                     status = "uncertain" if meta.get("invocation_started") else "blocked"
-                    reason = "规划调用未正常返回；先核对调用结果，再决定是否重试。" if status == "uncertain" else "规划调用尚未发出，请检查接入状态或额度后继续。"
-                else:
+                    reason = meta.get("display_reason") or (
+                        "规划调用未正常返回；先核对调用结果，再决定是否重试。" if status == "uncertain"
+                        else "规划调用尚未发出，请检查接入状态或本地预算后继续。"
+                    )
+                    receipt = reason
+                # Record usage even if JSON validation or installation subsequently fails.
+                self.rt.log.emit(type="msg.said", task_id=task_id, actor=self.rt._leader_actor(),
+                    payload={"text": receipt, "phase": "planning", "driver": leader.driver,
+                             "tokens": response.tokens if valid_token_count(response.tokens) else 0,
+                             "token_usage": self.rt._token_usage(response), "attempt_seq": started.seq})
+                if not meta.get("contained"):
                     if len(response.text) > 262144:
                         raise ValueError("规划输出过大，需要缩小单次计划")
                     parsed = validate_plan(json.loads(response.text), context)

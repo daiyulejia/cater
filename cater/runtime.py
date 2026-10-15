@@ -1654,7 +1654,15 @@ class Runtime:
                     "accounting": "reported_only",
                 },
             )
-            return self._contained_driver_failure(role, "reported token budget is exhausted", invocation_started=False)
+            return self._contained_driver_failure(
+                role, "reported token budget is exhausted", invocation_started=False,
+                display_reason=(
+                    f"请求尚未发出：Cater 本地累计 token 预算已用尽（已记录 {used_tokens:,}，"
+                    f"上限 {token_budget:,}）。同一数据库内共用此接入通道的所有角色和任务合计计数；"
+                    "这不是服务商余额或 API Key 失效的结论。请检查接入配置中的 token_budget，"
+                    "确认是否调整本地预算后再继续。"
+                ),
+            )
         if self._is_circuit_open(role.driver):
             self._emit_driver_failure(
                 task_id=task_id,
@@ -1787,7 +1795,8 @@ class Runtime:
         return self._driver_health.is_circuit_open(driver_name, self.circuit_breaker_threshold)
 
     @staticmethod
-    def _contained_driver_failure(role: Role, reason: str, *, invocation_started: bool = True) -> DriverResponse:
+    def _contained_driver_failure(role: Role, reason: str, *, invocation_started: bool = True,
+                                  display_reason: str | None = None) -> DriverResponse:
         text = json.dumps(
             {
                 "stance": "challenge",
@@ -1795,7 +1804,7 @@ class Runtime:
                 "claim": f"{role.name} driver failed; autonomous decision needs caution",
                 "evidence": [reason],
                 "confidence": 1.0,
-                "text": f"{role.name} could not produce a normal response: {reason}",
+                "text": display_reason or f"{role.name} could not produce a normal response: {reason}",
             },
             ensure_ascii=False,
         )
@@ -1803,7 +1812,7 @@ class Runtime:
             text=text,
             tokens=0,
             meta={"driver": role.driver, "contained": True, "token_usage": "unavailable",
-                  "invocation_started": invocation_started},
+                  "invocation_started": invocation_started, "display_reason": display_reason},
         )
 
     @staticmethod
