@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown, Cat, CheckCircle2, ChevronDown, CircleHelp,
-  CornerDownRight, FileText, GitBranch, GitFork, LoaderCircle, PawPrint, Plus, RefreshCw, Search, ShieldCheck,
+  CornerDownRight, FileText, GitBranch, GitFork, Info, LoaderCircle, PawPrint, Plus, RefreshCw, Search, ShieldCheck, TriangleAlert,
 } from 'lucide-react'
 import catPortraits from './assets/cat-portraits.jpg'
 import staffPortraits from './assets/staff-portraits.jpg'
@@ -60,7 +60,7 @@ type Question = QuestionResult & { seq: number; status: string; question: string
 type QuestionContext = { basis?: QuestionBasis; outdated?: boolean; questionSeq?: number; recipient?: string; progress?: string; evidence?: { source_seq: number; quote: string }[]; limits?: string[]; reason?: string }
 type TaskDetail = { task: Task; events: Event[]; questions?: Question[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
 type DerivationSource = { id: string; goal: string }
-type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; question?: QuestionContext; targets: string[]; replyTo?: number; evidence: Event }
+type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; question?: QuestionContext; targets: string[]; replyTo?: number; evidence: Event }
 
 const accessToken = (() => {
   const fragment = new URLSearchParams(window.location.hash.slice(1))
@@ -167,7 +167,7 @@ function disciplineText(issues?: string[]): string {
     invalid_stance: '表达格式不完整', missing_claim: '没有写清结论', challenge_without_evidence: '质疑缺少可复查依据',
     invalid_target: '点名对象不存在', invalid_reply_to: '回复没有对应到可见发言', target_without_visible_reply: '点名缺少回复依据', reply_without_target: '回复缺少明确对象',
   }
-  const values = (issues ?? []).map((item) => labels[item] ?? item)
+  const values = [...new Set((issues ?? []).map((item) => labels[item] ?? '协作格式需要补充'))]
   return values.length ? values.join('、') : '协作格式需要补充'
 }
 
@@ -196,6 +196,11 @@ function publicIdentity(actorId: string, organization: Organization | null): str
   return actorId === 'cabinet' ? '' : '猫咖'
 }
 
+const legacySystemActors = new Set(['system', 'discipline', 'local_verifier', 'explainer', 'driver_gateway', 'work_scheduler', 'rulebook', 'rooms', 'reviewer', 'cabinet', 'orchestrator'])
+function isSystemActor(actor: Event['actor'], identities: Record<string, OrgRole>): boolean {
+  return !Object.hasOwn(identities, actor.id) && (actor.kind === 'system' || (!actor.kind && legacySystemActors.has(actor.id)))
+}
+
 function conversationFor(events: Event[], identities: Record<string, OrgRole>, organization: Organization | null, questions: Question[] = []): ChatItem[] {
   const hasAutonomousDecision = events.some((event) => event.type === 'agent.decided' || event.type === 'supreme.decided')
   const hasFinishedActivity = events.some((event) => event.type === 'activity.completed' || event.type === 'activity.failed')
@@ -206,7 +211,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     const payload = event.payload
     const actor = event.actor
     const message = (title: string | undefined, text: string, kind: ChatItem['kind'], category: ChatItem['category'] = kind === 'agent' || kind === 'human' ? 'collaboration' : 'system', details?: string[]): ChatItem => ({
-      id: event.seq, actor: actor.id, display: identities[actor.id]?.name ?? actorText(actor.id), role: publicIdentity(actor.id, organization), kind, category, title, text, evidence: event,
+      id: event.seq, actor: actor.id, display: identities[actor.id]?.name ?? actorText(actor.id), role: publicIdentity(actor.id, organization), kind, systemActor: isSystemActor(actor, identities), category, title, text, evidence: event,
       details: details?.filter(Boolean),
       targets: [
         ...(typeof payload.target === 'string' ? [payload.target] : []),
@@ -227,7 +232,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       const reason = typeof payload.reason === 'string' ? payload.reason : undefined
       const hasAnswer = typeof payload.answer === 'string' && Boolean(payload.answer.trim())
       const speaker = !asked && hasAnswer && typeof payload.speaker_id === 'string' && payload.speaker_id ? payload.speaker_id : undefined
-      const system = actor.kind === 'system' || actor.id === 'system' || actor.id === 'explainer'
+      const system = isSystemActor(actor, identities)
       const item = message(asked ? '提问' : labels[String(payload.status)] ?? '提问结果',
         asked ? String(payload.question ?? '') : hasAnswer ? String(payload.answer) : reason || '暂无回答。',
         asked ? 'human' : speaker || !system ? 'agent' : 'system', 'collaboration')
@@ -235,6 +240,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
         item.actor = speaker ?? 'system'
         item.display = speaker ? identities[speaker]?.name ?? actorText(speaker) : '系统'
         item.role = publicIdentity(item.actor, organization)
+        item.systemActor = !speaker
       }
       const recipient = row?.role_id ?? (asked ? payload.role_id : askedEvents.get(questionSeq ?? -1)?.payload.role_id)
       const progress = asked && row && !finishedQuestions.has(event.seq)
@@ -365,6 +371,12 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
         git?.head ? `Git 提交：${String(git.head).slice(0, 12)}${git.dirty ? '（工作区有未提交改动，检查未绑定具体文件内容）' : ''}` : '未识别 Git 状态',
         '仅表示这条本地命令的观察结果，不代表根因或整项任务已证实。',
       ]
+      for (const [key, label] of [['stdout', '标准输出'], ['stderr', '错误输出']] as const) {
+        const output = payload[key] as { excerpt?: unknown } | undefined
+        if (typeof output?.excerpt === 'string' && output.excerpt) details.push(`${label}：${output.excerpt}`)
+      }
+      if (typeof payload.launch_error === 'string') details.push(`启动错误：${payload.launch_error}`)
+      if (typeof payload.cleanup_error === 'string') details.push(`清理错误：${payload.cleanup_error}`)
       return [message(`本机检查 · ${label}`, command.join(' '), 'system', 'decision', details)]
     }
     if (event.type === 'cabinet.voted') {
@@ -894,12 +906,17 @@ function TaskComposer({ members, draft, isSending, onDraftChange, onCreate }: { 
   return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput id="new-task" value={draft} label="发起任务对话" placeholder="和店长说说，今天想做什么？" members={members} onChange={onDraftChange} onSubmit={onCreate} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={isSending || !draft.trim()} onClick={onCreate} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isSending ? '正在发送新任务' : '发送新任务'} aria-label="发送新任务" aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
 }
 
-function QuestionDetails({ question }: { question: QuestionContext }) {
+function QuestionDetails({ item }: { item: ChatItem }) {
+  const question = item.question
+  if (!question) return null
   const { basis, questionSeq, recipient, evidence, limits, reason } = question
   const sourceNames: Record<string, string> = { task: '任务背景', goal: '目标', requirement: '顾客要求', member_artifact: '成员成果', execution_record: '实际检查', member_review: '成员说明', work_state: '工作状态' }
-  return <details className="mt-3 border-t border-current/20 pt-2 text-xs">
-    <summary className="cursor-pointer font-semibold">查看引用、版本与限制</summary>
-    <div className="mt-2 space-y-2 whitespace-pre-wrap [overflow-wrap:anywhere]">
+  return <>
+    {question.progress && <p role="status" className="question-progress">{question.progress}</p>}
+    {question.outdated && item.kind !== 'human' && <p className="question-outdated">历史版本 · 回答基于提问时的任务版本</p>}
+    <details className="question-details">
+    <summary>查看引用、版本与限制</summary>
+    <div className="question-context">
       {questionSeq !== undefined && <p>对应提问 · 事件 #{questionSeq}</p>}
       {recipient && <p>提问对象：@{recipient}</p>}
       {basis && <div>
@@ -907,27 +924,59 @@ function QuestionDetails({ question }: { question: QuestionContext }) {
         <p>来源事件：{basis.source_seqs?.map((source) => `#${source.seq}（${sourceNames[source.kind] ?? '来源记录'}）`).join('、') || '无'}</p>
         <p>历史问答事件：{basis.history_seqs?.map((seq) => `#${seq}`).join('、') || '无'}</p>
       </div>}
-      {evidence?.map((entry, index) => <div key={index}><p className="font-semibold">原文引用 · 来源事件 #{entry.source_seq}</p><blockquote className="mt-1 border-l-2 border-current/30 pl-3">{entry.quote}</blockquote></div>)}
-      {limits?.length ? <div><p className="font-semibold">限制</p><ul className="mt-1 list-disc space-y-1 pl-4">{limits.map((limit, index) => <li key={index}>{limit}</li>)}</ul></div> : null}
+      {evidence?.map((entry, index) => <div key={index}><p className="font-semibold">原文引用 · 来源事件 #{entry.source_seq}</p><blockquote>{entry.quote}</blockquote></div>)}
+      {limits?.length ? <div><p className="font-semibold">限制</p><ul>{limits.map((limit, index) => <li key={index}>{limit}</li>)}</ul></div> : null}
       {reason && <p>说明：{reason}</p>}
     </div>
+    </details>
+  </>
+}
+
+function AuditTrail({ item }: { item: ChatItem }) {
+  return <details className="chat-audit">
+    <summary>事件 #{item.id} · 审计记录</summary>
+    <pre>{JSON.stringify(item.systemActor ? item.evidence : item.evidence.payload, null, 2)}</pre>
   </details>
 }
 
+function SystemRecord({ item }: { item: ChatItem }) {
+  const checking = item.evidence.type === 'verification.completed'
+  const passed = checking && item.evidence.payload.outcome === 'passed'
+  const technical = checking || item.evidence.type === 'agent.discipline_flagged'
+  const failed = checking && !passed
+  const attention = failed || ['activity.failed', 'driver.failed', 'driver.budget_exhausted'].includes(item.evidence.type)
+  const Icon = attention ? TriangleAlert : passed ? CheckCircle2 : Info
+  const heading = <><strong>系统</strong>{item.title && <span> · {item.title}</span>}</>
+  const body = <>
+    <p className={checking ? 'font-mono' : undefined}>{item.text}</p>
+    {item.details?.length ? <ul>{item.details.map((detail, index) => <li key={index}>{detail}</li>)}</ul> : null}
+    <QuestionDetails item={item} />
+    <AuditTrail item={item} />
+  </>
+  return <article className={`system-record-row${attention ? ' needs-attention' : ''}`}>
+    <Icon size={16} aria-hidden="true" />
+    <div data-actor="system" className="message-bubble is-system system-record">
+      {technical ? <details open={failed}>
+        <summary>{heading}</summary>
+        <div>{body}</div>
+      </details> : <><header>{heading}</header>{body}</>}
+    </div>
+  </article>
+}
+
 function ChatBubble({ item }: { item: ChatItem }) {
-  const system = item.kind === 'system'; const human = item.kind === 'human'
+  if (item.systemActor) return <SystemRecord item={item} />
+  const human = item.kind === 'human'
   return <article className={`flex items-start gap-3 ${human ? 'justify-end' : ''}`}>
     {!human && <Portrait id={item.actor} />}
-    <div className={`message-bubble max-w-[min(86%,700px)] px-4 py-3 ${human ? 'is-human text-white' : system ? 'is-system' : 'is-agent'}`} data-actor={item.actor}>
+    <div className={`message-bubble max-w-[min(86%,700px)] px-4 py-3 ${human ? 'is-human text-white' : 'is-agent'}`} data-actor={item.actor}>
       <div className={`mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${human ? 'text-[#fff0e8]' : 'text-[#6e8981]'}`}><strong className={human ? 'text-white' : 'text-[#28433d]'}>{human ? '你' : item.display}</strong><span>{item.role}</span>{item.title && <span className={`text-[11px] font-semibold ${human ? 'text-[#fff4d9]' : 'text-[#a56049]'}`}>· {item.title}</span>}</div>
       <p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>
-      {item.question?.progress && <p role="status" className="mt-2 text-xs">{item.question.progress}</p>}
-      {item.question?.outdated && !human && <p className="mt-2 text-xs font-semibold text-[#a56049]">历史版本 · 回答基于提问时的任务版本</p>}
-      {item.question && <QuestionDetails question={item.question} />}
+      <QuestionDetails item={item} />
       {item.evidence.type === 'deliverable.published' && <ArtifactPreview item={{ ...item.evidence.payload, seq: item.id } as Artifact} publisher={item.display} showSummary={false} />}
       {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
       {item.details?.length ? <details className={`mt-3 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#dfeae5] text-[#52766d]'}`}><summary className="cursor-pointer font-semibold">查看判断与依据</summary><ul className="mt-2 space-y-1.5 leading-5">{item.details.map((detail, index) => <li key={`${item.id}-${index}`}>{detail}</li>)}</ul></details> : null}
-      <details className={`mt-2 text-[11px] ${human ? 'text-[#fde9dd]' : 'text-[#94a9a2]'}`}><summary className="cursor-pointer">事件 #{item.id} · 审计记录</summary><pre className="mt-2 max-h-36 overflow-auto whitespace-pre-wrap rounded bg-[#233833] p-2 text-[10px] text-stone-100">{JSON.stringify(item.evidence.payload, null, 2)}</pre></details>
+      <AuditTrail item={item} />
     </div>
   </article>
 }
