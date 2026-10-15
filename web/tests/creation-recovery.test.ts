@@ -40,6 +40,28 @@ test('不同标签页存储不共享恢复记录', async () => {
   expect(source.getItem(CREATION_RECOVERY_KEY)).not.toBeNull()
 })
 
+test('创建目录标识完整保存并恢复；旧版无目录记录保持兼容，不持久化目录授权详情', async () => {
+  const original = { ...attempt(), workspaceId: 'frontend-execute_1' }
+  expect(await saveCreationRecovery(original, '', () => true)).toBe('')
+  const record = JSON.parse(window.sessionStorage.getItem(CREATION_RECOVERY_KEY)!)
+  expect(record.attempt).toEqual(original)
+  expect(Object.keys(record.attempt).sort()).toEqual(['createdAt', 'projectId', 'requestId', 'text', 'workspaceId'])
+  expect((await loadCreationRecovery('')).attempt).toEqual(original)
+  delete record.attempt.workspaceId
+  window.sessionStorage.setItem(CREATION_RECOVERY_KEY, JSON.stringify(record))
+  expect((await loadCreationRecovery('')).attempt).toEqual(record.attempt)
+  expect((await loadCreationRecovery('')).attempt).not.toHaveProperty('workspaceId')
+})
+
+test.each([null, '', 7, {}, 'F:/any-root', 'has space', 'x'.repeat(81)])('损坏目录标识不进入刷新恢复：%j', async (workspaceId) => {
+  await saveCreationRecovery(attempt(), '', () => true)
+  const record = JSON.parse(window.sessionStorage.getItem(CREATION_RECOVERY_KEY)!)
+  record.attempt.workspaceId = workspaceId
+  window.sessionStorage.setItem(CREATION_RECOVERY_KEY, JSON.stringify(record))
+  expect((await loadCreationRecovery('')).attempt).toBeNull()
+  expect(window.sessionStorage.getItem(CREATION_RECOVERY_KEY)).toBeNull()
+})
+
 test.each([
   { text: '' }, { projectId: 5 }, { requestId: 'invalid' }, { createdAt: 0 }, { createdAt: Date.now() + CREATION_RECOVERY_TTL },
 ])('损坏或过期字段不进入恢复草稿：%j', async (change) => {

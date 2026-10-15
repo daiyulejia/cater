@@ -983,6 +983,7 @@ def serve(
     drivers_path: str | Path | None = None,
     roles_path: str | Path | None = None,
     browser_checker_path: str | Path | None = None,
+    workspaces_path: str | Path | None = None,
     driver_attempts: int = 2,
     circuit_breaker_threshold: int = 2,
     audit_key: str | bytes | None = None,
@@ -1013,6 +1014,7 @@ def serve(
         drivers_path=drivers_path,
         roles_path=roles_path,
         browser_checker_path=browser_checker_path,
+        workspaces_path=workspaces_path,
         driver_attempts=driver_attempts,
         circuit_breaker_threshold=circuit_breaker_threshold,
         audit_key=audit_key,
@@ -1060,6 +1062,7 @@ def make_handler(
     drivers_path: str | Path | None = None,
     roles_path: str | Path | None = None,
     browser_checker_path: str | Path | None = None,
+    workspaces_path: str | Path | None = None,
     driver_attempts: int = 2,
     circuit_breaker_threshold: int = 2,
     audit_key: str | bytes | None = None,
@@ -1083,6 +1086,7 @@ def make_handler(
             drivers_path=drivers_path,
             roles_path=roles_path,
             browser_checker_path=browser_checker_path,
+            workspaces_path=workspaces_path,
             driver_attempts=driver_attempts,
             circuit_breaker_threshold=circuit_breaker_threshold,
             audit_key=audit_key,
@@ -1135,6 +1139,12 @@ def make_handler(
             if path == "/api/projects":
                 with self._runtime() as rt:
                     return self._send_json(rt.rulebook.projects())
+            if path == "/api/workspaces":
+                with self._runtime() as rt:
+                    try:
+                        return self._send_json(rt.workspaces.options())
+                    except ValueError as exc:
+                        return self._bad_request(str(exc))
             if path == "/api/rules":
                 query = parse_qs(parsed.query)
                 with self._runtime() as rt:
@@ -1313,6 +1323,7 @@ def make_handler(
                             "assign_acceptance": _optional_text(data.get("assign_acceptance")),
                             "run": run_now, "battle": force_battle, "background": background,
                             "dispatch": _truthy(data.get("dispatch")),
+                            **({"workspace_id": data["workspace_id"]} if "workspace_id" in data else {}),
                         }, data.get("request_id"))
                     except WorkConflict as exc:
                         return self._conflict(str(exc))
@@ -1343,7 +1354,14 @@ def make_handler(
                     if rt.task(task_id) is None:
                         return self._not_found()
                     try:
-                        if action == "control":
+                        if action == "workspace":
+                            if set(data) != {"workspace_id", "expected_revision"}:
+                                return self._bad_request("工作区绑定需要已配置目录和当前版本。")
+                            if activities.status(task_id)["active"]:
+                                return self._conflict("已有协作在途，结束或暂停并核对后再绑定工作区。")
+                            rt.workspaces.bind(task_id, data["workspace_id"], expected_revision=data["expected_revision"])
+                            return self._send_json(self._task_payload(task_id, activities))
+                        elif action == "control":
                             if set(data) - {"action", "request_id"}:
                                 return self._bad_request("执行控制只接收动作和请求标识。")
                             event, _ = rt.execution_control.change(task_id, data.get("action"), request_id=data.get("request_id"))
@@ -2311,6 +2329,7 @@ def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | N
                               for e in events))), activity or {"state": "idle", "active": False}),
         "task": task_to_dict(task),
         "execution_control": rt.execution_control.view(task_id),
+        "workspace": rt.workspaces.view(task_id),
         "events": [event_to_dict(e) for e in events],
         "organization_memory": rt.shared_memory(exclude_task_id=task_id),
         "background": rt.conversation_background(task_id),

@@ -212,6 +212,13 @@ class WorkLedger:
                      if e.actor == Actor.human()]
         if revisions:
             scope["checks_revision"] = revisions[-1]
+        binding = next((e for e in reversed(list(self.log.iter_events(
+            task_id=task_id, event_types=("workspace.bound",)))) if e.actor == Actor.human()), None)
+        if binding is not None:
+            scope["workspace"] = {"revision": binding.seq, "fingerprint": binding.payload.get("fingerprint")}
+            configured = getattr(self, "workspace_configuration", None)
+            if configured is not None:
+                scope["workspace"]["configured"] = configured(task_id)
         return scope
 
     def directions(self, task_id: str, through_seq: int) -> list[dict[str, Any]]:
@@ -263,7 +270,7 @@ class WorkLedger:
         for candidate in (plan.payload.get("planning") or {}).get("reuse", []):
             if candidate["work_item_id"] in items:
                 items[candidate["work_item_id"]]["reuse_candidate"] = candidate
-        histories, review_histories = {}, {}
+        histories, review_histories, execution_claims = {}, {}, {}
 
         def review_history(item):
             if item["id"] not in review_histories:
@@ -303,9 +310,18 @@ class WorkLedger:
             if item is None:
                 continue
             if event.type == "work.claimed":
+                execution_claims[item_id] = event
                 item.update(status="running", attempt_id=p["attempt_id"], lease_until=p["lease_until"],
                             inputs=p["inputs"], submission=None, checks=[], reason="", dependency_uncertain=False,
                             dependency_check_stale=False)
+            elif event.type == "work.lease_renewed" and event.actor == Actor.system("work_scheduler"):
+                claim = execution_claims.get(item_id)
+                until = p.get("lease_until")
+                if (claim and p.get("claim_seq") == claim.seq and p.get("claim_hash") == claim.hash
+                        and p.get("attempt_id") == item["attempt_id"] and item["status"] == "running"
+                        and p.get("previous_lease_until") == item["lease_until"]
+                        and type(until) in (int, float) and math.isfinite(until) and until > item["lease_until"]):
+                    item["lease_until"] = until
             elif (event.type == "work.submitted" and p.get("attempt_id") == item["attempt_id"]
                   and not item.get("dependency_uncertain") and not item.get("dependency_check_stale")):
                 item.update(status="submitted", submission={"seq": event.seq, **p}, reason="")
@@ -459,6 +475,25 @@ class WorkLedger:
             return "work.claimed", {"plan_seq": view["plan_seq"], "work_item_id": item_id,
                                     "attempt_id": uuid.uuid4().hex, "inputs": inputs,
                                     "scope": view["scope"], "lease_until": time.time() + lease_seconds}, Actor.system("work_scheduler")
+        return self._write(task_id, build)
+
+    def renew_claim(self, task_id: str, item_id: str, attempt_id: str, *, lease_seconds: float = 600) -> Event:
+        if type(lease_seconds) not in (int, float) or not math.isfinite(lease_seconds) or not 0 < lease_seconds <= 3600:
+            raise ValueError("work lease must be between 0 and 3600 seconds")
+
+        def build():
+            view, item = self._item(task_id, item_id)
+            now = time.time()
+            if (not view.get("scope_current") or item["status"] != "running" or item.get("attempt_id") != attempt_id
+                    or item["lease_until"] <= now):
+                raise WorkConflict("只能续期当前有效的执行认领，不能恢复已过期或变更的尝试。")
+            claim = next((e for e in self.log.iter_events(task_id=task_id, event_types=("work.claimed",))
+                          if e.payload.get("attempt_id") == attempt_id), None)
+            if claim is None:
+                raise WorkConflict("执行认领缺少开始记录。")
+            return "work.lease_renewed", {"plan_seq": view["plan_seq"], "work_item_id": item_id,
+                "attempt_id": attempt_id, "claim_seq": claim.seq, "claim_hash": claim.hash,
+                "previous_lease_until": item["lease_until"], "lease_until": max(item["lease_until"] + 0.001, now + lease_seconds)}, Actor.system("work_scheduler")
         return self._write(task_id, build)
 
     def artifacts(self, task_id: str, submission: dict[str, Any]) -> list[dict[str, Any]]:
@@ -887,8 +922,8 @@ class WorkLedger:
                             if receipt.payload.get("outcome") == "unavailable":
                                 check.update(status="unknown", execution_status="unavailable",
                                              reason="检查工具未产生有效执行结论，需要恢复工具或补充检查；不据此判定成果错误。")
-                            elif receipt.payload.get("check_kind") == "browser":
-                                check.update(status="unknown", reason="浏览器检查失败，尚未独立判定是成果问题还是测试方案问题。")
+                            elif receipt.payload.get("check_kind") in {"browser", "workspace"}:
+                                check.update(status="unknown", reason="实际检查失败，尚未独立判定是成果问题还是测试方案问题。")
                                 if (judgment and judgment["status"] in {"failed", "unknown"}
                                         and type(row.get("receipt_seq")) is int and row["receipt_seq"] == receipt.seq):
                                     check.update(judgment, source="model_assessment")

@@ -70,6 +70,35 @@ def browser_observations(receipt: dict | None) -> list[str]:
     return list(dict.fromkeys(observed))
 
 
+def execution_observations(receipt: dict | None) -> list[str]:
+    if not isinstance(receipt, dict) or receipt.get("check_kind") == "browser":
+        return browser_observations(receipt)
+    if receipt.get("check_kind") != "workspace":
+        if not isinstance(receipt.get("command"), list) or receipt.get("outcome") not in {"passed", "failed", "timeout", "launch_error"}:
+            return []
+        values = [json.dumps({k: receipt[k] for k in ("command", "outcome", "exit_code") if k in receipt}, ensure_ascii=False)]
+        for stream in ("stdout", "stderr"):
+            capture = receipt.get(stream)
+            if isinstance(capture, dict) and isinstance(capture.get("excerpt"), str) and capture["excerpt"].strip():
+                values.append(capture["excerpt"])
+        return values
+    rows = receipt.get("suite")
+    if not isinstance(rows, list) or not rows:
+        return []
+    observations = []
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("result"), dict):
+            return []
+        result = row["result"]
+        observations.append(json.dumps({"id": row.get("id"), "command_alias": row.get("command_alias"),
+            "exit_code": result.get("exit_code"), "outcome": result.get("outcome")}, ensure_ascii=False))
+        for stream in ("stdout", "stderr"):
+            capture = result.get(stream)
+            if isinstance(capture, dict) and isinstance(capture.get("excerpt"), str) and capture["excerpt"].strip():
+                observations.append(capture["excerpt"])
+    return observations
+
+
 def assessment(results: list, criterion_id: str, artifacts: dict,
                receipt: dict | None = None) -> tuple[dict | None, str | None, dict | None]:
     rows = [r for r in results if isinstance(r, dict) and r.get("id") == criterion_id]
@@ -83,13 +112,13 @@ def assessment(results: list, criterion_id: str, artifacts: dict,
         return None, "missing_reason", row
     if status == "unknown" and seq is None and quote in (None, ""):
         return {"status": status, "reason": reason}, None, row
-    if seq is None and isinstance(receipt, dict) and receipt.get("check_kind") == "browser":
+    if seq is None and isinstance(receipt, dict) and receipt.get("check_kind") in {"browser", "workspace"}:
         if (type(row.get("receipt_seq")) is not int or type(receipt.get("seq")) is not int
                 or receipt["seq"] <= 0 or row["receipt_seq"] != receipt["seq"]):
             return None, "invalid_receipt", row
         if not isinstance(quote, str) or not quote.strip() or len(quote) > 2000:
             return None, "missing_quote", row
-        if not any(quote in observed for observed in browser_observations(receipt)):
+        if not any(quote in observed for observed in execution_observations(receipt)):
             return None, "quote_not_found", row
         return {"status": status, "reason": reason, "quote": quote, "artifact_seq": None}, None, row
     if type(seq) is not int or seq not in artifacts:

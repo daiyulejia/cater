@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import type { ComponentProps } from 'react'
+import type { ComponentProps, ReactNode } from 'react'
 import {
   ArrowDown, Cat, CheckCircle2, ChevronDown, CircleHelp,
   CornerDownRight, FileText, GitBranch, GitFork, Info, LoaderCircle, PawPrint, Plus, RefreshCw, Search, ShieldCheck, TriangleAlert,
@@ -27,6 +27,8 @@ import { collaborationProjection, workTransfers } from './collaborationProjectio
 import type { WorkAssignment } from './collaborationProjection'
 import { readJsonResponse, request } from './request'
 import { TaskControlMenu } from './TaskControlMenu'
+import { WorkspacePanel, WorkspaceToolProgress } from './WorkspacePanel'
+import type { WorkspaceBinding, WorkspaceOption } from './WorkspacePanel'
 import { controlLabels, executionLabel } from './executionControl'
 import type { ControlAction, ExecutionControl } from './executionControl'
 import { clearCreationRecovery, CREATION_RECOVERY_TTL, loadCreationRecovery, readAccessToken, saveCreationRecovery } from './creationRecovery'
@@ -74,7 +76,7 @@ type Event = { seq: number; type: string; category: string; actor: { id: string;
 type QuestionResult = { question_seq?: number; answer?: string; evidence?: { source_seq: number; quote: string }[]; limits?: string[]; reason?: string; speaker_id?: string; driver?: string; tokens?: number; token_usage?: string }
 type Question = QuestionResult & { seq: number; status: string; question: string; role_id: string; basis: QuestionBasis; outdated: boolean }
 type ConversationReceipt = { seq: number; status: string }
-type TaskDetail = { task: Task; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity; execution_control?: ExecutionControl }
+export type TaskDetail = { task: Task; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity; execution_control?: ExecutionControl; workspace?: WorkspaceBinding }
 type DerivationSource = { id: string; goal: string }
 type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event }
 
@@ -86,6 +88,7 @@ const apiRead = <T,>(path: string, read: (response: Response) => Promise<T>, ini
   return request(path, { ...init, headers }, read)
 }
 const api = <T,>(path: string, init?: RequestInit): Promise<T> => apiRead(path, readJsonResponse<T>, init)
+const loadWorkspaceOptions = () => api<WorkspaceOption[]>('/api/workspaces')
 
 const summaryOrder = (next: TaskSummary, current: TaskSummary) => next.version - current.version
   || (next.activity?.revision ?? 0) - (current.activity?.revision ?? 0)
@@ -593,6 +596,7 @@ function App() {
   const [recoveryNotice, setRecoveryNotice] = useState('')
   const creationMounted = useRef(true)
   const [newProject, setNewProject] = useState<{ id: string; name: string } | null>(null)
+  const [newWorkspaceId, setNewWorkspaceId] = useState<string | undefined>()
   const [tasks, setTasks] = useState<TaskSummary[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<TaskDetail | null>(null)
@@ -678,6 +682,16 @@ function App() {
     updateDraft(composerKey, value)
   }
 
+  const selectDraftWorkspace = (workspaceId: string | undefined) => {
+    if (workspaceId === newWorkspaceId) return
+    navigationRef.current += 1
+    if (creationRequest.current) clearCreationRecovery(creationRequest.current.requestId)
+    creationRequest.current = null
+    setSendErrors((current) => ({ ...current, [newKey]: '' }))
+    setRecoveryNotice('')
+    setNewWorkspaceId(workspaceId)
+  }
+
   const chooseTask = useCallback((id: string | null) => {
     questionModeRef.current = false
     setQuestionMode(false)
@@ -717,6 +731,7 @@ function App() {
     creationRequest.current = attempt
     updateDraft(newKey, attempt.text)
     setNewProject(attempt.projectId ? { id: attempt.projectId, name: attempt.projectId } : null)
+    setNewWorkspaceId(attempt.workspaceId)
     setSendErrors((current) => ({ ...current, [newKey]: '上次新建任务的提交结果未知。原草稿已恢复，可核对任务列表后手动重试。' }))
     chooseTask(null)
   }
@@ -902,6 +917,8 @@ function App() {
   const task: Task | undefined = selectedId ? currentDetail?.task ?? (selectedSummary
     ? { ...selectedSummary, acceptance: [], messages: [], assignments: [], deliverables: [] } : undefined) : undefined
   const loading = selectedId !== null && currentDetail === null
+  const workspaceActive = Boolean(currentDetail?.activity?.active || task?.activity?.active || task?.work?.items.some((item) =>
+    'in_flight' in item ? item.in_flight === true : item.status === 'running' || item.status === 'uncertain' || item.check_in_flight))
   const loadError = selectedId ? loadErrors[selectedId] ?? '' : ''
   const controlKey = `$control:${selectedId}`
   const controlBusy = pending.has(controlKey)
@@ -987,8 +1004,8 @@ function App() {
       setRecoveryNotice('待确认创建记录已过期，请先核对任务列表；本次没有发送。')
       return
     }
-    const attempt = previous?.text === submitted && previous.projectId === newProject?.id
-      ? previous : { text: submitted, projectId: newProject?.id, requestId: creationRequestId(), createdAt: Date.now() }
+    const attempt = previous?.text === submitted && previous.projectId === newProject?.id && previous.workspaceId === newWorkspaceId
+      ? previous : { text: submitted, projectId: newProject?.id, workspaceId: newWorkspaceId, requestId: creationRequestId(), createdAt: Date.now() }
     creationRequest.current = attempt
     pendingRef.current.add(newKey); setPending(new Set(pendingRef.current))
     setSendErrors((current) => ({ ...current, [newKey]: '' }))
@@ -1002,6 +1019,7 @@ function App() {
         body: JSON.stringify({
           goal: attempt.text.trim(),
           project_id: attempt.projectId,
+          ...(attempt.workspaceId ? { workspace_id: attempt.workspaceId } : {}),
           request_id: attempt.requestId,
           run: true, background: true,
         }),
@@ -1014,6 +1032,7 @@ function App() {
       clearCreationRecovery(attempt.requestId)
       if (creationRequest.current === attempt) {
         creationRequest.current = null
+        setNewWorkspaceId(undefined)
         setRecoveryNotice('')
         setDrafts((current) => current[newKey] === submitted ? { ...current, [newKey]: '' } : current)
       }
@@ -1219,6 +1238,17 @@ function App() {
               <div className="flex max-w-full flex-wrap items-center gap-2">
                 <ConversationMembers key={task.id} members={team} participants={participants} portrait={(id, size) => <Portrait id={id} size={size} />} onMention={(id) => setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${names[id] ?? id} `)} onOpenDirectory={() => { setTeamOpen(true); void refreshOrganization() }} />
                 {currentDetail?.background && <ConversationOrigin key={`origin:${task.id}`} background={currentDetail.background} onNavigate={(id) => { chooseTask(id); focusComposerRef.current = true }} />}
+                <WorkspacePanel taskId={task.id} workspace={currentDetail?.workspace} disabled={loading || isSending || controlBusy}
+                  active={workspaceActive}
+                  loadOptions={loadWorkspaceOptions} onBind={async (change) => {
+                    const { next, order } = await requestDetail(`/api/tasks/${encodeURIComponent(task.id)}/workspace`, { method: 'POST', body: JSON.stringify(change) })
+                    acceptDetail(next, order)
+                    return next.workspace
+                  }} onRefresh={async () => {
+                    const { next, order } = await requestDetail(`/api/tasks/${encodeURIComponent(task.id)}`)
+                    acceptDetail(next, order)
+                    return next.workspace
+                  }} />
                 <button type="button" className="origin-tool" aria-label="提问" title={questionMode ? '取消提问，返回协作草稿' : '向当前对话提问'} aria-pressed={questionMode} disabled={loading} onClick={toggleQuestion}><CircleHelp size={17} aria-hidden="true" /></button>
                 <button type="button" className="origin-tool" aria-label="基于此对话开新任务" title="基于此对话开新任务" aria-pressed={Boolean(derivation)} disabled={loading || Boolean(derivation)} onClick={beginDerivation}><GitFork size={17} aria-hidden="true" /></button>
                 <TaskControlMenu key={`control:${task.id}`} state={executionState} busy={controlBusy} disabled={loading} retry={sendErrors[controlKey] ? controlRequests[task.id]?.action : undefined} onAction={(action) => void controlTask(action)} />
@@ -1238,7 +1268,7 @@ function App() {
             </div>
             {derivation ? <DerivationDraftBar goal={derivation.goal} onCancel={cancelDerivation} /> : questionMode ? <QuestionComposerBar onCancel={toggleQuestion} /> : rulesControl}
             <DirectionComposer key={composerKey} members={team} message={message} isSending={isSending} isLoading={loading} deriving={Boolean(derivation)} questioning={questionMode} onMessageChange={setMessage} onSend={() => void (derivation ? deriveTask() : questionMode ? sendQuestion() : sendDirection())} />
-          </> : <><EmptyConversation onChoose={setDraft} />{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} disabled={!recoveryReady || Boolean(recovery)} onDraftChange={setDraft} onCreate={() => void createTask()} />{recoveryNotice && <p role="status" className="px-4 pb-2 text-xs text-amber-800 sm:px-7">{recoveryNotice}</p>}</>}
+          </> : <><EmptyConversation onChoose={setDraft} />{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} disabled={!recoveryReady || Boolean(recovery)} workspaceControl={<WorkspacePanel draft workspaceId={newWorkspaceId} disabled={!recoveryReady || Boolean(recovery)} loadOptions={loadWorkspaceOptions} onSelect={selectDraftWorkspace} />} onDraftChange={setDraft} onCreate={() => void createTask()} />{recoveryNotice && <p role="status" className="px-4 pb-2 text-xs text-amber-800 sm:px-7">{recoveryNotice}</p>}</>}
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
         {task && <WorkboardPanel taskId={task.id} open={showMobileBoard} onOpenChange={setShowMobileBoard}>
@@ -1258,8 +1288,8 @@ function DirectionComposer({ members, message, isSending, isLoading, deriving = 
   return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput value={message} label={deriving ? '衍生任务目标' : questioning ? '向当前对话提问' : '向团队发送消息'} placeholder={deriving ? '说说新任务要完成什么，可直接 @一位伙伴' : questioning ? '想了解什么？' : '继续说吧，补充想法、改目标，或直接 @一位伙伴'} members={members} onChange={onMessageChange} onSubmit={onSend} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={isSending || isLoading || !message.trim()} onClick={onSend} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isLoading ? '正在接上对话' : isSending ? '正在发送' : sendLabel} aria-label={sendLabel} aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
 }
 
-function TaskComposer({ members, draft, isSending, disabled, onDraftChange, onCreate }: { members: OrgRole[]; draft: string; isSending: boolean; disabled: boolean; onDraftChange: (value: string) => void; onCreate: () => void }) {
-  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput id="new-task" value={draft} label="发起任务对话" placeholder="和店长说说，今天想做什么？" members={members} onChange={onDraftChange} onSubmit={onCreate} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={disabled || isSending || !draft.trim()} onClick={onCreate} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isSending ? '正在发送新任务' : '发送新任务'} aria-label="发送新任务" aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
+function TaskComposer({ members, draft, isSending, disabled, workspaceControl, onDraftChange, onCreate }: { members: OrgRole[]; draft: string; isSending: boolean; disabled: boolean; workspaceControl: ReactNode; onDraftChange: (value: string) => void; onCreate: () => void }) {
+  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput id="new-task" value={draft} label="发起任务对话" placeholder="和店长说说，今天想做什么？" members={members} onChange={onDraftChange} onSubmit={onCreate} portrait={(id) => <Portrait id={id} size="sm" />} /><div className="flex shrink-0 items-center gap-1 self-end">{workspaceControl}<button disabled={disabled || isSending || !draft.trim()} onClick={onCreate} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isSending ? '正在发送新任务' : '发送新任务'} aria-label="发送新任务" aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div></div>
 }
 
 function MessageContext({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ClarificationControls }) {
@@ -1358,6 +1388,7 @@ function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; arti
       <p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>
       <MessageContext item={item} taskId={taskId} controls={controls} />
       {item.progress && <Suspense fallback={null}><WorkProgressPanel events={item.progress} claim={item.id} name={item.display} /></Suspense>}
+      {item.progress && <WorkspaceToolProgress events={item.progress} claim={item.id} name={item.display} />}
       {item.evidence.type === 'deliverable.published' && <ArtifactPreview item={artifact ?? untrustedArtifact(item.evidence)} publisher={item.display} showSummary={false} />}
       {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
       {item.details?.length ? <details className={`mt-3 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#dfeae5] text-[#52766d]'}`}><summary className="cursor-pointer font-semibold">查看判断与依据</summary><ul className="mt-2 space-y-1.5 leading-5">{item.details.map((detail, index) => <li key={`${item.id}-${index}`}>{detail}</li>)}</ul></details> : null}

@@ -148,6 +148,7 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
     submissions: dict[int, Event] = {}
     # Reuse shares artifact seqs; only valid receipts advance this private version guard.
     materialization_versions: dict[tuple[str, int], int] = {}
+    workspace_usage: dict[int, Event] = {}
     for event in events:
         if not event.task_id:
             continue
@@ -215,15 +216,25 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
                 }
             )
             tokens = payload.get("tokens")
-            task.tokens += tokens if valid_token_count(tokens) else 0
-            source = usage_source(tokens, payload.get("token_usage"))
-            task.token_usage[source] = task.token_usage.get(source, 0) + 1
+            calls = payload.get("usage_recorded_in")
+            accounted = (isinstance(calls, list) and bool(calls) and all(type(seq) is int and seq in workspace_usage
+                and workspace_usage[seq].task_id == event.task_id
+                and workspace_usage[seq].payload.get("attempt_id") == payload.get("attempt_id")
+                and workspace_usage[seq].payload.get("role") == event.actor.id
+                and workspace_usage[seq].payload.get("driver") == payload.get("driver") for seq in calls))
+            if not accounted:
+                task.tokens += tokens if valid_token_count(tokens) else 0
+                source = usage_source(tokens, payload.get("token_usage"))
+                task.token_usage[source] = task.token_usage.get(source, 0) + 1
         elif event.type == "driver.failed":
             task.driver_failures.append({"seq": event.seq, **payload})
         elif ((event.type == "question.finished" and event.actor.id == "explainer")
               or (event.type == "conversation.finished" and event.actor.id == "conversation")
               or (event.type == "collaboration.finished" and event.actor.id == "collaboration")
-              or (event.type == "verification.planned" and event.actor.id == "local_verifier")) and event.actor.kind == "system" and "driver" in payload:
+              or (event.type == "verification.planned" and event.actor.id == "local_verifier")
+              or (event.type == "workspace.model_called" and event.actor.id == "workspace_gateway")) and event.actor.kind == "system" and "driver" in payload:
+            if event.type == "workspace.model_called":
+                workspace_usage[event.seq] = event
             tokens = payload.get("tokens")
             task.tokens += tokens if valid_token_count(tokens) else 0
             source = usage_source(tokens, payload.get("token_usage"))

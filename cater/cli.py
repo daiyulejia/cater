@@ -70,6 +70,7 @@ def open_runtime(args: argparse.Namespace) -> Runtime:
         drivers_path=args.drivers,
         roles_path=args.roles,
         browser_checker_path=getattr(args, "browser_checker", None),
+        workspaces_path=getattr(args, "workspaces", None),
         driver_attempts=args.driver_attempts,
         circuit_breaker_threshold=args.circuit_breaker_threshold,
         audit_key=resolve_audit_key(args),
@@ -114,7 +115,11 @@ def cmd_new(args: argparse.Namespace) -> int:
         if args.assign_to and args.assign_to not in {role.id for role in rt.worker_roles}:
             print(_unknown_role_message(args.assign_to, rt))
             return 1
-        task_id = rt.create_task(args.goal, args.accept or [])
+        with rt.log.atomic():
+            task_id = rt.create_task(args.goal, args.accept or [])
+            workspace_id = getattr(args, "workspace", None)
+            if workspace_id is not None:
+                rt.workspaces.bind(task_id, workspace_id, expected_revision=None)
         print(f"created {task_id}")
         if args.dispatch:
             rt.dispatch(task_id)
@@ -709,6 +714,7 @@ def cmd_web(args: argparse.Namespace) -> int:
         drivers_path=args.drivers,
         roles_path=args.roles,
         browser_checker_path=args.browser_checker,
+        workspaces_path=args.workspaces,
         driver_attempts=args.driver_attempts,
         circuit_breaker_threshold=args.circuit_breaker_threshold,
         audit_key=resolve_audit_key(args),
@@ -720,6 +726,19 @@ def cmd_web(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_workspace(args: argparse.Namespace) -> int:
+    with open_runtime(args) as rt:
+        if args.reconcile is not None:
+            rt.workspaces.reconcile(args.task_id, args.reconcile, reason=args.reason, invocation_stopped=args.invocation_stopped)
+        elif args.reconcile_work is not None:
+            rt.workspaces.reconcile_work(args.task_id, args.reconcile_work, reason=args.reason, invocation_stopped=args.invocation_stopped)
+        elif args.bind is not None or args.unbind:
+            rt.workspaces.bind(args.task_id, None if args.unbind else args.bind,
+                               expected_revision=args.expected_revision)
+        print(json.dumps({"current": rt.workspaces.view(args.task_id), "options": rt.workspaces.options()}, ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cater")
     parser.add_argument("--version", action="version", version=f"cater {__version__}")
@@ -727,6 +746,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--drivers", help="driver config JSON")
     parser.add_argument("--roles", help="role config JSON")
     parser.add_argument("--browser-checker", help="trusted optional browser checker config JSON")
+    parser.add_argument("--workspaces", help="trusted host workspace and command configuration JSON")
     parser.add_argument("--driver-attempts", type=int, default=2,
                         help="legacy compatibility option; execution calls are never implicitly replayed")
     parser.add_argument("--circuit-breaker-threshold", type=int, default=2, help="failures before a driver circuit opens")
@@ -739,6 +759,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_new = sub.add_parser("new", help="create a task")
     p_new.add_argument("goal")
     p_new.add_argument("--accept", action="append")
+    p_new.add_argument("--workspace", help="首次执行前绑定已配置的工作区标识")
     p_new.add_argument("--dispatch", action="store_true", help="dispatch mission before running")
     p_new.add_argument("--assign-to", help="directly assign the task to one worker role")
     p_new.add_argument("--assign-objective", help="objective for --assign-to")
@@ -791,6 +812,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_checks.add_argument("--reason", help="why the check contract is being changed")
     p_checks.add_argument("--expected-revision", type=int, help="current check contract revision from the read command")
     p_checks.set_defaults(func=cmd_checks)
+
+    p_workspace = sub.add_parser("workspace", help="查看或绑定任务工作目录；核对中断工具")
+    p_workspace.add_argument("task_id")
+    workspace_actions = p_workspace.add_mutually_exclusive_group()
+    workspace_actions.add_argument("--bind", help="已配置工作区标识")
+    workspace_actions.add_argument("--unbind", action="store_true")
+    workspace_actions.add_argument("--reconcile", type=int, help="已实际核对副作用的工具开始事件编号")
+    workspace_actions.add_argument("--reconcile-work", help="已实际核对影响的中断工程工作 attempt_id")
+    p_workspace.add_argument("--invocation-stopped", action="store_true", help="确认原执行及子进程已停止")
+    p_workspace.add_argument("--expected-revision", type=int, help="绑定前查询得到的版本；首次绑定省略")
+    p_workspace.add_argument("--reason", help="工具中断后的实际核对说明")
+    p_workspace.set_defaults(func=cmd_workspace)
 
     p_export = sub.add_parser("export", help="export replay data as JSON or JSONL")
     p_export.add_argument("task_id", nargs="?")

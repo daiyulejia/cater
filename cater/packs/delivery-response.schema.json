@@ -45,8 +45,9 @@
         "evidence": {
           "type": "array", "items": {
             "type": "object", "additionalProperties": false,
-            "required": ["artifact_seq", "quote"],
-            "properties": {"artifact_seq": {"type": "integer"}, "quote": {"type": "string"}}
+            "required": ["quote"],
+            "oneOf": [{"required": ["artifact_seq"]}, {"required": ["receipt_seq"]}],
+            "properties": {"artifact_seq": {"type": "integer"}, "receipt_seq": {"type": "integer"}, "quote": {"type": "string"}}
           }
         }
       }

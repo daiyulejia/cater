@@ -24,6 +24,8 @@ def prepare(runtime: Runtime, request: dict, request_id: str | None):
         task_id, created = create(runtime, request, uuid.uuid4().hex if request_id is None else request_id)
         if not created:
             return task_id, False, activation(runtime, task_id)
+        if request.get("workspace_id") is not None:
+            runtime.workspaces.bind(task_id, request["workspace_id"], expected_revision=None)
         if request.get("requested_route") is not None or not request.get("dispatch"):
             runtime.intake(task_id, requested_route=request.get("requested_route") or "auto",
                            preferred_owner=request.get("assign_to") or None,

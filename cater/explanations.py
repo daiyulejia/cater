@@ -156,6 +156,11 @@ class ExplanationService:
                 sources.append({"seq": e.seq, "kind": "work_state"})
             elif e.seq in host_receipts:
                 sources.append({"seq": e.seq, "kind": host_receipts[e.seq]})
+            elif (e.type == "workspace.tool_finished" and e.actor == Actor.system("workspace_gateway")
+                  and work.get("scope_current") and e.payload.get("scope") == self.rt.work.scope(task_id)
+                  and any(i.get("attempt_id") == e.payload.get("attempt_id") for i in current_items.values())
+                  and any(r["seq"] == e.seq for r in self.rt.workspaces.receipts(task_id, attempt_id=e.payload.get("attempt_id")))):
+                sources.append({"seq": e.seq, "kind": "execution_record"})
             elif e.type == "delivery.review_finished" and delivery["status"] == "accepted" and e.seq == delivery.get("review_seq"):
                 sources.append({"seq": e.seq, "kind": "member_review"})
         history = [r["finish_seq"] for r in self.view(task_id) if r["status"] == "answered" and not r["outdated"]][-4:]

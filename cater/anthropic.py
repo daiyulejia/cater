@@ -1,4 +1,4 @@
-"""Text-only Anthropic Messages transport using the standard library."""
+"""Anthropic Messages transports using the standard library."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from urllib.request import Request
 
 from .drivers import (MAX_API_RESPONSE_BYTES, DriverProtocolError, DriverResponse,
                       DriverUnavailable, TextRequestRejected, TextTransportFailure, _open_api_request, _safe_api_endpoint,
-                      _text_only_request, _token_budget)
+                      _text_only_request, _token_budget, _tool_api_request)
+from .tool_protocol import ToolTurn, anthropic_history, anthropic_turn, prepare_tool_turn
 from .usage import valid_token_count
 
 
@@ -55,6 +56,29 @@ class AnthropicMessagesDriver:
                    max_tokens=data.get("max_tokens", 4096), timeout=data.get("timeout", 60.0),
                    version=data.get("version", "2023-06-01"), token_budget=_token_budget(data, name),
                    thinking=data.get("thinking"))
+
+    def tool_turn(self, *, role: str, prompt: str, history: list[dict], tools: list[dict]) -> ToolTurn:
+        try:
+            system, transcript, definitions, seen = prepare_tool_turn(role=role, prompt=prompt, history=history, tools=tools)
+            body = {"model": self.model, "max_tokens": self.max_tokens, "stream": False,
+                    "system": system, "messages": anthropic_history(prompt, transcript)}
+            if definitions:
+                body["tools"] = definitions
+            if self.thinking is not None:
+                body["thinking"] = {"type": self.thinking}
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            raise DriverProtocolError("Invalid client tool schemas or history") from None
+        key = os.environ.get(self.api_key_env)
+        if not key:
+            raise DriverUnavailable(f"{self.name} API key is unavailable; set {self.api_key_env}")
+        data = _tool_api_request(endpoint=self.endpoint, body=body,
+            headers={"X-Api-Key": key, "anthropic-version": self.version,
+                     "Content-Type": "application/json", "Accept": "application/json"},
+            name=self.name, timeout=self.timeout, opener=_open_api_request, byte_limit=MAX_API_RESPONSE_BYTES)
+        try:
+            return anthropic_turn(data, driver=self.name, names={t["name"] for t in definitions}, seen=seen)
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            raise DriverProtocolError("Invalid Anthropic tool response") from None
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
         key = os.environ.get(self.api_key_env)

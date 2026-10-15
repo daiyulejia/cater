@@ -4,6 +4,7 @@ export const CREATION_RECOVERY_TTL = 24 * 60 * 60 * 1000
 export type CreationAttempt = {
   text: string
   projectId?: string
+  workspaceId?: string
   requestId: string
   createdAt: number
 }
@@ -47,6 +48,7 @@ function validAttempt(value: unknown): value is CreationAttempt {
   const item = value as CreationAttempt
   return typeof item.text === 'string' && Boolean(item.text.trim()) && item.text.length <= 100000
     && (item.projectId === undefined || (typeof item.projectId === 'string' && item.projectId.length > 0 && item.projectId.length <= 1000))
+    && (item.workspaceId === undefined || (typeof item.workspaceId === 'string' && /^[A-Za-z0-9_-]{1,80}$/.test(item.workspaceId)))
     && typeof item.requestId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(item.requestId)
     && Number.isSafeInteger(item.createdAt) && item.createdAt <= Date.now()
     && Date.now() - item.createdAt < CREATION_RECOVERY_TTL
@@ -79,8 +81,8 @@ export async function loadCreationRecovery(token: string): Promise<{ attempt: Cr
       return { attempt: null, notice: invalid }
     }
     if (window.sessionStorage.getItem(CREATION_RECOVERY_KEY) !== raw || !validAttempt(record.attempt)) return { attempt: null, notice: invalid }
-    const { text, projectId, requestId, createdAt } = record.attempt as CreationAttempt
-    return { attempt: { text, projectId, requestId, createdAt }, notice: '' }
+    const { text, projectId, workspaceId, requestId, createdAt } = record.attempt as CreationAttempt
+    return { attempt: { text, projectId, ...(workspaceId ? { workspaceId } : {}), requestId, createdAt }, notice: '' }
   } catch {
     discard()
     return { attempt: null, notice: invalid }
@@ -93,9 +95,9 @@ export async function saveCreationRecovery(attempt: CreationAttempt, token: stri
     if (!current()) return ''
     if (readAccessToken() !== token) return unavailable
     if (!validAttempt(attempt)) return invalid
-    const { text, projectId, requestId, createdAt } = attempt
+    const { text, projectId, workspaceId, requestId, createdAt } = attempt
     window.sessionStorage.setItem(CREATION_RECOVERY_KEY, JSON.stringify({
-      version: 1, account, attempt: { text, projectId, requestId, createdAt },
+      version: 1, account, attempt: { text, projectId, ...(workspaceId ? { workspaceId } : {}), requestId, createdAt },
     }))
     return ''
   } catch { return unavailable }

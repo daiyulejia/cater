@@ -58,6 +58,7 @@ The guides below are primarily in Chinese.
 - [Work items and whole-task acceptance](docs/work-items.zh-CN.md)
 - [Local verification and safety](docs/local-verification.zh-CN.md)
 - [Optional automated browser checks](docs/browser-checks.zh-CN.md)
+- [Project workspaces and host tools](docs/workspaces.zh-CN.md)
 - [Frontend development and remote access](web/README.md)
 - [Contributing](CONTRIBUTING.md)
 

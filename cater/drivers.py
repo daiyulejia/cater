@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import subprocess
@@ -18,6 +19,8 @@ from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .processes import ProcessScope
+from .tool_protocol import (ToolTurn, openai_history, openai_turn, prepare_tool_turn,
+                            strict_json)
 from .usage import usage_source, valid_token_count
 
 
@@ -74,6 +77,61 @@ class TextRequestRejected(DriverUnavailable):
     def __init__(self, message: str, *, status_code: int):
         super().__init__(message)
         self.status_code = status_code
+
+
+class ToolRequestRejected(DriverUnavailable):
+    """A client-tool model request was refused; local tool effects are separate."""
+
+    def __init__(self, message: str, *, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _tool_api_request(*, endpoint: str, body: dict, headers: dict, name: str,
+                      timeout: float, opener: Any, byte_limit: int) -> dict:
+    try:
+        if not isinstance(endpoint, str) or not _safe_api_endpoint(endpoint):
+            raise ValueError
+        parsed = urlparse(endpoint)
+        if not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
+            raise ValueError
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                or not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError
+    except (ValueError, TypeError, OverflowError):
+        raise DriverProtocolError("Invalid tool API endpoint or timeout") from None
+    try:
+        encoded = json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        raise DriverProtocolError("Tool request is not valid JSON") from None
+    phase = "request"
+    try:
+        request = Request(endpoint, data=encoded, headers=headers, method="POST")
+        with opener(request, timeout=timeout) as response:
+            phase = "response read"
+            raw = response.read(byte_limit + 1)
+    except HTTPError as exc:
+        if exc.code == 429:
+            raise ToolRequestRejected(f"{name} API request failed with HTTP 429", status_code=429) from None
+        raise DriverUnavailable(f"{name} API request failed with HTTP {exc.code}") from None
+    except (URLError, TimeoutError, OSError) as exc:
+        reason = exc.reason if isinstance(exc, URLError) else exc
+        if isinstance(reason, TimeoutError):
+            message = f"{name} API {phase} timed out (configured timeout: {timeout:g}s)"
+        else:
+            message = f"{name} API endpoint is unavailable (connection or network failure during {phase})"
+        raise DriverUnavailable(message) from None
+    except (ValueError, TypeError, UnicodeError):
+        raise DriverUnavailable(f"{name} API request failed (invalid request or headers)") from None
+    if not isinstance(raw, bytes) or len(raw) > byte_limit:
+        raise DriverProtocolError("Tool response is not bytes or exceeds the byte limit")
+    try:
+        data = strict_json(raw)
+    except (ValueError, UnicodeError, RecursionError, OverflowError):
+        raise DriverProtocolError("Tool response is not valid unambiguous JSON") from None
+    if not isinstance(data, dict):
+        raise DriverProtocolError("Tool response must be a JSON object")
+    return data
 
 
 def _text_only_request(body: dict[str, Any]) -> bool:
@@ -487,6 +545,29 @@ class OpenAICompatibleDriver:
         self.timeout = timeout
         self.temperature = temperature
         self.token_budget = token_budget
+
+    def tool_turn(self, *, role: str, prompt: str, history: list[dict], tools: list[dict]) -> ToolTurn:
+        try:
+            system, transcript, definitions, seen = prepare_tool_turn(role=role, prompt=prompt, history=history, tools=tools)
+            payload = {"model": self.model, "stream": False, "messages": openai_history(system, prompt, transcript)}
+            if definitions:
+                payload["tools"] = [{"type": "function", "function": {
+                    "name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
+                    for t in definitions]
+            if self.temperature is not None:
+                payload["temperature"] = self.temperature
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            raise DriverProtocolError("Invalid client tool schemas or history") from None
+        key = os.environ.get(self.api_key_env)
+        if not key:
+            raise DriverUnavailable(f"{self.name} API key is unavailable; set {self.api_key_env}")
+        data = _tool_api_request(endpoint=self.endpoint, body=payload,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "Accept": "application/json"},
+            name=self.name, timeout=self.timeout, opener=_open_api_request, byte_limit=MAX_API_RESPONSE_BYTES)
+        try:
+            return openai_turn(data, driver=self.name, names={t["name"] for t in definitions}, seen=seen)
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            raise DriverProtocolError("Invalid OpenAI tool response") from None
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
         api_key = os.environ.get(self.api_key_env)
