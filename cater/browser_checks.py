@@ -372,6 +372,7 @@ class BrowserChecks:
         return False
 
     def _plan(self, task_id, started, context, filenames, role, current) -> dict:
+        context["planning_attempt_seq"] = started.seq
         context["browser_limits"] = {"max_steps": MAX_BROWSER_STEPS, "max_plan_bytes": 65536,
                                      "per_step_wait_ms": 2000, "total_execution_ms": 60000}
         skill = Path(__file__).with_name("packs").joinpath("browser_check.md").read_text(encoding="utf-8")

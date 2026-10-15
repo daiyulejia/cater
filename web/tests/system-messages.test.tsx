@@ -11,12 +11,12 @@ const event = (seq: number, type: string, id: string, payload: Record<string, un
 beforeEach(() => { vi.useFakeTimers() })
 
 async function mount(events: FixtureEvent[]) {
-  const allEvents = [event(1, 'task.created', 'human', { goal: '核对聊天系统记录' }, 'human'), ...events]
+  const allEvents = () => [event(1, 'task.created', 'human', { goal: '核对聊天系统记录' }, 'human'), ...events]
   vi.stubGlobal('fetch', vi.fn((url: string) => {
-    if (url === '/api/task-summaries') return json({ tasks: [{ id: 'system-ui', goal: '核对聊天系统记录', status: 'pending', status_label: '待开始', conversation_count: allEvents.length, latest_seq: allEvents.at(-1)!.seq, version: allEvents.length }] })
+    if (url === '/api/task-summaries') return json({ tasks: [{ id: 'system-ui', goal: '核对聊天系统记录', status: 'pending', status_label: '待开始', conversation_count: allEvents().length, latest_seq: Math.max(...allEvents().map(entry => entry.seq)), version: allEvents().length }] })
     if (url === '/api/organization') return json([leader, member])
     if (url === '/api/organization/profile') return json({ leader, cabinet: [], workers: [member] })
-    if (url === '/api/tasks/system-ui') return json({ task: { id: 'system-ui', goal: '核对聊天系统记录', acceptance: [], status: 'pending', messages: [], assignments: [], deliverables: [] }, events: allEvents, activity: { active: false, state: 'idle' }, review: {} })
+    if (url === '/api/tasks/system-ui') return json({ task: { id: 'system-ui', goal: '核对聊天系统记录', acceptance: [], status: 'pending', messages: [], assignments: [], deliverables: [] }, events: allEvents(), activity: { active: false, state: 'idle' }, review: {} })
     throw new Error(`Unexpected request ${url}`)
   }))
   await act(async () => { render(<App />) })
@@ -458,4 +458,124 @@ test.each([
   expect(visibleText(row)).not.toContain(actor)
   expect(row.querySelectorAll('details')).toHaveLength(1)
   expect(row.querySelector('details')!.querySelector('summary')!.textContent).toContain('审计记录')
+})
+
+const gateway = (seq: number, type: string, payload: Record<string, unknown>): FixtureEvent => ({
+  seq, type, actor: { id: 'driver_gateway', role: 'driver_gateway', kind: 'system' }, payload,
+})
+const retryFailure = () => gateway(2, 'driver.failed', { role: 'dev', driver: 'external_model', message: 'RAW_CONNECTION_ERROR', attempt: 1 })
+const scheduledRetry = (payload = {}) => gateway(3, 'driver.retry_scheduled', {
+  role: 'dev', driver: 'external_model', failure_seq: 2, retry_index: 1, retry_limit: 1, delay_seconds: 5,
+  not_before: 1792022405, phase: 'work', work_item_id: 'board', scope: { digest: 'INTERNAL_SCOPE' }, reason: '等待后自动续试一次。', ...payload,
+})
+const finishedRetry = (status: string, payload = {}) => gateway(4, 'driver.retry_finished', {
+  request_seq: 3, role: 'dev', driver: 'external_model', status, reason: '续试调用结果已记录。', ...payload,
+})
+
+test('自动续试等待沿用轻量系统提示，显示伙伴名并保持聊天和暂停可用', async () => {
+  const stream = await mount([retryFailure(), scheduledRetry()])
+  const row = record(3)
+  expect(stream.querySelectorAll('article')).toHaveLength(2)
+  expect(row.classList.contains('system-record-row')).toBe(true)
+  expect(row.classList.contains('needs-attention')).toBe(false)
+  expect(row.querySelector('[data-actor="system"]')).toBeTruthy()
+  expect(within(row).queryByRole('img')).toBeNull()
+  expect(visibleText(row)).toContain('@米寇的模型暂时连接不稳定')
+  expect(visibleText(row)).toContain('至少间隔 5 秒')
+  expect(visibleText(row)).toContain('结果返回后会在这里更新')
+  expect(visibleText(row)).toContain('仍可发消息或暂停任务')
+  expect(visibleText(stream)).not.toMatch(/RAW_CONNECTION_ERROR|external_model|INTERNAL_SCOPE|dev|任务完成/)
+  expect(row.querySelectorAll('details')).toHaveLength(1)
+  expect(row.querySelector('details')!.open).toBe(false)
+  fireEvent.change(screen.getByRole('textbox', { name: '向团队发送消息' }), { target: { value: '请继续保留现有成果' } })
+  expect((screen.getByRole('button', { name: '发送消息' }) as HTMLButtonElement).disabled).toBe(false)
+  fireEvent.click(screen.getByRole('button', { name: '更多任务操作' }))
+  expect((screen.getByRole('button', { name: '暂停执行' }) as HTMLButtonElement).disabled).toBe(false)
+  expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+})
+
+test.each([
+  ['succeeded', '模型调用已恢复', false],
+  ['failed', '模型续试仍失败，已保留检查点', true],
+  ['cancelled', '自动续试等待已取消', false],
+] as const)('轮询到 %s 后原位更新等待提示，不遗留即将续试或永久故障', async (status, expected, attention) => {
+  const events = [retryFailure(), scheduledRetry()]
+  const stream = await mount(events)
+  const row = record(3)
+  expect(visibleText(row)).toContain('至少间隔 5 秒')
+  events.push(finishedRetry(status))
+  await act(async () => { await vi.advanceTimersByTimeAsync(4000) })
+  expect(record(3)).toBe(row)
+  expect(stream.querySelectorAll('article')).toHaveLength(2)
+  expect(visibleText(row)).toContain(expected)
+  expect(visibleText(row)).not.toMatch(/至少间隔|正在自动恢复连接|即将|RAW_CONNECTION_ERROR|任务已完成|验收通过/)
+  expect(row.classList.contains('needs-attention')).toBe(attention)
+  expect(Boolean(row.querySelector('.lucide-triangle-alert'))).toBe(attention)
+  expect(vi.mocked(fetch).mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+})
+
+test('重试审计可展开原始失败、安排和结束记录，并使用显示名', async () => {
+  vi.useRealTimers()
+  await mount([retryFailure(), scheduledRetry(), finishedRetry('succeeded')])
+  const row = record(3)
+  openDetails(row.querySelector('details')!)
+  await act(async () => { await vi.dynamicImportSettled() })
+  expect(within(row).getByRole('heading', { name: '模型自动续试安排' })).toBeTruthy()
+  expect(within(row).getByRole('heading', { name: '模型自动续试结果' })).toBeTruthy()
+  expect(within(row).getAllByText('@米寇')).toHaveLength(2)
+  expect(visibleText(row)).toContain('RAW_CONNECTION_ERROR')
+  expect(visibleText(row)).toContain('续试调用结果已记录。')
+  expect(visibleText(row)).not.toContain('INTERNAL_SCOPE')
+  const raw = within(row).getAllByText('开发者详情')
+  expect(raw).toHaveLength(3)
+  raw.forEach(summary => expect(summary.closest('details')!.open).toBe(false))
+  openDetails(raw[1].closest('details')!)
+  expect(visibleText(row)).toContain('INTERNAL_SCOPE')
+})
+
+test('快照数组乱序仍按事件序号关联恢复', async () => {
+  const stream = await mount([finishedRetry('succeeded'), scheduledRetry(), retryFailure()])
+  expect(visibleText(record(3))).toContain('@米寇的模型调用已恢复')
+  expect(visibleText(stream)).not.toContain('至少间隔')
+  expect(stream.querySelectorAll('article')).toHaveLength(2)
+})
+
+test.each([
+  { actor: { id: 'dev', role: 'driver_gateway', kind: 'agent' } },
+  { actor: { id: 'dev', role: 'driver_gateway', kind: 'system' } },
+  { actor: { id: 'driver_gateway', role: 'worker', kind: 'system' } },
+  { actor: { id: 'driver_gateway', role: 'driver_gateway', kind: 'agent' } },
+  { actor: { id: 'driver_gateway', role: 'driver_gateway' } },
+  { seq: 2 },
+  { payload: { request_seq: 999, role: 'dev', driver: 'external_model', status: 'succeeded' } },
+  { payload: { request_seq: '3', role: 'dev', driver: 'external_model', status: 'succeeded' } },
+  { payload: { request_seq: 3, role: 'test', driver: 'external_model', status: 'succeeded' } },
+  { payload: { request_seq: 3, role: 'dev', driver: 'other_model', status: 'succeeded' } },
+  { payload: { request_seq: 3, role: 'dev', driver: 'external_model', status: ['succeeded'] } },
+])('来源或关联不正确的回执不能伪装恢复：%j', async (overrides) => {
+  const stream = await mount([scheduledRetry(), { ...finishedRetry('succeeded'), ...overrides }])
+  expect(visibleText(record(3))).toContain('至少间隔 5 秒')
+  expect(visibleText(stream)).not.toContain('已恢复')
+  expect(visibleText(stream)).toContain('续试回执待核对')
+  expect(stream.querySelector('[data-actor="dev"]')).toBeNull()
+})
+
+test('取消后到达的矛盾成功回执不能把等待改为恢复', async () => {
+  const stream = await mount([scheduledRetry(), finishedRetry('cancelled'), { ...finishedRetry('succeeded'), seq: 5 }])
+  expect(visibleText(record(3))).toContain('等待已取消')
+  expect(visibleText(stream)).not.toContain('已恢复')
+})
+
+test('没有安排的成功回执和伪造成员安排不能展示恢复或自动续试承诺', async () => {
+  const stream = await mount([finishedRetry('succeeded'), { ...scheduledRetry(), actor: { id: 'dev', kind: 'agent', role: 'worker' } }])
+  expect(visibleText(stream)).not.toMatch(/已恢复|至少间隔/)
+  expect(within(stream).getAllByText(/续试回执待核对/)).toHaveLength(2)
+  expect(stream.querySelector('[data-actor="dev"]')).toBeNull()
+})
+
+test('未知伙伴使用自然中文兜底，不泄漏机器角色名或吞掉无关失败', async () => {
+  const stream = await mount([retryFailure(), scheduledRetry({ role: 'worker_internal_7' })])
+  expect(visibleText(record(3))).toContain('一位伙伴的模型暂时连接不稳定')
+  expect(visibleText(stream)).not.toContain('worker_internal_7')
+  expect(visibleText(record(2))).toContain('RAW_CONNECTION_ERROR')
 })

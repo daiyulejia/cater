@@ -722,6 +722,7 @@ def cmd_web(args: argparse.Namespace) -> int:
         audit_keys=resolve_audit_keys(args),
         allow_remote=args.allow_remote,
         access_token=resolve_web_access_token(args),
+        text_retry=not args.no_text_retry,
     )
     return 0
 
@@ -879,6 +880,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_web = sub.add_parser("web", help="run local replay web UI")
     p_web.add_argument("--host", default="127.0.0.1")
     p_web.add_argument("--port", type=int, default=8765)
+    p_web.add_argument("--no-text-retry", action="store_true",
+                       help="disable the Web task's single automatic retry for transient tool-free API failures")
     p_web.add_argument(
         "--allow-remote",
         action="store_true",

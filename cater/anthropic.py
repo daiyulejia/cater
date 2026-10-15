@@ -12,7 +12,7 @@ from urllib.request import Request
 
 from .drivers import (MAX_API_RESPONSE_BYTES, DriverProtocolError, DriverResponse,
                       DriverUnavailable, TextRequestRejected, TextTransportFailure, _open_api_request, _safe_api_endpoint,
-                      _text_only_request, _token_budget, _tool_api_request)
+                      _retry_after_seconds, _text_only_request, _token_budget, _tool_api_request)
 from .tool_protocol import ToolTurn, anthropic_history, anthropic_turn, prepare_tool_turn
 from .usage import valid_token_count
 
@@ -105,9 +105,11 @@ class AnthropicMessagesDriver:
         except HTTPError as exc:
             if exc.code == 429 and _text_only_request(body):
                 raise TextRequestRejected(f"{self.name} API request failed with HTTP {exc.code}",
-                                          status_code=exc.code) from None
+                                          status_code=exc.code,
+                                          retry_after_seconds=_retry_after_seconds(exc.headers)) from None
             if exc.code in {408, 500, 502, 503, 504} and _text_only_request(body):
-                raise TextTransportFailure(f"{self.name} API request failed with HTTP {exc.code}") from None
+                raise TextTransportFailure(f"{self.name} API request failed with HTTP {exc.code}",
+                                           retry_after_seconds=_retry_after_seconds(exc.headers)) from None
             raise DriverUnavailable(f"{self.name} API request failed with HTTP {exc.code}") from None
         except (URLError, TimeoutError, OSError) as exc:
             reason = exc.reason if isinstance(exc, URLError) else exc

@@ -6,12 +6,15 @@ import json
 import math
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -27,6 +30,55 @@ from .usage import usage_source, valid_token_count
 MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_CLI_RESPONSE_CHARS = 4 * 1024 * 1024
 MAX_CLI_REQUEST_BYTES = 4 * 1024 * 1024
+MAX_RETRY_AFTER_SECONDS = 2**53 - 1
+_HTTP_DATE = re.compile(
+    r"(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [0-9]{2} "
+    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) [0-9]{4} "
+    r"[0-9]{2}:[0-9]{2}:[0-9]{2} GMT|"
+    r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), [0-9]{2}-"
+    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-[0-9]{2} "
+    r"[0-9]{2}:[0-9]{2}:[0-9]{2} GMT|"
+    r"(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) "
+    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (?:[0-9]{2}| [0-9]) "
+    r"[0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4})"
+)
+
+
+def _sanitized_retry_after_seconds(value: Any) -> float | None:
+    if type(value) not in (int, float) or value < 0:
+        return None
+    if type(value) is float and not math.isfinite(value):
+        return None
+    # Saturate before float conversion so huge valid delays cannot become missing.
+    return float(min(value, MAX_RETRY_AFTER_SECONDS))
+
+
+def _retry_after_seconds(headers: Any) -> float | None:
+    """Read only bounded HTTP delay values; header failures must not mask HTTP errors."""
+    try:
+        get_all = getattr(headers, "get_all", None)
+        if get_all is not None:
+            values = get_all("Retry-After")
+            if not isinstance(values, list) or len(values) != 1:
+                return None
+            value = values[0]
+        else:
+            value = headers.get("Retry-After")
+        if type(value) is not str or len(value) > 128:
+            return None
+        value = value.strip(" \t")
+        if re.fullmatch(r"[0-9]+", value):
+            return _sanitized_retry_after_seconds(int(value))
+        # parsedate_to_datetime alone accepts trailing text and non-HTTP dates.
+        if not _HTTP_DATE.fullmatch(value):
+            return None
+        date = parsedate_to_datetime(value)
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=timezone.utc)
+        seconds = (date - datetime(1970, 1, 1, tzinfo=timezone.utc)).total_seconds() - time.time()
+        return _sanitized_retry_after_seconds(max(0.0, seconds))
+    except Exception:
+        return None
 
 
 class _RejectRedirects(HTTPRedirectHandler):
@@ -70,13 +122,18 @@ class DriverUnavailable(DriverError):
 class TextTransportFailure(DriverUnavailable):
     """Network/transient HTTP failure of a tool-free call; remote billing unknown."""
 
+    def __init__(self, *args: Any, retry_after_seconds: float | None = None):
+        super().__init__(*args)
+        self.retry_after_seconds = _sanitized_retry_after_seconds(retry_after_seconds)
+
 
 class TextRequestRejected(DriverUnavailable):
     """HTTP rejection of a text-only request; remote billing remains unknown."""
 
-    def __init__(self, message: str, *, status_code: int):
+    def __init__(self, message: str, *, status_code: int, retry_after_seconds: float | None = None):
         super().__init__(message)
         self.status_code = status_code
+        self.retry_after_seconds = _sanitized_retry_after_seconds(retry_after_seconds)
 
 
 class ToolRequestRejected(DriverUnavailable):
@@ -610,9 +667,11 @@ class OpenAICompatibleDriver:
         except HTTPError as exc:
             if exc.code == 429 and _text_only_request(payload):
                 raise TextRequestRejected(f"{self.name} API request failed with HTTP {exc.code}",
-                                          status_code=exc.code) from None
+                                          status_code=exc.code,
+                                          retry_after_seconds=_retry_after_seconds(exc.headers)) from None
             if exc.code in {408, 500, 502, 503, 504} and _text_only_request(payload):
-                raise TextTransportFailure(f"{self.name} API request failed with HTTP {exc.code}") from None
+                raise TextTransportFailure(f"{self.name} API request failed with HTTP {exc.code}",
+                                           retry_after_seconds=_retry_after_seconds(exc.headers)) from None
             raise DriverUnavailable(f"{self.name} API request failed with HTTP {exc.code}") from None
         except (URLError, TimeoutError, OSError):
             # Adding any local or server-side tools must remove the text-only

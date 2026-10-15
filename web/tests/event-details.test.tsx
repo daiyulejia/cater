@@ -330,3 +330,60 @@ test('切换事件时开发者详情重新收起', () => {
   rerender(<EventDetails event={{ ...event('work.claimed'), seq: 125 }} />)
   expect(screen.getByText('开发者详情').closest('details')!.open).toBe(false)
 })
+
+const driverActor = { id: 'driver_gateway', role: 'driver_gateway', kind: 'system' }
+
+test('续试安排用中文展示伙伴、延迟和关联信息，范围原文收进开发者详情', () => {
+  const current = event('driver.retry_scheduled', {
+    role: 'dev', driver: 'external_model', failure_seq: 120, retry_index: 1, retry_limit: 1,
+    delay_seconds: 5, not_before: 1792022405, phase: 'work', work_item_id: 'board',
+    scope: { digest: 'PRIVATE_SCOPE' }, reason: '连接暂时不稳定，等待后续试。',
+  }, driverActor)
+  const { container } = render(<EventDetails event={current} actorName={names} />)
+  expect(screen.getByRole('heading', { name: '模型自动续试安排' })).toBeTruthy()
+  expect(screen.getByText('@米寇')).toBeTruthy()
+  expect(screen.getByText('5 秒')).toBeTruthy()
+  expect(screen.getByText('原失败事件').parentElement!.textContent).toContain('120')
+  expect(screen.getByText('本次续试').parentElement!.textContent).toContain('1')
+  expect(screen.getByText('续试上限').parentElement!.textContent).toContain('1')
+  expect(screen.getByText('最早续试时间').parentElement!.textContent).toMatch(/2026/)
+  expect(screen.getByText('执行工作')).toBeTruthy()
+  expect(screen.getByText('board')).toBeTruthy()
+  expect(ordinary(container)).toContain('仍可发消息或暂停任务')
+  expect(ordinary(container)).not.toMatch(/PRIVATE_SCOPE|\{"|driver.retry_scheduled/)
+  expect(screen.getByText('开发者详情').closest('details')!.open).toBe(false)
+  expect(screen.getByLabelText('原始事件 JSON').textContent).toBe(JSON.stringify(current, null, 2))
+})
+
+test.each([
+  ['succeeded', '模型调用已恢复'], ['failed', '续试仍失败，已保留检查点'], ['cancelled', '续试等待已取消'], ['unknown', '状态待核对'],
+])('续试结果 %s 显示中文状态与原因，不表示验收完成', (status, expected) => {
+  const { container } = render(<EventDetails actorName={names} event={event('driver.retry_finished', {
+    request_seq: 123, role: 'test', driver: 'external_model', status, reason: '已有成果保留。',
+  }, driverActor)} />)
+  expect(screen.getByRole('heading', { name: '模型自动续试结果' })).toBeTruthy()
+  expect(screen.getByText(expected)).toBeTruthy()
+  expect(screen.getByText('@复核伙伴')).toBeTruthy()
+  expect(screen.getByText('续试安排事件').parentElement!.textContent).toContain('123')
+  expect(screen.getByText('已有成果保留。')).toBeTruthy()
+  expect(ordinary(container)).toContain('不代表任务完成或验收通过')
+})
+
+test.each([
+  { id: 'dev', role: 'driver_gateway', kind: 'agent' },
+  { id: 'driver_gateway', role: 'worker', kind: 'system' },
+  { id: 'dev', role: 'driver_gateway', kind: 'system' },
+])('非网关回执不能在详情中冒充已恢复：%j', actor => {
+  const { container } = render(<EventDetails event={event('driver.retry_finished', { status: 'succeeded', request_seq: 123, role: 'dev' }, actor)} />)
+  expect(screen.getByText('回执来源待核对')).toBeTruthy()
+  expect(ordinary(container)).not.toContain('已恢复')
+})
+
+test('续试详情的未知角色和异常字段不会泄漏机器名或生成 JSON 正文', () => {
+  const { container } = render(<EventDetails actorName={id => id} event={event('driver.retry_scheduled', {
+    role: 'internal_worker', driver: { secret: 'PRIVATE_DRIVER' }, delay_seconds: '5', not_before: 1e100,
+    reason: { secret: 'PRIVATE_REASON' }, phase: 'internal_phase', scope: { secret: 'PRIVATE_SCOPE' },
+  }, driverActor)} />)
+  expect(ordinary(container)).toContain('@未命名成员')
+  expect(ordinary(container)).not.toMatch(/internal_worker|internal_phase|PRIVATE_|\[object Object\]/)
+})

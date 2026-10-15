@@ -31,6 +31,7 @@ const titles: Record<string, string> = {
   'clarification.requested': '等待补充信息', 'activity.queued': '协作已排队',
   'activity.completed': '本轮协作已结束', 'activity.failed': '本轮协作失败',
   'driver.failed': '模型调用异常', 'driver.budget_exhausted': '模型预算已用尽',
+  'driver.retry_scheduled': '模型自动续试安排', 'driver.retry_finished': '模型自动续试结果',
   'cabinet.convened': '联合讨论', 'cabinet.voted': '讨论建议', 'decision.proposed': '决策建议',
   'agent.decided': '协作决定', 'supreme.decided': '最终协作决定', 'brief.generated': '本轮总结',
   'escalation.triggered': '需要进一步处理', 'review.generated': '任务复查',
@@ -255,6 +256,26 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       status = '调用失败'; add('失败原因', p.message); number('调用次数', p.attempt)
       if (p.circuit_open === true) add('后续调用', '该模型通道已暂停调用')
       break
+    case 'driver.retry_scheduled': case 'driver.retry_finished': {
+      const trusted = event.actor.kind === 'system' && event.actor.id === 'driver_gateway' && event.actor.role === 'driver_gateway'
+      status = !trusted ? '回执来源待核对' : event.type === 'driver.retry_scheduled' ? '等待自动续试'
+        : label(p.status, { succeeded: '模型调用已恢复', failed: '续试仍失败，已保留检查点', cancelled: '续试等待已取消' })
+      add('相关伙伴', member(p.role)); add('模型通道', p.driver); add('原因', p.reason)
+      if (event.type === 'driver.retry_scheduled') {
+        number('原失败事件', p.failure_seq); number('本次续试', p.retry_index); number('续试上限', p.retry_limit)
+        number('等待时长', p.delay_seconds, ' 秒')
+        if (typeof p.not_before === 'number' && Number.isFinite(p.not_before)) {
+          const date = new Date(p.not_before * 1000)
+          if (Number.isFinite(date.getTime())) add('最早续试时间', date.toLocaleString('zh-CN', { hour12: false }))
+        }
+        add('调用阶段', label(p.phase, { work: '执行工作', planning: '整理计划', review: '阶段复核', delivery: '整体交付', delivery_review: '整体验收', conversation: '回应消息', question: '回答提问', explanation: '讲解成果' }, '其他调用阶段'))
+        note = '等待期间仍可发消息或暂停任务；安排不代表已经发出续试请求。'
+      } else {
+        number('续试安排事件', p.request_seq)
+        note = '仅记录本次模型续试结果，不代表任务完成或验收通过；关联安排以审计记录为准。'
+      }
+      break
+    }
     case 'driver.budget_exhausted': status = '调用受阻'; number('预算', p.budget); number('已使用', p.used_tokens); break
     case 'brief.generated': add('本轮分歧', record(p.brief).dispute); break
     case 'cabinet.voted': add('建议原因', record(p.tally).reason); break

@@ -753,6 +753,7 @@ class ActivityRunner:
                 if "activation_seq" in binding and not self._claim_activation_start(runtime, task_id, binding):
                     self._finish(task_id, activity_id, "observing")
                     return
+                runtime._active_activity_id = activity_id
                 if action == "run":
                     if "expected_scope" in binding:
                         runtime.collaborate(task_id, expected_scope=binding["expected_scope"])
@@ -884,8 +885,32 @@ class ActivityRunner:
                       and event.payload.get("activity_id") == activity_id]
             payload = {**queued[-1].payload, "queued_seq": queued[-1].seq} if queued else {}
             payload.update(activity_id=activity_id, action=action, **details)
-            return runtime.log.emit(type=kind, task_id=task_id, actor=EventActor.system("orchestrator"),
-                                    payload=payload), True
+            terminal = runtime.log.emit(type=kind, task_id=task_id, actor=EventActor.system("orchestrator"),
+                                        payload=payload)
+            if queued:
+                pending = {}
+                for event in runtime.log.iter_events(task_id=task_id,
+                        event_types=("driver.retry_scheduled", "driver.retry_finished"), after_seq=queued[0].seq):
+                    if event.actor != EventActor.system("driver_gateway"):
+                        continue
+                    if event.type == "driver.retry_scheduled":
+                        if (event.payload.get("activity_id") == activity_id
+                                and all(isinstance(event.payload.get(key), str) and event.payload[key]
+                                        for key in ("role", "driver"))):
+                            pending[event.seq] = event
+                    else:
+                        request_seq = event.payload.get("request_seq")
+                        started = pending.get(request_seq) if type(request_seq) is int else None
+                        if (started and event.payload.get("status") in {"succeeded", "failed", "cancelled"}
+                                and all(event.payload.get(key) == started.payload[key] for key in ("role", "driver"))):
+                            pending.pop(request_seq)
+                for started in pending.values():
+                    runtime.log.emit(type="driver.retry_finished", task_id=task_id,
+                        actor=EventActor.system("driver_gateway"), payload={
+                            "request_seq": started.seq, "role": started.payload["role"],
+                            "driver": started.payload["driver"], "status": "cancelled",
+                            "reason": "本轮活动已结束，已取消等待中的自动续试；不会重放模型请求。"})
+            return terminal, True
 
     def _fail_activity(self, task_id: str, activity_id: str, action: str, exc: Exception,
                        *, control: dict[str, Any] | None = None) -> None:
@@ -986,6 +1011,7 @@ def serve(
     workspaces_path: str | Path | None = None,
     driver_attempts: int = 2,
     circuit_breaker_threshold: int = 2,
+    text_retry: bool = True,
     audit_key: str | bytes | None = None,
     audit_key_id: str = "local",
     audit_keys: Mapping[str, str | bytes] | None = None,
@@ -1017,6 +1043,7 @@ def serve(
         workspaces_path=workspaces_path,
         driver_attempts=driver_attempts,
         circuit_breaker_threshold=circuit_breaker_threshold,
+        text_retry=text_retry,
         audit_key=audit_key,
         audit_key_id=audit_key_id,
         audit_keys=audit_keys,
@@ -1065,6 +1092,7 @@ def make_handler(
     workspaces_path: str | Path | None = None,
     driver_attempts: int = 2,
     circuit_breaker_threshold: int = 2,
+    text_retry: bool = True,
     audit_key: str | bytes | None = None,
     audit_key_id: str = "local",
     audit_keys: Mapping[str, str | bytes] | None = None,
@@ -1095,6 +1123,7 @@ def make_handler(
             drivers=shared_drivers,
             close_drivers_on_close=shared_drivers is None,
             driver_health=shared_driver_health,
+            text_retry=text_retry,
         )
 
     activities = ActivityRunner(build_runtime)

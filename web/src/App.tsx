@@ -78,7 +78,7 @@ type Question = QuestionResult & { seq: number; status: string; question: string
 type ConversationReceipt = { seq: number; status: string }
 export type TaskDetail = { task: Task; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity; execution_control?: ExecutionControl; workspace?: WorkspaceBinding }
 type DerivationSource = { id: string; goal: string }
-type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event }
+type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event; retryStatus?: 'waiting' | 'succeeded' | 'failed' | 'cancelled'; auditEvents?: Event[]; auditName?: (id: string) => string }
 
 const accessToken = readAccessToken()
 
@@ -208,6 +208,10 @@ function isResponseFormatError(event: Event): boolean {
     && event.payload.speech_source === 'system_receipt' && event.payload.error_code === 'invalid_response'
 }
 
+function isDriverGateway(event: Event): boolean {
+  return event.actor.kind === 'system' && event.actor.id === 'driver_gateway' && event.actor.role === 'driver_gateway'
+}
+
 function conversationFor(events: Event[], identities: Record<string, OrgRole>, organization: Organization | null, questions: Question[] = [], clarifications: Clarification[] = [], receipts: ConversationReceipt[] = []): ChatItem[] {
   const hasAutonomousDecision = events.some((event) => event.type === 'agent.decided' || event.type === 'supreme.decided')
   const hasFinishedActivity = events.some((event) => event.type === 'activity.completed' || event.type === 'activity.failed')
@@ -221,6 +225,32 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
   const collaboration = collaborationProjection(events, organization?.leader.id ?? 'store_manager')
   const transfers = workTransfers(events)
   const displayName = (id: string) => identities[id]?.name ?? actorText(id)
+  const retries = new Map<number, { scheduled: Event; failure?: Event; finished?: Event }>()
+  const retryRecords = new Set<number>()
+  const bySeq = new Map(events.map((event) => [event.seq, event]))
+  // Bind in sequence order, even when a snapshot arrives out of order. The first valid terminal receipt wins.
+  for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
+    if (!isDriverGateway(event)) continue
+    const p = event.payload
+    if (event.type === 'driver.retry_scheduled' && typeof p.role === 'string' && p.role.trim()
+      && typeof p.driver === 'string' && p.driver.trim() && p.retry_index === 1 && p.retry_limit === 1
+      && typeof p.delay_seconds === 'number' && Number.isFinite(p.delay_seconds) && p.delay_seconds >= 0
+      && typeof p.failure_seq === 'number' && Number.isInteger(p.failure_seq) && p.failure_seq > 0 && p.failure_seq < event.seq) {
+      const source = bySeq.get(p.failure_seq)
+      const failure = source?.type === 'driver.failed' && isDriverGateway(source)
+        && source.payload.role === p.role && source.payload.driver === p.driver ? source : undefined
+      retries.set(event.seq, { scheduled: event, failure })
+      if (failure) retryRecords.add(failure.seq)
+    } else if (event.type === 'driver.retry_finished' && typeof p.request_seq === 'number') {
+      const retry = retries.get(p.request_seq)
+      if (retry && !retry.finished && event.seq > retry.scheduled.seq
+        && p.role === retry.scheduled.payload.role && p.driver === retry.scheduled.payload.driver
+        && typeof p.status === 'string' && ['succeeded', 'failed', 'cancelled'].includes(p.status)) {
+        retry.finished = event
+        retryRecords.add(event.seq)
+      }
+    }
+  }
   return events.flatMap((event) => {
     const payload = event.payload
     const actor = event.actor
@@ -240,6 +270,35 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     const memberNames = (value: unknown) => Array.isArray(value)
       ? value.filter((id): id is string => typeof id === 'string').map((id) => identities[id]?.name ?? actorText(id))
       : []
+    if (retryRecords.has(event.seq)) return []
+    if (event.type === 'driver.retry_scheduled' || event.type === 'driver.retry_finished') {
+      const retry = retries.get(event.seq)
+      const role = retry?.scheduled.payload.role
+      const name = typeof role === 'string' ? displayName(role).trim() : ''
+      const partner = name && name !== role ? `@${name}` : '一位伙伴'
+      const state = retry?.finished?.payload.status as ChatItem['retryStatus'] | undefined
+      const status = state ?? 'waiting'
+      const texts = {
+        waiting: `${partner}的模型暂时连接不稳定，已安排一次自动续试（至少间隔 ${Math.ceil(Number(payload.delay_seconds))} 秒）。结果返回后会在这里更新；期间你仍可发消息或暂停任务。`,
+        succeeded: `${partner}的模型调用已恢复。后续进展以新的工作记录为准。`,
+        failed: `${partner}的模型续试仍失败，已保留检查点。你可以补充消息，或稍后继续。`,
+        cancelled: `${partner}的自动续试等待已取消，已有成果保留。`,
+      }
+      const item = message(retry ? ({ waiting: '正在自动恢复连接', succeeded: '模型调用已恢复', failed: '续试仍失败', cancelled: '续试等待已取消' })[status] : '续试回执待核对',
+        retry ? texts[status] : '这条续试记录的来源或关联信息不完整，请以已核对的工作记录为准。', 'system')
+      item.actor = 'system'
+      item.display = '系统'
+      item.role = ''
+      item.systemActor = true
+      item.targets = []
+      item.replyTo = undefined
+      if (retry) {
+        item.retryStatus = status
+        item.auditEvents = [retry.failure, retry.scheduled, retry.finished].filter((entry): entry is Event => Boolean(entry))
+        item.auditName = displayName
+      }
+      return [item]
+    }
     const transfer = transfers.get(event.seq)
     if (transfer) {
       const owner = `@${displayName(transfer.owner)}`
@@ -1313,7 +1372,7 @@ function AuditTrail({ item }: { item: ChatItem }) {
   const [open, setOpen] = useState(false)
   return <details className="chat-audit" onToggle={(event) => { if (event.target === event.currentTarget) setOpen(event.currentTarget.open) }}>
     <summary>事件 #{item.id} · 审计记录</summary>
-    {open && <Suspense fallback={<p>正在读取过程记录…</p>}><EventDetails event={item.evidence} actorName={actorText} /></Suspense>}
+    {open && <Suspense fallback={<p>正在读取过程记录…</p>}>{(item.auditEvents ?? [item.evidence]).map((event) => <EventDetails key={event.seq} event={event} actorName={item.auditName ?? actorText} />)}</Suspense>}
   </details>
 }
 
@@ -1342,8 +1401,8 @@ function SystemRecord({ item, taskId, controls }: { item: ChatItem; taskId: stri
   const [expanded, setExpanded] = useState(failed)
   const responseAttention = isResponseFormatError(item.evidence) || (item.evidence.type === 'conversation.finished'
     && ['clarification', 'outdated', 'invalid', 'blocked', 'uncertain'].includes(String(item.evidence.payload.status)))
-  const attention = responseAttention || failed || ['activity.failed', 'driver.failed', 'driver.budget_exhausted'].includes(item.evidence.type)
-  const Icon = attention ? TriangleAlert : passed ? CheckCircle2 : Info
+  const attention = responseAttention || failed || item.retryStatus === 'failed' || ['activity.failed', 'driver.failed', 'driver.budget_exhausted'].includes(item.evidence.type)
+  const Icon = attention ? TriangleAlert : passed || item.retryStatus === 'succeeded' ? CheckCircle2 : Info
   const heading = <><strong>系统</strong>{item.title && <span> · {item.title}</span>}</>
   const body = <>
     <p className={checking ? 'font-mono' : undefined}>{item.text}</p>
@@ -1354,7 +1413,7 @@ function SystemRecord({ item, taskId, controls }: { item: ChatItem; taskId: stri
     <MessageContext item={item} taskId={taskId} controls={controls} />
     <AuditTrail item={item} />
   </>
-  return <article role={responseAttention ? 'alert' : undefined} className={`system-record-row${attention ? ' needs-attention' : ''}`}>
+  return <article role={responseAttention || item.retryStatus === 'failed' ? 'alert' : undefined} className={`system-record-row${attention ? ' needs-attention' : ''}`}>
     <Icon size={16} aria-hidden="true" />
     <div data-actor="system" className="message-bubble is-system system-record">
       {technical ? <details open={failed} onToggle={(event) => setExpanded(event.currentTarget.open)}>

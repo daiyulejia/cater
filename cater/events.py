@@ -67,6 +67,8 @@ EVENT_CATEGORIES = {
     "plan.proposed": "planning",
     "plan.amended": "planning",
     "driver.failed": "driver",
+    "driver.retry_scheduled": "driver",
+    "driver.retry_finished": "driver",
     "driver.budget_exhausted": "driver",
     "agent.working": "dialogue",
     "msg.said": "dialogue",
