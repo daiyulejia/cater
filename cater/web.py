@@ -736,6 +736,14 @@ def make_handler(
                             rt.questions.ask(task_id, data.get("question"), request_id=data.get("request_id"), role_id=data.get("role_id"))
                             activities.answer_questions(task_id)
                             return self._send_json(self._task_payload(task_id, activities), status=HTTPStatus.ACCEPTED)
+                        elif action == "clarifications":
+                            if set(data) - {"question_seq", "kind", "request_id", "option_index", "answer"}:
+                                return self._bad_request("回复只接收问题编号、选择或自填内容和请求标识。")
+                            _, created = rt.clarifications.respond(task_id,
+                                question_seq=data.get("question_seq"), kind=data.get("kind"), request_id=data.get("request_id"),
+                                option_index=data.get("option_index"), answer=data.get("answer"))
+                            if created:
+                                background_action = "run"
                         elif action == "derive":
                             if set(data) - {"goal", "acceptance", "request_id", "run", "background"}:
                                 return self._bad_request("来源背景与项目由服务器确定，不能由请求替换。")
@@ -806,7 +814,7 @@ def make_handler(
                     except ValueError as exc:
                         return self._bad_request(str(exc))
                 if background_action:
-                    if action == "command":
+                    if action in {"command", "clarifications"}:
                         activities.continue_after_current(task_id, background_action)
                     else:
                         activities.submit(task_id, background_action)
@@ -1056,7 +1064,7 @@ def make_handler(
                     for row in rt.log.db.execute("""
                         SELECT task_id, type,
                             CASE WHEN type = 'msg.said' AND json_extract(payload_json, '$.phase')
-                                IN ('planning', 'delivery_receipt')
+                                IN ('planning', 'delivery_receipt', 'clarification_receipt')
                                 THEN json_extract(payload_json, '$.phase') END AS phase,
                             COUNT(*) AS n, MAX(seq) AS latest
                         FROM events WHERE task_id IS NOT NULL GROUP BY task_id, type, phase
@@ -1548,9 +1556,10 @@ def _event_version(rt: Runtime) -> int:
     return rt.log.db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
 
 
-# One record per bubble in App.conversationFor's unfiltered conversation.
-# Keep its conditional suppression rules in sync when adding chat event types.
+# Count conversational records, not inline membership notices. Keep receipt
+# suppression in sync with App.conversationFor when adding message event types.
 _CHAT_TYPES = {
+    "clarification.requested",
     "question.asked", "question.finished",
     "task.created", "rule.recorded", "rule.updated", "activity.failed", "human.commanded",
     "task.progress_reported", "planning.started", "planning.finished", "delivery.review_started",
@@ -1563,7 +1572,7 @@ _CHAT_TYPES = {
 
 def _conversation_count(counts: Counter) -> int:
     count = sum(n for (kind, phase), n in counts.items() if kind in _CHAT_TYPES
-                and not (kind == "msg.said" and phase in {"planning", "delivery_receipt"}))
+                and not (kind == "msg.said" and phase in {"planning", "delivery_receipt", "clarification_receipt"}))
     if not (counts[("activity.completed", None)] or counts[("activity.failed", None)]):
         count += counts[("activity.queued", None)]
     if not (counts[("agent.decided", None)] or counts[("supreme.decided", None)]):
@@ -1631,13 +1640,14 @@ def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | N
             _task_summary(task, version=version, latest_seq=events[-1].seq if events else 0,
                           conversation_count=_conversation_count(Counter(
                               (e.type, e.payload.get("phase") if e.type == "msg.said"
-                               and e.payload.get("phase") in ("planning", "delivery_receipt") else None)
+                               and e.payload.get("phase") in ("planning", "delivery_receipt", "clarification_receipt") else None)
                               for e in events))), activity or {"state": "idle", "active": False}),
         "task": task_to_dict(task),
         "events": [event_to_dict(e) for e in events],
         "organization_memory": rt.shared_memory(exclude_task_id=task_id),
         "background": rt.conversation_background(task_id),
         "questions": rt.questions.view(task_id),
+        "clarifications": rt.clarifications.view(task_id),
         "decision_ladder": decision_ladder(events),
         "organization_path": organization_path(task, events),
         "review": rt.review(task_id),

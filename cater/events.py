@@ -77,6 +77,7 @@ EVENT_CATEGORIES = {
     "question.asked": "dialogue",
     "question.started": "lifecycle",
     "question.finished": "dialogue",
+    "clarification.requested": "dialogue",
     "human.decided": "decision",
     "review.generated": "review",
 }

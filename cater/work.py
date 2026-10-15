@@ -657,23 +657,33 @@ class WorkLedger:
             local = self.checks(task_id, item)
             for criterion in item["criteria"]:
                 check = {"id": criterion["id"], "kind": criterion["kind"], "status": "unknown", "reason": "缺少可核对的验收依据。"}
+                matches = [r for r in raw_results if isinstance(r, dict) and r.get("id") == criterion["id"]]
+                assessment = None
+                if len(matches) == 1:
+                    r = matches[0]
+                    status, quote, seq = r.get("status"), r.get("quote"), r.get("artifact_seq")
+                    reason = r.get("reason")
+                    if (status in ("passed", "failed", "unknown") and isinstance(reason, str) and reason.strip()
+                            and len(reason) <= 2000 and type(seq) is int and seq in artifacts
+                            and isinstance(quote, str) and quote.strip() and len(quote) <= 2000
+                            and quote in artifacts[seq]["content"]):
+                        assessment = {"status": status, "reason": reason, "quote": quote, "artifact_seq": seq}
                 if criterion["kind"] == "local_check":
                     receipt = local.get(criterion["id"])
                     if receipt:
                         passed = self._receipt_passed(receipt)
-                        check.update(status="passed" if passed else "failed", receipt_seq=receipt.seq,
-                                     reason="已记录该成果副本的本地检查；覆盖范围仅限所执行命令。")
-                else:
-                    matches = [r for r in raw_results if isinstance(r, dict) and r.get("id") == criterion["id"]]
-                    if len(matches) == 1:
-                        r = matches[0]
-                        status, quote, seq = r.get("status"), r.get("quote"), r.get("artifact_seq")
-                        reason = r.get("reason")
-                        if (status in ("passed", "failed", "unknown") and isinstance(reason, str) and reason.strip()
-                                and len(reason) <= 2000 and type(seq) is int and seq in artifacts
-                                and isinstance(quote, str) and quote.strip() and len(quote) <= 2000
-                                and quote in artifacts[seq]["content"]):
-                            check.update(status=status, reason=reason, quote=quote, artifact_seq=seq)
+                        check.update(execution_status="passed" if passed else "failed", receipt_seq=receipt.seq,
+                                     reason="命令已通过，但尚未独立核对它是否足以验证这项标准。" if passed
+                                     else "实际检查未通过，成员评价不能覆盖执行结果。")
+                        if not passed:
+                            check["status"] = "failed"
+                        # A successful process is necessary, not sufficient evidence
+                        # that the command actually tests this acceptance criterion.
+                        elif (assessment and type(matches[0].get("receipt_seq")) is int
+                              and matches[0]["receipt_seq"] == receipt.seq):
+                            check.update(assessment)
+                elif assessment:
+                    check.update(assessment)
                 checks.append(check)
             status = "accepted" if all(c["status"] == "passed" for c in checks) else (
                 "rework" if any(c["status"] == "failed" for c in checks) else "submitted")

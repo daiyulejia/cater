@@ -57,13 +57,20 @@ def _text(value: object, limit: int = 2000) -> str:
 
 
 def validate_plan(raw: object, context: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(raw, dict) or set(raw) != {"status", "summary", "items", "coverage", "reuse"}:
+    if not isinstance(raw, dict) or set(raw) - {"clarification"} != {"status", "summary", "items", "coverage", "reuse"}:
         raise ValueError("规划响应字段不完整")
     summary = _text(raw["summary"])
-    if raw["status"] == "blocked":
+    if raw["status"] in ("blocked", "needs_input"):
         if any(raw[key] != [] for key in ("items", "coverage", "reuse")):
             raise ValueError("暂停规划时不能下发工作")
+        if raw["status"] == "needs_input":
+            from .clarifications import normalize_question
+            return {**raw, "summary": summary, "clarification": normalize_question(raw.get("clarification"))}
+        if raw.get("clarification") is not None:
+            raise ValueError("提问必须使用 needs_input 状态，不能隐藏在暂停说明中。")
         return {**raw, "summary": summary}
+    if raw.get("clarification") is not None:
+        raise ValueError("不能在下发工作时同时等待顾客回答。")
     if raw["status"] != "ready":
         raise ValueError("未知的规划状态")
     roles = context["roles"]
@@ -187,7 +194,17 @@ class Planner:
             "Use the exact role ids allowed in the schema, never names, job titles or the store manager id. "
             "Planning and whole-delivery acceptance are handled by the store manager outside the items; "
             "do not add work items for those orchestration steps. Cabinet members may review a worker item. "
-            "Assign a small task directly; do not create meetings or extra work for ceremony. Honor requested assignees when feasible. "
+            "Independent review belongs to each item's reviewer; do not add a separate review work item merely to repeat it. "
+            "Scope work items to necessary deliverables and real dependencies. Honor requested assignees when feasible. "
+            "Only when necessary customer information is missing and cannot be safely inferred, use status=needs_input "
+            "with clarification={question, options}, empty items/coverage/reuse, and a concise Chinese summary. "
+            "Offer zero or two to four distinct suggestions; the customer may skip or write their own answer. "
+            "Use clarification=null otherwise. Do not escalate routine internal decisions to the customer. "
+            "Skipping never grants permission or confirms an option. Never request passwords or API keys in chat. "
+            "Use review criteria to judge meaning, naturalness and coverage of requirements in the actual artifact. "
+            "Use local_check for behavior that genuinely needs to be run, with reproducible observations and failure conditions. "
+            "Keyword matches and arbitrary counts cannot establish semantic quality or completeness; assess those through review. "
+            "Prose-only deliverables with no execution claims may use only review criteria when no active check obligation requires otherwise. "
             "Include reproducible local_check criteria for code behavior and test claims; narrative review cannot prove execution. "
             "Preserve every active local_check obligation: its obligation_id, work item binding, criterion id, subject and text. "
             "Copy existing obligation_id and subject explicitly, even if the business objective description changes. "
@@ -225,6 +242,9 @@ class Planner:
                             expected_scope=context["scope"], expected_plan_seq=context["previous_plan"]["plan_seq"],
                             planning={"attempt_seq": started.seq, "summary": reason, "coverage": parsed["coverage"], "reuse": parsed["reuse"]})
                         status, plan_seq = "installed", event.seq
+                    elif parsed["status"] == "needs_input":
+                        self.rt.clarifications.request(task_id, leader.id, parsed["clarification"], scope=context["scope"])
+                        status = "needs_input"
         except WorkConflict:
             status, reason = "stale", "规划期间要求、店规或工作状态发生变化，这份计划未下发。"
         except (ValueError, TypeError, RecursionError) as exc:

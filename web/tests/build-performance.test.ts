@@ -40,4 +40,10 @@ test('production chunks stay within loading budgets with complete acyclic import
   const graph = chunks.find((chunk) => chunk.fileName.includes('TaskGraph-'))
   expect(graph, 'the graph view must be loaded through a dynamic import').toBeDefined()
   expect(entries[0].dynamicImports).toContain(graph!.fileName)
+  for (const name of ['ClarificationCard', 'QuestionDetails', 'Artifact']) {
+    const component = chunks.find((chunk) => chunk.fileName.includes(`${name}-`))
+    expect(component, `${name} must load on demand`).toBeDefined()
+    expect(visited.has(component!.fileName), `${name} must not be statically reachable from the entry`).toBe(false)
+    expect(entries[0].dynamicImports).toContain(component!.fileName)
+  }
 }, 30_000)

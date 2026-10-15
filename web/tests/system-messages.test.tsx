@@ -134,6 +134,7 @@ test('真实执行成员的 system 类型总结保留身份，未注册的系统
 })
 
 test('explainer 的 question.finished 按实际 speaker 保留成员身份与引用详情', async () => {
+  vi.useRealTimers()
   await mount([
     event(2, 'question.asked', 'human', { question: '为何这样安排？', role_id: 'dev', basis: { seq: 1, source_seqs: [{ seq: 1, kind: 'goal' }], history_seqs: [] } }, 'human'),
     event(3, 'question.finished', 'explainer', { question_seq: 2, status: 'answered', speaker_id: 'dev', answer: '我依据这次要求安排。', evidence: [{ source_seq: 1, quote: '核对聊天系统记录' }], limits: ['仅基于当时的版本。'] }, 'system'),
@@ -142,17 +143,18 @@ test('explainer 的 question.finished 按实际 speaker 保留成员身份与引
   expect(within(row).getByRole('img', { name: '米寇' })).toBeTruthy()
   expect(row.querySelector('[data-actor="dev"].is-agent')).toBeTruthy()
   expect(visibleText(row)).toContain('我依据这次要求安排。')
-  openDetails(within(row).getByText('查看引用、版本与限制').closest('details')!)
+  openDetails((await within(row).findByText('查看引用、版本与限制')).closest('details')!)
   expect(visibleText(row)).toContain('原文引用 · 来源事件 #1')
   expect(visibleText(row)).toContain('仅基于当时的版本。')
 })
 
 test('没有成员回答的系统提问通知保留 QuestionDetails', async () => {
+  vi.useRealTimers()
   await mount([event(2, 'question.finished', 'explainer', { question_seq: 1, status: 'insufficient', reason: '目前引用依据不足。', limits: ['等待可引用的成果。'] }, 'system')])
   const row = record(2)
   expect(within(row).queryByRole('img')).toBeNull()
   expect(visibleText(row)).toContain('目前引用依据不足。')
-  openDetails(within(row).getByText('查看引用、版本与限制').closest('details')!)
+  openDetails((await within(row).findByText('查看引用、版本与限制')).closest('details')!)
   expect(visibleText(row)).toContain('对应提问 · 事件 #1')
   expect(visibleText(row)).toContain('等待可引用的成果。')
 })

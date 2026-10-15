@@ -41,8 +41,10 @@ class WorkDriver:
             self.after(work)
         if work.get("phase") == "review":
             artifact = work["artifacts"][0]
-            payload = {"checks": [{"id": "meaning", "status": self.status, "reason": "Inspected the exact body",
-                                   "artifact_seq": artifact["seq"], "quote": self.quote or artifact["content"]}]}
+            payload = {"checks": [{"id": c["id"], "status": self.status, "reason": "Inspected the exact body and check scope",
+                                   "artifact_seq": artifact["seq"], "quote": self.quote or artifact["content"],
+                                   "receipt_seq": work["local_checks"].get(c["id"], {}).get("seq")}
+                                  for c in work["contract"]["criteria"]]}
         else:
             payload = {"claim": "Completed", "text": "Completed", "stance": "assert", "option_id": "A",
                        "deliverables": [{"title": work["work_item_id"], "summary": "Result",

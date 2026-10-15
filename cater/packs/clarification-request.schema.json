@@ -1,0 +1,9 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["question", "options"],
+  "properties": {
+    "question": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "options": {"type": "array", "maxItems": 4, "items": {"type": "string", "minLength": 1, "maxLength": 200}, "description": "Zero options for an open question, or two to four distinct suggestions. Custom answers and skipping are always supported by the UI."}
+  }
+}

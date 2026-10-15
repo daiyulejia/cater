@@ -1,19 +1,25 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["status", "summary", "items", "coverage", "reuse"],
+  "required": ["status", "summary", "items", "coverage", "reuse", "clarification"],
   "properties": {
-    "status": {"type": "string", "enum": ["ready", "blocked"]},
+    "status": {"type": "string", "enum": ["ready", "blocked", "needs_input"]},
+    "clarification": {"type": ["object", "null"], "additionalProperties": false,
+      "required": ["question", "options"], "properties": {
+        "question": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "options": {"type": "array", "maxItems": 4, "items": {"type": "string", "minLength": 1, "maxLength": 200}}
+      }},
     "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
     "items": {
       "type": "array", "maxItems": 64,
+      "description": "Necessary deliverables and real prerequisites, not duplicate reviewer or manager steps.",
       "items": {
         "type": "object", "additionalProperties": false,
         "required": ["id", "owner", "reviewer", "objective", "depends_on", "criteria"],
         "properties": {
           "id": {"type": "string", "minLength": 1, "maxLength": 200},
           "owner": {"type": "string", "minLength": 1, "maxLength": 200},
-          "reviewer": {"type": "string", "minLength": 1, "maxLength": 200},
+          "reviewer": {"type": "string", "minLength": 1, "maxLength": 200, "description": "Independent reviewer of this item's artifacts, different from owner."},
           "objective": {"type": "string", "minLength": 1, "maxLength": 12000},
           "depends_on": {"type": "array", "maxItems": 64, "items": {"type": "string"}},
           "criteria": {
@@ -23,8 +29,8 @@
               "required": ["id", "kind", "text"],
               "properties": {
                 "id": {"type": "string", "minLength": 1, "maxLength": 100},
-                "kind": {"type": "string", "enum": ["review", "local_check"]},
-                "text": {"type": "string", "minLength": 1, "maxLength": 2000},
+                "kind": {"type": "string", "enum": ["review", "local_check"], "description": "review: meaning, naturalness and coverage. local_check: reproducible executed behavior, not a semantic-quality proxy."},
+                "text": {"type": "string", "minLength": 1, "maxLength": 2000, "description": "Observable acceptance condition. Copy existing check_contract definitions unchanged."},
                 "obligation_id": {"type": ["string", "null"], "maxLength": 100},
                 "subject": {"type": ["string", "null"], "maxLength": 12000}
               }

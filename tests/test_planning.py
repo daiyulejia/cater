@@ -27,6 +27,7 @@ from test_runtime import start_test_web
 class PlanningDriver:
     def __init__(self):
         self.calls = []
+        self.prompts = []
         self.items = [item("implement", local=True)]
         self.reuse = False
         self.after = None
@@ -35,6 +36,7 @@ class PlanningDriver:
     def complete(self, *, role, prompt, context):
         work = context["work"]
         self.calls.append(copy.deepcopy(work))
+        self.prompts.append(prompt)
         if self.after:
             self.after(work)
         payload = {"status": "ready", "summary": "先实现，再检查实际成果；不把提交当作通过。",
@@ -91,6 +93,19 @@ class PlanningTests(unittest.TestCase):
         self.assertTrue(self.view()["stage_accepted"])
         self.assertEqual(len(self.planner.calls), 1)
         self.assertNotEqual(self.rt.task(self.task).status, "done")
+
+    def test_criterion_selection_guidance_reaches_planner_without_forcing_extra_work(self):
+        self.planner.items = [item("welcome", owner="product", reviewer="test")]
+        result = Planner(self.rt).run(self.task)
+        self.assertTrue(result["installed"])
+        prompt = self.planner.prompts[0]
+        self.assertIn("do not add a separate review work item merely to repeat it", prompt)
+        self.assertIn("Prose-only deliverables with no execution claims may use only review", prompt)
+        self.assertIn("Keyword matches and arbitrary counts cannot establish semantic quality", prompt)
+        self.assertIn("local_check criteria for code behavior and test claims", prompt)
+        self.assertIn("only a separate trusted revision can change it", prompt)
+        self.assertEqual(len(self.view()["items"]), 1)
+        self.assertEqual(self.view()["items"][0]["criteria"][0]["kind"], "review")
 
     def test_cli_dispatch_reports_pending_planning_without_assuming_legacy_plan_shape(self):
         from cater.cli import cmd_dispatch
@@ -319,7 +334,7 @@ class PlanningTests(unittest.TestCase):
 
     def test_adapter_uses_planning_contract_without_real_model(self):
         from examples import codex_cli_driver as adapter
-        payload = {"status": "blocked", "summary": "缺少一个必要条件", "items": [], "coverage": [], "reuse": []}
+        payload = {"status": "blocked", "summary": "缺少一个必要条件", "items": [], "coverage": [], "reuse": [], "clarification": None}
         observed = []
 
         def run(command, **kwargs):

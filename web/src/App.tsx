@@ -6,7 +6,6 @@ import {
 import catPortraits from './assets/cat-portraits.jpg'
 import staffPortraits from './assets/staff-portraits.jpg'
 import cafeWelcome from './assets/cafe-welcome-v2.jpg'
-import { ArtifactPreview } from './Artifact'
 import type { Artifact } from './Artifact'
 import { WorkboardPanel } from './WorkboardPanel'
 import { MentionInput } from './MentionInput'
@@ -22,8 +21,14 @@ import { QuestionComposerBar } from './QuestionComposerBar'
 import { conversationParticipants } from './participants'
 import type { WorkState } from './WorkItems'
 import type { TeamAvailability } from './TeamDirectory'
+import type { Clarification, ClarificationControls, ClarificationStore } from './ClarificationCard'
+import type { QuestionBasis, QuestionContext } from './QuestionDetails'
+import { collaborationProjection } from './collaborationProjection'
 
 const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
+const ClarificationCard = lazy(() => import('./ClarificationCard').then((module) => ({ default: module.ClarificationCard })))
+const QuestionDetails = lazy(() => import('./QuestionDetails').then((module) => ({ default: module.QuestionDetails })))
+const LazyArtifactPreview = lazy(() => import('./Artifact').then((module) => ({ default: module.ArtifactPreview })))
 
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
 type Message = { seq: number; actor: string; role: string; type: string; claim?: string; text?: string; stance?: string; target?: string; reply_to?: number }
@@ -54,13 +59,11 @@ type Task = {
   route?: { route?: string; reason?: string }
 }
 type Event = { seq: number; type: string; category: string; actor: { id: string; role: string; kind: string }; payload: Record<string, unknown> }
-type QuestionBasis = { seq: number; anchor: unknown; source_seqs: { seq: number; kind: string }[]; history_seqs: number[] }
 type QuestionResult = { question_seq?: number; answer?: string; evidence?: { source_seq: number; quote: string }[]; limits?: string[]; reason?: string; speaker_id?: string; driver?: string; tokens?: number; token_usage?: string }
 type Question = QuestionResult & { seq: number; status: string; question: string; role_id: string; basis: QuestionBasis; outdated: boolean }
-type QuestionContext = { basis?: QuestionBasis; outdated?: boolean; questionSeq?: number; recipient?: string; progress?: string; evidence?: { source_seq: number; quote: string }[]; limits?: string[]; reason?: string }
-type TaskDetail = { task: Task; events: Event[]; questions?: Question[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
+type TaskDetail = { task: Task; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
 type DerivationSource = { id: string; goal: string }
-type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; question?: QuestionContext; targets: string[]; replyTo?: number; evidence: Event }
+type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event }
 
 const accessToken = (() => {
   const fragment = new URLSearchParams(window.location.hash.slice(1))
@@ -201,18 +204,24 @@ function isSystemActor(actor: Event['actor'], identities: Record<string, OrgRole
   return !Object.hasOwn(identities, actor.id) && (actor.kind === 'system' || (!actor.kind && legacySystemActors.has(actor.id)))
 }
 
-function conversationFor(events: Event[], identities: Record<string, OrgRole>, organization: Organization | null, questions: Question[] = []): ChatItem[] {
+function conversationFor(events: Event[], identities: Record<string, OrgRole>, organization: Organization | null, questions: Question[] = [], clarifications: Clarification[] = []): ChatItem[] {
   const hasAutonomousDecision = events.some((event) => event.type === 'agent.decided' || event.type === 'supreme.decided')
   const hasFinishedActivity = events.some((event) => event.type === 'activity.completed' || event.type === 'activity.failed')
   const questionRows = new Map(questions.map((question) => [question.seq, question]))
   const askedEvents = new Map(events.filter((event) => event.type === 'question.asked').map((event) => [event.seq, event]))
   const finishedQuestions = new Set(events.filter((event) => event.type === 'question.finished').map((event) => event.payload.question_seq))
+  const clarificationRows = new Map(clarifications.map((question) => [question.seq, question]))
+  const collaboration = collaborationProjection(events, organization?.leader.id ?? 'store_manager')
+  const displayName = (id: string) => identities[id]?.name ?? actorText(id)
   return events.flatMap((event) => {
     const payload = event.payload
     const actor = event.actor
+    const projection = collaboration.get(event.seq)
     const message = (title: string | undefined, text: string, kind: ChatItem['kind'], category: ChatItem['category'] = kind === 'agent' || kind === 'human' ? 'collaboration' : 'system', details?: string[]): ChatItem => ({
       id: event.seq, actor: actor.id, display: identities[actor.id]?.name ?? actorText(actor.id), role: publicIdentity(actor.id, organization), kind, systemActor: isSystemActor(actor, identities), category, title, text, evidence: event,
       details: details?.filter(Boolean),
+      joined: projection?.joined.map(displayName),
+      handoff: projection?.handoff ? { owners: projection.handoff.owners.map(displayName), reviewers: projection.handoff.reviewers.map(displayName) } : undefined,
       targets: [
         ...(typeof payload.target === 'string' ? [payload.target] : []),
         ...(Array.isArray(payload.mentions) ? payload.mentions.filter((item): item is string => typeof item === 'string') : []),
@@ -222,6 +231,18 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     const memberNames = (value: unknown) => Array.isArray(value)
       ? value.filter((id): id is string => typeof id === 'string').map((id) => identities[id]?.name ?? actorText(id))
       : []
+    if (event.type === 'clarification.requested') {
+      const item = message('请你补充', String(payload.question ?? ''), 'agent')
+      item.targets = []
+      item.clarification = clarificationRows.get(event.seq)
+      return [item]
+    }
+    if (event.type === 'work.plan_created' || event.type === 'subtask.assigned') {
+      if (!projection) return []
+      const item = message(undefined, '', 'system', 'collaboration')
+      item.notice = true
+      return [item]
+    }
     if (event.type === 'question.started') return []
     if (event.type === 'question.asked' || event.type === 'question.finished') {
       const asked = event.type === 'question.asked'
@@ -274,8 +295,11 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     if (event.type === 'human.commanded') return [message(payload.intent === 'status' ? '查看进度' : payload.intent === 'resume' ? '继续推进' : '方向更新', String(payload.instruction ?? ''), 'human')]
     if (event.type === 'task.progress_reported') return [message('当前进展', String(payload.text ?? ''), 'system', 'collaboration')]
     if (event.type === 'planning.started') return [message('店长在整理安排', '我先核对这次的要求、已有成果和前后依赖，再把具体工作交给伙伴。', 'system', 'collaboration')]
-    if (event.type === 'planning.finished') return [message(payload.status === 'installed' ? '这次这样安排' : '计划先不下发', String(payload.reason ?? ''), 'system', 'decision')]
-    if (event.type === 'msg.said' && (payload.phase === 'planning' || payload.phase === 'delivery_receipt')) return []
+    if (event.type === 'planning.finished') {
+      const item = message(payload.status === 'installed' ? '这次这样安排' : '计划先不下发', String(payload.reason ?? ''), 'system', 'decision')
+      return [item]
+    }
+    if (event.type === 'msg.said' && ['planning', 'delivery_receipt', 'clarification_receipt'].includes(String(payload.phase))) return []
     if (event.type === 'delivery.review_started') return [message('最后一起核对', '各项成果已经过阶段验收。我再检查它们合起来是否满足你现在的要求，再整理交付和复查说明。', 'agent', 'collaboration')]
     if (event.type === 'delivery.review_finished') {
       const handoff = payload.handoff && typeof payload.handoff === 'object' ? payload.handoff as Record<string, unknown> : null
@@ -332,7 +356,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       const roster = participants.length ? `下一轮由 ${participants.map((name) => `@${name}`).join('、')} 跟进。` : '店长会先根据这条新方向重新安排。'
       return [message('店长更新了下一轮安排', `${roster}\n${reasonText(String(payload.reason ?? '已记录最新方向。'))}`, 'system', 'decision', changes)]
     }
-    if (event.type === 'subtask.assigned' || event.type === 'plan.proposed' || event.type === 'agent.working') return []
+    if (event.type === 'plan.proposed' || event.type === 'agent.working') return []
     if (event.type === 'msg.said' || event.type === 'msg.challenge') return [message(event.type === 'msg.challenge' ? '提出质疑' : undefined, String(payload.text ?? payload.claim ?? ''), 'agent')]
     if (event.type === 'diagnosis.recorded') {
       const observations = Array.isArray(payload.observations) ? payload.observations.filter((item): item is string => typeof item === 'string') : []
@@ -408,6 +432,7 @@ function App() {
   const [questionMode, setQuestionMode] = useState(false)
   const questionModeRef = useRef(false)
   const questionRequests = useRef<Record<string, { text: string; requestId: string }>>({})
+  const [clarificationStore] = useState<ClarificationStore>(() => new Map())
   const derivationRef = useRef<DerivationSource | null>(null)
   const derivationRequests = useRef<Record<string, { text: string; requestId: string }>>({})
   const focusComposerRef = useRef(false)
@@ -504,7 +529,7 @@ function App() {
     const version = next.summary?.version ?? seq
     const item = next.summary ?? { id, goal: next.task.goal, project_id: next.task.project_id,
       status: next.task.status, status_label: taskListStatus({ ...next.task, activity: next.activity }),
-      activity: next.activity, conversation_count: conversationFor(next.events, {}, null, next.questions).length, latest_seq: seq, version }
+      activity: next.activity, conversation_count: conversationFor(next.events, {}, null, next.questions).filter((item) => !item.notice).length, latest_seq: seq, version }
     const previous = versionsRef.current[id]
     const comparison = previous ? summaryOrder(item, previous.summary) : 1
     if (comparison < 0 || (comparison === 0 && previous && order < previous.order)) return
@@ -648,7 +673,7 @@ function App() {
     return Object.fromEntries(members.map((member) => [member.id, member]))
   }, [organization, roles])
   const currentDetail = detail?.task.id === selectedId ? detail : null
-  const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization, currentDetail.questions) : [], [currentDetail, identities, organization])
+  const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization, currentDetail.questions, currentDetail.clarifications) : [], [currentDetail, identities, organization])
   const visibleConversation = useMemo(() => chatFilter === 'all' ? conversation : conversation.filter((item) => item.category === chatFilter), [chatFilter, conversation])
   const selectedSummary = tasks.find((item) => item.id === selectedId)
   const task: Task | undefined = selectedId ? currentDetail?.task ?? (selectedSummary
@@ -656,6 +681,14 @@ function App() {
   const loading = selectedId !== null && currentDetail === null
   const loadError = selectedId ? loadErrors[selectedId] ?? '' : ''
   const visibleError = sendErrors[composerKey] || error || taskListError
+  const clarificationControls: ClarificationControls = {
+    store: clarificationStore, createRequestId: creationRequestId,
+    submit: async (id, reply) => {
+      if (selectedRef.current !== id || !currentDetail?.clarifications?.some((question) => question.seq === reply.question_seq && question.status === 'pending')) throw new Error('请读取当前对话的最新问题后再回答。')
+      const { next, order } = await requestDetail(`/api/tasks/${encodeURIComponent(id)}/clarifications`, { method: 'POST', body: JSON.stringify(reply) })
+      acceptDetail(next, order)
+    },
+  }
 
   const jumpToLatest = () => {
     const stream = streamRef.current
@@ -827,7 +860,7 @@ function App() {
 
   const team = organization ? [...organization.workers, organization.leader, ...organization.cabinet] : roles
   const names = Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))
-  const participants = task ? conversationParticipants(task, organization?.leader.id ?? 'store_manager', team.map((member) => member.id), currentDetail?.questions?.map((question) => question.role_id)) : []
+  const participants = task ? conversationParticipants(task, organization?.leader.id ?? 'store_manager', team.map((member) => member.id), [...(currentDetail?.questions ?? []), ...(currentDetail?.clarifications ?? [])].map((question) => question.role_id)) : []
   const rulesControl = <RulesPanel key={`rules:${selectedId ?? '$new'}`} request={api} taskId={selectedId ?? undefined} projectId={task ? task.project_id : newProject?.id} draft={task ? message : draft} busy={Boolean(loading || isSending || currentDetail?.activity?.active)} onProjectChange={async (project) => {
     if (selectedId) {
       if (!project) return
@@ -877,7 +910,7 @@ function App() {
             </div>
             {graphLoaded && task.work?.items.length ? <Suspense fallback={<p role="status" className="px-4 py-2 text-xs text-[#52766d]">正在打开任务脉络…</p>}><TaskGraph key={task.id} work={task.work} open={graphOpen} onOpenChange={setGraphOpen} returnFocusRef={graphTriggerRef} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></Suspense> : null}
             <div className="relative flex min-h-0 flex-1 flex-col">
-              <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>{loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={item.id} item={item} />) : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
+              <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>{loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={`${task.id}:${item.id}`} item={item} taskId={task.id} controls={clarificationControls} />) : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
               {!loading && unread > 0 && <button onClick={jumpToLatest} className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-md border border-[#d9b9a5] bg-[#fff7eb] px-3 py-2 text-xs font-semibold text-[#915340] shadow-md" title="返回最新消息"><ArrowDown size={15} /> 查看新消息 · {unread}</button>}
             </div>
             {derivation ? <DerivationDraftBar goal={derivation.goal} onCancel={cancelDerivation} /> : questionMode ? <QuestionComposerBar onCancel={toggleQuestion} /> : rulesControl}
@@ -906,29 +939,18 @@ function TaskComposer({ members, draft, isSending, onDraftChange, onCreate }: { 
   return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput id="new-task" value={draft} label="发起任务对话" placeholder="和店长说说，今天想做什么？" members={members} onChange={onDraftChange} onSubmit={onCreate} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={isSending || !draft.trim()} onClick={onCreate} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isSending ? '正在发送新任务' : '发送新任务'} aria-label="发送新任务" aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
 }
 
-function QuestionDetails({ item }: { item: ChatItem }) {
-  const question = item.question
-  if (!question) return null
-  const { basis, questionSeq, recipient, evidence, limits, reason } = question
-  const sourceNames: Record<string, string> = { task: '任务背景', goal: '目标', requirement: '顾客要求', member_artifact: '成员成果', execution_record: '实际检查', member_review: '成员说明', work_state: '工作状态' }
+function MessageContext({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ClarificationControls }) {
   return <>
-    {question.progress && <p role="status" className="question-progress">{question.progress}</p>}
-    {question.outdated && item.kind !== 'human' && <p className="question-outdated">历史版本 · 回答基于提问时的任务版本</p>}
-    <details className="question-details">
-    <summary>查看引用、版本与限制</summary>
-    <div className="question-context">
-      {questionSeq !== undefined && <p>对应提问 · 事件 #{questionSeq}</p>}
-      {recipient && <p>提问对象：@{recipient}</p>}
-      {basis && <div>
-        <p>提问时版本 · 截至事件 #{basis.seq}</p>
-        <p>来源事件：{basis.source_seqs?.map((source) => `#${source.seq}（${sourceNames[source.kind] ?? '来源记录'}）`).join('、') || '无'}</p>
-        <p>历史问答事件：{basis.history_seqs?.map((seq) => `#${seq}`).join('、') || '无'}</p>
-      </div>}
-      {evidence?.map((entry, index) => <div key={index}><p className="font-semibold">原文引用 · 来源事件 #{entry.source_seq}</p><blockquote>{entry.quote}</blockquote></div>)}
-      {limits?.length ? <div><p className="font-semibold">限制</p><ul>{limits.map((limit, index) => <li key={index}>{limit}</li>)}</ul></div> : null}
-      {reason && <p>说明：{reason}</p>}
-    </div>
-    </details>
+    {item.handoff && <div className="handoff-line" aria-label="工作交接">
+      {item.handoff.owners.length > 0 && <p>接手：{item.handoff.owners.map((name) => `@${name}`).join('、')}</p>}
+      {item.handoff.reviewers.length > 0 && <p>复核：{item.handoff.reviewers.map((name) => `@${name}`).join('、')}</p>}
+    </div>}
+    {item.joined?.length ? <p className="collaboration-joined" aria-label="协作通知">{item.joined.join('、')} 加入协作</p> : null}
+    {item.question && <Suspense fallback={<p className="question-progress">正在读取提问详情…</p>}><QuestionDetails question={item.question} human={item.kind === 'human'} /></Suspense>}
+    {item.evidence.type === 'clarification.requested' && <>
+      <p className="mt-2 text-xs text-teal-700">@你</p>
+      {item.clarification ? <Suspense fallback={<p role="status" className="question-progress">正在读取补充问题…</p>}><ClarificationCard taskId={taskId} question={item.clarification} controls={controls} /></Suspense> : <p className="question-progress">此条历史问题暂无可提交状态</p>}
+    </>}
   </>
 }
 
@@ -939,7 +961,11 @@ function AuditTrail({ item }: { item: ChatItem }) {
   </details>
 }
 
-function SystemRecord({ item }: { item: ChatItem }) {
+function ArtifactPreview(props: { item: Artifact; publisher?: string; showSummary?: boolean }) {
+  return <Suspense fallback={<p role="status" className="question-progress">正在读取成果…</p>}><LazyArtifactPreview {...props} /></Suspense>
+}
+
+function SystemRecord({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ClarificationControls }) {
   const checking = item.evidence.type === 'verification.completed'
   const passed = checking && item.evidence.payload.outcome === 'passed'
   const technical = checking || item.evidence.type === 'agent.discipline_flagged'
@@ -950,7 +976,7 @@ function SystemRecord({ item }: { item: ChatItem }) {
   const body = <>
     <p className={checking ? 'font-mono' : undefined}>{item.text}</p>
     {item.details?.length ? <ul>{item.details.map((detail, index) => <li key={index}>{detail}</li>)}</ul> : null}
-    <QuestionDetails item={item} />
+    <MessageContext item={item} taskId={taskId} controls={controls} />
     <AuditTrail item={item} />
   </>
   return <article className={`system-record-row${attention ? ' needs-attention' : ''}`}>
@@ -964,15 +990,19 @@ function SystemRecord({ item }: { item: ChatItem }) {
   </article>
 }
 
-function ChatBubble({ item }: { item: ChatItem }) {
-  if (item.systemActor) return <SystemRecord item={item} />
+function ChatBubble({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ClarificationControls }) {
+  if (item.notice) return <article className="collaboration-notice">
+    <MessageContext item={item} taskId={taskId} controls={controls} />
+    <AuditTrail item={item} />
+  </article>
+  if (item.systemActor) return <SystemRecord item={item} taskId={taskId} controls={controls} />
   const human = item.kind === 'human'
   return <article className={`flex items-start gap-3 ${human ? 'justify-end' : ''}`}>
     {!human && <Portrait id={item.actor} />}
     <div className={`message-bubble max-w-[min(86%,700px)] px-4 py-3 ${human ? 'is-human text-white' : 'is-agent'}`} data-actor={item.actor}>
       <div className={`mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${human ? 'text-[#fff0e8]' : 'text-[#6e8981]'}`}><strong className={human ? 'text-white' : 'text-[#28433d]'}>{human ? '你' : item.display}</strong><span>{item.role}</span>{item.title && <span className={`text-[11px] font-semibold ${human ? 'text-[#fff4d9]' : 'text-[#a56049]'}`}>· {item.title}</span>}</div>
       <p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>
-      <QuestionDetails item={item} />
+      <MessageContext item={item} taskId={taskId} controls={controls} />
       {item.evidence.type === 'deliverable.published' && <ArtifactPreview item={{ ...item.evidence.payload, seq: item.id } as Artifact} publisher={item.display} showSummary={false} />}
       {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
       {item.details?.length ? <details className={`mt-3 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#dfeae5] text-[#52766d]'}`}><summary className="cursor-pointer font-semibold">查看判断与依据</summary><ul className="mt-2 space-y-1.5 leading-5">{item.details.map((detail, index) => <li key={`${item.id}-${index}`}>{detail}</li>)}</ul></details> : null}

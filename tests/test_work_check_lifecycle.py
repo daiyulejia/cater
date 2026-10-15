@@ -59,9 +59,12 @@ class WorkCheckLifecycleTests(unittest.TestCase):
     def review(self, name="a"):
         current = self.current(name)
         artifact = self.work.artifacts(self.task, current["submission"])[0]
+        local = self.work.checks(self.task, current)
         return self.work.review(self.task, name, reviewer="test", submission_seq=current["submission"]["seq"],
-                                results=[{"id": "meaning", "status": "passed", "reason": "Inspected the result",
-                                          "artifact_seq": artifact["seq"], "quote": "assert True"}])
+                                results=[{"id": c["id"], "status": "passed", "reason": "Inspected the result and check scope",
+                                          "artifact_seq": artifact["seq"], "quote": "assert True",
+                                          "receipt_seq": local[c["id"]].seq if c["id"] in local else None}
+                                         for c in current["criteria"]])
 
     def receipt(self, start=None, *, passed=True, actor=None, overrides=None, name="a", task_id=None):
         if start:

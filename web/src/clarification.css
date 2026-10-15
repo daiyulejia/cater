@@ -1,0 +1,18 @@
+.clarification-form, .clarification-response { margin-top: 12px; border-top: 1px solid #eadfd7; padding-top: 12px; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.clarification-form fieldset { min-width: 0; }
+.clarification-form button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 6px 10px; border-radius: 4px; white-space: normal; }
+.clarification-modes { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+.clarification-modes button { color: #687b73; }
+.clarification-modes [aria-pressed="true"] { background: #f5e9e2; color: #8a4f3c; }
+.clarification-options { display: grid; gap: 4px; }
+.clarification-options label { display: flex; align-items: flex-start; gap: 8px; min-height: 36px; padding: 8px 0; cursor: pointer; }
+.clarification-options input { flex-shrink: 0; margin-top: 3px; accent-color: #ac614c; }
+.clarification-options span { min-width: 0; }
+.clarification-custom { display: grid; gap: 6px; }
+.clarification-custom textarea { box-sizing: border-box; width: 100%; min-width: 0; min-height: 84px; resize: vertical; border: 1px solid #c9d9d1; border-radius: 4px; background: #fffdfb; padding: 8px; color: #29483c; }
+.clarification-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; color: #677970; }
+.clarification-confirm { background: #a95d48; color: white; }
+.clarification-form button:disabled, .clarification-form fieldset:disabled { opacity: .65; }
+.clarification-form [role="alert"] { margin-top: 8px; color: #a52d3c; }
+.clarification-response { color: #61746b; }
+.clarification-response p { margin-top: 4px; white-space: pre-wrap; }
