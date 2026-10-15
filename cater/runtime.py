@@ -32,7 +32,7 @@ from .verification import run_check, validate_check
 from .delivery import DeliveryService
 from .explanations import ExplanationService
 from .rooms import RoomService
-from .review_contract import response_schema
+from .review_contract import assessment, response_schema
 from .checkpoints import work_checkpoint
 
 
@@ -932,8 +932,21 @@ class Runtime:
                                      for c in item["criteria"]]}
             retry = False
             try:
+                results = parsed.get("checks")
+                if correction and isinstance(results, list):
+                    severity = {"passed": 0, "unknown": 1, "failed": 2}
+                    artifact_by_seq = {a["seq"]: a for a in artifacts}
+                    # Format repair cannot clear an existing evidence gap, but
+                    # validated new uncertainty or failure must remain visible.
+                    for previous in correction["previous_checks"]:
+                        if previous.get("response_issue"):
+                            continue
+                        judgment, _, _ = assessment(results, previous["id"], artifact_by_seq)
+                        if judgment and severity[judgment["status"]] <= severity[previous["status"]]:
+                            results = [dict(previous) if isinstance(row, dict) and row.get("id") == previous["id"]
+                                       else row for row in results]
                 review = self.work.review(task.id, item["id"], reviewer=role.id, submission_seq=item["submission"]["seq"],
-                                          results=parsed.get("checks"))
+                                          results=results)
                 notes = [c["reason"] for c in review.payload["checks"] if c["status"] != "passed"]
                 issues = [{"id": c["id"], "issue": c["response_issue"], "reason": c["reason"]}
                           for c in review.payload["checks"] if c.get("response_issue")]
@@ -960,7 +973,7 @@ class Runtime:
                 text = "要求或成果版本刚刚有变化，这次审查不能沿用，需要重新核对。"
             self.log.emit(actor=Actor.agent(role.id, role.role), type="msg.said", task_id=task.id,
                           payload={"text": text, "claim": text[:240], "work_item_id": item["id"],
-                                   "phase": "review", "driver": role.driver,
+                                   "phase": "review_response_correction" if retry else "review", "driver": role.driver,
                                    "tokens": response.tokens if valid_token_count(response.tokens) else 0,
                                    "token_usage": self._token_usage(response), "rule_fingerprint": snapshot["fingerprint"]})
             if not retry:

@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { expect, test, vi } from 'vitest'
 import App from '../src/App'
-import { collaborationProjection } from '../src/collaborationProjection'
+import { collaborationProjection, workTransfers } from '../src/collaborationProjection'
 
 type Event = { seq: number; type: string; actor: { id: string; kind: string }; payload: Record<string, unknown> }
 const event = (seq: number, type: string, payload: Record<string, unknown>, id = 'work_scheduler', kind = 'system'): Event => ({ seq, type, payload, actor: { id, kind } })
@@ -128,4 +128,33 @@ test('旧回执只有后继计划时可关联；显式关联失配、无真实 o
   expect(projection.get(5)).toBeUndefined()
   expect(projection.get(6)).toBeUndefined()
   expect(projection.get(7)?.joined).toEqual([])
+})
+
+const workPlan = () => event(2, 'work.plan_created', { items: [
+  { id: 'a', owner: 'dev', reviewer: 'test', objective: '实现棋盘', depends_on: [] },
+  { id: 'b', owner: 'design', reviewer: 'test', objective: '完善界面', depends_on: ['a'] },
+] })
+const workEvent = (seq: number, type: string, id = 'a', attempt = 'run-a', extra = {}) => event(seq, type, { plan_seq: 2, work_item_id: id, attempt_id: attempt, ...extra })
+
+test('实际提交才通知复核人；依赖验收不伪装已开工，调度领取后才显示接力', async () => {
+  const events = [workPlan(), workEvent(3, 'work.claimed'), workEvent(4, 'work.submitted'),
+    workEvent(5, 'work.reviewed', 'a', 'run-a', { status: 'accepted', submission_seq: 4 }),
+    workEvent(6, 'work.claimed', 'b', 'run-b', { inputs: { a: 'accepted-digest' } })]
+  const projection = workTransfers(events)
+  expect([...projection.keys()]).toEqual([4, 6])
+  await mount(events)
+  expect(within(article(4)).getByText('@米寇 已提交成果，交给 @三角 复核。')).toBeTruthy()
+  expect(within(article(6)).getByText('@罐头 已接手，接着 @米寇 的成果继续做。')).toBeTruthy()
+  expect(within(article(4)).queryByRole('img')).toBeNull()
+  expect(within(article(6)).getByText('完善界面')).toBeTruthy()
+})
+
+test('多项依赖尚无领取记录时不编造下一位；旧计划、旧尝试和失效提交不形成交接', () => {
+  const events = [workPlan(), workEvent(3, 'work.submitted'), workEvent(4, 'work.claimed'),
+    workEvent(5, 'work.submitted', 'a', 'old-attempt'),
+    workEvent(6, 'work.invalidated', 'a', 'run-a', { affected: ['a', 'b'] }),
+    workEvent(7, 'work.submitted'),
+    workEvent(8, 'work.reviewed', 'a', 'run-a', { status: 'accepted' }),
+    plan(9), workEvent(10, 'work.claimed', 'b', 'run-b', { inputs: { a: 'digest' } })]
+  expect(workTransfers(events).size).toBe(0)
 })

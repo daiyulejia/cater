@@ -52,6 +52,7 @@ export function ArtifactPreview({ item, publisher, showSummary = true }: { item:
     {showSummary && <><strong className="block text-xs text-[#294c40]">{item.title}</strong><p className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-[#687e73]">{item.summary}</p></>}
     <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2 text-[11px]">
       <span className={item.source === 'local_demo' ? 'text-[#a06b36]' : 'text-[#839087]'}>{sourceText(item.source)}</span>
+      {hasBody && <><span className="max-w-full break-all text-[#687e73]">{filename}</span><button onClick={download} className="artifact-tool" title={`下载 ${filename}`} aria-label={`下载 ${filename}`}><Download size={16} /></button></>}
       {hasBody && <Dialog.Root onOpenChange={() => { setCopyState('idle'); setDownloadError(false) }}>
         <Dialog.Trigger asChild><button className="inline-flex items-center gap-1.5 font-semibold text-[#2e786b] hover:text-[#a95945]"><FileText size={14} /> 查看正文</button></Dialog.Trigger>
         <Dialog.Portal>
@@ -82,6 +83,7 @@ export function ArtifactPreview({ item, publisher, showSummary = true }: { item:
       {source && <a href={source} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[#377d70]"><ExternalLink size={13} /> 打开来源</a>}
     </div>
     {item.uri && !source && <p className="mt-2 break-all text-[11px] leading-5 text-[#86968c]">资源引用：{item.uri}</p>}
+    {downloadError && <p role="alert" className="mt-2 text-xs text-rose-700">下载未完成，请重试。</p>}
     {item.content_error && <p className="mt-2 text-[11px] leading-5 text-[#a3704a]">{bodyError(item.content_error)}</p>}
   </div>
 }

@@ -41,6 +41,22 @@ function openDetails(details: HTMLDetailsElement) {
   expect(details.open).toBe(true)
 }
 
+test.each(['review_response_correction', 'review'])('内部复核修复 %s 收进中性过程记录，但最终失败仍公开', async (phase) => {
+  await mount([
+    event(2, 'msg.said', 'dev', { phase, text: '这次卡在我的复核回复格式或引用上，还不能据此认定成果有错。我会按原成果重新整理一次回复。', tokens: 100 }, 'agent'),
+    event(3, 'msg.said', 'dev', { phase: 'review', text: '复核仍未完成，引用需要核对。' }, 'agent'),
+  ])
+  const row = record(2)
+  expect(visibleText(row)).toContain('复核记录整理中')
+  expect(visibleText(row)).not.toContain('这次卡在')
+  expect(row.querySelector('details')!.open).toBe(false)
+  expect(within(row).queryByRole('img')).toBeNull()
+  expect(visibleText(record(3))).toContain('复核仍未完成')
+  openDetails(row.querySelector('details')!)
+  openDetails(within(row).getByText('事件 #2 · 审计记录').closest('details')!)
+  expect(visibleText(row)).toContain('100')
+})
+
 test.each([undefined, 'system'])('纪律记录（kind=%s）不再冒充成员，常规提醒默认收起且未知码只进入审计', async (kind) => {
   await mount([event(2, 'agent.discipline_flagged', 'discipline', { issues: ['missing_claim', 'unknown_internal_issue'], message_seq: 1 }, kind)])
   const row = record(2)

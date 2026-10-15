@@ -52,6 +52,17 @@ class PlanningDriver:
 
 
 class PlanningTests(unittest.TestCase):
+    def test_schema_binds_sources_and_separates_supersession_from_active_coverage(self):
+        schema = planning_schema([], [{"id": "1:goal:0"}, {"id": "4:instruction:0"}])
+        coverage = schema["properties"]["coverage"]["items"]
+        self.assertEqual(coverage["properties"]["source_id"]["enum"], ["1:goal:0", "4:instruction:0"])
+        self.assertEqual(coverage["properties"]["superseded_by"]["enum"], [None, "1:goal:0", "4:instruction:0"])
+        active, replaced = coverage["oneOf"]
+        self.assertEqual(active["properties"]["item_ids"]["minItems"], 1)
+        self.assertEqual(replaced["properties"]["item_ids"]["maxItems"], 0)
+        self.assertIn("LATER", replaced["properties"]["quote"]["description"])
+        self.assertNotIn("oneOf", PLAN_SCHEMA["properties"]["coverage"]["items"])
+
     def test_schema_binds_configured_execution_and_review_roles_without_global_mutation(self):
         roles = [{"id": "worker_a", "worker": True}, {"id": "advisor", "worker": False}]
         schema = planning_schema(roles)

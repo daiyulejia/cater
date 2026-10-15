@@ -15,7 +15,7 @@ from unittest.mock import patch
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-from cater.delivery import DeliveryService
+from cater.delivery import DeliveryService, delivery_schema
 from cater.drivers import DriverResponse
 from cater.events import Actor
 from cater.runtime import Runtime
@@ -61,6 +61,22 @@ class DocumentWorkDriver(WorkDriver):
 
 
 class DeliveryTests(unittest.TestCase):
+    def test_response_schema_binds_actual_requirement_check_and_artifact_ids(self):
+        context = {"manifest": {"sources": [{"id": "1:goal:0"}, {"id": "4:instruction:0"}],
+                                "criteria": [{"id": "integration", "kind": "review"},
+                                             {"id": "behavior", "kind": "local_check"}]},
+                   "artifacts": [{"seq": 12}]}
+        schema = delivery_schema(context)
+        for key, ids in (("requirements", ["1:goal:0", "4:instruction:0"]), ("checks", ["integration"])):
+            self.assertEqual(schema["$defs"][key]["properties"]["id"]["enum"], ids)
+            self.assertEqual(schema["properties"][key]["minItems"], len(ids))
+            self.assertEqual(schema["properties"][key]["maxItems"], len(ids))
+            self.assertEqual(schema["$defs"][key]["properties"]["evidence"]["items"]["properties"]["artifact_seq"]["enum"], [12])
+        self.assertNotIn("superseded", schema["$defs"]["checks"]["properties"]["status"]["enum"])
+        context["manifest"]["sources"] = [{"id": "9:goal:0"}]
+        delivery_schema(context)
+        self.assertEqual(schema["$defs"]["requirements"]["properties"]["id"]["enum"], ["1:goal:0", "4:instruction:0"])
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

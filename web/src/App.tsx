@@ -23,7 +23,8 @@ import type { WorkState } from './WorkItems'
 import type { TeamAvailability } from './TeamDirectory'
 import type { Clarification, ClarificationControls, ClarificationStore } from './ClarificationCard'
 import type { QuestionBasis, QuestionContext } from './QuestionDetails'
-import { collaborationProjection } from './collaborationProjection'
+import { collaborationProjection, workTransfers } from './collaborationProjection'
+import type { WorkAssignment } from './collaborationProjection'
 
 const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
 const ClarificationCard = lazy(() => import('./ClarificationCard').then((module) => ({ default: module.ClarificationCard })))
@@ -63,7 +64,7 @@ type QuestionResult = { question_seq?: number; answer?: string; evidence?: { sou
 type Question = QuestionResult & { seq: number; status: string; question: string; role_id: string; basis: QuestionBasis; outdated: boolean }
 type TaskDetail = { task: Task; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
 type DerivationSource = { id: string; goal: string }
-type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event }
+type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event }
 
 const accessToken = (() => {
   const fragment = new URLSearchParams(window.location.hash.slice(1))
@@ -212,6 +213,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
   const finishedQuestions = new Set(events.filter((event) => event.type === 'question.finished').map((event) => event.payload.question_seq))
   const clarificationRows = new Map(clarifications.map((question) => [question.seq, question]))
   const collaboration = collaborationProjection(events, organization?.leader.id ?? 'store_manager')
+  const transfers = workTransfers(events)
   const displayName = (id: string) => identities[id]?.name ?? actorText(id)
   return events.flatMap((event) => {
     const payload = event.payload
@@ -221,6 +223,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       id: event.seq, actor: actor.id, display: identities[actor.id]?.name ?? actorText(actor.id), role: publicIdentity(actor.id, organization), kind, systemActor: isSystemActor(actor, identities), category, title, text, evidence: event,
       details: details?.filter(Boolean),
       joined: projection?.joined.map(displayName),
+      assignments: projection?.assignments?.map((item) => ({ ...item, owner: displayName(item.owner), reviewer: item.reviewer ? displayName(item.reviewer) : undefined })),
       handoff: projection?.handoff ? { owners: projection.handoff.owners.map(displayName), reviewers: projection.handoff.reviewers.map(displayName) } : undefined,
       targets: [
         ...(typeof payload.target === 'string' ? [payload.target] : []),
@@ -231,6 +234,16 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     const memberNames = (value: unknown) => Array.isArray(value)
       ? value.filter((id): id is string => typeof id === 'string').map((id) => identities[id]?.name ?? actorText(id))
       : []
+    const transfer = transfers.get(event.seq)
+    if (transfer) {
+      const owner = `@${displayName(transfer.owner)}`
+      const text = transfer.kind === 'submitted'
+        ? `${owner} 已提交成果${transfer.reviewer ? `，交给 @${displayName(transfer.reviewer)} 复核` : '，等待安排复核'}。`
+        : `${owner} 已接手，接着 ${transfer.from.map((id) => `@${displayName(id)}`).join('、')} 的成果继续做。`
+      const item = message(undefined, text, 'system', 'collaboration', [transfer.objective])
+      item.notice = true
+      return [item]
+    }
     if (event.type === 'clarification.requested') {
       const item = message('请你补充', String(payload.question ?? ''), 'agent')
       item.targets = []
@@ -300,6 +313,12 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       return [item]
     }
     if (event.type === 'msg.said' && ['planning', 'delivery_receipt', 'clarification_receipt'].includes(String(payload.phase))) return []
+    if (event.type === 'msg.said' && (payload.phase === 'review_response_correction'
+      || (payload.phase === 'review' && payload.text === '这次卡在我的复核回复格式或引用上，还不能据此认定成果有错。我会按原成果重新整理一次回复。'))) {
+      const item = message('复核记录整理中', '正在校正复核回复的格式与引用，不改动成果，也不代表验收已经通过。', 'system')
+      item.systemActor = true
+      return [item]
+    }
     if (event.type === 'delivery.review_started') return [message('最后一起核对', '各项成果已经过阶段验收。我再检查它们合起来是否满足你现在的要求，再整理交付和复查说明。', 'agent', 'collaboration')]
     if (event.type === 'delivery.review_finished') {
       const handoff = payload.handoff && typeof payload.handoff === 'object' ? payload.handoff as Record<string, unknown> : null
@@ -942,8 +961,13 @@ function TaskComposer({ members, draft, isSending, onDraftChange, onCreate }: { 
 function MessageContext({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ClarificationControls }) {
   return <>
     {item.handoff && <div className="handoff-line" aria-label="工作交接">
-      {item.handoff.owners.length > 0 && <p>接手：{item.handoff.owners.map((name) => `@${name}`).join('、')}</p>}
-      {item.handoff.reviewers.length > 0 && <p>复核：{item.handoff.reviewers.map((name) => `@${name}`).join('、')}</p>}
+      {item.assignments?.length ? item.assignments.map((assignment, index) => <details key={index}>
+        <summary>@{assignment.owner} 接手{assignment.reviewer ? `，完成后交给 @${assignment.reviewer} 复核` : ''}</summary>
+        <p>{assignment.objective}</p>
+      </details>) : <>
+        {item.handoff.owners.length > 0 && <p>接手：{item.handoff.owners.map((name) => `@${name}`).join('、')}</p>}
+        {item.handoff.reviewers.length > 0 && <p>复核：{item.handoff.reviewers.map((name) => `@${name}`).join('、')}</p>}
+      </>}
     </div>}
     {item.joined?.length ? <p className="collaboration-joined" aria-label="协作通知">{item.joined.join('、')} 加入协作</p> : null}
     {item.question && <Suspense fallback={<p className="question-progress">正在读取提问详情…</p>}><QuestionDetails question={item.question} human={item.kind === 'human'} /></Suspense>}
@@ -968,7 +992,7 @@ function ArtifactPreview(props: { item: Artifact; publisher?: string; showSummar
 function SystemRecord({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ClarificationControls }) {
   const checking = item.evidence.type === 'verification.completed'
   const passed = checking && item.evidence.payload.outcome === 'passed'
-  const technical = checking || item.evidence.type === 'agent.discipline_flagged'
+  const technical = checking || item.evidence.type === 'agent.discipline_flagged' || item.title === '复核记录整理中'
   const failed = checking && !passed
   const attention = failed || ['activity.failed', 'driver.failed', 'driver.budget_exhausted'].includes(item.evidence.type)
   const Icon = attention ? TriangleAlert : passed ? CheckCircle2 : Info
@@ -992,6 +1016,8 @@ function SystemRecord({ item, taskId, controls }: { item: ChatItem; taskId: stri
 
 function ChatBubble({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ClarificationControls }) {
   if (item.notice) return <article className="collaboration-notice">
+    {item.text && <p>{item.text}</p>}
+    {item.details?.length ? <details><summary>这次接力的工作</summary>{item.details.map((detail, index) => <p key={index}>{detail}</p>)}</details> : null}
     <MessageContext item={item} taskId={taskId} controls={controls} />
     <AuditTrail item={item} />
   </article>

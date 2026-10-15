@@ -49,6 +49,19 @@ test('代码内容按原文展示，HTML 不变成可执行页面', () => {
   expect(reader.querySelector('script')).toBeNull()
 })
 
+test('网页成果在聊天入口即可下载，保留 html 文件名且不在工作台执行', () => {
+  const content = '<html><script>window.test = true</script></html>'
+  const names: string[] = []
+  vi.stubGlobal('URL', class extends URL { static createObjectURL = () => 'blob:artifact'; static revokeObjectURL = vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () { names.push(this.download) })
+  render(<ArtifactPreview item={{ ...artifact, content, format: 'code', filename: 'gomoku.html' }} />)
+  fireEvent.click(screen.getByRole('button', { name: '下载 gomoku.html' }))
+  expect(names).toEqual(['gomoku.html'])
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(document.querySelector('iframe')).toBeNull()
+  expect(document.querySelector('script')).toBeNull()
+})
+
 test('复制的内容与发布正文一致，失败反馈不会损坏正文', async () => {
   const writeText = vi.fn().mockRejectedValueOnce(new Error('denied')).mockResolvedValueOnce(undefined)
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })

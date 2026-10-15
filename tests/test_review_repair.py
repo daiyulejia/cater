@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +18,7 @@ class ReviewRepairDriver(WorkDriver):
         super().__init__()
         self.review_count = 0
         self.mode = "repair"
+        self.review_transform = None
 
     def complete(self, **kwargs):
         response = super().complete(**kwargs)
@@ -35,6 +37,8 @@ class ReviewRepairDriver(WorkDriver):
         elif self.mode == "always_bad" or self.review_count == 1:
             for row in raw["checks"]:
                 row["quote"] = "并不存在的原文"
+        if self.review_transform:
+            self.review_transform(raw, kwargs["context"]["work"])
         return DriverResponse(json.dumps(raw), tokens=7,
                               meta={"token_usage": "reported", "review_response_repair": True})
 
@@ -55,6 +59,89 @@ class ReviewRepairTests(unittest.TestCase):
         return [e for e in self.rt.log.iter_events(task_id=self.task, event_types=("work.review_deferred",))
                 if e.payload.get("response_repair")]
 
+    def mixed_review(self, *, first="unknown", second="passed", repaired="passed", local=False):
+        contract = item("draft")
+        if local:
+            contract["criteria"][0]["kind"] = "local_check"
+        contract["criteria"].append({"id": "citation", "kind": "review", "text": "独立核对正文引用"})
+        self.rt.plan_work(self.task, [contract])
+
+        def transform(raw, context):
+            rows = {r["id"]: r for r in raw["checks"]}
+            for row in rows.values():
+                row["quote"] = context["artifacts"][0]["content"]
+            judgment = first if self.driver.review_count == 1 else second
+            rows["meaning"].update(status=judgment, reason="缺少调用者输入约定，不能确认覆盖范围。"
+                                   if self.driver.review_count == 1 else "纠错轮给出的新判断。")
+            if judgment == "unknown":
+                rows["meaning"].update(artifact_seq=None, quote="")
+            if self.driver.review_count == 1:
+                rows["citation"]["quote"] = "并不存在的原文"
+            else:
+                rows["citation"].update(status=repaired, reason="纠错轮核对了正文。")
+
+        self.driver.review_transform = transform
+
+    def test_correction_cannot_upgrade_untouched_genuine_unknown(self):
+        self.mixed_review()
+        self.rt.collaborate(self.task)
+        current = self.rt.work.view(self.task)
+        checks = {c["id"]: c for c in current["items"][0]["checks"]}
+        self.assertFalse(current["stage_accepted"])
+        self.assertEqual(checks["meaning"]["status"], "unknown")
+        self.assertEqual(checks["meaning"]["reason"], "缺少调用者输入约定，不能确认覆盖范围。")
+        self.assertNotIn("response_issue", checks["meaning"])
+        self.assertEqual(checks["citation"]["status"], "passed")
+        self.assertEqual(self.driver.review_count, 2)
+        self.assertEqual(len(self.repairs()), 1)
+        reviews = list(self.rt.log.iter_events(task_id=self.task, event_types=("work.reviewed",)))
+        self.assertEqual([e.payload["status"] for e in reviews], ["submitted", "submitted"])
+        self.assertEqual(len([c for c in self.driver.calls if c.get("phase") != "review"]), 1)
+
+    def test_correction_retains_first_unknown_reason_when_still_unknown(self):
+        self.mixed_review(second="unknown")
+        self.rt.collaborate(self.task)
+        check = self.rt.work.view(self.task)["items"][0]["checks"][0]
+        self.assertEqual(check["status"], "unknown")
+        self.assertEqual(check["reason"], "缺少调用者输入约定，不能确认覆盖范围。")
+
+    def test_correction_keeps_new_negative_findings_on_untouched_rows(self):
+        for first, second in (("unknown", "failed"), ("passed", "failed"), ("passed", "unknown")):
+            with self.subTest(first=first, second=second):
+                self.driver.review_count = 0
+                self.mixed_review(first=first, second=second)
+                self.rt.collaborate(self.task)
+                current = self.rt.work.view(self.task)
+                self.assertFalse(current["stage_accepted"])
+                check = current["items"][0]["checks"][0]
+                self.assertEqual(check["status"], second)
+                self.assertEqual(check["reason"], "纠错轮给出的新判断。")
+                self.assertNotIn("response_issue", check)
+                self.assertEqual(self.driver.review_count, 2)
+
+    def test_correction_keeps_new_failure_on_repaired_row(self):
+        self.mixed_review(repaired="failed")
+        self.rt.collaborate(self.task)
+        checks = {c["id"]: c for c in self.rt.work.view(self.task)["items"][0]["checks"]}
+        self.assertEqual(checks["meaning"]["status"], "unknown")
+        self.assertEqual(checks["citation"]["status"], "failed")
+        self.assertNotIn("response_issue", checks["citation"])
+
+    def test_correction_cannot_upgrade_unknown_check_relevance_with_real_receipt(self):
+        self.mixed_review(local=True)
+        self.rt.collaborate(self.task)
+        self.assertEqual(self.driver.review_count, 0)
+        receipt, _ = self.rt.verify_work(self.task, "draft", "meaning", [sys.executable, "check.py"])
+        self.rt.collaborate(self.task)
+        current = self.rt.work.view(self.task)
+        check = current["items"][0]["checks"][0]
+        self.assertFalse(current["stage_accepted"])
+        self.assertEqual(check["status"], "unknown")
+        self.assertEqual(check["execution_status"], "passed")
+        self.assertEqual(check["receipt_seq"], receipt.seq)
+        self.assertEqual(check["reason"], "缺少调用者输入约定，不能确认覆盖范围。")
+        self.assertEqual(self.driver.review_count, 2)
+
     def test_bad_citation_gets_one_correction_against_same_artifacts_and_preserves_usage(self):
         self.rt.collaborate(self.task)
         self.assertTrue(self.rt.work.view(self.task)["stage_accepted"])
@@ -70,8 +157,35 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(fields["artifact_seq"]["enum"], [None, reviews[0]["artifacts"][0]["seq"]])
         self.assertEqual(self.rt._reported_driver_tokens("test"), 14)
         events = self.rt.log.read(task_id=self.task)
+        messages = [e for e in events if e.type == "msg.said" and e.actor.id == "test"]
+        self.assertEqual([e.payload["phase"] for e in messages], ["review_response_correction", "review"])
+        self.assertIn("这次卡在我的复核回复格式", messages[0].payload["text"])
+        for message in messages:
+            self.assertEqual(message.payload["work_item_id"], "draft")
+            self.assertEqual(message.payload["driver"], "test")
+            self.assertEqual(message.payload["tokens"], 7)
+            self.assertEqual(message.payload["token_usage"], "reported")
+            self.assertTrue(message.payload["rule_fingerprint"])
         self.assertTrue(any(e.payload.get("checks", [{}])[0].get("response_issue") == "quote_not_found"
                             for e in events if e.type == "work.reviewed"))
+        self.assertTrue(self.rt.verify_chain().ok)
+
+    def test_final_invalid_correction_remains_a_review_message_with_usage_and_audit(self):
+        self.driver.mode = "always_bad"
+        result = self.rt.collaborate(self.task)
+        messages = [e for e in self.rt.log.iter_events(task_id=self.task, event_types=("msg.said",))
+                    if e.actor.id == "test"]
+        self.assertEqual([e.payload["phase"] for e in messages], ["review_response_correction", "review"])
+        terminal = messages[-1].payload
+        self.assertIn("复核回复未通过格式或引用检查", terminal["text"])
+        self.assertIn("当前已暂停", terminal["text"])
+        self.assertEqual(terminal["tokens"], 7)
+        self.assertEqual(terminal["token_usage"], "reported")
+        self.assertEqual(self.rt._reported_driver_tokens("test"), 14)
+        self.assertEqual(result["brief"]["checkpoint"]["state"], "review_response_issue")
+        reviews = list(self.rt.log.iter_events(task_id=self.task, event_types=("work.reviewed",)))
+        self.assertEqual(len(reviews), 2)
+        self.assertTrue(all(e.payload["status"] == "submitted" for e in reviews))
         self.assertTrue(self.rt.verify_chain().ok)
 
     def test_repeated_bad_response_does_not_loop_and_correction_limit_survives_restart(self):
