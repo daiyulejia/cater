@@ -82,7 +82,8 @@ class PlanningTests(unittest.TestCase):
 
     def test_initial_planning_flows_into_work_and_waits_for_real_checks(self):
         result = self.rt.collaborate(self.task)
-        self.assertIn("待", result["brief"]["dispute"])
+        self.assertEqual(result["brief"]["checkpoint"]["state"], "waiting_local_check")
+        self.assertIn("实际检查回执", result["brief"]["dispute"])
         self.assertEqual(self.view()["items"][0]["status"], "submitted")
         self.assertEqual(self.planner.calls[0]["request"]["preferred_owner"], "dev")
         self.assertEqual(len(self.view()["planning"]["coverage"]), 2)

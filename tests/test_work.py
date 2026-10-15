@@ -100,7 +100,9 @@ class WorkTests(unittest.TestCase):
         self.assertEqual(report.type, "task.progress_reported")
         self.assertEqual(report.payload["command_seq"], command.seq)
         self.assertEqual(report.payload["counts"], {"submitted": 1, "blocked": 1})
-        self.assertIn("验收证据还没齐", report.payload["text"])
+        self.assertIn("已提交 1 项成果", report.payload["text"])
+        self.assertIn("复核结论尚未确认", report.payload["text"])
+        self.assertEqual(report.payload["checkpoint"]["state"], "waiting_review")
         self.assertEqual(report.payload["observed_head"], command.hash)
         self.assertEqual(self.driver.calls, [])
 

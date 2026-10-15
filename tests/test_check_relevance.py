@@ -55,7 +55,7 @@ class CheckRelevanceTests(unittest.TestCase):
         self.assertEqual(check["execution_status"], "passed")
         self.assertEqual(check["receipt_seq"], receipt.seq)
         self.assertEqual(check["status"], "unknown")
-        self.assertIn("是否足以验证", check["reason"])
+        self.assertIn("复核回复缺少", check["reason"])
         self.assert_blocked()
 
     def test_reviewer_can_reject_irrelevant_success_without_falsifying_execution(self):

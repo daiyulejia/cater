@@ -12,6 +12,7 @@ from typing import Any, Callable
 from .events import Actor, Event, EventLog, HeadChanged
 from .directions import changes_direction
 from .rules import RuleBook
+from .review_contract import ISSUES, assessment
 
 
 class WorkConflict(ValueError):
@@ -385,12 +386,16 @@ class WorkLedger:
                                         else self.directions(task_id, plan.payload["scope"]["direction_seq"])),
                 "stage_accepted": all(i["status"] == "accepted" for i in items.values())}
 
-    def defer_review(self, task_id: str, item_id: str, submission_seq: int, reason: str) -> Event:
+    def defer_review(self, task_id: str, item_id: str, submission_seq: int, reason: str, *, response_repair: bool = False) -> Event:
         def build():
             view, item = self._item(task_id, item_id)
             if item["status"] != "submitted" or item["submission"]["seq"] != submission_seq:
                 raise WorkConflict("review deferral must target the current submission")
+            if response_repair and any(e.payload.get("response_repair") and e.payload.get("submission_seq") == submission_seq
+                    for e in self.log.iter_events(task_id=task_id, event_types=("work.review_deferred",))):
+                raise WorkConflict("这份成果的复核回复已自动纠正过一次，不再自动重复调用。")
             return "work.review_deferred", {"plan_seq": view["plan_seq"], "work_item_id": item_id,
+                                            "response_repair": response_repair,
                                             "submission_seq": submission_seq, "reason": _text(reason, "reason", 2000)}, Actor.system("work_scheduler")
         return self._write(task_id, build)
 
@@ -657,33 +662,32 @@ class WorkLedger:
             local = self.checks(task_id, item)
             for criterion in item["criteria"]:
                 check = {"id": criterion["id"], "kind": criterion["kind"], "status": "unknown", "reason": "缺少可核对的验收依据。"}
-                matches = [r for r in raw_results if isinstance(r, dict) and r.get("id") == criterion["id"]]
-                assessment = None
-                if len(matches) == 1:
-                    r = matches[0]
-                    status, quote, seq = r.get("status"), r.get("quote"), r.get("artifact_seq")
-                    reason = r.get("reason")
-                    if (status in ("passed", "failed", "unknown") and isinstance(reason, str) and reason.strip()
-                            and len(reason) <= 2000 and type(seq) is int and seq in artifacts
-                            and isinstance(quote, str) and quote.strip() and len(quote) <= 2000
-                            and quote in artifacts[seq]["content"]):
-                        assessment = {"status": status, "reason": reason, "quote": quote, "artifact_seq": seq}
+                judgment, issue, row = assessment(raw_results, criterion["id"], artifacts)
+                if issue:
+                    check.update(reason=ISSUES[issue], response_issue=issue)
                 if criterion["kind"] == "local_check":
                     receipt = local.get(criterion["id"])
                     if receipt:
                         passed = self._receipt_passed(receipt)
                         check.update(execution_status="passed" if passed else "failed", receipt_seq=receipt.seq,
-                                     reason="命令已通过，但尚未独立核对它是否足以验证这项标准。" if passed
+                                     reason=(ISSUES[issue] if issue else "命令已通过，但尚未独立核对它是否足以验证这项标准。") if passed
                                      else "实际检查未通过，成员评价不能覆盖执行结果。")
                         if not passed:
+                            check.pop("response_issue", None)
                             check["status"] = "failed"
                         # A successful process is necessary, not sufficient evidence
                         # that the command actually tests this acceptance criterion.
-                        elif (assessment and type(matches[0].get("receipt_seq")) is int
-                              and matches[0]["receipt_seq"] == receipt.seq):
-                            check.update(assessment)
-                elif assessment:
-                    check.update(assessment)
+                        elif judgment and type(row.get("receipt_seq")) is int and row["receipt_seq"] == receipt.seq:
+                            check.update(judgment)
+                        elif judgment and judgment["status"] == "unknown":
+                            check.update(judgment)
+                        elif judgment:
+                            check.update(reason=ISSUES["invalid_receipt"], response_issue="invalid_receipt")
+                    else:
+                        check.pop("response_issue", None)
+                        check["reason"] = "尚未取得本次成果的完整实际检查回执，不能用成员声明代替。"
+                elif judgment:
+                    check.update(judgment)
                 checks.append(check)
             status = "accepted" if all(c["status"] == "passed" for c in checks) else (
                 "rework" if any(c["status"] == "failed" for c in checks) else "submitted")

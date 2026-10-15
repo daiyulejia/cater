@@ -103,7 +103,9 @@ class DeliveryTests(unittest.TestCase):
         self.rt.collaborate(self.task)
         self.rt.command(self.task, "进度怎么样")
         self.assertEqual(len(self.final.calls), 1)
-        self.assertIn("整体验收也已通过", self.rt.log.read(task_id=self.task)[-1].payload["text"])
+        progress = self.rt.log.read(task_id=self.task)[-1].payload
+        self.assertEqual(progress["checkpoint"]["state"], "accepted")
+        self.assertIn("整体验收已通过", progress["text"])
         with zipfile.ZipFile(io.BytesIO(self.rt.delivery.archive(self.task))) as archive:
             self.assertEqual(archive.read("work-1/result.md"), "# 离线文档成果\n\n保留逐条复查依据。\n".encode())
             self.assertEqual(archive.read("work-2/result.md"), "# 离线文档成果\n\n保留逐条复查依据。\n".encode())

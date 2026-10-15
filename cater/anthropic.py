@@ -16,6 +16,8 @@ from .usage import valid_token_count
 
 
 class AnthropicMessagesDriver:
+    review_response_repair = True
+
     def __init__(self, name: str, *, endpoint: str, model: str, api_key_env: str,
                  max_tokens: int = 4096, timeout: float = 60.0,
                  version: str = "2023-06-01", token_budget: int | None = None,

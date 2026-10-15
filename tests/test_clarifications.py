@@ -202,8 +202,13 @@ class ClarificationFlowTests(unittest.TestCase):
             with Runtime(Path(tmp) / "worker.db", drivers={"dev": worker}) as rt:
                 task = rt.create_task("整理说明")
                 rt.plan_work(task, [item("draft"), item("independent", owner="product")])
-                rt.collaborate(task)
+                result = rt.collaborate(task)
                 self.assertIsNotNone(rt.clarifications.pending(task))
+                self.assertEqual(result["brief"]["checkpoint"]["state"], "waiting_customer")
+                self.assertIn("@顾客", result["brief"]["root_cause"])
+                rt.command(task, "进度怎么样？")
+                progress = rt.log.read(task_id=task)[-1].payload
+                self.assertEqual(progress["checkpoint"]["state"], "waiting_customer")
                 self.assertEqual(len(worker.calls), 1)
                 self.assertEqual(list(rt.log.iter_events(task_id=task, event_types=("deliverable.published", "work.submitted"))), [])
                 rt.collaborate(task)

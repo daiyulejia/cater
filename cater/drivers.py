@@ -446,6 +446,8 @@ class OpenAICompatibleDriver:
     allowing several Cater roles to share one account or use separate accounts.
     """
 
+    review_response_repair = True
+
     def __init__(
         self,
         name: str,
