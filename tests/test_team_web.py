@@ -12,6 +12,7 @@ from email.message import Message
 from http.client import HTTPResponse
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlencode
 
 from cater.artifacts import normalize_deliverables
 from cater.conversation import ConversationService
@@ -58,6 +59,13 @@ class MemorySocket:
         return io.BytesIO(self.raw)
 
 
+class TextOnlyDriver:
+    name = NativeDriver.name
+
+    def complete(self, **kwargs):
+        raise AssertionError("fallback tests must not call a model")
+
+
 class TeamWebTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -83,16 +91,16 @@ class TeamWebTests(unittest.TestCase):
         return Runtime(self.db, roles_path=self.roles, workspaces_path=self.workspaces,
                        drivers={NativeDriver.name: self.driver}, close_drivers_on_close=False)
 
-    def request(self, path, data=None, *, expected=200):
+    def request(self, path, data=None, *, expected=200, form=False):
         method = "GET" if data is None else "POST"
-        raw = b"" if data is None else json.dumps(data).encode("utf-8")
+        raw = b"" if data is None else (urlencode(data) if form else json.dumps(data)).encode("utf-8")
         handler = self.handler.__new__(self.handler)
         handler.path, handler.command = path, method
         handler.request_version = "HTTP/1.1"
         handler.requestline = f"{method} {path} HTTP/1.1"
         handler.headers = Message()
         handler.headers["Host"] = "localhost"
-        handler.headers["Content-Type"] = "application/json"
+        handler.headers["Content-Type"] = "application/x-www-form-urlencoded" if form else "application/json"
         handler.headers["Content-Length"] = str(len(raw))
         handler.rfile, handler.wfile = io.BytesIO(raw), io.BytesIO()
         getattr(handler, "do_" + method)()
@@ -179,18 +187,121 @@ class TeamWebTests(unittest.TestCase):
 
     def test_demo_team_request_still_uses_legacy_intake(self):
         with Runtime(self.root / "demo.db") as rt:
-            task, _, intent = prepare(rt, {"goal": "Demo fixture", "collaboration": "team", "run": True},
-                                      "demo-team-001")
-            self.assertFalse(rt.team.enabled(task))
-            self.assertIsNotNone(rt.task(task).plan)
-            self.assertEqual(intent.payload["action"], "run")
+            for selection in ({}, {"collaboration": "team"}):
+                with self.subTest(selection=selection):
+                    task, _, intent = prepare(rt, {"goal": "Demo fixture", "run": True, **selection}, None)
+                    self.assertFalse(rt.team.enabled(task))
+                    self.assertIsNotNone(rt.task(task).plan)
+                    self.assertEqual(intent.payload["action"], "run")
 
-    def test_native_creation_without_team_selection_keeps_legacy_planning(self):
-        detail = self.request("/api/tasks", {"goal": "Legacy native fixture"}, expected=201)
+    def test_native_creation_without_selection_defaults_to_team_and_replays_once(self):
+        payload = {"goal": "  Default native fixture\nwith exact whitespace  \n", "run": True,
+                   "background": True, "request_id": "default-create-001", "workspace_id": "source"}
+        with patch.object(Runtime, "intake", side_effect=AssertionError("legacy intake")), \
+                patch.object(Runtime, "dispatch", side_effect=AssertionError("legacy dispatch")):
+            detail = self.request("/api/tasks", payload, expected=202)
+            task = detail["task"]["id"]
+            before = self.events(task)
+            duplicate = self.request("/api/tasks", payload)
+        self.assertEqual(duplicate["task"]["id"], task)
+        self.assertEqual(self.events(task), before)
+        self.assertTrue(detail["team"]["enabled"])
+        self.assertEqual(detail["team"]["pending_count"], 1)
+        self.assertEqual(detail["conversation"], [])
+        self.assertIsNone(detail["task"]["plan"])
+        source = next(e for e in before if e.type == "task.created")
+        self.assertNotIn("collaboration", source.payload["creation_request"])
+        message = next(e for e in before if e.type == "team.message_received")
+        self.assertEqual(message.payload["text"], payload["goal"])
+        kinds = [e.type for e in before]
+        self.assertLess(kinds.index("workspace.bound"), kinds.index("team.started"))
+        self.assertLess(kinds.index("team.message_received"), kinds.index("task.activation_requested"))
+        self.start.assert_called_once()
+        self.assertEqual(self.run_current(task)["state"], "completed")
+        self.assertEqual(len(self.driver.calls), 1)
+        self.assertTrue(any(e.type == "team.run_finished" for e in self.events(task)))
+
+    def test_legacy_creation_retry_keeps_original_identity_and_activation(self):
+        payload = {"goal": "  Historical native request  ", "run": True,
+                   "background": True, "request_id": "legacy-create-retry"}
+        # Simulate the old default and a lost response before activation dispatch.
+        with patch.object(TeamService, "available", return_value=False), \
+                patch.object(self.runner, "dispatch_activation"):
+            first = self.request("/api/tasks", payload, expected=202)
+        task = first["task"]["id"]
+        before = self.events(task)
+        with self.factory() as rt:
+            intent = activation(rt, task)
+        self.assertIsNotNone(intent)
+        with patch.object(Runtime, "intake", side_effect=AssertionError("repeated intake")), \
+                patch.object(TeamService, "enable", side_effect=AssertionError("retry switched engine")):
+            replay = self.request("/api/tasks", payload)
+            after = self.events(task)
+            self.request("/api/tasks", payload)
+        self.assertEqual(replay["task"]["id"], task)
+        self.assertFalse(replay["team"]["enabled"])
+        self.assertEqual(after[:len(before)], before)
+        self.assertEqual(self.events(task), after)
+        with self.factory() as rt:
+            self.assertEqual(activation(rt, task), intent)
+            self.assertEqual(len(rt.tasks()), 1)
+        queued = [e for e in after if e.type == "activity.queued"]
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(queued[0].payload["activation_seq"], intent.seq)
+        self.start.assert_called_once()
+        for change in ({"goal": "Changed"}, {"run": False}, {"collaboration": "team"}):
+            self.request("/api/tasks", {**payload, **change}, expected=409)
+        self.assertEqual(self.events(task), after)
+
+    def test_default_creation_keeps_native_mentions_in_team(self):
+        detail = self.request("/api/tasks", {"goal": "@dev inspect this fixture"}, expected=201)
+        self.assertTrue(detail["team"]["enabled"])
+        message = next(e for e in self.events(detail["task"]["id"]) if e.type == "team.message_received")
+        self.assertEqual(message.payload["recipient"], "dev")
+
+    def test_non_native_ordinary_entries_keep_legacy_behavior(self):
+        self.driver = TextOnlyDriver()
+        detail = self.request("/api/tasks", {"goal": "Text only fixture"}, expected=201)
+        task = detail["task"]["id"]
         self.assertFalse(detail["team"]["enabled"])
         self.assertTrue(any(e["type"] == "planning.requested" for e in detail["events"]))
-        self.assertIsNone(detail["task"]["work"])
-        self.assertEqual(self.driver.calls, [])
+        with patch.object(self.runner, "answer_conversations") as answer:
+            command = self.command(task)
+        self.assertFalse(command["team"]["enabled"])
+        self.assertEqual(len(command["conversation"]), 1)
+        answer.assert_called_once_with(task)
+        child = self.request(f"/api/tasks/{task}/derive", {
+            "goal": "Text only child", "request_id": "text-only-derive", "run": True
+        }, expected=201)
+        self.assertFalse(child["team"]["enabled"])
+        self.assertTrue(any(e["type"] == "planning.requested" for e in child["events"]))
+
+    def test_explicit_legacy_creation_options_do_not_enable_team(self):
+        for options in ({"battle": True}, {"battle": True, "collaboration": "team"},
+                        {"dispatch": True}, {"requested_route": "auto"},
+                        {"assign_to": "dev", "assign_objective": "Explicit work"}):
+            with self.subTest(options=options):
+                detail = self.request("/api/tasks", {
+                    "goal": "Explicit legacy fixture", "background": True, **options
+                }, expected=202 if options.get("battle") else 201)
+                self.assertFalse(detail["team"]["enabled"])
+                self.assertTrue(any(e["type"] == "planning.requested" for e in detail["events"]))
+                if options.get("battle"):
+                    self.assertEqual(detail["activity"]["action"], "battle")
+
+    def test_explicit_legacy_actions_and_structured_commands_keep_semantics(self):
+        for action, data, method in (("battle", {}, "battle"), ("dispatch", {}, "dispatch"),
+                                     ("assign", {"owner": "dev"}, "assign"),
+                                     ("command", {"instruction": "Update", "goal": "New goal"}, "chat"),
+                                     ("command", {"instruction": "Update", "acceptance": ["Check"]}, "chat")):
+            with self.subTest(action=action, data=data):
+                with self.factory() as rt:
+                    task = rt.create_task("Legacy operation fixture")
+                with patch.object(Runtime, method, autospec=True) as operation:
+                    self.request(f"/api/tasks/{task}/{action}", data)
+                self.assertEqual(operation.call_args.args[1], task)
+                with self.factory() as rt:
+                    self.assertFalse(rt.team.enabled(task))
 
     def test_non_native_command_team_request_falls_back_to_legacy_chat(self):
         with self.factory() as rt:
@@ -242,21 +353,25 @@ class TeamWebTests(unittest.TestCase):
                     self.runner._activities.pop(task)
                 before = self.events(task)
                 self.request(f"/api/tasks/{task}/command", {
-                    "instruction": "Switch engine", "collaboration": "team"
+                    "instruction": "Switch engine"
                 }, expected=409)
                 self.assertEqual(self.events(task), before)
                 with self.factory() as rt:
                     self.assertFalse(rt.team.enabled(task))
 
-    def test_switch_rejects_legacy_conversation_worker(self):
-        with self.factory() as rt:
-            task = rt.create_task("Legacy conversation")
-        self.runner._conversation_tasks[task] = "fixture-worker"
-        self.request(f"/api/tasks/{task}/command", {
-            "instruction": "Switch engine", "collaboration": "team"
-        }, expected=409)
-        with self.factory() as rt:
-            self.assertFalse(rt.team.enabled(task))
+    def test_switch_rejects_legacy_conversation_and_question_workers(self):
+        for workers in (self.runner._conversation_tasks, self.runner._question_tasks):
+            with self.factory() as rt:
+                task = rt.create_task("Legacy conversation")
+            workers[task] = "fixture-worker"
+            before = self.events(task)
+            self.request(f"/api/tasks/{task}/command", {
+                "instruction": "Switch engine"
+            }, expected=409)
+            self.assertEqual(self.events(task), before)
+            with self.factory() as rt:
+                self.assertFalse(rt.team.enabled(task))
+        self.start.assert_not_called()
 
     def test_invalid_team_command_does_not_enable_task_or_queue_execution(self):
         with self.factory() as rt:
@@ -265,7 +380,7 @@ class TeamWebTests(unittest.TestCase):
             with self.subTest(text=text):
                 before = self.events(task)
                 self.request(f"/api/tasks/{task}/command", {
-                    "instruction": text, "collaboration": "team"
+                    "instruction": text
                 }, expected=400)
                 self.assertEqual(self.events(task), before)
         self.start.assert_not_called()
@@ -279,15 +394,58 @@ class TeamWebTests(unittest.TestCase):
         }, expected=409)
         self.assertEqual(self.events(task), before)
 
-    def test_command_without_team_selection_keeps_legacy_conversation(self):
+    def test_command_without_selection_switches_idle_legacy_once(self):
         with self.factory() as rt:
             task = rt.create_task("Legacy conversation")
-        with patch.object(self.runner, "answer_conversations") as answer:
+            rt.intake(task)
+            before = rt.log.read(task_id=task)
+        with patch.object(self.runner, "answer_conversations", side_effect=AssertionError("legacy conversation")), \
+                patch.object(Runtime, "chat", side_effect=AssertionError("legacy chat")):
             detail = self.command(task)
-        self.assertFalse(detail["team"]["enabled"])
-        self.assertEqual(len(detail["conversation"]), 1)
-        answer.assert_called_once_with(task)
-        self.start.assert_not_called()
+            self.command(task)
+        self.assertTrue(detail["team"]["enabled"])
+        self.assertEqual(detail["conversation"], [])
+        events = self.events(task)
+        self.assertEqual(events[:len(before)], before)
+        self.assertEqual(sum(e.type == "team.started" for e in events), 1)
+        self.assertEqual(sum(e.type == "team.message_received" for e in events), 1)
+        self.start.assert_called_once()
+
+    def test_plain_form_create_and_command_default_to_team(self):
+        payload = {"goal": "  Form fixture  ", "request_id": "default-form-create", "run_now": "on"}
+        with patch.object(Runtime, "intake", side_effect=AssertionError("legacy intake")), \
+                patch.object(Runtime, "chat", side_effect=AssertionError("legacy chat")):
+            self.request("/tasks", payload, form=True, expected=303)
+            with self.factory() as rt:
+                task, = rt.tasks()
+            before = self.events(task.id)
+            self.request("/tasks", payload, form=True, expected=303)
+            self.assertEqual(self.events(task.id), before)
+            self.assertEqual(len(self.driver.calls), 1)
+            message = {"instruction": "  Continue form fixture  ", "request_id": "default-form-command"}
+            self.request(f"/tasks/{task.id}/command", message, form=True, expected=303)
+            before = self.events(task.id)
+            self.request(f"/tasks/{task.id}/command", message, form=True, expected=303)
+            self.assertEqual(self.events(task.id), before)
+        self.assertEqual(self.run_current(task.id)["state"], "completed")
+        self.assertEqual(len(self.driver.calls), 2)
+        received = [e.payload["text"] for e in self.events(task.id) if e.type == "team.message_received"]
+        self.assertEqual(received, [payload["goal"], message["instruction"]])
+
+    def test_plain_form_command_switches_idle_legacy_but_rejects_active_legacy(self):
+        for active in (False, True):
+            with self.subTest(active=active):
+                with self.factory() as rt:
+                    task = rt.create_task("Legacy form fixture")
+                if active:
+                    self.runner.submit(task, "run")
+                before = self.events(task)
+                self.request(f"/tasks/{task}/command", {"instruction": "Continue form fixture"},
+                             form=True, expected=409 if active else 303)
+                with self.factory() as rt:
+                    self.assertEqual(rt.team.enabled(task), not active)
+                if active:
+                    self.assertEqual(self.events(task), before)
 
     def test_old_pending_conversation_is_not_consumed_after_switch_or_restart(self):
         with self.factory() as rt:
@@ -351,6 +509,42 @@ class TeamWebTests(unittest.TestCase):
         with patch.object(Runtime, "collaborate", autospec=True) as collaborate:
             self.runner._run(child_id, current["id"], current["action"])
         self.assertEqual(collaborate.call_args.args[1], child_id)
+
+    def test_derive_from_legacy_defaults_child_to_team_and_replays_once(self):
+        with self.factory() as rt:
+            parent = rt.create_task("Legacy source")
+            rt.intake(parent)
+        parent_events = self.events(parent)
+        payload = {"goal": "  Derived native fixture  ", "request_id": "default-native-derive", "run": True}
+        with patch.object(Runtime, "intake", side_effect=AssertionError("legacy child intake")):
+            child = self.request(f"/api/tasks/{parent}/derive", payload, expected=201)
+            task = child["task"]["id"]
+            before = self.events(task)
+            duplicate = self.request(f"/api/tasks/{parent}/derive", payload)
+        self.assertEqual(duplicate["task"]["id"], task)
+        self.assertEqual(self.events(task), before)
+        self.assertEqual(self.events(parent), parent_events)
+        self.assertTrue(child["team"]["enabled"])
+        self.assertIsNone(child["task"]["plan"])
+        self.assertEqual(sum(e.type == "team.message_received" for e in before), 1)
+        self.assertEqual(next(e.payload["text"] for e in before if e.type == "team.message_received"), payload["goal"])
+        self.start.assert_called_once()
+        self.assertEqual(self.run_current(task)["state"], "completed")
+        self.assertEqual(len(self.driver.calls), 1)
+
+    def test_old_derived_request_retry_does_not_switch_existing_child(self):
+        with self.factory() as rt:
+            parent = rt.create_task("Legacy source")
+        payload = {"goal": "Historical child", "request_id": "legacy-child-retry", "run": True}
+        with patch.object(TeamService, "available", return_value=False):
+            child = self.request(f"/api/tasks/{parent}/derive", payload, expected=201)
+        task = child["task"]["id"]
+        before = self.events(task)
+        duplicate = self.request(f"/api/tasks/{parent}/derive", payload)
+        self.assertEqual(duplicate["task"]["id"], task)
+        self.assertFalse(duplicate["team"]["enabled"])
+        self.assertEqual(self.events(task), before)
+        self.start.assert_called_once()
 
     def test_failed_derived_message_rolls_back_child_creation(self):
         task = self.create()["task"]["id"]

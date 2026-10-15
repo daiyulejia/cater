@@ -3,7 +3,7 @@ import { beforeEach, expect, test, vi } from 'vitest'
 import App from '../src/App'
 import type { TaskDetail } from '../src/App'
 import type { TeamState } from '../src/team'
-import { teamStatus } from '../src/team'
+import { teamMessageEchoes, teamStatus } from '../src/team'
 
 type EventRecord = TaskDetail['events'][number]
 const event = (seq: number, type: string, payload: Record<string, unknown> = {}, id = 'team', kind = 'system'): EventRecord => ({
@@ -91,30 +91,66 @@ test('模型调用失败在聊天中明确提示，不只留在折叠审计里',
   expect(stream().getByText('本轮调用未完成，已有文件保留。')).toBeTruthy()
 })
 
-test('send_message 的真实伙伴沟通即使没有 turn.text 也保留正文、接收者和回复关系', async () => {
+test.each(['message', 'report'])('send_message 的显式 %s 即使没有 turn.text 也保留正文、接收者和回复关系', async (kind) => {
   await mount(detail([
-    event(2, 'team.message_received', { text: '登录态由哪一层保存？', recipient: 'store_manager', kind: 'message', reply_to: 1 }, 'dev', 'agent'),
+    event(2, 'team.message_received', { text: '登录态由哪一层保存？', recipient: 'store_manager', kind, visible: true, reply_to: 1 }, 'dev', 'agent'),
     event(3, 'team.message_received', { text: '自动报告无需再次展示', recipient: 'store_manager', kind: 'report' }, 'dev', 'agent'),
+    event(4, 'team.message_received', { text: '自动进度无需再次展示', recipient: 'store_manager', kind: 'progress' }, 'dev', 'agent'),
   ]))
   const row = stream().getByText('登录态由哪一层保存？').closest('article')!
   expect(row.querySelector('[data-actor="dev"].is-agent')).toBeTruthy()
   expect(within(row).getByText('@店长')).toBeTruthy()
   expect(within(row).getByText('回复 #1')).toBeTruthy()
   expect(stream().queryByText('自动报告无需再次展示')).toBeNull()
+  expect(stream().queryByText('自动进度无需再次展示')).toBeNull()
 })
 
-test('只有同轮工具明确关联且全文相同的 msg.said 回声去重，相似文本与下一轮原话均保留', async () => {
+test.each(['message', 'report'])('只有同轮工具明确关联的显式 %s 全文回声去重，相似文本、下一轮与其他角色原话均保留', async (kind) => {
   await mount(detail([
     event(2, 'msg.said', { text: '需要确认入口范围', phase: 'team', run_id: 'run-a' }, 'dev', 'agent'),
     event(3, 'team.tool_started', { name: 'send_message', role: 'dev', run_id: 'run-a', call_id: 'send' }),
-    event(4, 'team.message_received', { text: '需要确认入口范围', recipient: 'store_manager', kind: 'message' }, 'dev', 'agent'),
+    event(4, 'team.message_received', { text: '需要确认入口范围', recipient: 'store_manager', kind, visible: true }, 'dev', 'agent'),
     event(5, 'team.tool_finished', { name: 'send_message', role: 'dev', started_seq: 3, result: { status: 'ok', message_seq: 4 } }),
     event(6, 'msg.said', { text: '需要确认入口范围。', phase: 'team', run_id: 'run-a' }, 'dev', 'agent'),
     event(7, 'msg.said', { text: '需要确认入口范围', phase: 'team', run_id: 'run-b' }, 'dev', 'agent'),
+    event(8, 'msg.said', { text: '需要确认入口范围', phase: 'team', run_id: 'run-a' }, 'test', 'agent'),
   ]))
-  expect(stream().getAllByText('需要确认入口范围')).toHaveLength(2)
+  expect(stream().getAllByText('需要确认入口范围')).toHaveLength(3)
   expect(stream().getByText('需要确认入口范围。')).toBeTruthy()
-  expect(screen.getByLabelText('聊天记录').querySelectorAll('article')).toHaveLength(4)
+  expect(screen.getByLabelText('聊天记录').querySelectorAll('article')).toHaveLength(5)
+})
+
+test('report 仅在 visible 严格为 true 时公开，隐藏的自动回报不会去掉公开发言', async () => {
+  const hidden = [undefined, false, 'true', 1].map((visible, index) => event(index + 2, 'team.message_received', {
+    text: `隐藏回报 ${index}`, kind: 'report', visible, recipient: 'store_manager',
+  }, 'dev', 'agent'))
+  await mount(detail([
+    ...hidden,
+    event(6, 'team.message_received', { text: '带可见标记的进度仍隐藏', kind: 'progress', visible: true }, 'dev', 'agent'),
+    event(7, 'msg.said', { text: '自动回报对应的公开发言', phase: 'team', run_id: 'run-auto' }, 'dev', 'agent'),
+    event(8, 'team.tool_started', { name: 'send_message', role: 'dev', run_id: 'run-auto' }),
+    event(9, 'team.message_received', { text: '自动回报对应的公开发言', kind: 'report' }, 'dev', 'agent'),
+    event(10, 'team.tool_finished', { name: 'send_message', role: 'dev', started_seq: 8, result: { status: 'ok', message_seq: 9 } }),
+  ]))
+  for (let index = 0; index < hidden.length; index++) expect(stream().queryByText(`隐藏回报 ${index}`)).toBeNull()
+  expect(stream().queryByText('带可见标记的进度仍隐藏')).toBeNull()
+  expect(stream().getAllByText('自动回报对应的公开发言')).toHaveLength(1)
+  expect(screen.getByLabelText('聊天记录').querySelectorAll('article')).toHaveLength(2)
+})
+
+test.each(['missing receipt', 'untrusted receipt', 'untrusted start', 'wrong start role', 'wrong receipt role', 'failed receipt', 'wrong tool'])
+('显式 report 缺少可信 send_message 关联时不按同文去重：%s', (invalid) => {
+  const said = event(2, 'msg.said', { text: '显式回复', phase: 'team', run_id: 'run-report' }, 'dev', 'agent')
+  const start = event(3, 'team.tool_started', { name: 'send_message', role: 'dev', run_id: 'run-report' })
+  const report = event(4, 'team.message_received', { text: '显式回复', kind: 'report', visible: true }, 'dev', 'agent')
+  const receipt = event(5, 'team.tool_finished', { name: 'send_message', role: 'dev', started_seq: 3, result: { status: 'ok', message_seq: 4 } })
+  if (invalid === 'untrusted receipt') receipt.actor.kind = 'agent'
+  if (invalid === 'untrusted start') start.actor.kind = 'agent'
+  if (invalid === 'wrong start role') start.payload.role = 'test'
+  if (invalid === 'wrong receipt role') receipt.payload.role = 'test'
+  if (invalid === 'failed receipt') receipt.payload.result = { status: 'error', message_seq: 4 }
+  if (invalid === 'wrong tool') start.payload.name = 'delegate'
+  expect(teamMessageEchoes([said, start, report, ...(invalid === 'missing receipt' ? [] : [receipt])])).toEqual(new Set())
 })
 
 test('waiting 安静等待不算任务完成，讲解和追问继续从原聊天框发送 command', async () => {

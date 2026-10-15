@@ -286,8 +286,8 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       || event.type.startsWith('delivery.') || event.type === 'task.decomposed' || event.type === 'subtask.assigned'
       || (event.type === 'brief.generated' && payload.reason === 'work_checkpoint'))) return []
     if (event.type === 'team.message_received') {
-      if (actor.kind !== 'human' && payload.kind === 'report') return []
-      if (actor.kind !== 'human' && (actor.kind !== 'agent' || !['assignment', 'message'].includes(String(payload.kind)))) return []
+      if (actor.kind !== 'human' && (actor.kind !== 'agent' || (!['assignment', 'message'].includes(String(payload.kind))
+        && !(payload.kind === 'report' && payload.visible === true)))) return []
       if (typeof payload.text !== 'string' || !payload.text.trim()) return []
       if (actor.kind === 'human' && typeof payload.request_id === 'string' && payload.request_id) {
         if (shownRequests.has(payload.request_id)) return []

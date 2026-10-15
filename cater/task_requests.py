@@ -12,11 +12,12 @@ if TYPE_CHECKING:
     from .runtime import Runtime
 
 
-def prepare(runtime: Runtime, request: dict, request_id: str | None):
+def prepare(runtime: Runtime, request: dict, request_id: str | None, *, default_team: bool = True):
     """Commit creation, local intake and the execution intent together.
 
     Intake records local routing or requests later model planning. No driver is
     called while the event transaction holds the database write lock.
+    default_team selects execution for ordinary Web requests without changing identity.
     """
     if request.get("run") and request.get("battle"):
         raise ValueError("普通协作与强制治理不能同时启动。")
@@ -29,7 +30,9 @@ def prepare(runtime: Runtime, request: dict, request_id: str | None):
         if request.get("workspace_id") is not None:
             runtime.workspaces.bind(task_id, request["workspace_id"], expected_revision=None)
         team = getattr(runtime, "team", None)
-        if request.get("collaboration") == "team" and team is not None and team.available():
+        # Select execution only after identity lookup; defaults are not request identity.
+        if (not request.get("battle") and (request.get("collaboration") == "team" or default_team)
+                and team is not None and team.available()):
             source = next(runtime.log.iter_events(task_id=task_id, event_types=("task.created",)))
             team.enable(task_id)
             team.receive(task_id, request["goal"], request_id=f"team-creation-{source.seq}")

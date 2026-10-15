@@ -31,6 +31,20 @@ def _tool(name, description, properties, required):
         "type": "object", "properties": properties, "required": required, "additionalProperties": False}}
 
 
+def _reported_messages(messages):
+    by_seq = {e.seq: e for e in messages}
+    reported = set()
+    for event in messages:
+        if event.payload.get("kind") != "report":
+            continue
+        source = by_seq.get(event.payload.get("reply_to"))
+        if (source is not None and source.payload.get("kind") in {"assignment", "message"}
+                and event.actor.id == source.payload.get("recipient")
+                and event.payload.get("recipient") == source.actor.id):
+            reported.add(source.seq)
+    return reported
+
+
 class TeamService:
     def __init__(self, runtime):
         self.rt = runtime
@@ -101,7 +115,8 @@ class TeamService:
                 if e.payload["status"] in {"failed", "interrupted"}:
                     checkpoint = e.payload.get("reason", "本轮未完成，已有记录保留。")
         messages = self._messages(task_id)
-        pending = [e for e in messages if e.seq not in starts]
+        reported = _reported_messages(messages)
+        pending = [e for e in messages if e.seq not in starts and e.seq not in reported]
         runs = [{"message_seq": seq, "role": e.payload["role"], "revision": e.payload.get("revision", 0),
                  "reason": finishes[seq].payload.get("reason", "") if seq in finishes else "",
                  "status": finishes[seq].payload["status"] if seq in finishes else "running"}
@@ -117,14 +132,14 @@ class TeamService:
         return {"enabled": self.enabled(task_id), "objective": objective, "revision": revision, "status": status,
                 "pending_count": len(pending), "runs": runs, "assignments": assignments, "checkpoint": checkpoint}
 
-    def _send(self, task_id, sender, recipient, text, kind, *, reply_to=None, parent_assignment_seq=None):
+    def _send(self, task_id, sender, recipient, text, kind, *, reply_to=None, parent_assignment_seq=None, visible=False):
         self._role(recipient)
         if recipient == sender.id:
             raise ValueError("请向另一位伙伴投递消息。")
         return self.rt.log.emit(type="team.message_received", task_id=task_id,
             actor=Actor.agent(sender.id, sender.role), payload={"recipient": recipient, "text": _text(text),
                 "kind": kind, "reply_to": reply_to, "revision": self.view(task_id)["revision"],
-                "parent_assignment_seq": parent_assignment_seq})
+                "parent_assignment_seq": parent_assignment_seq, **({"visible": True} if visible else {})})
 
     def _claim(self, task_id):
         with self.rt.log.atomic():
@@ -133,9 +148,11 @@ class TeamService:
             finished = {e.payload["message_seq"] for e in events if e.type == "team.run_finished" and e.actor == HOST}
             busy = {e.payload["role"] for seq, e in starts.items() if seq not in finished}
             running = self.rt.execution_control.view(task_id)["state"] == "running"
-            pending = [e for e in self._messages(task_id) if e.seq not in starts
+            messages = self._messages(task_id)
+            reported = _reported_messages(messages)
+            pending = [e for e in messages if e.seq not in starts and e.seq not in reported
                        and e.payload["recipient"] not in busy
-                       and (running or e.payload["kind"] != "assignment")]
+                       and (running or e.actor == Actor.human())]
             if not pending:
                 return None
             # A new customer message is read before the next delegated job.
@@ -155,8 +172,8 @@ class TeamService:
             _tool("wait_for_reply", "已经安排好工作或正在等信息时结束本轮，安静等待下一条消息，不必重复发言。", {}, []),
             _tool("delegate", "向伙伴交代一份工作或复核委托。对方执行后会自动回报你。用清晰文本说明目标、背景、输入和交付期待。",
                   {"recipient": recipient, "instruction": string}, ["recipient", "instruction"]),
-            _tool("send_message", "向伙伴提问、补充信息或沟通。是真实消息投递，不强制变成工作步骤。",
-                  {"recipient": recipient, "text": string}, ["recipient", "text"]),
+            _tool("send_message", "向伙伴交代工作、提问或补充信息，会真正唤起对方并承接结果。交代新工作不传reply_to；回答问题或交还已有委托时，reply_to填写对方原消息序号，表示这是回报而非另一份新委托。仅供知悉可安静等待。",
+                  {"recipient": recipient, "text": string, "reply_to": {"type": "integer"}}, ["recipient", "text"]),
             _tool("read_artifact", "读取本群已发布成果的完整正文。", {"artifact_seq": {"type": "integer"}}, ["artifact_seq"]),
             _tool("read_receipts", "读取本群真实工具执行回执（含失败和输出），自主检查伙伴的工作，不凭聊天自述判定测试通过。",
                   {"run_id": string, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}, []),
@@ -182,17 +199,22 @@ class TeamService:
     def _waiting_assignment(self, task_id, message, role):
         if message.payload["kind"] == "assignment":
             return message
-        if message.payload["kind"] != "report":
+        if message.payload["kind"] not in {"report", "progress", "message"}:
             return None
         messages = {e.seq: e for e in self._messages(task_id)}
         child = messages.get(message.payload.get("reply_to"))
         parent = messages.get(child.payload.get("parent_assignment_seq")) if child else None
-        if (child and parent and child.actor.id == role.id and parent.payload.get("kind") == "assignment"
+        if (child and parent and child.actor.id == role.id
+                and child.payload.get("recipient") == message.actor.id
+                and message.payload.get("recipient") == role.id
+                and parent.payload.get("kind") in {"assignment", "message"}
                 and parent.payload.get("recipient") == role.id
                 and parent.payload.get("revision") == self.view(task_id)["revision"]
                 and not any(e.payload.get("kind") == "report" and e.actor.id == role.id
                             and e.payload.get("reply_to") == parent.seq for e in messages.values())):
             return parent
+        if message.payload["kind"] == "message" and message.actor.kind == "agent":
+            return message
         return None
 
     def _context(self, task_id, message, role):
@@ -210,8 +232,16 @@ class TeamService:
                     history.append({"seq": e.seq, "sender": e.actor.id, "text": text})
         task = self.rt.task(task_id)
         assignment = self._waiting_assignment(task_id, message, role)
+        messages = self._messages(task_id)
+        reported = _reported_messages(messages)
+        revision = self.view(task_id)["revision"]
+        open_assignments = [{"seq": e.seq, "sender": e.actor.id, "text": e.payload["text"]} for e in messages
+                            if e.actor.kind == "agent" and e.payload.get("recipient") == role.id
+                            and e.payload.get("kind") in {"assignment", "message"}
+                            and e.payload.get("revision") == revision and e.seq not in reported]
         return {"you": asdict(role), "members": [asdict(r) for r in [self.rt.organization.leader, *self.rt.roles]],
             "active_assignment": {"seq": assignment.seq, "sender": assignment.actor.id, **assignment.payload} if assignment else None,
+            "open_assignments": open_assignments,
             "current_work": self.view(task_id), "message": {"seq": message.seq, "sender": message.actor.id, **message.payload},
             "conversation": history[-60:], "artifacts": [{k: a.get(k) for k in
                 ("seq", "filename", "summary", "content_sha256", "local_path")} for a in task.deliverables],
@@ -240,7 +270,14 @@ class TeamService:
                            parent_assignment_seq=assignment.seq if assignment else None)
             return {"status": "ok", "message_seq": e.seq, "recipient": e.payload["recipient"]}
         if name == "send_message":
-            e = self._send(task_id, role, arguments["recipient"], arguments["text"], "message")
+            reply_to = arguments.get("reply_to")
+            if reply_to is not None:
+                original = next((e for e in self._messages(task_id) if e.seq == reply_to), None)
+                if (type(reply_to) is not int or original is None or original.actor.id != arguments["recipient"]
+                        or original.payload.get("recipient") != role.id):
+                    raise ValueError("回复需要关联本群发给你的对应消息。")
+            e = self._send(task_id, role, arguments["recipient"], arguments["text"], "report" if reply_to is not None else "message",
+                           reply_to=reply_to, parent_assignment_seq=assignment.seq if assignment else None, visible=True)
             return {"status": "ok", "message_seq": e.seq}
         if name == "set_objective":
             goal = _text(arguments["goal"], "目标", 12000)
@@ -303,10 +340,13 @@ class TeamService:
 
     def _run_message(self, task_id, message, role, started):
         status, reason, final = "completed", "", ""
+        failure = {}
         revision = self.view(task_id)["revision"]
         assignment = self._waiting_assignment(task_id, message, role)
         try:
-            if message.payload["kind"] == "assignment" and (message.payload.get("revision") != revision
+            if (message.payload["kind"] == "assignment" or
+                    message.payload["kind"] == "message" and message.actor.kind == "agent") and (
+                    message.payload.get("revision") != revision
                     or self.view(task_id)["status"] == "done"):
                 raise WorkConflict("这份委托已被新的目标替代，不再执行旧方案。")
             driver = self.rt.drivers[role.driver]
@@ -327,9 +367,12 @@ class TeamService:
                 "顾客的新目标优先。店长用set_objective记录采用的目标，再用delegate交代清晰工作；"
                 "委托正文写明目标、背景、输入、交付期待和必要验证，不照抄顾客一句话。"
                 "步骤随实际情况调整，不必开会，不必每角色发言。普通进度问题就按当前工作和实际记录回答。"
-                "delegate会真正投递，接收者做完会回报；消息已投递不等于工作已完成。"
+                "delegate和send_message都会真正投递并唤起接收者，处理结果会回报；消息已投递不等于工作已完成。"
                 "需要帮助、选方案或复核时直接联系合适伙伴。复核发现问题就具体反馈并安排修正，而不是等顾客催。"
-                "active_assignment若非空是你仍负责的原委托，收到子回报后结合它继续工作并向原委托人回报。"
+                "每位伙伴既能接活，也能交代下一份工作；你的输出可以成为下一位的输入，不必每步经过店长。"
+                "需要下一位接着做时实际调用delegate或send_message，写清成果引用、具体要求与验证期待，只在聊天里说已交接不会投递。"
+                "active_assignment若非空是你仍负责的原委托，收到子回报、进展或问题答复后结合它继续工作并向原委托人回报。"
+                "open_assignments列出你尚未交还的委托，收到新消息也不要遗忘它们；完成其中一份时可用send_message的reply_to明确交回原委托。"
                 "成果用publish_artifact保存完整正文；操作和验证依据来自实际工具回执。"
                 "已写入工作目录的文件优先用publish_workspace_file直接发布，避免复述整份源码。"
                 "店长读成果，用read_receipts核对真实工具回执、跟进修正，能够交付时用finish_work记录结果及验证边界。"
@@ -398,18 +441,31 @@ class TeamService:
                 status, reason = "interrupted", "这轮操作较长，已保留成果与回执，交回店长检查后继续安排。"
         except WorkConflict as exc:
             status, reason = "interrupted", str(exc)
-        except Exception:
+        except Exception as exc:
             status, reason = "failed", f"{role.name}的本轮调用未完成，已有成果和操作记录保留；需要核对接入或执行记录。"
+            failure["error_type"] = type(exc).__name__
+            code = getattr(exc, "status_code", None)
+            if type(code) is int and 100 <= code <= 599:
+                failure["status_code"] = code
+                if code == 429:
+                    reason = f"{role.name}本轮模型请求被服务商限流（HTTP 429），不是工作已完成；已有成果和操作记录保留。"
         self.rt.log.emit(type="team.run_finished", task_id=task_id, actor=HOST,
             payload={"message_seq": message.seq, "role": role.id, "run_id": started.payload["run_id"],
-                     "status": status, "reason": reason})
-        if status == "waiting" and assignment is not None:
+                     "status": status, "reason": reason, **failure})
+        already_reported = assignment is not None and any(e.actor.id == role.id
+            and e.payload.get("kind") == "report" and e.payload.get("reply_to") == assignment.seq
+            for e in self._messages(task_id))
+        if (role.id == self.rt.organization.leader.id and self.view(task_id)["status"] == "done"
+                and status in {"completed", "waiting"}):
+            already_reported = True
+        if status == "waiting" and assignment is not None and not already_reported:
             artifacts = [a for a in self.rt.task(task_id).deliverables if a["seq"] > started.seq and a.get("actor") == role.id]
             published = "；".join(f"{a.get('filename', a.get('title', '成果'))}（成果 #{a['seq']}）" for a in artifacts)
             text = ("本轮已保存：" + published + "。" if published else "")
             text += (final or "我已处理这轮消息，现在等待后续信息或安排。")
-            self._send(task_id, role, assignment.actor.id, text, "progress", reply_to=assignment.seq)
-        if status != "waiting" and (assignment is not None or (message.actor == Actor.human()
+            if assignment.payload["kind"] == "assignment" or published:
+                self._send(task_id, role, assignment.actor.id, text, "progress", reply_to=assignment.seq)
+        if status != "waiting" and not already_reported and (assignment is not None or (message.actor == Actor.human()
                 and role.id != self.rt.organization.leader.id)):
             recipient = assignment.actor.id if assignment else self.rt.organization.leader.id
             self._send(task_id, role, recipient, reason or final or "委托已处理，请查看本轮成果和工具记录。", "report",

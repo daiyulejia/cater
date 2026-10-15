@@ -1394,6 +1394,9 @@ def make_handler(
                 assign_owner = str(data.get("assign_to", "")).strip()
                 requested_route = _optional_text(data.get("requested_route"))
                 acceptance = _acceptance_lines(data.get("acceptance"))
+                default_team = not (force_battle or _truthy(data.get("dispatch")) or requested_route
+                                    or assign_owner or _optional_text(data.get("assign_objective"))
+                                    or _optional_text(data.get("assign_acceptance")))
                 with self._runtime() as rt:
                     if not assign_owner and requested_route is None:
                         mentioned_workers = rt.mentioned_workers(goal)
@@ -1412,7 +1415,7 @@ def make_handler(
                     try:
                         from .task_requests import prepare
                         task_id, created, activation = prepare(rt, {
-                            "goal": data.get("goal") if data.get("collaboration") == "team" else goal,
+                            "goal": data.get("goal") if data.get("collaboration") == "team" else str(data.get("goal", "")),
                             "acceptance": acceptance, "project_id": data.get("project_id"),
                             "requested_route": requested_route, "assign_to": assign_owner,
                             "assign_objective": _optional_text(data.get("assign_objective")),
@@ -1421,7 +1424,7 @@ def make_handler(
                             "dispatch": _truthy(data.get("dispatch")),
                             **({"collaboration": data["collaboration"]} if "collaboration" in data else {}),
                             **({"workspace_id": data["workspace_id"]} if "workspace_id" in data else {}),
-                        }, data.get("request_id"))
+                        }, data.get("request_id"), default_team=default_team)
                     except WorkConflict as exc:
                         return self._conflict(str(exc))
                     except ValueError as exc:
@@ -1490,12 +1493,10 @@ def make_handler(
                                                         request_id=data.get("request_id"))
                                 child_id = result["task_id"]
                                 if result["created"]:
-                                    team = getattr(rt, "team", None)
-                                    if (_team_enabled(rt, task_id) or
-                                            data.get("collaboration") == "team" and team is not None and team.available()):
+                                    if _team_enabled(rt, task_id) or _team_available(rt):
                                         source = next(rt.log.iter_events(task_id=child_id, event_types=("task.created",)))
-                                        team.enable(child_id)
-                                        team.receive(child_id, data["goal"], request_id=f"team-creation-{source.seq}")
+                                        rt.team.enable(child_id)
+                                        rt.team.receive(child_id, data["goal"], request_id=f"team-creation-{source.seq}")
                                     else:
                                         mentioned = rt.mentioned_workers(data["goal"])
                                         owner = mentioned[0] if len(mentioned) == 1 else None
@@ -1535,9 +1536,9 @@ def make_handler(
                         elif action == "command":
                             if data.get("collaboration") not in (None, "team"):
                                 return self._bad_request("collaboration must be team")
-                            team = getattr(rt, "team", None)
                             if (_team_enabled(rt, task_id) or
-                                    data.get("collaboration") == "team" and team is not None and team.available()):
+                                    _team_available(rt) and (data.get("collaboration") == "team" or
+                                        _optional_text(data.get("goal")) is None and "acceptance" not in data)):
                                 message = activities.receive_team(rt, task_id, data.get("instruction"), data.get("request_id"))
                                 activities.continue_team(task_id, message)
                                 return self._send_json(self._task_payload(task_id, activities), status=HTTPStatus.ACCEPTED)
@@ -1597,7 +1598,21 @@ def make_handler(
                 ]
                 with self._runtime() as rt:
                     try:
+                        if (_team_available(rt) and data.get("dispatch", [""])[0] != "on"
+                                and not data.get("assign_owner", [""])[0].strip()
+                                and data.get("battle", [""])[0] != "on"):
+                            from .task_requests import prepare
+                            task_id, _, intent = prepare(rt, {
+                                "goal": data.get("goal", [""])[0], "acceptance": acceptance,
+                                "run": data.get("run_now", [""])[0] == "on",
+                            }, data.get("request_id", [None])[0])
+                            if intent is not None:
+                                activities.dispatch_activation(task_id, intent, background=False)
+                            self._redirect(f"/tasks/{task_id}")
+                            return
                         task_id = rt.create_task(goal, acceptance)
+                    except WorkConflict as exc:
+                        return self._conflict(str(exc))
                     except ValueError as exc:
                         return self._bad_request(str(exc))
                     if data.get("dispatch", [""])[0] == "on":
@@ -1667,7 +1682,8 @@ def make_handler(
                     if rt.task(task_id) is None:
                         return self._not_found()
                     try:
-                        if _team_enabled(rt, task_id):
+                        if (_team_enabled(rt, task_id) or
+                                _team_available(rt) and goal is None and not acceptance_raw.strip()):
                             message = activities.receive_team(rt, task_id, data.get("instruction", [""])[0],
                                                               data.get("request_id", [None])[0])
                             activities.continue_team(task_id, message)
@@ -2382,6 +2398,11 @@ def _read_snapshot(rt: Runtime):
 
 def _event_version(rt: Runtime) -> int:
     return rt.log.db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
+
+
+def _team_available(rt: Runtime) -> bool:
+    team = getattr(rt, "team", None)
+    return team is not None and team.available()
 
 
 def _team_enabled(rt: Runtime, task_id: str) -> bool:

@@ -94,7 +94,8 @@ export function teamMessageEchoes(events: TeamEvent[]): Set<number> {
     const message = typeof result.message_seq === 'number' ? bySeq.get(result.message_seq) : undefined
     if (!start || !isTeamHost(start) || start.type !== 'team.tool_started' || start.payload.name !== 'send_message'
       || typeof start.payload.run_id !== 'string' || !message || message.type !== 'team.message_received'
-      || message.actor.kind !== 'agent' || message.payload.kind !== 'message' || start.payload.role !== message.actor.id
+      || message.actor.kind !== 'agent' || (message.payload.kind !== 'message'
+        && !(message.payload.kind === 'report' && message.payload.visible === true)) || start.payload.role !== message.actor.id
       || p.role !== message.actor.id || result.status !== 'ok') return []
     return [{ run: start.payload.run_id, actor: message.actor.id, text: message.payload.text }]
   })
