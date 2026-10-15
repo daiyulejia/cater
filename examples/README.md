@@ -123,6 +123,8 @@ CLI 不提供给此适配器，因此事件中会记录为 `0`，不伪造成本
 
 ## OpenAI 兼容 API 适配器
 
+Anthropic Messages 协议使用独立的 [`anthropic_driver_config.json`](anthropic_driver_config.json)，见 [协议配置与真实测试](../docs/model-evaluation.zh-CN.md)。不要把两种协议的地址和请求格式混用。
+
 [`openai_compatible_driver_config.json`](openai_compatible_driver_config.json) 是按专业
 通道配置的模板：产品、设计、工程、质量可以使用不同模型或不同账号。它直接使用
 Python 标准库发出 Chat Completions 请求，不需要在 Cater 核心安装 SDK。先把每个

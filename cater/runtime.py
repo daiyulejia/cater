@@ -966,7 +966,15 @@ class Runtime:
                            "Apply all version-bound customer_directions, not just recent chat excerpts. "
                            "Later explicit directions override earlier conflicting directions, but not unrelated requirements. "
                            "If the item no longer fits the updated requirements, report the conflict instead of pretending it is complete. "
-                           "a statement of completion or a URI is not a submission. The runtime controls acceptance.")
+                           "A statement of completion or a URI is not a submission. The runtime controls acceptance. "
+                           "Use stance='assert' for a concrete contribution or 'challenge' for a material obstacle. "
+                           "For every actual deliverable include its complete body in deliverables[].content, "
+                           "format ('markdown', 'text', or 'code') and a simple filename. "
+                           "Do not put the body only in text, summary, uri, body, or another field. "
+                           "Example of the required body fields: "
+                           + json.dumps({"deliverables": [{"title": "成果名称", "summary": "成果摘要",
+                                                           "content": "完整交付正文放在这里。", "format": "markdown",
+                                                           "filename": "result.md"}]}, ensure_ascii=False))
             self.log.emit(
                 actor=Actor.agent(role.id, role.role),
                 type="agent.working",

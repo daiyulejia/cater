@@ -263,10 +263,13 @@ class CliDriver:
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
         task_id = context.get("task_id") if isinstance(context, dict) else None
         work = context.get("work") if isinstance(context, dict) else None
+        conversation = context.get("conversation") if isinstance(context, dict) else None
+        request_isolated = isinstance(context, dict) and context.get("context_scope") == "request"
+        request_isolated = request_isolated or isinstance(conversation, dict) and conversation.get("phase") == "room_dialogue"
         isolated = isinstance(context.get("background"), dict) if isinstance(context, dict) else False
         isolated = isolated or isinstance(context, dict) and context.get("context_scope") == "task"
         isolated = isolated or isinstance(work, dict) and work.get("phase") == "explanation"
-        if isinstance(task_id, str) and task_id and isolated:
+        if request_isolated or isinstance(task_id, str) and task_id and isolated:
             # Isolated calls carry explicit context and must not reuse process history.
             worker = CliDriver(
                 self.name, self.command, cwd=self.cwd, timeout=self.timeout,
@@ -592,6 +595,9 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
             restart_limit=restart_limit,
             token_budget=_token_budget(data, name),
         )
+    if kind == "anthropic":
+        from .anthropic import AnthropicMessagesDriver
+        return AnthropicMessagesDriver.from_config(name, data)
     if kind == "openai_compatible":
         endpoint = data.get("endpoint")
         model = data.get("model")

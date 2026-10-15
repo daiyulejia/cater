@@ -1,0 +1,14 @@
+{
+  "drivers": [
+    {
+      "kind": "anthropic",
+      "name": "shared_api",
+      "endpoint": "https://your-provider.example/v1/messages",
+      "model": "your-model-name",
+      "api_key_env": "CATER_ANTHROPIC_API_KEY",
+      "max_tokens": 8192,
+      "timeout": 90,
+      "token_budget": 100000
+    }
+  ]
+}

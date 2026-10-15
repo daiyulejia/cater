@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import asdict
 from importlib.resources import files
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,14 @@ if TYPE_CHECKING:
 
 
 PLAN_SCHEMA = json.loads(files("cater.packs").joinpath("planning-response.schema.json").read_text(encoding="utf-8"))
+
+
+def planning_schema(roles: list[dict[str, Any]]) -> dict[str, Any]:
+    schema = deepcopy(PLAN_SCHEMA)
+    fields = schema["properties"]["items"]["items"]["properties"]
+    fields["owner"]["enum"] = [role["id"] for role in roles if role["worker"]]
+    fields["reviewer"]["enum"] = [role["id"] for role in roles]
+    return schema
 
 
 def requirement_sources(events) -> list[dict[str, Any]]:
@@ -175,6 +184,9 @@ class Planner:
             "Cover every source. Later human directions override conflicting earlier ones, not unrelated requirements. "
             "Link each requirement to work items; cite the original source. Supersession requires a later human source quote. "
             "Use real prerequisite dependencies, a worker owner and a different reviewer for every item. "
+            "Use the exact role ids allowed in the schema, never names, job titles or the store manager id. "
+            "Planning and whole-delivery acceptance are handled by the store manager outside the items; "
+            "do not add work items for those orchestration steps. Cabinet members may review a worker item. "
             "Assign a small task directly; do not create meetings or extra work for ceremony. Honor requested assignees when feasible. "
             "Include reproducible local_check criteria for code behavior and test claims; narrative review cannot prove execution. "
             "Preserve every active local_check obligation: its obligation_id, work item binding, criterion id, subject and text. "
@@ -186,7 +198,7 @@ class Planner:
             "Reuse only listed same-owner submission candidates when still relevant; all reused bytes will be independently "
             "reviewed and checked again. Never claim a plan, quote or previous success proves the result works. "
             "Do not call tools, execute commands or publish artifacts during planning.\n"
-            + json.dumps({"schema": PLAN_SCHEMA, "rules": snapshot["rules"], **context}, ensure_ascii=False)
+            + json.dumps({"schema": planning_schema(context["roles"]), "rules": snapshot["rules"], **context}, ensure_ascii=False)
         )
         try:
             if len(prompt) > 131072:

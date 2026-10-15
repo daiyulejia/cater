@@ -1,0 +1,88 @@
+[
+  {
+    "id": "discussion_system_terms",
+    "message": "我们先聊聊多代理系统的架构，店长和执行层之间为什么要有调度？现在别开任务，也别改代码。",
+    "history": [],
+    "tasks": [],
+    "expected": {"actions": ["discuss"], "task_id": null}
+  },
+  {
+    "id": "independent_new_work",
+    "message": "另外帮我写一份周末读书会的招募文案，面向第一次来的顾客，交付一段能直接发出去的正文。",
+    "history": [{"actor": "human", "text": "预约页面继续保持原来的安排。"}],
+    "tasks": [{"id": "booking", "goal": "制作预约页面", "status": "running"}],
+    "expected": {"actions": ["new_task"], "task_id": null}
+  },
+  {
+    "id": "same_task_simpler",
+    "message": "预约页面先简化成姓名、人数和时间三个字段，会员积分这一版取消。",
+    "history": [{"actor": "human", "text": "预约页之前说过要带会员积分。"}],
+    "tasks": [{"id": "booking", "goal": "制作带会员积分的预约页面", "status": "running"}],
+    "expected": {"actions": ["update_task"], "task_id": "booking"}
+  },
+  {
+    "id": "discussion_no_execution",
+    "message": "我还在想预约是不是太麻烦了。先陪我讨论可能的流程，不需要做页面。",
+    "history": [{"actor": "store_manager", "text": "你更在意顾客选时间，还是到店确认？"}],
+    "tasks": [{"id": "booking", "goal": "制作预约页面", "status": "paused"}],
+    "expected": {"actions": ["discuss"], "task_id": null}
+  },
+  {
+    "id": "same_task_harder",
+    "message": "在原来的预约页面上再加团体预约和候补队列，人数满了能排队；还是这一项预约工作。",
+    "history": [{"actor": "store_manager", "text": "预约页目前只覆盖单人预约。"}],
+    "tasks": [{"id": "booking", "goal": "制作单人预约页面", "status": "running"}],
+    "expected": {"actions": ["update_task"], "task_id": "booking"}
+  },
+  {
+    "id": "completed_task_explanation",
+    "message": "预约页面已经交付了，你结合当时的实现和检查结果讲讲，为什么人数上限放在提交时检查？先别修改。",
+    "history": [{"actor": "store_manager", "text": "预约页面的交付记录已经整理好了。"}],
+    "tasks": [{"id": "booking", "goal": "制作预约页面", "status": "done"}],
+    "expected": {"actions": ["explain_task"], "task_id": "booking"}
+  },
+  {
+    "id": "ambiguous_two_tasks",
+    "message": "那个改得简洁一点。",
+    "history": [
+      {"actor": "human", "text": "预约页面和活动招募文案都给我看看。"},
+      {"actor": "store_manager", "text": "两项都有摘要，你想先看哪项？"}
+    ],
+    "tasks": [
+      {"id": "booking", "goal": "制作预约页面", "status": "running"},
+      {"id": "recruitment", "goal": "撰写活动招募文案", "status": "running"}
+    ],
+    "expected": {"actions": ["discuss"], "task_id": null}
+  },
+  {
+    "id": "interleaved_explicit_target",
+    "message": "回到读书会招募文案，把面向老会员改成面向第一次来的顾客。",
+    "history": [
+      {"actor": "human", "text": "读书会文案先写给老会员。"},
+      {"actor": "human", "text": "预约页面的时间选项也给我看一下。"},
+      {"actor": "store_manager", "text": "预约页面目前提供上午和下午两个时段。"}
+    ],
+    "tasks": [
+      {"id": "recruitment", "goal": "撰写面向老会员的读书会招募文案", "status": "running"},
+      {"id": "booking", "goal": "制作预约页面", "status": "running"}
+    ],
+    "expected": {"actions": ["update_task"], "task_id": "recruitment"}
+  },
+  {
+    "id": "resume_paused_task",
+    "message": "继续上次暂停的预约页面，按已确认的范围往下做。",
+    "history": [{"actor": "human", "text": "预约页面先停一下，我确认完时间再继续。"}],
+    "tasks": [
+      {"id": "booking", "goal": "制作预约页面", "status": "paused"},
+      {"id": "recruitment", "goal": "撰写活动招募文案", "status": "done"}
+    ],
+    "expected": {"actions": ["resume_task"], "task_id": "booking"}
+  },
+  {
+    "id": "long_message_tiny_change",
+    "message": "预约页面只改一处：把提交按钮上的‘确认预定’改成‘确认预约’。我把背景再讲清楚，避免大家以为这是重新设计：这个页面最早只是给小范围试营业使用，后来讨论过会员积分、团体到店、候补队列和消息通知，但这些都没有进入当前确认的范围。店里周末和工作日的接待节奏不一样，之前有人建议用复杂的排班规则，我当时没有接受，因为顾客还在反馈最基本的填写体验。现有布局、字段、验证规则、配色、移动端排版、网络请求和错误提示都维持当前版本，先前的截图只是历史参考。我们以后也许会重新讨论整个系统架构和调度方式，这段话不是让工程伙伴现在去实现那些设想，也不是另开一个页面。请把这次修改仍然记在原来的预约页面任务里，只修刚才那个按钮上的用词。",
+    "history": [{"actor": "store_manager", "text": "预约页面已经完成初版，等待文字校对。"}],
+    "tasks": [{"id": "booking", "goal": "制作预约页面", "status": "running"}],
+    "expected": {"actions": ["update_task"], "task_id": "booking"}
+  }
+]

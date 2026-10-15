@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 
 from cater.availability import team_availability
 from cater.drivers import DriverResponse
-from cater.planning import Planner, validate_plan
+from cater.planning import PLAN_SCHEMA, Planner, planning_schema, validate_plan
 from cater.runtime import Runtime
 from cater.work import WorkConflict
 from test_work import WorkDriver, item
@@ -50,6 +50,16 @@ class PlanningDriver:
 
 
 class PlanningTests(unittest.TestCase):
+    def test_schema_binds_configured_execution_and_review_roles_without_global_mutation(self):
+        roles = [{"id": "worker_a", "worker": True}, {"id": "advisor", "worker": False}]
+        schema = planning_schema(roles)
+        fields = schema["properties"]["items"]["items"]["properties"]
+        self.assertEqual(fields["owner"]["enum"], ["worker_a"])
+        self.assertEqual(fields["reviewer"]["enum"], ["worker_a", "advisor"])
+        planning_schema([{"id": "other_worker", "worker": True}])
+        self.assertEqual(fields["owner"]["enum"], ["worker_a"])
+        self.assertNotIn("enum", PLAN_SCHEMA["properties"]["items"]["items"]["properties"]["owner"])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

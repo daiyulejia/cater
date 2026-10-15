@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from .drivers import OpenAICompatibleDriver, driver_mode
+from .anthropic import AnthropicMessagesDriver
 from .usage import valid_token_count
 
 if TYPE_CHECKING:
@@ -34,7 +35,7 @@ def team_availability(rt: Runtime) -> dict[str, Any]:
                 state = ("on_leave", "invalid_budget")
             elif valid_token_count(budget) and totals.get(role.driver, 0) >= budget:
                 state = ("on_leave", "budget_exhausted")
-            elif isinstance(driver, OpenAICompatibleDriver) and not os.environ.get(driver.api_key_env):
+            elif isinstance(driver, (OpenAICompatibleDriver, AnthropicMessagesDriver)) and not os.environ.get(driver.api_key_env):
                 state = ("on_leave", "missing_key")
             elif rt._is_circuit_open(role.driver):
                 state = ("on_leave", "circuit_open")

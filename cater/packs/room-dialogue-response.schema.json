@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reply", "action", "task_id", "goal", "acceptance", "quote"],
+  "properties": {
+    "reply": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "action": {"type": "string", "enum": ["discuss", "new_task", "update_task", "explain_task", "resume_task"]},
+    "task_id": {"type": ["string", "null"]},
+    "goal": {"type": ["string", "null"], "maxLength": 12000},
+    "acceptance": {
+      "type": ["array", "null"], "maxItems": 32,
+      "items": {"type": "string", "minLength": 1, "maxLength": 2000}
+    },
+    "quote": {"type": ["string", "null"], "maxLength": 2000}
+  }
+}
