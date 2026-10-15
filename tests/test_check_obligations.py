@@ -183,13 +183,17 @@ class CheckObligationTests(unittest.TestCase):
 
     def test_overall_review_pending_and_uncertain_prevent_revision(self):
         actor = Actor.agent("store_manager", "delivery_reviewer")
+        self.rt.log.emit(type="delivery.prepared", task_id=self.task, actor=Actor.system("store_manager"),
+            payload={"digest": "old-bundle", "reviewer": actor.id,
+                     "manifest": {"scope": self.rt.work.scope(self.task), "plan_seq": self.contract()["revision"],
+                                  "criteria": [], "items": [], "files": [], "sources": []}})
         started = self.rt.log.emit(type="delivery.review_started", task_id=self.task,
-            actor=actor, payload={"delivery_digest": "old-bundle", "lease_until": 0})
+            actor=actor, payload={"delivery_digest": "old-bundle", "lease_until": 0, "check_seqs": {}})
         change = [{"id": self.contract()["obligations"][0]["id"], "action": "retire"}]
         with self.assertRaises(WorkConflict):
             self.revise(change)
         self.rt.log.emit(type="delivery.review_finished", task_id=self.task, actor=actor,
-            payload={"delivery_digest": "old-bundle", "attempt_seq": started.seq, "status": "uncertain"})
+            payload={"delivery_digest": "old-bundle", "attempt_seq": started.seq, "status": "uncertain", "check_seqs": {}})
         with self.assertRaises(WorkConflict):
             self.revise(change)
 

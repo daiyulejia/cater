@@ -350,9 +350,11 @@ class ActualViewCheckpointTests(unittest.TestCase):
         result = work_checkpoint(self.ledger.view(self.task), self.delivery.view(self.task), NAMES)
         self.assertEqual(result["state"], "delivery_pending")
         self.assertIn("下一步：店长", result["summary"])
+        started = self.log.emit(type="delivery.review_started", actor=Actor.agent("manager", "delivery_reviewer"),
+                      task_id=self.task, payload={"delivery_digest": "current-bundle", "check_seqs": {}})
         self.log.emit(type="delivery.review_finished", actor=Actor.agent("manager", "delivery_reviewer"),
                       task_id=self.task, payload={"status": "accepted", "delivery_digest": "current-bundle",
-                                                 "check_seqs": {}, "attempt_seq": 100})
+                                                 "check_seqs": {}, "attempt_seq": started.seq})
         result = work_checkpoint(self.ledger.view(self.task), self.delivery.view(self.task), NAMES)
         self.assertEqual(result["state"], "accepted")
         self.assertIn("整体验收已通过", result["summary"])

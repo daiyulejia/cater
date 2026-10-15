@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { request } from './request'
 import { Download, FileCheck2, PackageCheck, LoaderCircle } from 'lucide-react'
 
 type Evidence = { artifact_seq: number; quote: string }
@@ -53,11 +54,13 @@ export function DeliveryPanel({ taskId, delivery, names, accessToken = '' }: {
     if (downloading) return
     setDownloading(true); setError('')
     try {
-      const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/delivery`, {
+      const blob = await request(`/api/tasks/${encodeURIComponent(taskId)}/delivery`, {
         headers: accessToken ? { 'X-Cater-Access-Token': accessToken } : {},
+      }, async (response) => {
+        if (!response.ok) throw new Error(response.status === 409 ? '交付版本已变化，请重新核对。' : '暂时无法取回交付包，请稍后重试。')
+        return response.blob()
       })
-      if (!response.ok) throw new Error(response.status === 409 ? '交付版本已变化，请重新核对。' : '暂时无法取回交付包，请稍后重试。')
-      const url = URL.createObjectURL(await response.blob())
+      const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url; link.download = 'cater-delivery.zip'; link.click()
       setTimeout(() => URL.revokeObjectURL(url), 1000)

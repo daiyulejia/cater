@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import { BookOpen, BookPlus, Check, FolderPlus, Pencil, Plus, RefreshCw, Save, X } from 'lucide-react'
+import { SubmissionUnknownError } from './request'
 
 type Project = { id: string; name: string }
 type Rule = { id: string; revision: number; text: string; scope: string; status: string; rationale?: string; source: { kind: string; actor?: string; event_seq?: number; task_id?: string; rule_id?: string }; seq: number }
@@ -10,6 +11,7 @@ const scopeName: Record<string, string> = { workspace: '猫咖通用', project: 
 const stateName: Record<string, string> = { active: '已采用', candidate: '待采用', retired: '已停用' }
 
 function messageFor(error: unknown): string {
+  if (error instanceof SubmissionUnknownError) return error.message
   const value = error instanceof Error ? error.message : ''
   if (value.includes('version changed') || value.includes('concurrently')) return '店规已有新版本，请刷新核对后再保存。你的编辑仍保留。'
   if (value.includes('equivalent rule')) return '这个范围已经有相同的店规，无需重复记录。'

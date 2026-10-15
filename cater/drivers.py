@@ -360,9 +360,9 @@ class CliDriver:
 
     def _request(self, payload: dict[str, Any]) -> dict[str, Any]:
         last_error: DriverError | None = None
-        context = payload.get("context")
-        restart_limit = (0 if payload.get("type") == "complete" and isinstance(context, dict)
-                         and isinstance(context.get("work"), dict) else self.restart_limit)
+        # A response may be lost after the child has already changed files.
+        # Process recovery is for the next request, never replay of this one.
+        restart_limit = 0 if payload.get("type") == "complete" else self.restart_limit
         for attempt in range(restart_limit + 1):
             with self._lock:
                 request_payload = dict(payload)

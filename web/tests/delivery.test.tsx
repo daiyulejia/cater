@@ -1,7 +1,8 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, expect, test, vi } from 'vitest'
 import { DeliveryPanel } from '../src/DeliveryPanel'
 import type { DeliveryState } from '../src/DeliveryPanel'
+import { READ_TIMEOUT_MS } from '../src/request'
 
 const accepted: DeliveryState = {
   status: 'accepted', reason: '当前交付已通过', digest: 'fixture', reviewer: 'store_manager',
@@ -25,6 +26,30 @@ function withReceipts(receipts: Receipt[]): DeliveryState {
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async () => new Response(new Blob(['fixture-archive']), { headers: { 'Content-Type': 'application/zip' } })))
+})
+
+test('交付包正文挂起时超时解锁，旧正文迟到不会下载，手动重试保留令牌', async () => {
+  vi.useFakeTimers()
+  let resolve!: (blob: Blob) => void
+  const response = new Response('archive')
+  vi.spyOn(response, 'blob').mockImplementation(() => new Promise((done) => { resolve = done }))
+  const fetchMock = vi.fn(async (_path: string, _init: RequestInit) => response)
+  vi.stubGlobal('fetch', fetchMock)
+  const create = vi.fn(() => 'blob:delivery')
+  vi.stubGlobal('URL', { createObjectURL: create, revokeObjectURL: vi.fn() })
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  render(<DeliveryPanel taskId="task" delivery={accepted} names={{}} accessToken="test-token" />)
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '下载交付包' })))
+  await act(async () => { await vi.advanceTimersByTimeAsync(READ_TIMEOUT_MS) })
+  expect(screen.getByRole('alert').textContent).toContain('请求超时')
+  expect((screen.getByRole('button', { name: '下载交付包' }) as HTMLButtonElement).disabled).toBe(false)
+  await act(async () => resolve(new Blob(['old'])))
+  expect(create).not.toHaveBeenCalled()
+  fetchMock.mockImplementation(async () => new Response('new archive'))
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '下载交付包' })))
+  expect(create).toHaveBeenCalledTimes(1)
+  expect(new Headers(fetchMock.mock.calls[1][1].headers).get('X-Cater-Access-Token')).toBe('test-token')
+  expect(screen.queryByRole('alert')).toBeNull()
 })
 
 test('仅有效交付显示下载入口，并提供选择原因、复查步骤及未覆盖范围', () => {
@@ -197,7 +222,7 @@ test('下载携带访问令牌而不放入地址，阻止并发点击', async ()
   const button = screen.getByRole('button', { name: '下载交付包' })
   fireEvent.click(button); fireEvent.click(button)
   expect(fetch).toHaveBeenCalledTimes(1)
-  expect(fetch).toHaveBeenCalledWith('/api/tasks/task/delivery', { headers: { 'X-Cater-Access-Token': 'fixture-token' } })
+  expect(fetch).toHaveBeenCalledWith('/api/tasks/task/delivery', { headers: { 'X-Cater-Access-Token': 'fixture-token' }, signal: expect.any(AbortSignal) })
   expect((button as HTMLButtonElement).disabled).toBe(true)
   done(new Response(new Blob(['fixture-archive'])))
   await waitFor(() => expect(create).toHaveBeenCalledTimes(1))

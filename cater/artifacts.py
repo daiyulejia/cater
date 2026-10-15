@@ -4,11 +4,46 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from typing import Any
 
 MAX_CONTENT_BYTES = 65_536
 MAX_DELIVERABLES = 8
 FORMATS = {"markdown", "text", "code"}
+
+
+def content_metrics(content: str) -> dict[str, Any]:
+    """Count raw source, not rendered Markdown, tokens or inferred requirements."""
+    return {
+        "basis": "raw_content_including_markdown",
+        "utf8_bytes": len(content.encode("utf-8")),
+        "codepoints": len(content),
+        "non_whitespace_codepoints": sum(not char.isspace() for char in content),
+        "cjk_ideographs": sum(unicodedata.name(char, "").startswith(
+            ("CJK UNIFIED IDEOGRAPH-", "CJK COMPATIBILITY IDEOGRAPH-")) for char in content),
+    }
+
+
+def check_measurements(value: object, artifacts: dict[int, dict[str, Any]], source: str) -> list[dict[str, Any]]:
+    """Evaluate declared source-bound comparisons, never infer limits from prose."""
+    if not isinstance(value, list) or len(value) > 32:
+        raise ValueError("量化检查必须是有界列表。")
+    metrics = {"utf8_bytes", "codepoints", "non_whitespace_codepoints", "cjk_ideographs"}
+    results = []
+    for row in value:
+        if not isinstance(row, dict) or set(row) != {"artifact_seq", "metric", "operator", "limit", "source_quote"}:
+            raise ValueError("量化检查字段无效，观测值必须由宿主计算。")
+        seq, metric, operator, limit, quote = (row[key] for key in ("artifact_seq", "metric", "operator", "limit", "source_quote"))
+        if (type(seq) is not int or seq not in artifacts or not isinstance(metric, str) or metric not in metrics
+                or not isinstance(operator, str) or operator not in {"le", "ge", "eq"}
+                or type(limit) is not int or not 0 <= limit <= 1_000_000_000
+                or not isinstance(quote, str) or not quote.strip() or len(quote) > 2000 or quote not in source):
+            raise ValueError("量化检查必须绑定当前正文、支持的计量口径和本条要求原文。")
+        observed = content_metrics(artifacts[seq]["content"])[metric]
+        passed = {"le": observed <= limit, "ge": observed >= limit, "eq": observed == limit}[operator]
+        results.append({**row, "observed": observed, "status": "passed" if passed else "failed",
+                        "basis": "raw_content_including_markdown", "source": "host_computed"})
+    return results
 
 
 def safe_filename(value: Any) -> str | None:

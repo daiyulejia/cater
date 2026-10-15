@@ -136,7 +136,7 @@ class TaskSummaryTests(unittest.TestCase):
         rows, _ = self.rows()
         self.assertEqual(rows[0]["conversation_count"], expected)
         self.assertEqual(set(rows[0]), {"id", "goal", "project_id", "status", "status_label",
-                                      "conversation_count", "latest_seq", "version", "evaluated_at", "activity"})
+                                      "conversation_count", "latest_seq", "version", "evaluated_at", "activity", "execution_control"})
         self.assertNotIn("PRIVATE_BODY", json.dumps(rows))
 
     def test_queue_and_brief_suppression_matches_chat_and_can_reduce_count(self):
@@ -229,6 +229,31 @@ class TaskSummaryTests(unittest.TestCase):
             self.assertEqual(rows[0]["version"], version)
             self.assertEqual(rows[0]["status_label"], "结果待核实")
             self.assertEqual(self.get(new_tag)[0], 304)
+
+    def test_stage_review_expiry_invalidates_cached_summary(self):
+        from cater.artifacts import normalize_deliverables
+        from test_work import item
+
+        with self.factory() as rt:
+            task = rt.create_task("Review expiry")
+            rt.plan_work(task, [item("a")])
+            claim = rt.work.claim(task, "a")
+            artifact = normalize_deliverables([{"title": "Note", "summary": "A note", "content": "Ready for review"}])[0]
+            body = rt.log.emit(type="deliverable.published", actor=Actor.agent("dev", "worker"), task_id=task,
+                payload={**artifact, "work_item_id": "a", "attempt_id": claim.payload["attempt_id"]})
+            submission = rt.work.submit(task, claim, [body.seq])
+            with patch("cater.work.time.time", return_value=100):
+                rt.work.start_review(task, "a", reviewer="test", submission_seq=submission.seq,
+                                     expected_check_seqs={}, lease_seconds=10)
+        with patch("cater.web.time.time", return_value=105):
+            rows, tag = self.rows()
+            version = rows[0]["version"]
+            self.assertEqual(self.get(tag)[0], 304)
+        with patch("cater.web.time.time", return_value=111):
+            rows, next_tag = self.rows(tag)
+            self.assertNotEqual(next_tag, tag)
+            self.assertEqual(rows[0]["version"], version)
+            self.assertEqual(rows[0]["status_label"], "结果待核实")
 
 
 if __name__ == "__main__":

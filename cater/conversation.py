@@ -81,6 +81,9 @@ class ConversationService:
             }
             if request_id is not None:
                 payload["request_id"] = request_id
+            control_seq = self.rt.execution_control.view(task_id)["seq"]
+            if control_seq is not None:
+                payload["control_seq"] = control_seq
             try:
                 return self.rt.log.emit(type="conversation.received", task_id=task_id, actor=Actor.human(),
                                         payload=payload, expected_head=head)
@@ -123,6 +126,14 @@ class ConversationService:
     def _check_current(self, received: Event) -> None:
         if self.rt.work.scope(received.task_id) != received.payload["scope"]:
             raise WorkConflict("消息依据已变化。")
+        if self.rt.execution_control.view(received.task_id)["seq"] != received.payload.get("control_seq"):
+            events = self.rt.log.read(task_id=received.task_id)
+            earlier = {e.seq for e in events if e.type == "conversation.received"
+                       and e.actor == Actor.human() and e.seq < received.seq}
+            controls = [e for e in events if e.type == "task.execution_controlled" and e.actor == Actor.human()
+                        and e.seq > (received.payload.get("control_seq") or 0)]
+            if not controls or any(e.payload.get("conversation_seq") not in earlier for e in controls):
+                raise WorkConflict("执行控制已变化，本条旧消息不能覆盖后来的暂停或取消。")
 
     def _can_rebase(self, received: Event, current: dict) -> bool:
         original = received.payload["scope"]
@@ -155,17 +166,43 @@ class ConversationService:
                    for e in self.rt.log.iter_events(task_id=task_id, event_types=("human.commanded",))):
                 raise WorkConflict("这条消息已经采用，不重复执行。")
             try:
-                command, finished = self.rt.log.emit_many([
+                entries = [
                     {"type": "human.commanded", "task_id": task_id, "actor": Actor.human(), "payload": {
                         "conversation_seq": received.seq, "instruction": received.payload["instruction"],
                         "intent": intent, "model_suggestion": suggestion, "next_action": "run"}},
                     {"type": "conversation.finished", "task_id": task_id, "actor": SYSTEM,
                      "payload": finish_payload},
-                ], expected_head=head)
+                ]
+                control = self.rt.execution_control.view(task_id)
+                if intent == "resume" and control["state"] != "running" and received.payload["continue_work"]:
+                    control_entry = self.rt.execution_control.entry(task_id, "resume",
+                                                                    request_id=f"conversation_resume_{received.seq}")
+                    control_entry["payload"]["conversation_seq"] = received.seq
+                    entries.insert(0, control_entry)
+                written = self.rt.log.emit_many(entries, expected_head=head)
+                command, finished = written[-2:]
                 return {**finished.payload, "finish_seq": finished.seq, "command_seq": command.seq}
             except HeadChanged:
                 continue
         raise WorkConflict("任务正在更新，本次建议未采用。")
+
+    def _apply_control(self, received: Event, result: dict, suggestion: dict, usage: dict) -> dict:
+        action = "pause" if suggestion["action"] == "pause_task" else "cancel"
+        for _ in range(8):
+            head = self.rt.log.head_hash()
+            self._check_current(received)
+            entry = self.rt.execution_control.entry(received.task_id, action,
+                                                    request_id=f"conversation_control_{received.seq}")
+            entry["payload"]["conversation_seq"] = received.seq
+            try:
+                _, finished = self.rt.log.emit_many([entry,
+                    {"type": "conversation.finished", "task_id": received.task_id, "actor": SYSTEM,
+                     "payload": {**result, **usage, "reply": entry["payload"]["reason"], "next_action": "none"}}],
+                    expected_head=head)
+                return {**finished.payload, "finish_seq": finished.seq}
+            except HeadChanged:
+                continue
+        raise WorkConflict("执行状态正在更新，本次控制未采用。")
 
     def _request(self, received: Event, task, rules: dict) -> tuple[str, dict]:
         history = []
@@ -196,6 +233,7 @@ class ConversationService:
         candidate = {
             "id": task.id, "goal": task.goal, "acceptance": list(task.acceptance),
             "status": task.status, "scope": received.payload["scope"],
+            "execution_control": self.rt.execution_control.view(task.id),
             "roles": [{"id": role.id, "name": role.name, "role": role.role[:500]}
                       for role in (self.rt.organization.leader, *self.rt.roles)],
             "progress": {"plan_seq": work.get("plan_seq"), "scope_current": work.get("scope_current"),
@@ -218,6 +256,8 @@ class ConversationService:
         size = len(prompt.encode("utf-8"))
         background = self.rt.conversation_background(received.task_id)
         if background is not None:
+            from .conversations import dialogue_background
+            background = dialogue_background(background)
             size += len(json.dumps(background, ensure_ascii=False).encode("utf-8")) + 1024
         if size > 131072:
             raise ValueError("理解依据过多，未截断本条消息或目标验收。")
@@ -302,6 +342,8 @@ class ConversationService:
                 result.update(status="finished", reply=suggestion["reply"], action=action)
                 if action in {"resume_task", "update_task"}:
                     return self._apply_command(received, result, suggestion, usage)
+                elif action in {"pause_task", "cancel_task"}:
+                    return self._apply_control(received, result, suggestion, usage)
                 elif action == "explain_task":
                     question = _BoundQuestions(self, received).ask(task_id, received.payload["instruction"],
                         request_id=f"conversation_{received.seq}")

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import math
+import time
 from copy import deepcopy
 from dataclasses import asdict
+from datetime import datetime
 from importlib.resources import files
 from typing import TYPE_CHECKING, Any
 
 from .directions import changes_direction
+from .collaboration import text_advice_available
 from .responses import load_response_object
 from .events import Actor
 from .usage import valid_token_count
@@ -19,6 +23,138 @@ if TYPE_CHECKING:
 
 
 PLAN_SCHEMA = json.loads(files("cater.packs").joinpath("planning-response.schema.json").read_text(encoding="utf-8"))
+
+# Version this allowlist when an adapter's execution capabilities change. Old
+# events must never acquire a contract from the currently configured driver.
+_TEXT_CONTRACTS = {
+    name: {"version": 1, "kind": "builtin_text_api", "adapter": name,
+           "local_tool_effects": "none", "remote_billing": "unknown"}
+    for name in ("AnthropicMessagesDriver", "OpenAICompatibleDriver")
+}
+_RECONCILIATION_EVIDENCE = {"human.commanded", "human.decided", "driver.failed", "verification.completed", "work.failed"}
+
+
+def _execution_contract(driver) -> dict[str, Any]:
+    from .runtime import _TEXT_ONLY_CALLS
+
+    original = _TEXT_ONLY_CALLS.get(type(driver))
+    if (original is not None and text_advice_available(driver)
+            and getattr(driver.complete, "__func__", None) is original):
+        return dict(_TEXT_CONTRACTS[type(driver).__name__])
+    return {"version": 1, "kind": "unknown"}
+
+
+def _known_text(started) -> bool:
+    contract = started.payload.get("execution_contract")
+    return (isinstance(contract, dict) and type(contract.get("version")) is int
+            and any(contract == value for value in _TEXT_CONTRACTS.values()))
+
+
+def _expired(started, *, at=None) -> bool:
+    lease = started.payload.get("lease_until")
+    return type(lease) in (int, float) and math.isfinite(lease) and lease <= (time.time() if at is None else at)
+
+
+def _bound_attempt(event, started, binding, *, require_hash=False) -> bool:
+    if (event.task_id != started.task_id or event.seq <= started.seq
+            or not isinstance(event.payload.get("scope"), dict)
+            or event.payload["scope"] != started.payload.get("scope")):
+        return False
+    # Old owner completions and installed plans predate these extra bindings.
+    if require_hash or "attempt_hash" in binding:
+        if binding.get("attempt_hash") != started.hash:
+            return False
+    if require_hash or "previous_plan_seq" in binding:
+        previous = binding.get("previous_plan_seq")
+        if ("previous_plan_seq" not in binding or previous != started.payload.get("previous_plan_seq")
+                or previous is not None and type(previous) is not int):
+            return False
+    return True
+
+
+def _reconciliation_evidence(events, started, seqs, *, before_seq=None) -> bool:
+    if (not isinstance(seqs, list) or not 1 <= len(seqs) <= 32
+            or any(type(seq) is not int or seq <= started.seq or before_seq is not None and seq >= before_seq for seq in seqs)
+            or len(set(seqs)) != len(seqs)):
+        return False
+    catalog = {e.seq: e for e in events}
+    return all(seq in catalog and catalog[seq].task_id == started.task_id
+               and catalog[seq].actor.kind in {"human", "system"}
+               and catalog[seq].type in _RECONCILIATION_EVIDENCE for seq in seqs)
+
+
+def _valid_finish(event, started, previous, applied, events, plan_seq) -> bool:
+    p, recovery = event.payload, event.payload.get("recovery")
+    status = p.get("status")
+    if not isinstance(status, str) or status not in {"installed", "needs_input", "blocked", "invalid", "uncertain", "stale", "interrupted"}:
+        return False
+    if not _bound_attempt(event, started, p, require_hash=recovery is not None):
+        return False
+    if recovery in ("operator_reconciled", "text_lease_expired"):
+        if applied or previous and previous.payload["status"] != "uncertain" or status != "interrupted":
+            return False
+        if recovery == "operator_reconciled":
+            return (event.actor == Actor.human() and p.get("invocation_stopped") is True
+                    and p.get("effects_reconciled") is True and "reconciled_finish_seq" in p
+                    and p["reconciled_finish_seq"] == (previous.seq if previous else None)
+                    and (p["reconciled_finish_seq"] is None or type(p["reconciled_finish_seq"]) is int)
+                    and isinstance(p.get("reconciled_scope"), dict) and "reconciled_plan_seq" in p
+                    and p["reconciled_plan_seq"] == plan_seq
+                    and (p["reconciled_plan_seq"] is None or type(p["reconciled_plan_seq"]) is int)
+                    and _reconciliation_evidence(events, started, p.get("evidence_seqs"), before_seq=event.seq))
+        try:
+            recovered_at = datetime.fromisoformat(event.ts)
+        except (TypeError, ValueError):
+            return False
+        return (event.actor == Actor.system("planning_recovery") and _known_text(started) and _known_text(event)
+                and p.get("execution_contract") == started.payload["execution_contract"]
+                and p.get("evidence_seqs") == [started.seq] + ([previous.seq] if previous else [])
+                and all(type(seq) is int for seq in p["evidence_seqs"])
+                and recovered_at.tzinfo is not None and _expired(started, at=recovered_at.timestamp()))
+    if previous or event.actor != started.actor:
+        return False
+    if recovery is not None:
+        allowed = {"text_request_rejected": {"blocked", "interrupted", "stale"},
+                   "text_transport_failure": {"interrupted", "stale"}}
+        if not isinstance(recovery, str) or recovery not in allowed or status not in allowed[recovery] or not _known_text(started):
+            return False
+    if status == "interrupted" and not _known_text(started):
+        return False
+    if status == "installed":
+        return bool(applied and applied.type == "work.plan_created" and type(p.get("plan_seq")) is int
+                    and p["plan_seq"] == applied.seq)
+    return applied is None or applied.type == "clarification.requested" and status == "needs_input"
+
+
+def _attempt_state(events):
+    starts, finishes, applied = {}, {}, {}
+    plan_seqs = {}
+    for event in events:
+        if event.type == "planning.started":
+            starts[event.seq] = event
+        elif event.type == "planning.finished":
+            seq = event.payload.get("attempt_seq")
+            started = starts.get(seq) if type(seq) is int else None
+            if started and _valid_finish(event, started, finishes.get(seq), applied.get(seq), events,
+                                         plan_seqs.get(event.task_id)):
+                finishes[seq] = event
+        elif event.type in {"work.plan_created", "clarification.requested"}:
+            is_plan = event.type == "work.plan_created"
+            binding = event.payload.get("planning") if is_plan else event.payload
+            if isinstance(binding, dict):
+                seq = binding.get("attempt_seq" if is_plan else "planning_attempt_seq")
+                started = starts.get(seq) if type(seq) is int else None
+                if (started and seq not in finishes and seq not in applied
+                        and _bound_attempt(event, started, binding)
+                        and started.payload.get("previous_plan_seq") == plan_seqs.get(event.task_id)
+                        and (event.actor == Actor.system("work_scheduler") if is_plan else
+                             event.actor == started.actor and event.payload.get("role_id") == started.actor.id)):
+                    applied[seq] = event
+            if is_plan:
+                plan_seqs[event.task_id] = event.seq
+    pending = [event for seq, event in starts.items() if seq not in applied
+               and (seq not in finishes or finishes[seq].payload.get("status") == "uncertain")]
+    return starts, finishes, applied, pending
 
 
 def planning_schema(roles: list[dict[str, Any]], sources: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -150,28 +286,172 @@ class Planner:
         view = self.rt.work.view(task_id)
         return not view["items"] or not view.get("scope_current")
 
-    def _start(self, task_id: str):
-        context = {}
+    @staticmethod
+    def _finish_payload(started, status, reason, **extra):
+        return {"attempt_seq": started.seq, "attempt_hash": started.hash,
+                "scope": started.payload.get("scope"),
+                "previous_plan_seq": started.payload.get("previous_plan_seq"),
+                "status": status, "reason": reason, "plan_seq": None, **extra}
+
+    def recover(self, task_id: str):
+        """Close one expired, attested text call; never invoke a model here."""
+        _, _, _, pending = _attempt_state(self.rt.log.read(task_id=task_id))
+        candidate = next((e for e in pending if _known_text(e) and _expired(e)), None)
+        if candidate is None:
+            return None
+
+        def build():
+            _, finishes, _, current = _attempt_state(self.rt.log.read(task_id=task_id))
+            if candidate not in current or not _known_text(candidate) or not _expired(candidate):
+                raise WorkConflict("规划认领已变化，请重新读取调用记录。")
+            finish = finishes.get(candidate.seq)
+            reason = ("规划纯文本调用租约已到期，已关闭旧认领；本地无工具副作用，远端是否计费未知。"
+                      "等待后续明确 run 重新规划，不会自动重试，旧响应不能再下发计划。")
+            return "planning.finished", self._finish_payload(candidate, "interrupted", reason,
+                recovery="text_lease_expired", evidence_seqs=[candidate.seq] + ([finish.seq] if finish else []),
+                execution_contract=candidate.payload["execution_contract"]), Actor.system("planning_recovery")
+
+        return self.rt.work._write(task_id, build)
+
+    def reconcile(self, task_id: str, *, attempt_seq: int, attempt_hash: str,
+                  expected_finish_seq: int | None, expected_scope: dict[str, Any],
+                  expected_plan_seq: int | None, evidence_seqs: list[int], reason: str,
+                  invocation_stopped: bool, effects_reconciled: bool):
+        """Record a trusted operator's check, without cancelling or replaying a call.
+
+        Bind the check to the immutable start, observed finish and current input
+        versions. Evidence references support the operator's attestation; they
+        do not by themselves prove that an arbitrary CLI had no side effects.
+        """
+        if invocation_stopped is not True or effects_reconciled is not True:
+            raise ValueError("必须明确核对调用已停止及其副作用已处理；租约到期不等于取消执行。")
+        reason = _text(reason)
+        if (type(attempt_seq) is not int or attempt_seq < 1 or not isinstance(attempt_hash, str)
+                or (expected_finish_seq is not None and type(expected_finish_seq) is not int)
+                or not isinstance(expected_scope, dict)
+                or (expected_plan_seq is not None and type(expected_plan_seq) is not int)
+                or not isinstance(evidence_seqs, list) or not 1 <= len(evidence_seqs) <= 32
+                or any(type(seq) is not int or seq <= attempt_seq for seq in evidence_seqs)
+                or len(set(evidence_seqs)) != len(evidence_seqs)):
+            raise ValueError("核对需要有效的规划版本及调用之后的事件依据。")
 
         def build():
             events = self.rt.log.read(task_id=task_id)
-            finished = {e.payload["attempt_seq"] for e in events if e.type == "planning.finished"}
-            finished.update((e.payload.get("planning") or {}).get("attempt_seq") for e in events if e.type == "work.plan_created")
-            if any(e.type == "planning.started" and e.seq not in finished for e in events):
+            starts, finishes, _, pending = _attempt_state(events)
+            started, finish = starts.get(attempt_seq), finishes.get(attempt_seq)
+            if (started is None or started.hash != attempt_hash or started not in pending
+                    or (finish.seq if finish else None) != expected_finish_seq
+                    or self.rt.work.scope(task_id) != expected_scope
+                    or self.rt.work.view(task_id)["plan_seq"] != expected_plan_seq):
+                raise WorkConflict("规划核对的调用或输入版本已变化，请重新核对最新记录。")
+            if not _reconciliation_evidence(events, started, evidence_seqs):
+                raise ValueError("核对依据必须是本任务的人工记录或执行回执，不能采用模型自报。")
+            return "planning.finished", self._finish_payload(started, "interrupted",
+                reason + "；人工核对已记录，远端是否计费未知；等待后续明确 run，不会自动重试。",
+                recovery="operator_reconciled", evidence_seqs=list(evidence_seqs),
+                reconciled_finish_seq=expected_finish_seq, reconciled_scope=expected_scope,
+                reconciled_plan_seq=expected_plan_seq, invocation_stopped=True, effects_reconciled=True), Actor.human()
+
+        return self.rt.work._write(task_id, build)
+
+    def _current(self, task_id, started):
+        starts, finishes, applied, _ = _attempt_state(self.rt.log.read(task_id=task_id))
+        if (starts.get(started.seq) != started or started.seq != max(starts, default=None)
+                or started.seq in finishes or started.seq in applied or _expired(started)):
+            raise WorkConflict("规划认领已结束或失效，旧响应不能写入。")
+        current = self.rt.work.view(task_id)
+        if (self.rt.work.scope(task_id) != started.payload["scope"]
+                or current["plan_seq"] != started.payload["previous_plan_seq"]
+                or any(item.get("in_flight") for item in current["items"])):
+            raise WorkConflict("规划输入或工作版本已变化，旧响应不能写入。")
+
+    def _apply(self, task_id, started, parsed):
+        # Keep the attempt fence and domain validation in the same conditional
+        # append. Calling work.plan after a separate check leaves a takeover gap.
+        def build():
+            self._current(task_id, started)
+            scope = started.payload["scope"]
+            if parsed["status"] == "needs_input":
+                if self.rt.clarifications.pending(task_id):
+                    raise WorkConflict("已有问题等待顾客补充，不重复提问。")
+                return "clarification.requested", {**parsed["clarification"], "scope": scope,
+                    "role_id": started.actor.id, "planning_attempt_seq": started.seq,
+                    "attempt_hash": started.hash, "previous_plan_seq": started.payload["previous_plan_seq"]}, started.actor
+            normalized = validate_items(parsed["items"], {r.id for r in self.rt.roles})
+            obligations = preserve_check_obligations(normalized, self.rt.work.check_contract(task_id))
+            if len(obligations) > 4096:
+                raise ValueError("check contract capacity exceeded; split the task")
+            return "work.plan_created", {"items": normalized, "source_seq": 0, "scope": scope,
+                "check_contract": {"obligations": obligations},
+                "planning": {"attempt_seq": started.seq, "attempt_hash": started.hash,
+                             "previous_plan_seq": started.payload["previous_plan_seq"], "summary": parsed["summary"],
+                             "coverage": parsed["coverage"], "reuse": parsed["reuse"]},
+                "customer_directions": self.rt.work.directions(task_id, scope["direction_seq"])}, Actor.system("work_scheduler")
+
+        return self.rt.work._write(task_id, build)
+
+    def _finish(self, task_id, started, status, reason, *, recovery=None):
+        def build():
+            starts, finishes, applied, _ = _attempt_state(self.rt.log.read(task_id=task_id))
+            if started.seq in finishes or starts.get(started.seq) != started:
+                raise WorkConflict("规划已结束或经核对接管，迟到响应不能覆盖终态。")
+            result, explanation, plan_seq = status, reason, None
+            committed = applied.get(started.seq)
+            if committed:
+                result = "installed" if committed.type == "work.plan_created" else "needs_input"
+                plan_seq = committed.seq if result == "installed" else None
+            elif started.seq != max(starts, default=None):
+                raise WorkConflict("规划已被新的认领取代，迟到响应不能覆盖终态。")
+            elif _expired(started):
+                result = "interrupted" if _known_text(started) else "uncertain"
+                explanation = ("规划租约已失效，旧结果未采用；"
+                               + ("本地无工具副作用，远端是否计费未知；等待后续明确 run，不会自动重试。"
+                                  if _known_text(started) else "调用副作用未知，必须先显式核对，不能自动重放。"))
+            elif result != "uncertain":
+                try:
+                    self._current(task_id, started)
+                except WorkConflict:
+                    result, explanation = "stale", "规划期间要求、店规或工作状态发生变化，这份计划未下发。"
+            return "planning.finished", self._finish_payload(started, result, explanation,
+                plan_seq=plan_seq, recovery=recovery), started.actor
+
+        return self.rt.work._write(task_id, build)
+
+    def _start(self, task_id: str, *, lease_seconds: float | None = None, observed_seq: int | None = None):
+        context = {}
+        driver = self.rt.drivers[self.rt.organization.leader.driver]
+        if observed_seq is None:
+            observed_seq = max((e.seq for e in self.rt.log.iter_events(task_id=task_id,
+                               event_types=("planning.started", "planning.finished"))), default=0)
+        if lease_seconds is None:
+            timeout = getattr(driver, "timeout", 0)
+            lease_seconds = max(600, timeout + 30) if type(timeout) in (int, float) and math.isfinite(timeout) else 600
+        if type(lease_seconds) not in (int, float) or not math.isfinite(lease_seconds) or lease_seconds <= 0:
+            raise ValueError("planning lease must be positive and finite")
+
+        def build():
+            events = self.rt.log.read(task_id=task_id)
+            if any(e.seq > observed_seq and e.type in {"planning.started", "planning.finished"} for e in events):
+                raise WorkConflict("本次 run 进入后规划调用已有变化；请读取终态后再明确 run，不自动接续调用。")
+            starts, finishes, _, pending = _attempt_state(events)
+            if pending:
                 raise WorkConflict("店长已有规划调用未结束；中断的调用需要先核对，不能自动重放。")
+            if self.rt.clarifications.pending(task_id):
+                raise WorkConflict("已有问题等待顾客补充，不重复规划。")
             previous = self.rt.work.view(task_id)
             if any(item.get("in_flight") for item in previous["items"]):
                 raise WorkConflict("仍有执行中或结果不明的工作，先核对副作用再重新规划。")
             scope = self.rt.work.scope(task_id)
             if previous["items"] and previous.get("scope_current"):
                 raise WorkConflict("已有当前版本的计划，不需要重复规划。")
-            last = next((e for e in reversed(events) if e.type == "planning.finished"), None)
+            last = finishes.get(max(starts)) if starts else None
             request = next((e for e in reversed(events) if e.type == "planning.requested"), None)
-            if last and last.payload.get("status") == "uncertain" and (request is None or request.seq < last.seq):
+            if last and last.payload.get("status") == "uncertain":
                 raise WorkConflict(last.payload["reason"])
-            if last and last.payload.get("scope") == scope and last.payload.get("status") in {"blocked", "invalid", "uncertain"}:
+            if (last and last.payload.get("scope") == scope and last.payload.get("status") in {"blocked", "invalid"}
+                    and last.payload.get("recovery") != "text_request_rejected"):
                 resumes = [e for e in events if e.seq > last.seq and e.type == "human.commanded" and e.payload.get("intent") == "resume"]
-                if not resumes or last.payload["status"] == "uncertain":
+                if not resumes:
                     raise WorkConflict(last.payload["reason"])
             context.clear()
             context.update(phase="planning", scope=scope, sources=requirement_sources(events), previous_plan=previous,
@@ -180,19 +460,29 @@ class Planner:
                                                 for i in previous["items"] if i.get("submission")},
                            request=request.payload if request else {},
                            roles=[{**asdict(role), "worker": role.id in self.rt.organization.worker_members} for role in self.rt.roles])
-            return "planning.started", {"scope": scope, "previous_plan_seq": previous["plan_seq"]}, self.rt._leader_actor()
+            return "planning.started", {"scope": scope, "previous_plan_seq": previous["plan_seq"],
+                "lease_until": time.time() + lease_seconds, "driver": self.rt.organization.leader.driver,
+                "execution_contract": _execution_contract(driver)}, self.rt._leader_actor()
 
         event = self.rt.work._write(task_id, build)
         return event, context
 
-    def run(self, task_id: str) -> dict[str, Any]:
-        from .runtime import Role
+    def run(self, task_id: str, *, lease_seconds: float | None = None) -> dict[str, Any]:
+        from .runtime import Role, _TEXT_REQUEST_REJECTED, _TEXT_TRANSPORT_FAILURE
 
         try:
-            started, context = self._start(task_id)
+            # A concurrent run that began before a failure was recorded is not
+            # authorization to spend again, even if its conditional append retries.
+            observed_seq = max((e.seq for e in self.rt.log.iter_events(task_id=task_id,
+                               event_types=("planning.started", "planning.finished"))), default=0)
+            recovered = self.recover(task_id)
+            if recovered:
+                return {"installed": False, "reason": recovered.payload["reason"], "plan_seq": None}
+            started, context = self._start(task_id, lease_seconds=lease_seconds, observed_seq=observed_seq)
         except WorkConflict as exc:
             return {"installed": False, "reason": str(exc)}
-        status, reason, plan_seq = "blocked", "规划尚未完成。", None
+        status, reason, recovery = "blocked", "规划尚未完成。", None
+        driver = self.rt.drivers[started.payload["driver"]]
         snapshot = self.rt.rulebook.snapshot(task_id)
         leader = self.rt.organization.leader
         role = Role(id=leader.id, name=leader.name, role=leader.role, driver=leader.driver,
@@ -239,11 +529,14 @@ class Planner:
             + json.dumps({"schema": planning_schema(context["roles"], context["sources"]), "rules": snapshot["rules"], **context}, ensure_ascii=False)
         )
         try:
+            self._current(task_id, started)
             if len(prompt) > 131072:
                 reason = "规划输入过大，需要拆分；没有截断顾客要求后继续调用。"
+            elif _execution_contract(driver) != started.payload["execution_contract"]:
+                reason = "规划通道的执行契约已变化，本次没有发出调用；请核对后继续。"
             else:
                 response = self.rt._complete_with_containment(task_id=task_id, task=self.rt.task(task_id), role=role,
-                    driver=self.rt.drivers[leader.driver], prompt=prompt, rule_snapshot=snapshot, work_context=context)
+                    driver=driver, prompt=prompt, rule_snapshot=snapshot, work_context=context)
                 meta = response.meta if isinstance(response.meta, dict) else {}
                 receipt = "店长规划调用已返回，正在核对计划。"
                 if meta.get("contained"):
@@ -252,6 +545,15 @@ class Planner:
                         "规划调用未正常返回；先核对调用结果，再决定是否重试。" if status == "uncertain"
                         else "规划调用尚未发出，请检查接入状态或本地预算后继续。"
                     )
+                    if _known_text(started) and _execution_contract(driver) == started.payload["execution_contract"]:
+                        if meta.get("_text_request_rejected") is _TEXT_REQUEST_REJECTED:
+                            status, recovery = "blocked", "text_request_rejected"
+                            reason = "规划请求收到 HTTP 429 服务端拒绝。"
+                        elif meta.get("_text_transport_failure") is _TEXT_TRANSPORT_FAILURE:
+                            status, recovery = "interrupted", "text_transport_failure"
+                            reason = "规划纯文本传输中断，没有获得可采用的完整计划。"
+                        if recovery:
+                            reason += "本地无工具副作用，远端是否计费未知；等待后续明确 run，不会自动重试。"
                     receipt = reason
                 # Record usage even if JSON validation or installation subsequently fails.
                 self.rt.log.emit(type="msg.said", task_id=task_id, actor=self.rt._leader_actor(),
@@ -264,18 +566,19 @@ class Planner:
                     parsed = validate_plan(load_response_object(response.text), context)
                     reason = parsed["summary"]
                     if parsed["status"] == "ready":
-                        event = self.rt.work.plan(task_id, parsed["items"], role_ids={r.id for r in self.rt.roles}, source_seq=0,
-                            expected_scope=context["scope"], expected_plan_seq=context["previous_plan"]["plan_seq"],
-                            planning={"attempt_seq": started.seq, "summary": reason, "coverage": parsed["coverage"], "reuse": parsed["reuse"]})
-                        status, plan_seq = "installed", event.seq
+                        self._apply(task_id, started, parsed)
+                        status = "installed"
                     elif parsed["status"] == "needs_input":
-                        self.rt.clarifications.request(task_id, leader.id, parsed["clarification"], scope=context["scope"])
+                        self._apply(task_id, started, parsed)
                         status = "needs_input"
         except WorkConflict:
             status, reason = "stale", "规划期间要求、店规或工作状态发生变化，这份计划未下发。"
         except (ValueError, TypeError, RecursionError) as exc:
             status, reason = "invalid", "计划未通过结构或覆盖检查，尚未下发：" + str(exc)[:500]
-        self.rt.log.emit(type="planning.finished", actor=self.rt._leader_actor(), task_id=task_id,
-                         payload={"attempt_seq": started.seq, "scope": context["scope"], "status": status,
-                                  "reason": reason, "plan_seq": plan_seq})
-        return {"installed": status == "installed", "reason": reason, "plan_seq": plan_seq}
+        try:
+            finished = self._finish(task_id, started, status, reason, recovery=recovery)
+        except WorkConflict as exc:
+            return {"installed": False, "reason": str(exc), "plan_seq": None}
+        payload = finished.payload
+        return {"installed": payload["status"] == "installed", "reason": payload["reason"],
+                "plan_seq": payload["plan_seq"]}

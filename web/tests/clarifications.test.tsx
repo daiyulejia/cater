@@ -3,6 +3,7 @@ import { beforeEach, expect, test, vi } from 'vitest'
 import App from '../src/App'
 import { ClarificationCard } from '../src/ClarificationCard'
 import type { Clarification, ClarificationControls } from '../src/ClarificationCard'
+import { SUBMIT_TIMEOUT_MS } from '../src/request'
 
 const member = { id: 'dev', name: '米寇', role: 'dev' }
 const leader = { id: 'store_manager', name: '店长', role: 'leader' }
@@ -59,6 +60,29 @@ const selectTask = async (id: string) => {
 }
 const refresh = async () => { await act(async () => fireEvent(document, new Event('visibilitychange'))) }
 
+test('澄清发送挂起正文后解锁，保留答案与 request_id，只由用户手动重试', async () => {
+  vi.useFakeTimers()
+  await mount()
+  const pending = deferred<unknown>()
+  const response = json({})
+  vi.spyOn(response, 'json').mockReturnValue(pending.promise)
+  handler = (url) => url.endsWith('/clarifications') ? response : undefined
+  fireEvent.click(screen.getByRole('radio', { name: options[0] }))
+  await click('确认补充')
+  await act(async () => { await vi.advanceTimersByTimeAsync(SUBMIT_TIMEOUT_MS) })
+  expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
+  expect(form().getAttribute('aria-busy')).toBe('false')
+  expect((screen.getByRole('radio', { name: options[0] }) as HTMLInputElement).checked).toBe(true)
+  expect(posts()).toHaveLength(1)
+  current = detail('b', 5, { ...row('answered'), response: { kind: 'choice', option_index: 0, answer: options[0] } })
+  handler = (url) => url.endsWith('/clarifications') ? json(current) : undefined
+  await click('确认补充')
+  expect(body(1)).toEqual(body())
+  expect(screen.getByText('已答')).toBeTruthy()
+  await act(async () => pending.resolve(detail()))
+  expect(screen.queryByRole('form')).toBeNull()
+})
+
 test('真实成员提问显示 @你，单选确认使用专用 API，成功显示后端答案并保留普通草稿', async () => {
   await mount()
   await waitFor(() => expect(screen.getByText(prompt).closest('article')!.querySelector('[role="img"]')?.getAttribute('aria-label')).toBe('米寇'))
@@ -104,7 +128,8 @@ test('HTTP、网络和409错误保留单选、自填和 request_id，切任务�
     return new Response(attempts === 1 ? '暂时无法保存' : '问题状态需要刷新', { status: attempts === 1 ? 503 : 409 })
   }
   await click('确认补充')
-  expect(screen.getByRole('alert').textContent).toBe('暂时无法保存')
+  expect(screen.getByRole('alert').textContent).toContain('暂时无法保存')
+  expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   expect(body()).toEqual({ question_seq: 2, kind: 'custom', answer: '优先已有会员', request_id: expect.any(String) })
   await refresh(); await selectTask('a')
   expect((screen.getByRole('button', { name: '选择选项' })).getAttribute('aria-pressed')).toBe('true')
@@ -112,7 +137,7 @@ test('HTTP、网络和409错误保留单选、自填和 request_id，切任务�
   await selectTask('b')
   expect((screen.getByRole('textbox', { name: '你的补充' }) as HTMLTextAreaElement).value).toBe('  优先已有会员  ')
   await click('确认补充')
-  expect(screen.getByRole('alert').textContent).toBe('网络中断')
+  expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   await click('确认补充')
   expect(screen.getByRole('alert').textContent).toBe('问题状态需要刷新')
   expect(body(1)).toEqual(body()); expect(body(2)).toEqual(body())
@@ -156,7 +181,8 @@ test('切任务后的迟到失败不串错误，返回原任务仍保留选择�
   expect(screen.queryByRole('alert')).toBeNull()
   expect((screen.getByRole('radio', { name: options[0] }) as HTMLInputElement).checked).toBe(false)
   await selectTask('b')
-  expect(screen.getByRole('alert').textContent).toBe('乙的失败')
+  expect(screen.getByRole('alert').textContent).toContain('乙的失败')
+  expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   expect((screen.getByRole('radio', { name: options[0] }) as HTMLInputElement).checked).toBe(true)
   handler = (url) => url.endsWith('/clarifications') ? new Response('再试', { status: 503 }) : undefined
   await click('确认补充'); expect(body(1)).toEqual(body())

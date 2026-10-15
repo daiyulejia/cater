@@ -367,17 +367,18 @@ test('旧的详情请求不能覆盖较新的发送结果', async () => {
   expect(screen.getByText('乙任务专属消息 #9')).toBeTruthy()
 })
 
-test('空闲对话继续刷新，慢请求不会叠加', async () => {
+test('空闲对话慢请求在限时前不叠加，超时后继续轮询且忽略迟到结果', async () => {
   vi.useFakeTimers()
   const pending = deferred<Response>()
   let reads = 0
   handler = (url) => url === '/api/tasks/乙' ? (++reads === 1 ? pending.promise : Promise.resolve(json(detail('乙', 7)))) : undefined
   await act(async () => { render(<App />) })
-  await act(async () => { await vi.advanceTimersByTimeAsync(16000) })
+  await act(async () => { await vi.advanceTimersByTimeAsync(7999) })
   expect(reads).toBe(1)
-  await act(async () => pending.resolve(json(detail('乙'))))
-  await act(async () => { await vi.advanceTimersByTimeAsync(4000) })
+  await act(async () => { await vi.advanceTimersByTimeAsync(4001) })
   expect(reads).toBe(2)
+  await act(async () => pending.resolve(json(detail('乙', 99))))
+  expect(screen.queryByText('乙任务专属消息 #99')).toBeNull()
   expect(screen.getByText('乙任务专属消息 #7')).toBeTruthy()
 })
 
@@ -403,9 +404,10 @@ test('发送错误留在对应任务，切换后的对话不显示另一项任�
   write('乙的补充'); fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
   select('甲'); await ready('甲')
   await act(async () => pending.resolve(new Response('乙任务发送失败', { status: 500 })))
-  expect(screen.queryByText('乙任务发送失败')).toBeNull()
+  expect(screen.queryByText(/乙任务发送失败/)).toBeNull()
   select('乙'); await ready('乙')
-  expect(screen.getByText('乙任务发送失败')).toBeTruthy()
+  expect(screen.getByRole('alert').textContent).toContain('乙任务发送失败')
+  expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   expect(input().value).toBe('乙的补充')
 })
 

@@ -159,29 +159,33 @@ class UsageQuestionTests(unittest.TestCase):
         with self.factory() as rt:
             self.task = rt.create_task("制作五子棋游戏", ["交付网页成果"])
             rt.rulebook.record("使用说明必须区分源码与已部署应用。", scope="task", task_id=self.task)
-            rt.plan_work(self.task, [{
-                "id": "board", "owner": "dev", "reviewer": "test", "objective": "交付五子棋网页",
-                "depends_on": [], "criteria": [{"id": "body", "kind": "review", "text": "检查网页正文"},
-                    *[{"id": name, "kind": "local_check", "text": f"Check {name}"}
-                      for name in ("launch", "rules", "mobile")]],
-            }])
-            claim = rt.work.claim(self.task, "board")
-            artifact = normalize_deliverables([{
-                "title": "五子棋", "summary": "独立网页源码，尚未运行", "format": "code",
-                "filename": "gomoku.html", "content": "<!doctype html><title>Gomoku</title><canvas id='board'></canvas>",
-            }])[0]
-            published = rt.log.emit(type="deliverable.published", task_id=self.task,
-                actor=Actor.agent("dev", "worker"),
-                payload={**artifact, "work_item_id": "board", "attempt_id": claim.payload["attempt_id"]})
-            submitted = rt.work.submit(self.task, claim, [published.seq])
-            rt.work.review(self.task, "board", reviewer="test", submission_seq=submitted.seq, results=[{
-                "id": "body", "status": "passed", "reason": "Inspected stored HTML",
-                "artifact_seq": published.seq, "quote": artifact["content"],
-            }])
-            work = rt.work.view(self.task)
-            self.assertFalse(work["stage_accepted"])
-            self.assertEqual(work["items"][0]["status"], "submitted")
-            self.assertEqual(len([c for c in work["items"][0]["checks"] if c["status"] == "unknown"]), 3)
+            self.prepare_work(rt)
+
+    def prepare_work(self, rt):
+        rt.plan_work(self.task, [{
+            "id": "board", "owner": "dev", "reviewer": "test", "objective": "交付五子棋网页",
+            "depends_on": [], "criteria": [{"id": "body", "kind": "review", "text": "检查网页正文"},
+                *[{"id": name, "kind": "local_check", "text": f"Check {name}"}
+                  for name in ("launch", "rules", "mobile")]],
+        }])
+        claim = rt.work.claim(self.task, "board")
+        artifact = normalize_deliverables([{
+            "title": "五子棋", "summary": "独立网页源码，尚未运行", "format": "code",
+            "filename": "gomoku.html", "content": "<!doctype html><title>Gomoku</title><canvas id='board'></canvas>",
+        }])[0]
+        published = rt.log.emit(type="deliverable.published", task_id=self.task,
+            actor=Actor.agent("dev", "worker"),
+            payload={**artifact, "work_item_id": "board", "attempt_id": claim.payload["attempt_id"]})
+        submitted = rt.work.submit(self.task, claim, [published.seq])
+        rt.work.review(self.task, "board", reviewer="test", submission_seq=submitted.seq, results=[{
+            "id": "body", "status": "passed", "reason": "Inspected stored HTML",
+            "artifact_seq": published.seq, "quote": artifact["content"],
+        }])
+        work = rt.work.view(self.task)
+        self.assertTrue(work["scope_current"])
+        self.assertFalse(work["stage_accepted"])
+        self.assertEqual(work["items"][0]["status"], "submitted")
+        self.assertEqual(len([c for c in work["items"][0]["checks"] if c["status"] == "unknown"]), 3)
 
     def factory(self):
         return Runtime(self.db, roles_path=self.roles,
@@ -245,7 +249,6 @@ class UsageQuestionTests(unittest.TestCase):
             artifact = rt.task(self.task).deliverables[0]
             # Later requirements must not leak into the question-time API input.
             rt.command(self.task, "LATER_DIRECTION_NOT_QUESTION_CONTEXT")
-            before = self.snapshot(rt)
 
         self.driver = driver_type("usage_explainer", endpoint="https://provider.test/fixture",
                                   model="fixture", api_key_env="CATER_USAGE_TEST_KEY")
@@ -260,6 +263,9 @@ class UsageQuestionTests(unittest.TestCase):
         with patch.dict(os.environ, {"CATER_USAGE_TEST_KEY": "fixture-only"}), \
              patch(transport, return_value=io.BytesIO(json.dumps(response).encode())) as opened, \
              self.factory() as rt:
+            # Driver configuration belongs to F18 scope; compare around the answer itself.
+            before = self.snapshot(rt)
+            self.assertFalse(before["work"]["scope_current"])
             self.assertTrue(rt.questions.answer_next(self.task))
             self.assertFalse(rt.questions.answer_next(self.task))
             opened.assert_called_once()
@@ -488,6 +494,10 @@ class UsageQuestionTests(unittest.TestCase):
 
     def test_http_status_questions_never_queue_or_replan_idle_and_active_work(self):
         self.use_demo_leader()
+        with self.factory() as rt:
+            # Prepare submitted work under the HTTP fixture's actual organization.
+            self.assertFalse(rt.work.view(self.task)["scope_current"])
+            self.prepare_work(rt)
         runner = ActivityRunner(self.factory)
         base = self.start_web(runner)
         with patch.object(runner, "answer_questions") as questions, \

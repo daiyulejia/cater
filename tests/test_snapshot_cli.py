@@ -176,8 +176,8 @@ class SnapshotCliTests(unittest.TestCase):
         self.assertEqual(json.loads(response.text)["history"], ["parent-before", "parent-after"])
         self.assertEqual(json.loads(response.text)["pid"], parent.pid)
 
-    def test_snapshot_retains_restart_limit_but_work_calls_do_not_retry(self):
-        for with_work, expected_attempts in ((False, 3), (True, 1)):
+    def test_snapshot_retains_restart_limit_but_complete_calls_never_retry(self):
+        for with_work in (False, True):
             with self.subTest(with_work=with_work):
                 before = len(self.processes)
                 context = {"task_id": "child", "background": {}, "failure": "invalid_json"}
@@ -186,12 +186,30 @@ class SnapshotCliTests(unittest.TestCase):
                 with self.assertRaises(DriverProtocolError):
                     self.call("child", context)
                 attempts = self.processes[before:]
-                self.assertEqual(len(attempts), expected_attempts)
+                self.assertEqual(len(attempts), 1)
+                self.assertEqual(self.workers[-1].restart_limit, self.driver.restart_limit)
                 for process in attempts:
                     self.assertEqual(process.history, ["child"])
                     self.assert_closed(self.workers[-1], process)
         self.assertIsNone(self.driver._proc)
         self.assertEqual(len(self.workers), 2)
+
+    def test_ping_can_recover_without_replaying_complete(self):
+        send_once = self.driver._send_once
+        attempts = []
+
+        def send(payload):
+            attempts.append(payload)
+            if len(attempts) <= self.driver.restart_limit:
+                raise DriverUnavailable("fixture ping failure")
+            return send_once(payload)
+
+        with patch.object(self.driver, "_send_once", side_effect=send):
+            self.assertTrue(self.driver.probe())
+        self.assertEqual(len(attempts), self.driver.restart_limit + 1)
+        self.assertTrue(all(payload["type"] == "ping" for payload in attempts))
+        self.assertEqual(self.processes[0].history, [])
+        self.assertEqual(json.loads(self.call("after-ping", {}).text)["history"], ["after-ping"])
 
 
 class RealSnapshotCliTests(unittest.TestCase):

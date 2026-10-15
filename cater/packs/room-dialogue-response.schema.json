@@ -5,7 +5,7 @@
   "required": ["reply", "action", "task_id", "goal", "acceptance", "quote"],
   "properties": {
     "reply": {"type": "string", "minLength": 1, "maxLength": 4000},
-    "action": {"type": "string", "enum": ["discuss", "new_task", "update_task", "explain_task", "resume_task", "status_task"]},
+    "action": {"type": "string", "enum": ["discuss", "new_task", "update_task", "explain_task", "resume_task", "status_task", "pause_task", "cancel_task"]},
     "task_id": {"type": ["string", "null"]},
     "goal": {"type": ["string", "null"], "maxLength": 12000},
     "acceptance": {

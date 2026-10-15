@@ -24,6 +24,32 @@ def background(runtime: Runtime, task_id: str) -> dict[str, Any] | None:
     return created.payload.get("background") if created else None
 
 
+def dialogue_background(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """A bounded routing index, never a replacement for the frozen sources."""
+    sources = snapshot.get("sources", [])
+    artifacts = snapshot.get("artifacts", [])
+    selected = sources[-12:]
+    return {
+        **{key: snapshot.get(key) for key in ("version", "source_task_id", "source_seq", "source_hash", "captured_at")},
+        "representation": "routing_index",
+        "source_goal_excerpt": str(snapshot.get("source_goal", ""))[:1000],
+        "sources": [{**{key: source.get(key) for key in ("id", "seq", "task_id")},
+                     "excerpt": str(source.get("text", ""))[:500],
+                     "excerpt_truncated": len(str(source.get("text", ""))) > 500}
+                    for source in selected],
+        "omitted_sources": len(sources) - len(selected),
+        "artifacts": [{**{key: artifact.get(key) for key in ("task_id", "seq", "content_sha256", "verification")},
+                       "title": str(artifact.get("title", ""))[:300],
+                       "filename": str(artifact.get("filename", ""))[:300],
+                       "summary_excerpt": str(artifact.get("summary", ""))[:500],
+                       "content_included": False} for artifact in artifacts[:3]],
+        "omitted_artifacts": snapshot.get("omitted_artifacts", 0) + max(0, len(artifacts) - 3),
+        "notice": "这是群聊分流索引，历史原文与成果正文未完整加载。不可据此声称检查过成果；"
+                  "涉及具体成果内容或原因时使用 explain_task，由来源讲解读取保留的快照。"
+                  "完整快照没有修改，历史要求不自动成为当前任务要求。",
+    }
+
+
 def _size(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
 

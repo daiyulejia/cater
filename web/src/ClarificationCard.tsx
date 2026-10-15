@@ -13,6 +13,7 @@ type Session = { getSnapshot: () => Draft; subscribe: (listener: () => void) => 
 export type ClarificationStore = Map<string, Session>
 export type ClarificationControls = {
   store: ClarificationStore
+  disabledReason?: string
   createRequestId: () => string
   submit: (taskId: string, reply: ClarificationReply) => Promise<void>
 }
@@ -44,7 +45,7 @@ export function ClarificationCard({ taskId, question, controls }: { taskId: stri
   }
   const respond = async (kind: ClarificationReply['kind']) => {
     const current = entry.getSnapshot()
-    if (question.status !== 'pending' || current.busy || current.sent) return
+    if (controls.disabledReason || question.status !== 'pending' || current.busy || current.sent) return
     if ((kind === 'choice' && current.option === undefined) || (kind === 'custom' && !current.custom.trim())) return
     const reply: ClarificationReply = { question_seq: question.seq, kind,
       ...(kind === 'choice' ? { option_index: current.option } : kind === 'custom' ? { answer: current.custom.trim() } : {}),
@@ -66,7 +67,7 @@ export function ClarificationCard({ taskId, question, controls }: { taskId: stri
   if (question.status === 'stale') return <p className="clarification-response">此问题已失效</p>
   if (draft.sent) return <p className="clarification-response" role="status">已发送，等待更新</p>
   return <form className="clarification-form" aria-label={`补充信息：${question.question}`} aria-busy={Boolean(draft.busy)} onSubmit={(event) => { event.preventDefault(); void respond(draft.mode) }}>
-    <fieldset disabled={draft.busy}>
+    <fieldset disabled={draft.busy || Boolean(controls.disabledReason)} title={controls.disabledReason}>
       <legend className="sr-only">回复方式</legend>
       {question.options.length > 0 && <div className="clarification-modes" role="group" aria-label="回复方式">
         <button type="button" aria-pressed={draft.mode === 'choice'} onClick={() => edit({ mode: 'choice' })}>选择选项</button>

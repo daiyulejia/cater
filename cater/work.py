@@ -127,8 +127,9 @@ def validate_items(items: object, role_ids: set[str]) -> list[dict[str, Any]]:
 
 
 class WorkLedger:
-    def __init__(self, log: EventLog, rules: RuleBook):
+    def __init__(self, log: EventLog, rules: RuleBook, organization_fingerprint: str | None = None):
         self.log, self.rules = log, rules
+        self.organization_fingerprint = organization_fingerprint
 
     def check_contract(self, task_id: str) -> dict[str, Any]:
         events = list(self.log.iter_events(task_id=task_id, event_types=("work.plan_created", "checks.contract_revised")))
@@ -142,6 +143,8 @@ class WorkLedger:
         return {"revision": None, "obligations": []}
 
     def revise_checks(self, task_id: str, changes: object, *, reason: str, expected_revision: int | None) -> Event:
+        from .delivery import _review_state
+
         reason = _text(reason, "check revision reason", 4000)
         if (not isinstance(changes, list) or not 1 <= len(changes) <= 128
                 or (expected_revision is not None and type(expected_revision) is not int)):
@@ -153,8 +156,10 @@ class WorkLedger:
                 raise WorkConflict("检查契约已经更新，请重新核对当前版本。")
             if any(i.get("in_flight") for i in self.view(task_id)["items"]):
                 raise WorkConflict("在途工作或检查需要先核对，不能修订检查义务。")
-            events = list(self.log.iter_events(task_id=task_id, event_types=(
-                "delivery.check_started", "verification.completed", "delivery.review_started", "delivery.review_finished")))
+            # Recovery folding also verifies the human/system evidence it cites.
+            events = self.log.read(task_id=task_id)
+            if _review_state(events)[2]:
+                raise WorkConflict("整体复核尚未核对结束，不能修订检查义务。")
             for started in events:
                 if started.type == "delivery.check_started" and started.actor == Actor.system("local_verifier"):
                     ended = any(e.type == "verification.completed" and e.actor == started.actor and e.seq > started.seq
@@ -163,12 +168,6 @@ class WorkLedger:
                         and e.payload.get("criterion_id") == started.payload["criterion_id"] for e in events)
                     if not ended:
                         raise WorkConflict("整体检查尚未核对结束，不能修订检查义务。")
-                elif started.type == "delivery.review_started" and started.actor.role == "delivery_reviewer":
-                    ended = next((e for e in events if e.type == "delivery.review_finished" and e.actor == started.actor
-                        and e.seq > started.seq and e.payload.get("attempt_seq") == started.seq
-                        and e.payload.get("delivery_digest") == started.payload["delivery_digest"]), None)
-                    if ended is None or ended.payload.get("status") == "uncertain":
-                        raise WorkConflict("整体复核尚未核对结束，不能修订检查义务。")
             rows = {r["id"]: dict(r) for r in contract["obligations"]}
             seen = set()
             for change in changes:
@@ -207,6 +206,8 @@ class WorkLedger:
         plans = [e.seq for e in events if e.type in {"plan.proposed", "plan.amended", "planning.requested"}]
         scope = {"direction_seq": directions[-1].seq, "planning_seq": plans[-1] if plans else None,
                  "rules": self.rules.current_snapshot(task_id)["fingerprint"]}
+        if self.organization_fingerprint is not None:
+            scope["organization"] = self.organization_fingerprint
         revisions = [e.seq for e in self.log.iter_events(task_id=task_id, event_types=("checks.contract_revised",))
                      if e.actor == Actor.human()]
         if revisions:
@@ -262,7 +263,12 @@ class WorkLedger:
         for candidate in (plan.payload.get("planning") or {}).get("reuse", []):
             if candidate["work_item_id"] in items:
                 items[candidate["work_item_id"]]["reuse_candidate"] = candidate
-        histories = {}
+        histories, review_histories = {}, {}
+
+        def review_history(item):
+            if item["id"] not in review_histories:
+                review_histories[item["id"]] = self._review_history(events, plan.seq, item["id"])
+            return review_histories[item["id"]]
 
         def history(item):
             submission = item["submission"]
@@ -281,9 +287,10 @@ class WorkLedger:
                 checking = dependent["submission"] is not None and any(
                     e.seq not in state["receipts"] for state in history(dependent)["criteria"].values()
                     for e in state["starts"])
+                reviewing = bool(review_history(dependent)["pending"])
                 dependent.update(status="uncertain" if uncertain else "stale",
-                                 submission=dependent["submission"] if checking else None, checks=[],
-                                 dependency_check_stale=checking,
+                                 submission=dependent["submission"] if checking or reviewing else None, checks=[],
+                                 dependency_check_stale=checking or reviewing,
                                  dependency_uncertain=uncertain,
                                  reason="前置成果重新检查，执行副作用须先核对。" if uncertain else "前置成果重新检查，需要重新验收。")
 
@@ -315,6 +322,12 @@ class WorkLedger:
                 item.update(status=p["status"], checks=p["checks"], reason=p["reason"], review_seq=event.seq)
             elif event.type == "work.review_deferred" and p.get("submission_seq") == (item["submission"] or {}).get("seq"):
                 item.update(reason=p["reason"])
+            elif (event.type in {"work.review_finished", "work.review_reconciled"}
+                  and p.get("submission_seq") == (item["submission"] or {}).get("seq")):
+                lifecycle = review_history(item)
+                if event.seq in lifecycle["terminal_seqs"] and (
+                        event.type == "work.review_reconciled" or p["status"] in {"stale", "recoverable"}):
+                    item.update(status="submitted", checks=[], reason=p["reason"])
             elif event.type == "work.invalidated":
                 for target in p["affected"]:
                     if target in items:
@@ -325,6 +338,8 @@ class WorkLedger:
                             dependency_uncertain=bool(p["uncertain"] and item.get("dependency_uncertain")))
         scope_current = plan.payload["scope"] == self.scope(task_id)
         for item in items.values():
+            reviews = review_history(item)
+            pending_reviews = reviews["pending"]
             item["execution_in_flight"] = item["status"] in {"running", "uncertain"}
             item["check_in_flight"] = False
             item["check_uncertain"] = False
@@ -353,14 +368,38 @@ class WorkLedger:
                     item.update(status="uncertain" if item["check_uncertain"] else "submitted",
                                 reason="本地检查期限已过，结果不明；不会自动重放。" if item["check_uncertain"]
                                 else "本地检查尚未全部结束，不能放行。")
-                elif item.get("dependency_check_stale"):
+                elif item.get("dependency_check_stale") and not pending_reviews:
                     item.update(status="stale", submission=None, checks=[], dependency_check_stale=False,
                                 reason="前置成果重新检查，旧提交已失效。")
-            item["in_flight"] = item["execution_in_flight"] or item["check_in_flight"]
+            item["review_in_flight"] = bool(pending_reviews)
+            item["review_uncertain"] = any(
+                e.payload["lease_until"] <= time.time() or e.seq in reviews["finishes"] for e in pending_reviews)
+            latest = reviews["starts"][-1] if reviews["starts"] else None
+            item["review_lifecycle"] = {}
+            if latest:
+                finish = reviews["finishes"].get(latest.seq)
+                reconciled = reviews["reconciled"].get(latest.seq)
+                item["review_lifecycle"] = {
+                    "attempt_seq": latest.seq, "submission_seq": latest.payload["submission_seq"],
+                    "lease_until": latest.payload["lease_until"],
+                    "status": ("reconciled" if reconciled else finish.payload["status"] if finish else
+                               "uncertain" if latest.payload["lease_until"] <= time.time() else "reviewing"),
+                    "finish_seq": finish.seq if finish else None,
+                    "recovery": finish.payload.get("recovery") if finish else None,
+                    "reconciled_seq": reconciled.seq if reconciled else None,
+                    "pending_seqs": [e.seq for e in pending_reviews],
+                    "reason": (reconciled.payload["reason"] if reconciled else finish.payload.get("reason", "") if finish
+                               else "等待原调用返回；超时后需要先核对，不能自动重放。"),
+                }
+            if pending_reviews:
+                item.update(status="uncertain" if item["review_uncertain"] or not item["submission"] else "submitted",
+                            reason="阶段复核结果不明；核对调用已停止及其影响后才能恢复，不会按超时自动重放。"
+                            if item["review_uncertain"] else "阶段复核调用尚未结束，正在等待同一版本的结论。")
+            item["in_flight"] = item["execution_in_flight"] or item["check_in_flight"] or item["review_in_flight"]
             if item["status"] == "running" and item["lease_until"] < time.time():
                 item.update(status="uncertain", reason="执行期限已过，结果不明；不会自动重放。")
             if not scope_current and item["status"] != "uncertain":
-                item.update(status="stale", reason="顾客方向或店规已变更，需要重新核对计划。")
+                item.update(status="stale", reason="顾客方向、店规或组织配置已变更，需要重新核对计划。")
         # Resolve readiness in dependency order, independent of JSON list order.
         resolved: set[str] = set()
 
@@ -386,9 +425,11 @@ class WorkLedger:
                                         else self.directions(task_id, plan.payload["scope"]["direction_seq"])),
                 "stage_accepted": all(i["status"] == "accepted" for i in items.values())}
 
-    def defer_review(self, task_id: str, item_id: str, submission_seq: int, reason: str, *, response_repair: bool = False) -> Event:
+    def defer_review(self, task_id: str, item_id: str, submission_seq: int, reason: str, *, response_repair: bool = False,
+                     review_attempt_seq: int | None = None) -> Event:
         def build():
             view, item = self._item(task_id, item_id)
+            self._validate_review_owner(task_id, item, review_attempt_seq)
             if item["status"] != "submitted" or item["submission"]["seq"] != submission_seq:
                 raise WorkConflict("review deferral must target the current submission")
             if response_repair and any(e.payload.get("response_repair") and e.payload.get("submission_seq") == submission_seq
@@ -421,8 +462,12 @@ class WorkLedger:
         return self._write(task_id, build)
 
     def artifacts(self, task_id: str, submission: dict[str, Any]) -> list[dict[str, Any]]:
+        from .artifacts import content_metrics
+
         ids = set(submission["artifact_seqs"])
-        return [{"seq": event.seq, **event.payload} for event in self.log.iter_events(
+        return [{**event.payload, "seq": event.seq,
+                 "content_metrics": content_metrics(event.payload["content"])
+                 if isinstance(event.payload.get("content"), str) else {}} for event in self.log.iter_events(
             task_id=task_id, event_types=("deliverable.published",)) if event.seq in ids]
 
     def submit(self, task_id: str, claim: Event, artifact_seqs: list[int]) -> Event:
@@ -628,6 +673,7 @@ class WorkLedger:
             if (not view.get("scope_current") or not item["submission"]
                     or item["status"] not in {"submitted", "accepted", "ready"}
                     or item.get("execution_in_flight") or item.get("check_uncertain")
+                    or item.get("review_in_flight")
                     or item.get("dependency_check_stale")
                     or any(i["status"] != "accepted" for i in view["items"] if i["id"] in item["depends_on"])):
                 raise WorkConflict("checking requires a current submission with reconciled effects and accepted inputs")
@@ -648,13 +694,175 @@ class WorkLedger:
 
         return self._write(task_id, build)
 
+    @staticmethod
+    def _review_history(events: list[Event], plan_seq: int, item_id: str) -> dict[str, Any]:
+        starts, finishes, reconciled, terminal_seqs = {}, {}, {}, set()
+        plan = next((e for e in events if e.seq == plan_seq and e.type == "work.plan_created"), None)
+        contract = next((i for i in plan.payload["items"] if i["id"] == item_id), None) if plan else None
+        submissions = {e.seq: e for e in events if e.type == "work.submitted"}
+        binding = ("plan_seq", "work_item_id", "submission_seq", "submission_digest", "scope", "check_seqs")
+        for event in events:
+            p = event.payload
+            if not contract or p.get("plan_seq") != plan_seq or p.get("work_item_id") != item_id:
+                continue
+            if event.type == "work.review_started":
+                submission_seq = p.get("submission_seq")
+                submission = submissions.get(submission_seq) if type(submission_seq) is int else None
+                lease, checks = p.get("lease_until"), p.get("check_seqs")
+                if (not submission or event.seq <= submission.seq
+                        or submission.payload.get("plan_seq") != plan_seq
+                        or submission.payload.get("work_item_id") != item_id
+                        or p.get("submission_digest") != submission.payload.get("digest")
+                        or p.get("scope") != submission.payload.get("scope")
+                        or not contract["reviewer"] or contract["reviewer"] == contract["owner"]
+                        or event.actor != Actor.agent(contract["reviewer"], "reviewer")
+                        or type(lease) not in (int, float) or not math.isfinite(lease)
+                        or not isinstance(checks, dict)
+                        or any(not isinstance(k, str) or type(v) is not int for k, v in checks.items())):
+                    continue
+                starts[event.seq] = event
+            elif event.type in {"work.review_finished", "work.review_reconciled"}:
+                seq = p.get("attempt_seq")
+                start = starts.get(seq) if type(seq) is int else None
+                if (not start or event.seq <= start.seq
+                        or any(p.get(k) != start.payload.get(k) for k in binding)):
+                    continue
+                if event.type == "work.review_finished":
+                    if (event.actor != start.actor or seq in finishes or seq in reconciled
+                            or p.get("status") not in {"completed", "not_invoked", "uncertain", "stale", "invalid_response", "recoverable"}
+                            or (p["status"] == "recoverable" and p.get("recovery") not in {
+                                "text_request_rejected", "text_transport_failure"})):
+                        continue
+                    finishes[seq] = event
+                else:
+                    if (event.actor != Actor.human() or seq in reconciled
+                            or (seq in finishes and finishes[seq].payload["status"] != "uncertain")
+                            or p.get("invocation_stopped") is not True or not p.get("reason")):
+                        continue
+                    reconciled[seq] = event
+                terminal_seqs.add(event.seq)
+        return {"starts": list(starts.values()), "finishes": finishes, "reconciled": reconciled,
+                "terminal_seqs": terminal_seqs,
+                "pending": [e for seq, e in starts.items() if seq not in reconciled
+                            and (seq not in finishes or finishes[seq].payload["status"] == "uncertain")]}
+
+    def start_review(self, task_id: str, item_id: str, *, reviewer: str, submission_seq: int,
+                     expected_check_seqs: dict[str, int], expected_review_seq: int | None = None,
+                     expected_review_attempt_seq: int | None = None, lease_seconds: float = 600) -> Event:
+        """Reserve the exact prompt inputs before invoking a reviewer, using event-head CAS."""
+        if type(lease_seconds) not in (int, float) or not math.isfinite(lease_seconds) or not 0 < lease_seconds <= 3600:
+            raise ValueError("review lease must be between 0 and 3600 seconds")
+
+        def build():
+            view, item = self._item(task_id, item_id)
+            if not reviewer or reviewer != item["reviewer"] or reviewer == item["owner"]:
+                raise ValueError("only the assigned independent reviewer may review")
+            if (not view.get("scope_current") or item["status"] != "submitted" or item["in_flight"]
+                    or type(submission_seq) is not int or item["submission"]["seq"] != submission_seq
+                    or item.get("review_seq") != expected_review_seq
+                    or item["review_lifecycle"].get("attempt_seq") != expected_review_attempt_seq
+                    or any(i["status"] != "accepted" for i in view["items"] if i["id"] in item["depends_on"])):
+                raise WorkConflict("复核已被认领、输入已变化或调用尚未核对结束。")
+            checks = {k: v.seq for k, v in self.checks(task_id, item).items()}
+            if checks != expected_check_seqs:
+                raise WorkConflict("复核的检查证据已经变化，请重新读取当前版本。")
+            return "work.review_started", {
+                "plan_seq": view["plan_seq"], "work_item_id": item_id, "scope": view["scope"],
+                "submission_seq": submission_seq, "submission_digest": item["submission"]["digest"],
+                "check_seqs": checks, "base_review_seq": expected_review_seq,
+                "lease_until": time.time() + lease_seconds,
+            }, Actor.agent(reviewer, "reviewer")
+        return self._write(task_id, build)
+
+    def _review_attempt(self, task_id: str, attempt_seq: int) -> tuple[Event, dict[str, Any]]:
+        events = self.log.read(task_id=task_id)
+        started = next((e for e in events if type(attempt_seq) is int and e.seq == attempt_seq
+                        and e.type == "work.review_started"), None)
+        if started is None:
+            raise WorkConflict("复核认领不存在或不属于当前任务。")
+        state = self._review_history(events, started.payload["plan_seq"], started.payload["work_item_id"])
+        if started not in state["starts"]:
+            raise WorkConflict("复核认领的身份或版本绑定无效。")
+        return started, state
+
+    def _review_inputs_current(self, task_id: str, started: Event) -> bool:
+        view, item = self._item(task_id, started.payload["work_item_id"])
+        p, submission = started.payload, item["submission"]
+        return bool(view.get("scope_current") and view["plan_seq"] == p["plan_seq"] and submission
+                    and submission["seq"] == p["submission_seq"] and submission["digest"] == p["submission_digest"]
+                    and self.scope(task_id) == p["scope"] and not item["check_in_flight"]
+                    and not item.get("dependency_check_stale") and not item.get("dependency_uncertain")
+                    and all(i["status"] == "accepted" for i in view["items"] if i["id"] in item["depends_on"])
+                    and {k: v.seq for k, v in self.checks(task_id, item).items()} == p["check_seqs"])
+
+    def _validate_review_owner(self, task_id: str, item: dict[str, Any], attempt_seq: int | None) -> None:
+        if attempt_seq is None:
+            if item.get("review_in_flight"):
+                raise WorkConflict("阶段复核仍在途或结果不明，人工验收前需要先核对调用。")
+            return
+        started, state = self._review_attempt(task_id, attempt_seq)
+        if (started.payload["work_item_id"] != item["id"] or started not in state["pending"]
+                or attempt_seq in state["finishes"] or not self._review_inputs_current(task_id, started)):
+            raise WorkConflict("阶段复核认领已结束或证据版本已失效。")
+
+    def finish_review(self, task_id: str, attempt_seq: int, *, status: str, reason: str,
+                      recovery: str | None = None) -> Event:
+        if status not in {"completed", "not_invoked", "uncertain", "stale", "invalid_response", "recoverable"}:
+            raise ValueError("invalid review completion status")
+        if ((status == "recoverable" and recovery not in {"text_request_rejected", "text_transport_failure"})
+                or (status != "recoverable" and recovery is not None)):
+            raise ValueError("recoverable review requires a classified gateway recovery reason")
+        reason = _text(reason, "review completion reason", 2000)
+
+        def build():
+            started, state = self._review_attempt(task_id, attempt_seq)
+            if attempt_seq in state["finishes"] or attempt_seq in state["reconciled"]:
+                raise WorkConflict("复核认领已经结束，迟到响应不能覆盖既有状态。")
+            result = status
+            # Unknown remote effects remain locked even when their inputs are stale.
+            try:
+                current = self._review_inputs_current(task_id, started)
+            except KeyError:
+                current = False
+            if result != "uncertain" and not current:
+                result = "stale"
+            elif result == "completed" and not any(
+                    e.type == "work.reviewed" and e.actor == started.actor
+                    and e.payload.get("review_attempt_seq") == attempt_seq
+                    for e in self.log.read(task_id=task_id)):
+                result = "invalid_response"
+            return "work.review_finished", {**started.payload, "attempt_seq": attempt_seq,
+                **({"recovery": recovery} if recovery is not None else {}),
+                "status": result, "reason": "复核期间输入版本发生变化，旧结论不再放行。" if result == "stale" else reason}, started.actor
+        return self._write(task_id, build)
+
+    def reconcile_review(self, task_id: str, attempt_seq: int, *, reason: str, invocation_stopped: bool) -> Event:
+        """Trusted operator attestation, not cancellation: reconcile effects before retrying.
+
+        A lease expiry or a resume command alone never authorizes another call.
+        Discard any partial judgments and fence all late writes from this attempt.
+        """
+        if invocation_stopped is not True:
+            raise ValueError("confirm the invocation has stopped and its effects were reconciled")
+        reason = _text(reason, "review reconciliation evidence", 2000)
+
+        def build():
+            started, state = self._review_attempt(task_id, attempt_seq)
+            if started not in state["pending"]:
+                raise WorkConflict("这次复核没有待核对的调用。")
+            return "work.review_reconciled", {**started.payload, "attempt_seq": attempt_seq,
+                "invocation_stopped": True, "reason": reason}, Actor.human()
+        return self._write(task_id, build)
+
     def review(self, task_id: str, item_id: str, *, reviewer: str, submission_seq: int,
-               results: object) -> Event:
+               results: object, review_attempt_seq: int | None = None) -> Event:
         def build():
             view, item = self._item(task_id, item_id)
             if reviewer != item["reviewer"] or reviewer == item["owner"]:
                 raise ValueError("only the assigned independent reviewer may review")
-            if item["status"] != "submitted" or item["submission"]["seq"] != submission_seq:
+            self._validate_review_owner(task_id, item, review_attempt_seq)
+            if (item["status"] not in ({"submitted", "uncertain"} if review_attempt_seq is not None else {"submitted"})
+                    or not item["submission"] or item["submission"]["seq"] != submission_seq):
                 raise WorkConflict("review must target the current submitted artifact")
             artifacts = {a["seq"]: a for a in self.artifacts(task_id, item["submission"])}
             raw_results = results if isinstance(results, list) else []
@@ -719,6 +927,7 @@ class WorkLedger:
                 "阶段验收未通过，需要返工。" if status == "rework" else "证据不足，保留待验收状态。")
             return "work.reviewed", {"plan_seq": view["plan_seq"], "work_item_id": item_id,
                                      "submission_seq": submission_seq, "status": status,
+                                     **({"review_attempt_seq": review_attempt_seq} if review_attempt_seq is not None else {}),
                                      "checks": checks, "reason": reason}, Actor.agent(reviewer, "reviewer")
         return self._write(task_id, build)
 

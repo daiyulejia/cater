@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { beforeEach, expect, test, vi } from 'vitest'
 import App from '../src/App'
 import { conversationParticipants } from '../src/participants'
+import { SUBMIT_TIMEOUT_MS } from '../src/request'
 
 const goals: Record<string, string> = { a: '甲任务', b: '乙任务', c: '衍生任务' }
 const basis = { seq: 1, anchor: 'captured-version-hash', source_seqs: [{ seq: 1, kind: 'goal' }], history_seqs: [7, 9] }
@@ -69,6 +70,36 @@ const select = async (id: string) => { await act(async () => fireEvent.click(wit
 const send = async () => { await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送提问' }))) }
 const posts = () => fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')
 const bodies = () => posts().map(([, init]) => JSON.parse(init.body as string))
+
+test.each(['command', 'questions', 'derive'])('%s 发送超时解锁并保留 ID，手动重试不被迟到旧响应清空', async (mode) => {
+  await mount()
+  if (mode === 'questions') toggle()
+  if (mode === 'derive') beginDerivation()
+  const input = mode === 'command' ? normalInput : mode === 'questions' ? questionInput : derivedInput
+  const label = mode === 'command' ? '发送消息' : mode === 'questions' ? '发送提问' : '创建衍生任务'
+  const responseBody = deferred<unknown>()
+  const response = json(detail())
+  vi.spyOn(response, 'json').mockReturnValue(responseBody.promise)
+  handler = (url) => url.endsWith(`/${mode}`) ? response : undefined
+  write(input(), '需要确认的发送')
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: label })))
+  await act(async () => { await vi.advanceTimersByTimeAsync(SUBMIT_TIMEOUT_MS) })
+  expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
+  expect((screen.getByRole('button', { name: label }) as HTMLButtonElement).disabled).toBe(false)
+  expect(input().value).toBe('需要确认的发送')
+  await act(async () => { await vi.advanceTimersByTimeAsync(SUBMIT_TIMEOUT_MS) })
+  expect(posts()).toHaveLength(1)
+  const retry = deferred<Response>()
+  handler = (url) => url.endsWith(`/${mode}`) ? retry.promise : undefined
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: label })))
+  expect(bodies()[1]).toEqual(bodies()[0])
+  await act(async () => responseBody.resolve(mode === 'derive' ? detail('c') : answered()))
+  expect(input().value).toBe('需要确认的发送')
+  expect((screen.getByRole('button', { name: label }) as HTMLButtonElement).disabled).toBe(true)
+  await act(async () => retry.resolve(json(mode === 'derive' ? detail('c') : answered())))
+  if (mode === 'derive') expect(screen.getByRole('heading', { name: '衍生任务', level: 1 })).toBeTruthy()
+  else expect(input().value).toBe('')
+})
 
 test('中文图标入口在同一聊天区切换，普通、提问、衍生及新任务草稿独立', async () => {
   await mount()
@@ -157,9 +188,10 @@ test('HTTP、网络及409失败保留草稿与 UUID，取消、切换和轮询�
     return new Response('同一请求不能更换问题', { status: 409 })
   }
   toggle(); write(questionInput(), question); await send()
-  expect(screen.getByRole('alert').textContent).toBe('暂时不能提问')
+  expect(screen.getByRole('alert').textContent).toContain('暂时不能提问')
+  expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   toggle(); toggle(); await send()
-  expect(screen.getByRole('alert').textContent).toBe('网络中断')
+  expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   await select('a'); toggle(); write(questionInput(), '另一项问题')
   await select('b'); toggle()
   await act(async () => { await vi.advanceTimersByTimeAsync(4000) })
@@ -227,7 +259,8 @@ test('迟到失败不覆盖新问题的错误状态，其他模式不显示提�
   expect(questionInput().value).toBe('全新的提问草稿')
   handler = (url) => url.endsWith('/questions') ? new Response('旧问题失败', { status: 500 }) : undefined
   await send()
-  expect(screen.getByRole('alert').textContent).toBe('旧问题失败')
+  expect(screen.getByRole('alert').textContent).toContain('旧问题失败')
+  expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   toggle(); expect(screen.queryByRole('alert')).toBeNull()
   beginDerivation(); expect(screen.queryByRole('alert')).toBeNull()
   await select('a'); toggle(); expect(screen.queryByRole('alert')).toBeNull()

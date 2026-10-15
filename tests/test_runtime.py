@@ -1370,7 +1370,7 @@ class RuntimeTests(unittest.TestCase):
             task = rt.task(task_id)
 
             self.assertEqual(driver.calls, 2)
-            self.assertEqual(len(task.driver_failures), 3)
+            self.assertEqual(len(task.driver_failures), 2)
             self.assertIn("model process exploded", task.driver_failures[0]["message"])
             self.assertTrue(any("driver failed" in msg["claim"] for msg in task.messages))
             self.assertIn("driver.failed", [event.type for event in rt.log.read(task_id=task_id)])
@@ -1380,7 +1380,7 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(driver.calls, 2)
             self.assertTrue(any(item["attempt"] == 0 for item in task.driver_failures))
 
-    def test_open_circuit_stops_remaining_retries_in_the_same_round(self):
+    def test_open_circuit_follows_distinct_single_attempt_invocations(self):
         driver = AlwaysFailDriver()
         with Runtime(
             ":memory:",
@@ -1395,7 +1395,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(driver.calls, 2)
         assert task is not None
         first_failures = [item for item in task.driver_failures if item["attempt"] > 0]
-        self.assertEqual([item["attempt"] for item in first_failures[:2]], [1, 2])
+        self.assertEqual([item["attempt"] for item in first_failures[:2]], [1, 1])
         self.assertTrue(first_failures[1]["circuit_open"])
 
     def test_driver_health_can_keep_a_circuit_open_across_runtime_instances(self):

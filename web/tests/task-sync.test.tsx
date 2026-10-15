@@ -197,15 +197,18 @@ test('初始摘要到达前新建结果已选中，旧列表不能覆盖本窗�
   expect(screen.getByText('丙聊天 #9')).toBeTruthy()
 })
 
-test('慢摘要不叠加请求；切换后的迟到详情不能进入另一聊天', async () => {
+test('慢摘要限时前不叠加、超时继续读取；切换后的迟到详情不能进入另一聊天', async () => {
   await mount()
   const oldSummary = deferred<Response>()
   const oldDetail = deferred<Response>()
-  handler = (url) => url === '/api/task-summaries' ? oldSummary.promise : url === '/api/tasks/乙' ? oldDetail.promise : undefined
+  let reads = 0
+  handler = (url) => url === '/api/task-summaries' && ++reads === 1 ? oldSummary.promise : url === '/api/tasks/乙' ? oldDetail.promise : undefined
   await tick()
   await act(async () => select('甲')); write('甲草稿')
-  await tick(16000)
+  await tick(7999)
   expect(summaryCalls()).toHaveLength(2)
+  await tick(8001)
+  expect(summaryCalls()).toHaveLength(4)
   await act(async () => {
     oldSummary.resolve(json({ tasks: rows }, '"slow"'))
     oldDetail.resolve(json(detail('乙', 10)))
@@ -283,4 +286,52 @@ test('卸载中止读取并清理刷新计时器', async () => {
   await act(async () => pending.resolve(json({ tasks: rows })))
   await tick(20000)
   expect(summaryCalls()).toHaveLength(1)
+})
+
+test.each(['summary', 'detail'])('%s 正文挂起也会超时并恢复轮询，迟到正文不能更新状态或 ETag', async (kind) => {
+  const body = deferred<unknown>()
+  const response = json({}, '"stale"')
+  vi.spyOn(response, 'json').mockReturnValue(body.promise)
+  const path = kind === 'summary' ? '/api/task-summaries' : '/api/tasks/乙'
+  let reads = 0
+  handler = (url) => url === path && ++reads === 1 ? response : undefined
+  await mount()
+  await tick(8000)
+  expect(screen.getByText('请求超时，请稍后重试。')).toBeTruthy()
+  expect(fetchMock.mock.calls.find(([url]) => url === path)![1].signal.aborted).toBe(true)
+  await tick()
+  expect(reads).toBe(2)
+  expect(screen.queryByText('请求超时，请稍后重试。')).toBeNull()
+  expect(screen.getByText('乙聊天 #1')).toBeTruthy()
+  await act(async () => body.resolve(kind === 'summary' ? { tasks: [...rows, summary('迟到', 100)] } : detail('乙', 100)))
+  expect(screen.queryByText('乙聊天 #100')).toBeNull()
+  expect(nav().queryByRole('button', { name: /迟到任务/ })).toBeNull()
+  await tick()
+  expect(new Headers(summaryCalls().at(-1)![1].headers).get('If-None-Match')).toBe('"initial"')
+})
+
+test('隐藏页取消挂起正文，恢复继续读取而不取消在途发送', async () => {
+  await mount(); write('保留这次提交')
+  const body = deferred<unknown>()
+  const sending = deferred<Response>()
+  const response = json({})
+  vi.spyOn(response, 'json').mockReturnValue(body.promise)
+  handler = (url) => url === '/api/tasks/乙' ? response : url.endsWith('/command') ? sending.promise : undefined
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送消息' })))
+  await tick()
+  const detailSignal = fetchMock.mock.calls.filter(([url]) => url === '/api/tasks/乙').at(-1)![1].signal!
+  const postSignal = fetchMock.mock.calls.find(([url]) => url.endsWith('/command'))![1].signal!
+  const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+  await act(async () => fireEvent(document, new Event('visibilitychange')))
+  expect(detailSignal.aborted).toBe(true)
+  expect(postSignal.aborted).toBe(false)
+  expect(screen.queryByRole('alert')).toBeNull()
+  handler = () => undefined
+  visibility.mockReturnValue('visible')
+  await act(async () => fireEvent(document, new Event('visibilitychange')))
+  await act(async () => body.resolve(detail('乙', 99)))
+  expect(screen.queryByText('乙聊天 #99')).toBeNull()
+  await act(async () => sending.resolve(json(detail('乙', 5))))
+  expect(screen.getByText('乙聊天 #5')).toBeTruthy()
+  expect(input().value).toBe('')
 })

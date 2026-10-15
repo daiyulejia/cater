@@ -309,7 +309,7 @@ class WorkTests(unittest.TestCase):
         self.assertIn("assert 2 + 2", work[1]["accepted_inputs"]["first"][0]["content"])
         self.assertNotEqual(work[0]["attempt_id"], work[1]["attempt_id"])
         self.assertNotEqual(self.rt.task(self.task).status, "done")
-        with Runtime(self.db) as reopened:
+        with Runtime(self.db, drivers=self.rt.drivers) as reopened:
             self.assertTrue(reopened.work.view(self.task)["stage_accepted"])
             self.assertTrue(reopened.verify_chain().ok)
 
@@ -437,7 +437,7 @@ class WorkTests(unittest.TestCase):
         outcomes = []
 
         def claim():
-            with Runtime(self.db) as rt:
+            with Runtime(self.db, drivers=self.rt.drivers) as rt:
                 barrier.wait()
                 try:
                     rt.work.claim(self.task, "a")

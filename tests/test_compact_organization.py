@@ -171,13 +171,39 @@ class CompactOrganizationTests(unittest.TestCase):
             task_id = rt.create_task("Refactor architecture")
             rt.intake(task_id)
             rt.collaborate(task_id)
+            # Seed one evidence-backed acceptance; the demo need not finish every stage.
+            submitted = next(item for item in rt.work.view(task_id)["items"] if item["status"] == "submitted"
+                             and all(c["kind"] == "review" for c in item["criteria"]))
+            artifact = rt.work.artifacts(task_id, submitted["submission"])[0]
+            accepted = rt.work.review(task_id, submitted["id"], reviewer=submitted["reviewer"],
+                submission_seq=submitted["submission"]["seq"], results=[{
+                    "id": c["id"], "status": "passed", "reason": "Inspected the stored demo artifact",
+                    "artifact_seq": artifact["seq"], "quote": artifact["content"],
+                } for c in submitted["criteria"]])
+            self.assertEqual(accepted.payload["status"], "accepted")
             before = task_api_payload(rt, task_id)
+            self.assertTrue(before["task"]["work"]["scope_current"])
+            self.assertEqual(next(item for item in before["task"]["work"]["items"]
+                                  if item["id"] == submitted["id"])["status"], "accepted")
             self.assertEqual([role.name for role in rt.worker_roles], ["月亮", "罐头", "米寇", "三角"])
             self.assertFalse(rt.cabinet_roles)
         with Runtime(db) as rt:
             after = task_api_payload(rt, task_id)
-            for key in ("task", "events", "decision_ladder", "organization_path"):
+            for key in ("events", "decision_ladder", "organization_path"):
                 self.assertEqual(before[key], after[key])
+            self.assertEqual({k: v for k, v in before["task"].items() if k != "work"},
+                             {k: v for k, v in after["task"].items() if k != "work"})
+            previous, current = before["task"]["work"], after["task"]["work"]
+            self.assertEqual(current["plan_seq"], previous["plan_seq"])
+            self.assertEqual(current["scope"], previous["scope"])
+            self.assertNotEqual(current["scope"]["organization"], rt.work.scope(task_id)["organization"])
+            self.assertFalse(current["scope_current"])
+            self.assertFalse(current["stage_accepted"])
+            self.assertEqual([item["id"] for item in current["items"]], [item["id"] for item in previous["items"]])
+            for prior, item in zip(previous["items"], current["items"]):
+                self.assertEqual(item["status"], "stale")
+                self.assertEqual(item["submission"], prior["submission"])
+                self.assertEqual(item["checks"], prior["checks"])
             self.assertEqual(after["task"]["plan"]["source"], "leader")
             self.assertTrue(rt.verify_chain().ok)
 

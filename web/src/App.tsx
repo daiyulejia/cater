@@ -25,6 +25,10 @@ import type { Clarification, ClarificationControls, ClarificationStore } from '.
 import type { QuestionBasis, QuestionContext } from './QuestionDetails'
 import { collaborationProjection, workTransfers } from './collaborationProjection'
 import type { WorkAssignment } from './collaborationProjection'
+import { readJsonResponse, request } from './request'
+import { TaskControlMenu } from './TaskControlMenu'
+import { controlLabels, executionLabel } from './executionControl'
+import type { ControlAction, ExecutionControl } from './executionControl'
 
 const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
 const LazyDeliveryPanel = lazy(() => import('./DeliveryPanel').then((module) => ({ default: module.DeliveryPanel })))
@@ -49,7 +53,7 @@ type OrgRole = { id: string; name: string; role: string; charter?: string }
 type DriverCoverage = { role_id: string; name: string; driver: string; mode: 'local_demo' | 'external' }
 type Organization = { leader: OrgRole; cabinet: OrgRole[]; workers: OrgRole[]; mode?: 'local_demo' | 'mixed_driver' | 'external_driver'; worker_drivers?: DriverCoverage[]; availability?: TeamAvailability }
 type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'; active: boolean; revision?: number; error?: string; follow_up?: { action?: string } }
-type TaskSummary = { id: string; goal: string; project_id?: string | null; status: string; status_label: string; conversation_count: number; latest_seq: number; version: number; evaluated_at?: number; activity?: Activity }
+type TaskSummary = { id: string; goal: string; project_id?: string | null; status: string; status_label: string; conversation_count: number; latest_seq: number; version: number; evaluated_at?: number; activity?: Activity; execution_control?: ExecutionControl }
 type Task = {
   work?: WorkState | null
   project_id?: string | null
@@ -68,7 +72,7 @@ type Event = { seq: number; type: string; category: string; actor: { id: string;
 type QuestionResult = { question_seq?: number; answer?: string; evidence?: { source_seq: number; quote: string }[]; limits?: string[]; reason?: string; speaker_id?: string; driver?: string; tokens?: number; token_usage?: string }
 type Question = QuestionResult & { seq: number; status: string; question: string; role_id: string; basis: QuestionBasis; outdated: boolean }
 type ConversationReceipt = { seq: number; status: string }
-type TaskDetail = { task: Task; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
+type TaskDetail = { task: Task; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity; execution_control?: ExecutionControl }
 type DerivationSource = { id: string; goal: string }
 type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event }
 
@@ -83,20 +87,12 @@ const accessToken = (() => {
   return window.sessionStorage.getItem('cater.access_token') ?? ''
 })()
 
-const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
-  const response = await apiResponse(path, init)
-  if (!response.ok) throw new Error(await response.text())
-  return response.json() as Promise<T>
+const apiRead = <T,>(path: string, read: (response: Response) => Promise<T>, init?: RequestInit): Promise<T> => {
+  const headers = new Headers({ 'Content-Type': 'application/json', ...(accessToken ? { 'X-Cater-Access-Token': accessToken } : {}) })
+  new Headers(init?.headers).forEach((value, key) => headers.set(key, value))
+  return request(path, { ...init, headers }, read)
 }
-
-const apiResponse = (path: string, init?: RequestInit) => fetch(path, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(accessToken ? { 'X-Cater-Access-Token': accessToken } : {}),
-      ...(init?.headers ?? {}),
-    },
-  })
+const api = <T,>(path: string, init?: RequestInit): Promise<T> => apiRead(path, readJsonResponse<T>, init)
 
 const summaryOrder = (next: TaskSummary, current: TaskSummary) => next.version - current.version
   || (next.activity?.revision ?? 0) - (current.activity?.revision ?? 0)
@@ -607,6 +603,10 @@ function App() {
   const questionModeRef = useRef(false)
   const questionRequests = useRef<Record<string, { text: string; requestId: string }>>({})
   const conversationRequests = useRef<Record<string, { text: string; requestId: string }>>({})
+  const creationRequest = useRef<{ text: string; projectId?: string; requestId: string } | null>(null)
+  const [controlRequests, setControlRequests] = useState<Record<string, { action: ControlAction; requestId: string }>>({})
+  const controlsRef = useRef<Record<string, ExecutionControl>>({})
+  const [executionControls, setExecutionControls] = useState<Record<string, ExecutionControl>>({})
   const [clarificationStore] = useState<ClarificationStore>(() => new Map())
   const derivationRef = useRef<DerivationSource | null>(null)
   const derivationRequests = useRef<Record<string, { text: string; requestId: string }>>({})
@@ -655,7 +655,15 @@ function App() {
   const updateDraft = (key: string, value: string | ((current: string) => string)) => {
     setDrafts((current) => ({ ...current, [key]: typeof value === 'function' ? value(current[key] ?? '') : value }))
   }
-  const setDraft = (value: string | ((current: string) => string)) => { navigationRef.current += 1; updateDraft(newKey, value) }
+  const setDraft = (value: string | ((current: string) => string)) => {
+    const next = typeof value === 'function' ? value(draft) : value
+    navigationRef.current += 1
+    if (next !== draft) {
+      creationRequest.current = null
+      setSendErrors((current) => ({ ...current, [newKey]: '' }))
+    }
+    updateDraft(newKey, next)
+  }
   const setMessage = (value: string) => {
     if (!selectedId) return
     if (derivation && value !== message) {
@@ -698,8 +706,21 @@ function App() {
     return { next: await api<TaskDetail>(path, init), order }
   }, [])
 
+  const acceptControls = useCallback((items: { id: string; execution_control?: ExecutionControl }[]) => {
+    const updates: Record<string, ExecutionControl> = {}
+    for (const item of items) {
+      const control = item.execution_control
+      const previous = updates[item.id] ?? controlsRef.current[item.id]
+      if (control && (!previous || (control.seq ?? 0) > (previous.seq ?? 0))) updates[item.id] = control
+    }
+    if (!Object.keys(updates).length) return
+    controlsRef.current = { ...controlsRef.current, ...updates }
+    setExecutionControls((current) => ({ ...current, ...updates }))
+  }, [])
+
   const acceptDetail = useCallback((next: TaskDetail, order: number) => {
     const id = next.task.id
+    acceptControls([{ id, execution_control: next.execution_control }, { id, execution_control: next.summary?.execution_control }])
     const seq = next.events.at(-1)?.seq ?? 0
     const version = next.summary?.version ?? seq
     const item = next.summary ?? { id, goal: next.task.goal, project_id: next.task.project_id,
@@ -714,7 +735,7 @@ function App() {
         ? current.map((task) => task.id === id && summaryOrder(item, task) >= 0 ? item : task) : [...current, item]
     })
     if (selectedRef.current === id) setDetail(next)
-  }, [])
+  }, [acceptControls])
 
   useEffect(() => {
     let cancelled = false
@@ -729,16 +750,18 @@ function App() {
       fetching = true
       controller = new AbortController()
       const signal = controller.signal
-      const timeout = window.setTimeout(() => controller?.abort(), 8000)
       try {
-        const response = await apiResponse('/api/task-summaries', { signal, cache: 'no-store',
+        const result = await apiRead('/api/task-summaries', async (response) => {
+          if (response.status === 304) return null
+          return { next: await readJsonResponse<{ tasks: TaskSummary[] }>(response), etag: response.headers.get('ETag') ?? '' }
+        }, { signal, cache: 'no-store',
           headers: etag ? { 'If-None-Match': etag } : {} })
-        if (response.status === 304) return
-        if (!response.ok) throw new Error(await response.text())
-        const next = await response.json() as { tasks: TaskSummary[] }
         if (cancelled || signal.aborted || !pageVisible()) return
+        if (!result) { setTaskListError(''); return }
+        const { next } = result
         if (!Array.isArray(next.tasks)) throw new Error('暂时无法读取任务列表，请稍后重试。')
-        etag = response.headers.get('ETag') ?? ''
+        etag = result.etag
+        acceptControls(next.tasks)
         setTaskListError('')
         setTasks((current) => {
           const received = new Map(next.tasks.map((task) => [task.id, task]))
@@ -753,7 +776,6 @@ function App() {
       } catch (err) {
         if (!cancelled && !signal.aborted && !initialized) setTaskListError(userFacingError(err, '暂时无法读取任务。'))
       } finally {
-        window.clearTimeout(timeout)
         fetching = false
         if (!cancelled && pageVisible()) timer = window.setTimeout(() => void poll(), 4000)
       }
@@ -769,7 +791,7 @@ function App() {
       cancelled = true; controller?.abort(); window.clearTimeout(timer)
       document.removeEventListener('visibilitychange', visibilityChanged)
     }
-  }, [chooseTask])
+  }, [chooseTask, acceptControls])
   useEffect(() => {
     void api<OrgRole[]>('/api/organization').then((nextRoles) => {
       setRoles(nextRoles)
@@ -780,7 +802,6 @@ function App() {
     profileBusy.current = true
     const controller = new AbortController()
     profileAbort.current = controller
-    const timeout = window.setTimeout(() => controller.abort(), 8000)
     setTeamRefreshing(true)
     try {
       const next = await api<Organization>('/api/organization/profile', { signal: controller.signal })
@@ -791,7 +812,6 @@ function App() {
         setOrganization((current) => current ? { ...current, availability: undefined } : current)
       }
     } finally {
-      window.clearTimeout(timeout)
       profileBusy.current = false
       if (profileMounted.current) setTeamRefreshing(false)
     }
@@ -815,15 +835,16 @@ function App() {
       if (cancelled || fetching || !pageVisible()) return
       fetching = true
       controller = new AbortController()
+      const signal = controller.signal
       let delay = 4000
       try {
-        const { next, order } = await requestDetail(`/api/tasks/${selectedId}`, { signal: controller.signal })
-        if (cancelled) return
+        const { next, order } = await requestDetail(`/api/tasks/${selectedId}`, { signal })
+        if (cancelled || signal.aborted || !pageVisible()) return
         acceptDetail(next, order)
         setLoadErrors((current) => ({ ...current, [selectedId]: '' }))
         delay = next.activity?.active || next.conversation?.some((row) => row.status === 'pending' || row.status === 'answering') ? 800 : 4000
       } catch (err) {
-        if (!cancelled) setLoadErrors((current) => ({ ...current, [selectedId]: userFacingError(err, '暂时无法读取任务详情。') }))
+        if (!cancelled && !signal.aborted) setLoadErrors((current) => ({ ...current, [selectedId]: userFacingError(err, '暂时无法读取任务详情。') }))
       } finally {
         fetching = false
         if (!cancelled && pageVisible()) timer = window.setTimeout(() => void poll(), delay)
@@ -832,6 +853,7 @@ function App() {
     const visibilityChanged = () => {
       window.clearTimeout(timer)
       if (pageVisible()) void poll()
+      else controller?.abort()
     }
     void poll()
     document.addEventListener('visibilitychange', visibilityChanged)
@@ -855,11 +877,20 @@ function App() {
     ? { ...selectedSummary, acceptance: [], messages: [], assignments: [], deliverables: [] } : undefined) : undefined
   const loading = selectedId !== null && currentDetail === null
   const loadError = selectedId ? loadErrors[selectedId] ?? '' : ''
-  const visibleError = sendErrors[composerKey] || error || taskListError
+  const controlKey = `$control:${selectedId}`
+  const controlBusy = pending.has(controlKey)
+  const executionControl = selectedId ? executionControls[selectedId] : undefined
+  const executionState = executionControl?.state ?? 'running'
+  const clarificationBlocked = controlBusy || executionState !== 'running'
+  const clarificationBlockedReason = executionState === 'cancelled' ? '任务已取消，继续执行需新建任务。仍可直接聊天。'
+    : executionState === 'paused' ? '任务已暂停，提交澄清前需恢复执行。仍可直接聊天。' : '正在确认执行控制请求，请稍候再提交澄清。仍可直接聊天。'
+  const visibleError = sendErrors[controlKey] || sendErrors[composerKey] || error || taskListError
   const clarificationControls: ClarificationControls = {
     store: clarificationStore, createRequestId: creationRequestId,
+    disabledReason: clarificationBlocked ? clarificationBlockedReason : undefined,
     submit: async (id, reply) => {
       if (selectedRef.current !== id || !currentDetail?.clarifications?.some((question) => question.seq === reply.question_seq && question.status === 'pending')) throw new Error('请读取当前对话的最新问题后再回答。')
+      if (pendingRef.current.has(`$control:${id}`) || (controlsRef.current[id]?.state ?? 'running') !== 'running') throw new Error(clarificationBlockedReason)
       const { next, order } = await requestDetail(`/api/tasks/${encodeURIComponent(id)}/clarifications`, { method: 'POST', body: JSON.stringify(reply) })
       acceptDetail(next, order)
     },
@@ -917,21 +948,31 @@ function App() {
     const goal = submitted.trim()
     if (!goal || selectedRef.current !== null || pendingRef.current.has(newKey)) return
     const navigation = navigationRef.current
+    const previous = creationRequest.current
+    const attempt = previous?.text === submitted && previous.projectId === newProject?.id
+      ? previous : { text: submitted, projectId: newProject?.id, requestId: creationRequestId() }
+    creationRequest.current = attempt
     pendingRef.current.add(newKey); setPending(new Set(pendingRef.current))
     setSendErrors((current) => ({ ...current, [newKey]: '' }))
     try {
       const { next: result, order } = await requestDetail('/api/tasks', {
         method: 'POST',
         body: JSON.stringify({
-          goal,
-          project_id: newProject?.id,
+          goal: attempt.text.trim(),
+          project_id: attempt.projectId,
+          request_id: attempt.requestId,
           run: true, background: true,
         }),
       })
-      setDrafts((current) => current[newKey] === submitted ? { ...current, [newKey]: '' } : current)
+      if (creationRequest.current === attempt) {
+        creationRequest.current = null
+        setDrafts((current) => current[newKey] === submitted ? { ...current, [newKey]: '' } : current)
+      }
       if (navigationRef.current === navigation && selectedRef.current === null) chooseTask(result.task.id)
       acceptDetail(result, order)
-    } catch (err) { setSendErrors((current) => ({ ...current, [newKey]: userFacingError(err, '创建任务失败') })) }
+    } catch (err) {
+      if (creationRequest.current === attempt) setSendErrors((current) => ({ ...current, [newKey]: userFacingError(err, '创建任务失败') }))
+    }
     finally { pendingRef.current.delete(newKey); setPending(new Set(pendingRef.current)) }
   }
 
@@ -1039,6 +1080,38 @@ function App() {
     finally { pendingRef.current.delete(id); setPending(new Set(pendingRef.current)) }
   }
 
+  const controlTask = async (action: ControlAction) => {
+    const id = selectedId
+    if (!id || selectedRef.current !== id || loading) return
+    const key = `$control:${id}`
+    if (pendingRef.current.has(key)) return
+    const state = controlsRef.current[id]?.state ?? 'running'
+    const previous = controlRequests[id]
+    const retrying = previous?.action === action
+    if (state === 'cancelled' && !(action === 'cancel' && retrying)) return
+    if (!retrying && ((action === 'resume' && state !== 'paused') || (action === 'pause' && state !== 'running'))) return
+    const attempt = retrying ? previous : { action, requestId: creationRequestId() }
+    setControlRequests((current) => ({ ...current, [id]: attempt }))
+    pendingRef.current.add(key); setPending(new Set(pendingRef.current))
+    setSendErrors((current) => ({ ...current, [key]: '' }))
+    try {
+      const { next, order } = await requestDetail(`/api/tasks/${encodeURIComponent(id)}/control`, {
+        method: 'POST', body: JSON.stringify({ action: attempt.action, request_id: attempt.requestId }),
+      })
+      acceptDetail(next, order)
+      setControlRequests((current) => {
+        if (current[id] !== attempt) return current
+        const remaining = { ...current }
+        delete remaining[id]
+        return remaining
+      })
+    } catch (err) {
+      setSendErrors((current) => ({ ...current, [key]: userFacingError(err, '执行控制请求失败，请重试。') }))
+    } finally {
+      pendingRef.current.delete(key); setPending(new Set(pendingRef.current))
+    }
+  }
+
   const team = organization ? [...organization.workers, organization.leader, ...organization.cabinet] : roles
   const names = Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))
   const participants = task ? conversationParticipants(task, organization?.leader.id ?? 'store_manager', team.map((member) => member.id), [...(currentDetail?.questions ?? []), ...(currentDetail?.clarifications ?? [])].map((question) => question.role_id), currentDetail?.events) : []
@@ -1047,7 +1120,14 @@ function App() {
       if (!project) return
       const { next: result, order } = await requestDetail(`/api/tasks/${selectedId}/project`, { method: 'POST', body: JSON.stringify({ project_id: project.id }) })
       acceptDetail(result, order)
-    } else setNewProject(project)
+    } else {
+      if (project?.id !== newProject?.id) {
+        navigationRef.current += 1
+        creationRequest.current = null
+        setSendErrors((current) => ({ ...current, [newKey]: '' }))
+      }
+      setNewProject(project)
+    }
   }} onRecorded={(text) => { const key = selectedId ?? newKey; setDrafts((current) => current[key]?.trim() === text ? { ...current, [key]: '' } : current) }} onUpdated={() => setReloadToken((value) => value + 1)} />
   return (
     <div className="cater-app text-[#253d38]">
@@ -1072,13 +1152,13 @@ function App() {
               <button className="grid size-9 place-items-center rounded-md border border-[#ead2c5] bg-white text-[#b15342] shadow-sm hover:bg-[#fff0e9]" title="新建任务" aria-label="新建任务" onClick={() => chooseTask(null)}><Plus size={18} /></button>
             </div>
           </div>
-          <TaskList tasks={tasks} selectedId={selectedId} drafts={drafts} collapsed={tasksCollapsed} searchOpen={taskSearchOpen} onChoose={chooseTask} statusLabel={(item) => item.status_label} />
+          <TaskList tasks={tasks} selectedId={selectedId} drafts={drafts} collapsed={tasksCollapsed} searchOpen={taskSearchOpen} onChoose={chooseTask} statusLabel={(item) => executionLabel(executionControls[item.id]?.state) || item.status_label} />
         </aside>
         <section ref={chatPaneRef} className="chat-pane flex min-h-0 flex-col">
           {task ? <>
             <div className="chat-heading flex items-start justify-between gap-3 px-4 py-3 sm:px-7 sm:py-4" style={{ backgroundImage: `linear-gradient(90deg, #fffaf5 0%, rgba(255,250,245,.98) 55%, rgba(255,250,245,.78) 100%), url(${cafeWelcome})` }}>
               <div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div>
-              <div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${currentDetail?.activity?.active ? 'is-running' : ''}`}>{loading ? '接入对话中' : activityText(currentDetail?.activity) || taskListStatus(task)}</span><button id="workboard-trigger" onClick={() => setShowMobileBoard(true)} aria-label="打开成果与过程" title="打开成果与过程" aria-haspopup="dialog" aria-expanded={showMobileBoard} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div>
+              <div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${executionState === 'running' && currentDetail?.activity?.active ? 'is-running' : ''}`}>{loading ? '接入对话中' : executionLabel(executionState) || activityText(currentDetail?.activity) || taskListStatus(task)}</span><button id="workboard-trigger" onClick={() => setShowMobileBoard(true)} aria-label="打开成果与过程" title="打开成果与过程" aria-haspopup="dialog" aria-expanded={showMobileBoard} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div>
             </div>
             <div className="filter-strip flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-7"><div className="flex gap-1 overflow-x-auto" role="group" aria-label="对话筛选">{([{ id: 'all', label: '全部' }, { id: 'collaboration', label: '协作' }, { id: 'decision', label: '决策' }, { id: 'deliverable', label: '成果' }] as const).map((filter) => <button key={filter.id} onClick={() => setChatFilter(filter.id)} aria-pressed={chatFilter === filter.id} className={`filter-button shrink-0 px-3 py-1.5 text-xs font-semibold ${chatFilter === filter.id ? 'is-active' : ''}`}>{filter.label}</button>)}</div>
               <div className="flex max-w-full flex-wrap items-center gap-2">
@@ -1086,9 +1166,16 @@ function App() {
                 {currentDetail?.background && <ConversationOrigin key={`origin:${task.id}`} background={currentDetail.background} onNavigate={(id) => { chooseTask(id); focusComposerRef.current = true }} />}
                 <button type="button" className="origin-tool" aria-label="提问" title={questionMode ? '取消提问，返回协作草稿' : '向当前对话提问'} aria-pressed={questionMode} disabled={loading} onClick={toggleQuestion}><CircleHelp size={17} aria-hidden="true" /></button>
                 <button type="button" className="origin-tool" aria-label="基于此对话开新任务" title="基于此对话开新任务" aria-pressed={Boolean(derivation)} disabled={loading || Boolean(derivation)} onClick={beginDerivation}><GitFork size={17} aria-hidden="true" /></button>
+                <TaskControlMenu key={`control:${task.id}`} state={executionState} busy={controlBusy} disabled={loading} retry={sendErrors[controlKey] ? controlRequests[task.id]?.action : undefined} onAction={(action) => void controlTask(action)} />
                 {task.work?.items.length ? <button ref={graphTriggerRef} id="task-graph-trigger" type="button" aria-haspopup="dialog" aria-expanded={graphOpen} aria-busy={graphLoading} disabled={graphLoading} onClick={() => void openTaskGraph()} className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-semibold text-[#34786e] hover:bg-[#e7f0ec]">{graphLoading ? <LoaderCircle size={15} className="motion-safe:animate-spin" /> : <GitBranch size={15} />}任务脉络</button> : null}
               </div>
             </div>
+            {!loading && (executionState !== 'running' || controlBusy) && <p role="status" aria-label="执行状态" className="shrink-0 break-words px-4 py-2 text-xs leading-5 text-[#52766d] sm:px-7">
+              {executionState === 'paused' ? '已暂停后续执行；在途调用仍可能返回。仍可直接聊天。'
+                : executionState === 'cancelled' ? '已取消后续执行，不可恢复；在途调用仍可能返回。继续执行需新建任务，仍可直接聊天。' : ''}
+              {executionState !== 'running' && executionControl?.reason ? ` 原因：${executionControl.reason}` : ''}
+              {controlBusy && controlRequests[task.id] ? ` ${controlLabels[controlRequests[task.id].action]}请求待确认。` : ''}
+            </p>}
             {graphLoaded && task.work?.items.length ? <Suspense fallback={<p role="status" className="px-4 py-2 text-xs text-[#52766d]">正在打开任务脉络…</p>}><TaskGraph key={task.id} work={task.work} open={graphOpen} onOpenChange={setGraphOpen} returnFocusRef={graphTriggerRef} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></Suspense> : null}
             <div className="relative flex min-h-0 flex-1 flex-col">
               <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>{loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={`${task.id}:${item.id}`} item={item} taskId={task.id} controls={clarificationControls} />) : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
@@ -1113,7 +1200,7 @@ function ChatWaiting({ error, onRetry }: { error: string; onRetry: () => void })
 
 function DirectionComposer({ members, message, isSending, isLoading, deriving = false, questioning = false, onMessageChange, onSend }: { members: OrgRole[]; message: string; isSending: boolean; isLoading: boolean; deriving?: boolean; questioning?: boolean; onMessageChange: (value: string) => void; onSend: () => void }) {
   const sendLabel = deriving ? '创建衍生任务' : questioning ? '发送提问' : '发送消息'
-  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput value={message} label={deriving ? '衍生任务目标' : questioning ? '向当前对话提问' : '向团队发送消息'} placeholder={deriving ? '说说新任务要完成什么，可直接 @一位伙伴' : questioning ? '想了解什么？' : '继续说吧，补充想法、改目标，或直接 @一位伙伴'} members={members} onChange={onMessageChange} onSubmit={onSend} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={isSending || isLoading || !message.trim()} onClick={onSend} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isLoading ? '正在接上对话' : isSending ? '正在发送' : deriving || questioning ? sendLabel : '发送消息并安排下一轮协作'} aria-label={sendLabel} aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
+  return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput value={message} label={deriving ? '衍生任务目标' : questioning ? '向当前对话提问' : '向团队发送消息'} placeholder={deriving ? '说说新任务要完成什么，可直接 @一位伙伴' : questioning ? '想了解什么？' : '继续说吧，补充想法、改目标，或直接 @一位伙伴'} members={members} onChange={onMessageChange} onSubmit={onSend} portrait={(id) => <Portrait id={id} size="sm" />} /><button disabled={isSending || isLoading || !message.trim()} onClick={onSend} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isLoading ? '正在接上对话' : isSending ? '正在发送' : sendLabel} aria-label={sendLabel} aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div>
 }
 
 function TaskComposer({ members, draft, isSending, onDraftChange, onCreate }: { members: OrgRole[]; draft: string; isSending: boolean; onDraftChange: (value: string) => void; onCreate: () => void }) {

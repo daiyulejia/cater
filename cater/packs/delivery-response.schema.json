@@ -20,13 +20,28 @@
   "$defs": {
     "check": {
       "type": "object", "additionalProperties": false,
-      "required": ["id", "status", "reason", "evidence", "superseded_by", "source_quote"],
+      "required": ["id", "status", "reason", "evidence", "superseded_by", "source_quote", "measurements"],
       "properties": {
         "id": {"type": "string"},
         "status": {"type": "string", "enum": ["passed", "failed", "unknown", "superseded"]},
         "reason": {"type": "string"},
         "superseded_by": {"type": ["string", "null"]},
         "source_quote": {"type": ["string", "null"]},
+        "measurements": {
+          "type": "array", "maxItems": 32,
+          "description": "For every supported numeric content bound in this source, declare a comparison for EACH affected artifact. The host computes the observed value and overrides false passes. Use [] only when this source has no applicable supported metric; unsupported measures require unknown, not guessed success. Counts include raw Markdown.",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["artifact_seq", "metric", "operator", "limit", "source_quote"],
+            "properties": {
+              "artifact_seq": {"type": "integer"},
+              "metric": {"type": "string", "enum": ["utf8_bytes", "codepoints", "non_whitespace_codepoints", "cjk_ideographs"]},
+              "operator": {"type": "string", "enum": ["le", "ge", "eq"]},
+              "limit": {"type": "integer", "minimum": 0, "maximum": 1000000000},
+              "source_quote": {"type": "string", "minLength": 1, "maxLength": 2000, "description": "Exact excerpt specifying the numeric bound from this row's original requirement or criterion, not an artifact or another source."}
+            }
+          }
+        },
         "evidence": {
           "type": "array", "items": {
             "type": "object", "additionalProperties": false,

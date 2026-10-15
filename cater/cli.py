@@ -727,7 +727,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--drivers", help="driver config JSON")
     parser.add_argument("--roles", help="role config JSON")
     parser.add_argument("--browser-checker", help="trusted optional browser checker config JSON")
-    parser.add_argument("--driver-attempts", type=int, default=2, help="driver retry attempts before containment")
+    parser.add_argument("--driver-attempts", type=int, default=2,
+                        help="legacy compatibility option; execution calls are never implicitly replayed")
     parser.add_argument("--circuit-breaker-threshold", type=int, default=2, help="failures before a driver circuit opens")
     parser.add_argument("--audit-key", help="HMAC audit key")
     parser.add_argument("--audit-key-file", help="file containing HMAC audit key")
