@@ -20,13 +20,20 @@ def prepare(runtime: Runtime, request: dict, request_id: str | None):
     """
     if request.get("run") and request.get("battle"):
         raise ValueError("普通协作与强制治理不能同时启动。")
+    if request.get("collaboration") not in (None, "team"):
+        raise ValueError("collaboration must be team")
     with runtime.log.atomic():
         task_id, created = create(runtime, request, uuid.uuid4().hex if request_id is None else request_id)
         if not created:
             return task_id, False, activation(runtime, task_id)
         if request.get("workspace_id") is not None:
             runtime.workspaces.bind(task_id, request["workspace_id"], expected_revision=None)
-        if request.get("requested_route") is not None or not request.get("dispatch"):
+        team = getattr(runtime, "team", None)
+        if request.get("collaboration") == "team" and team is not None and team.available():
+            source = next(runtime.log.iter_events(task_id=task_id, event_types=("task.created",)))
+            team.enable(task_id)
+            team.receive(task_id, request["goal"], request_id=f"team-creation-{source.seq}")
+        elif request.get("requested_route") is not None or not request.get("dispatch"):
             runtime.intake(task_id, requested_route=request.get("requested_route") or "auto",
                            preferred_owner=request.get("assign_to") or None,
                            preferred_objective=request.get("assign_objective"),

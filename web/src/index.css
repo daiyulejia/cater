@@ -1,5 +1,19 @@
 @import "tailwindcss";
 
+.chat-markdown { overflow-wrap: anywhere; }
+.chat-markdown > * + * { margin-top: 0.7em; }
+.chat-markdown p { white-space: pre-wrap; }
+.chat-markdown h1, .chat-markdown h2, .chat-markdown h3 { font-size: 1em; font-weight: 700; }
+.chat-markdown ul, .chat-markdown ol { padding-left: 1.5em; }
+.chat-markdown ul { list-style: disc; }
+.chat-markdown ol { list-style: decimal; }
+.chat-markdown a { color: #24766b; text-decoration: underline; }
+.chat-markdown pre { overflow-x: auto; padding: 0.75em; background: #f5f8f6; border-radius: 6px; }
+.chat-markdown code { font-family: ui-monospace, monospace; font-size: 0.9em; }
+.chat-markdown :not(pre) > code { padding: 0.1em 0.3em; background: #f1f6f3; border-radius: 3px; }
+.chat-markdown blockquote { border-left: 2px solid #aac7bc; padding-left: 0.8em; }
+.chat-markdown th, .chat-markdown td { border: 1px solid #d9e6df; padding: 0.3em 0.6em; }
+
 :root {
   font-family: "Microsoft YaHei", "PingFang SC", Inter, ui-sans-serif, system-ui, sans-serif;
   color: #253d38;

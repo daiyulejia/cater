@@ -397,7 +397,7 @@ test.each([undefined, 'docs', 'host'])('首次发送目录 %s 随创建提交，
   writeNew()
   await sendNew()
   expect(h.posts().map(([url]) => url)).toEqual(['/api/tasks'])
-  expect(h.bodies()[0]).toEqual({ goal: '首次发送的工程任务', request_id: expect.any(String), run: true, background: true, ...(id ? { workspace_id: id } : {}) })
+  expect(h.bodies()[0]).toEqual({ goal: '首次发送的工程任务', request_id: expect.any(String), collaboration: 'team', run: true, background: true, ...(id ? { workspace_id: id } : {}) })
   fireEvent.click(screen.getByRole('button', { name: '新建任务' }))
   await open()
   expect(screen.getByText('未选择工作目录')).toBeTruthy()

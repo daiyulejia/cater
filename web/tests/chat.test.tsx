@@ -71,6 +71,7 @@ test.each(['决策', '成果'])('从%s筛选发送追问回到全部，执行中
   expect(posts).toHaveLength(1)
   expect(posts[0][0]).toBe('/api/tasks/乙/command')
   expect(JSON.parse(String(posts[0][1].body)).instruction).toBe('群里有人接着处理吗？')
+  expect(JSON.parse(String(posts[0][1].body)).collaboration).toBe('team')
 })
 
 test('品牌入口返回同一个新对话，保留各自草稿且不提交或重规划任务', async () => {

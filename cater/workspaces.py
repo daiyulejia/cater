@@ -110,21 +110,30 @@ class WorkspaceService:
 
     def pending(self, *, root=None, task_id=None):
         events = self.rt.log.read(task_id=task_id)
-        starts = {e.seq: e for e in events if e.type == "workspace.tool_started" and e.actor == HOST
+        team = Actor.system("team")
+        starts = {e.seq: e for e in events if (e.type == "workspace.tool_started" and e.actor == HOST
+                  or e.type == "team.tool_started" and e.actor == team
+                  and e.payload.get("name", "").startswith("workspace_"))
                   and (root is None or e.payload.get("root") == root)}
         for event in events:
-            if event.actor != HOST and not (event.type == "workspace.tool_reconciled" and event.actor == Actor.human()):
+            if event.actor not in (HOST, team) and not (event.type == "workspace.tool_reconciled" and event.actor == Actor.human()):
                 continue
-            if event.type not in {"workspace.tool_finished", "workspace.tool_reconciled"}:
+            if event.type not in {"workspace.tool_finished", "workspace.tool_reconciled", "team.tool_finished"}:
                 continue
             start = starts.get(event.payload.get("started_seq"))
+            if event.type != "workspace.tool_reconciled" and (start is None or
+                    (event.type == "team.tool_finished") != (start.type == "team.tool_started")
+                    or event.actor != (team if start.type == "team.tool_started" else HOST)):
+                continue
             if (start and event.task_id == start.task_id and event.seq > start.seq
-                    and event.payload.get("call_id") == start.payload.get("call_id")):
+                    and (event.payload.get("call_id") == start.payload.get("call_id")
+                         or event.type == "team.tool_finished" and start.type == "team.tool_started"
+                         and event.payload.get("run_id") == start.payload.get("run_id"))):
                 if event.type == "workspace.tool_reconciled" and (
                     event.payload.get("invocation_stopped") is not True or event.payload.get("started_hash") != start.hash):
                     continue
                 result = event.payload.get("result", {})
-                if event.type == "workspace.tool_finished" and (
+                if event.type in {"workspace.tool_finished", "team.tool_finished"} and (
                     not isinstance(result, dict) or result.get("status") not in {"ok", "error"} or result.get("complete") is False
                     or result.get("outcome") == "timeout"
                     or isinstance(result.get("error"), dict) and result["error"].get("code") == "process_failed"):

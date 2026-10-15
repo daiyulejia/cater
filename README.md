@@ -52,6 +52,7 @@ API 密钥放在环境变量中，不要写进角色卡、聊天或提交到仓�
 ## 文档与开发
 
 - [接入与配置](examples/README.md)
+- [对话式协作](docs/team-chat.zh-CN.md)
 - [成果与回放](docs/artifacts.zh-CN.md)
 - [工作项与整体验收](docs/work-items.zh-CN.md)
 - [本机验证与安全边界](docs/local-verification.zh-CN.md)

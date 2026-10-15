@@ -99,7 +99,7 @@ test('发送新目标到来源 derive 接口，保留点名且不向原群发 co
   await send()
   expect(posts()).toHaveLength(1)
   expect(posts()[0][0]).toBe('/api/tasks/b/derive')
-  expect(bodies()[0]).toEqual({ goal: '@米寇 做一个独立的新目标', request_id: expect.stringMatching(uuid), run: true, background: true })
+  expect(bodies()[0]).toEqual({ goal: '@米寇 做一个独立的新目标', request_id: expect.stringMatching(uuid), collaboration: 'team', run: true, background: true })
   expect(screen.getByRole('heading', { name: '新任务', level: 1 })).toBeTruthy()
   expect(screen.getByRole('button', { name: '查看对话来源' })).toBeTruthy()
   await select('b')

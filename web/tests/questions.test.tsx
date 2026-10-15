@@ -153,7 +153,7 @@ test('完成任务在原群 POST questions，保留点名，不调用 command �
   toggle(); expect(normalInput().value).toBe('继续协作的草稿')
   await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送消息' })))
   expect(posts()[1][0]).toBe('/api/tasks/b/command')
-  expect(bodies()[1]).toEqual({ instruction: '继续协作的草稿', continue: true, request_id: expect.stringMatching(uuid) })
+  expect(bodies()[1]).toEqual({ instruction: '继续协作的草稿', collaboration: 'team', continue: true, request_id: expect.stringMatching(uuid) })
 })
 
 test('普通消息发送失败后重试复用标识，成功后的下一条消息使用新标识', async () => {

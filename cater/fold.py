@@ -171,6 +171,17 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
                 task.status = "running"
         elif event.type == "task.started":
             task.status = "running"
+        elif event.type == "team.started":
+            task.status = "running"
+        elif event.type == "team.objective_updated" and event.actor == Actor.system("team"):
+            task.goal = payload["goal"]
+            task.status = "running"
+        elif event.type == "team.objective_completed" and event.actor == Actor.system("team"):
+            task.status = "done"
+        elif event.type == "team.artifact_saved" and event.actor == Actor.system("team"):
+            artifact = next((a for a in task.deliverables if a["seq"] == payload.get("artifact_seq")), None)
+            if artifact and artifact.get("content_sha256") == payload.get("content_sha256"):
+                artifact["local_path"] = payload["path"]
         elif event.type == "task.interpreted":
             task.interpretation = {"seq": event.seq, **payload}
         elif event.type == "task.routed":
@@ -222,7 +233,7 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
                 and workspace_usage[seq].payload.get("attempt_id") == payload.get("attempt_id")
                 and workspace_usage[seq].payload.get("role") == event.actor.id
                 and workspace_usage[seq].payload.get("driver") == payload.get("driver") for seq in calls))
-            if not accounted:
+            if not accounted and payload.get("phase") != "team":
                 task.tokens += tokens if valid_token_count(tokens) else 0
                 source = usage_source(tokens, payload.get("token_usage"))
                 task.token_usage[source] = task.token_usage.get(source, 0) + 1
@@ -235,6 +246,11 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
               or (event.type == "workspace.model_called" and event.actor.id == "workspace_gateway")) and event.actor.kind == "system" and "driver" in payload:
             if event.type == "workspace.model_called":
                 workspace_usage[event.seq] = event
+            tokens = payload.get("tokens")
+            task.tokens += tokens if valid_token_count(tokens) else 0
+            source = usage_source(tokens, payload.get("token_usage"))
+            task.token_usage[source] = task.token_usage.get(source, 0) + 1
+        elif event.type == "team.model_called" and event.actor == Actor.system("team"):
             tokens = payload.get("tokens")
             task.tokens += tokens if valid_token_count(tokens) else 0
             source = usage_source(tokens, payload.get("token_usage"))

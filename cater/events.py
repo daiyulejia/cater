@@ -20,6 +20,16 @@ from typing import Any, Iterable, Iterator, Mapping
 GENESIS_HASH = "0" * 64
 
 EVENT_CATEGORIES = {
+    "team.started": "lifecycle",
+    "team.message_received": "dialogue",
+    "team.run_started": "lifecycle",
+    "team.run_finished": "lifecycle",
+    "team.objective_updated": "planning",
+    "team.objective_completed": "outcome",
+    "team.model_called": "driver",
+    "team.tool_started": "execution",
+    "team.tool_finished": "execution",
+    "team.artifact_saved": "outcome",
     "planning.requested": "planning",
     "planning.started": "planning",
     "planning.finished": "planning",

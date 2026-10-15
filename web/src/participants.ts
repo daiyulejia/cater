@@ -1,6 +1,7 @@
 import type { WorkState } from './WorkItems'
+import type { TeamState } from './team'
 
-type WorkEvent = { seq: number; type: string; payload: Record<string, unknown> }
+type WorkEvent = { seq: number; type: string; actor?: { id: string }; payload: Record<string, unknown> }
 
 export function sameWorkScope(left: unknown, right: unknown): boolean {
   if (!left || !right || typeof left !== 'object' || typeof right !== 'object' || Array.isArray(left) || Array.isArray(right)) return false
@@ -16,12 +17,24 @@ export function consultationMatches(request: WorkEvent | undefined, reply: WorkE
 }
 
 export function conversationParticipants(
-  task: { work?: WorkState | null; assignments: { owner: string; status: string }[]; messages: { actor: string }[] },
+  task: { team?: TeamState | null; work?: WorkState | null; assignments: { owner: string; status: string }[]; messages: { actor: string }[] },
   leaderId: string,
   memberIds: string[],
   questionRoleIds: string[] = [],
   events: WorkEvent[] = [],
 ) {
+  if (task.team?.enabled) {
+    const known = new Set(memberIds)
+    const involved = events.flatMap((event) => {
+      const p = event.payload
+      if (event.type.startsWith('team.')) return [event.actor?.id, p.role, p.recipient]
+      if (event.type === 'msg.said' && p.phase === 'team') return [event.actor?.id, p.speaker, p.speaker_id]
+      return []
+    })
+    return [...new Set([leaderId, ...(task.team.runs ?? []).map((run) => run.role),
+      ...(task.team.assignments ?? []).flatMap((assignment) => [assignment.sender, assignment.owner, assignment.recipient, assignment.role]), ...involved, ...questionRoleIds])]
+      .filter((id): id is string => typeof id === 'string' && known.has(id))
+  }
   const participants = task.work?.items.length
     ? task.work.items.flatMap((item) => [item.owner, ...(item.reviewer ? [item.reviewer] : [])])
     : [...task.assignments.filter((item) => item.status === 'assigned').map((item) => item.owner),

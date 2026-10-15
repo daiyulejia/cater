@@ -51,7 +51,7 @@ class ActivationSuperseded(WorkConflict):
 class ActivityRunner:
     """Run long collaboration rounds off the request thread, one per task."""
 
-    _BINDING_KEYS = ("conversation_seq", "expected_scope", "finished_seq", "resume_seq", "activation_seq")
+    _BINDING_KEYS = ("conversation_seq", "expected_scope", "finished_seq", "resume_seq", "activation_seq", "team_message_seq")
 
     def __init__(self, runtime_factory: Callable[[], Runtime]):
         self._runtime_factory = runtime_factory
@@ -63,6 +63,9 @@ class ActivityRunner:
 
     def answer_conversations(self, task_id: str) -> None:
         with self._lock:
+            with self._runtime_factory() as runtime:
+                if _team_enabled(runtime, task_id):
+                    return
             if task_id in self._conversation_tasks:
                 return
             owner = uuid.uuid4().hex
@@ -87,6 +90,8 @@ class ActivityRunner:
                             return
                         wait_seconds = None
                         with self._runtime_factory() as runtime:
+                            if _team_enabled(runtime, task_id):
+                                return
                             pending = runtime.conversation.pending(task_id)
                             if not pending:
                                 rows = runtime.conversation.view(task_id)
@@ -459,6 +464,8 @@ class ActivityRunner:
             return self.status(task_id)
         with self._lock:
             with self._runtime_factory() as runtime:
+                if _team_enabled(runtime, task_id):
+                    return self.status(task_id)
                 events = runtime.log.read(task_id=task_id)
                 finished = next((event for event in events if event.type == "conversation.finished"
                     and event.actor == EventActor.system("conversation")
@@ -488,6 +495,52 @@ class ActivityRunner:
             except WorkConflict:
                 # Another runner may have durably queued the same authorization.
                 return self.status(task_id)
+
+    def receive_team(self, runtime: Runtime, task_id: str, text: str,
+                     request_id: str | None = None) -> Event:
+        """Serialize engine selection with activity and conversation scheduling."""
+        with self._lock, runtime.log.atomic():
+            if not runtime.team.enabled(task_id):
+                pending = set()
+                for event in runtime.log.iter_events(task_id=task_id,
+                        event_types=("activity.queued", "activity.completed", "activity.failed")):
+                    if event.actor != EventActor.system("orchestrator"):
+                        continue
+                    identity = event.payload.get("activity_id")
+                    if event.type == "activity.queued":
+                        pending.add(identity)
+                    else:
+                        pending.discard(identity)
+                if (pending or self.status(task_id)["active"]
+                        or task_id in self._conversation_tasks or task_id in self._question_tasks):
+                    raise WorkConflict("cannot switch collaboration while a legacy activity is in flight")
+                runtime.team.enable(task_id)
+            return runtime.team.receive(task_id, text, request_id=request_id)
+
+    @staticmethod
+    def _team_message(runtime: Runtime, task_id: str, binding: dict[str, Any] | None) -> Event | None:
+        if not binding or "team_message_seq" not in binding:
+            return None
+        seq = binding["team_message_seq"]
+        if type(seq) is int and _team_enabled(runtime, task_id):
+            source = next((event for event in runtime.log.iter_events(task_id=task_id,
+                event_types=("team.message_received",)) if event.seq == seq), None)
+            if (source is not None and source.actor == EventActor.human()
+                    and source.payload.get("kind") == "message"):
+                return source
+        raise WorkConflict("team chat requires a recorded customer message for this task")
+
+    def continue_team(self, task_id: str, message: Event) -> dict[str, Any]:
+        binding = {"team_message_seq": message.seq}
+        with self._lock:
+            with self._runtime_factory() as runtime:
+                if self._team_message(runtime, task_id, binding) != message:
+                    raise WorkConflict("team message source does not match")
+                if any(event.actor == EventActor.system("orchestrator")
+                       and event.payload.get("team_message_seq") == message.seq
+                       for event in runtime.log.iter_events(task_id=task_id, event_types=("activity.queued",))):
+                    return self.status(task_id)
+            return self._submit(task_id, "run", queue_after_current=True, binding=binding)
 
     def continue_after_current(self, task_id: str, action: str) -> dict[str, Any]:
         """Queue one follow-up round without racing the active one.
@@ -536,6 +589,8 @@ class ActivityRunner:
 
     def _submit(self, task_id: str, action: str, *, queue_after_current: bool,
                 binding: dict[str, Any] | None = None, run_inline: bool = False) -> dict[str, Any]:
+        if binding and "team_message_seq" in binding and action != "run":
+            raise WorkConflict("team messages can only queue ordinary collaboration")
         with self._lock:
             current = self._activities.get(task_id)
             with self._runtime_factory() as runtime:
@@ -644,7 +699,8 @@ class ActivityRunner:
                 payload["replaces_action"] = replaces_action
             payload.update({key: activity[key] for key in self._BINDING_KEYS
                             if key in activity})
-            source_key = next((key for key in ("conversation_seq", "resume_seq", "activation_seq") if key in payload), None)
+            source_key = next((key for key in ("conversation_seq", "resume_seq", "activation_seq", "team_message_seq")
+                               if key in payload), None)
             if source_key is not None:
                 def claim():
                     if any(event.actor == EventActor.system("orchestrator")
@@ -766,7 +822,8 @@ class ActivityRunner:
                         runtime.battle(task_id)
                 else:
                     raise ValueError(f"unsupported background action {action!r}")
-                control = self._control_failure(runtime, task_id)
+                control = self._control_failure(runtime, task_id,
+                    binding if "team_message_seq" in binding else None)
                 if control:
                     raise ExecutionScopeChanged(control["message"])
                 # A normal return can still mean planning/review stopped at an unknown call.
@@ -781,6 +838,9 @@ class ActivityRunner:
     @staticmethod
     def _control_failure(runtime: Runtime, task_id: str, binding: dict[str, Any] | None = None) -> dict[str, Any] | None:
         control = runtime.execution_control.view(task_id)
+        message = ActivityRunner._team_message(runtime, task_id, binding)
+        if message is not None and control["state"] == "paused":
+            return None
         authorization_seq = (binding or {}).get("resume_seq",
             (binding or {}).get("conversation_seq", (binding or {}).get("activation_seq", (binding or {}).get("queued_seq"))))
         if control["state"] == "running" and authorization_seq is not None:
@@ -813,22 +873,23 @@ class ActivityRunner:
         # Both folds authenticate recovery evidence; review starts also need the
         # prepared bundle. A filtered event stream would change their meaning.
         events = runtime.log.read(task_id=task_id)
+        team_message = ActivityRunner._team_message(runtime, task_id, binding)
         blocked = []
         pending = {}
         authorization_seq = (binding or {}).get("resume_seq",
             (binding or {}).get("conversation_seq", (binding or {}).get("queued_seq")))
-        _, planning_finishes, _, planning_pending = _attempt_state(events)
-        _, review_finishes, review_pending = _review_state(events)
-        if planning_pending:
-            Planner(runtime).recover(task_id)
-        if review_pending:
-            DeliveryService(runtime).recover(task_id)
-        # Closing a safe expired text claim is not permission to replay it in
-        # this activity. The caller must authorize again after reconciliation.
-        blocked.extend(event.seq for event in (*planning_pending, *review_pending))
-        blocked.extend(event.seq for event in (*planning_finishes.values(), *review_finishes.values())
-            if authorization_seq is not None and event.payload.get("status") == "interrupted"
-            and event.seq > authorization_seq)
+        if not _team_enabled(runtime, task_id):
+            _, planning_finishes, _, planning_pending = _attempt_state(events)
+            _, review_finishes, review_pending = _review_state(events)
+            if planning_pending:
+                Planner(runtime).recover(task_id)
+            if review_pending:
+                DeliveryService(runtime).recover(task_id)
+            # An expired text claim is not permission to replay it.
+            blocked.extend(event.seq for event in (*planning_pending, *review_pending))
+            blocked.extend(event.seq for event in (*planning_finishes.values(), *review_finishes.values())
+                if authorization_seq is not None and event.payload.get("status") == "interrupted"
+                and event.seq > authorization_seq)
         for started in events:
             if started.actor == EventActor.system("orchestrator"):
                 activity_id = started.payload.get("activity_id")
@@ -842,7 +903,7 @@ class ActivityRunner:
                         blocked.append(started.seq)
                 elif started.type in {"activity.completed", "activity.failed"}:
                     pending.pop(activity_id, None)
-            if (check_activities and binding and started.type == "activity.failed"
+            if (check_activities and binding and team_message is None and started.type == "activity.failed"
                     and started.actor == EventActor.system("orchestrator")
                     and authorization_seq is not None and started.seq > authorization_seq
                     and started.payload.get("activity_id") != binding.get("activity_id")
@@ -966,10 +1027,12 @@ class ActivityRunner:
             if error:
                 activity["error"] = error
             queued = activity.get("follow_up")
+            team_chat = False
             if isinstance(queued, dict):
                 try:
                     with self._runtime_factory() as runtime:
                         control = self._control_failure(runtime, task_id, queued)
+                        team_chat = self._team_message(runtime, task_id, queued) is not None
                 except Exception:
                     queued.update(state="blocked", error="无法核对执行控制状态，排队请求尚未执行。")
                     self._revision += 1
@@ -978,7 +1041,7 @@ class ActivityRunner:
                 if control:
                     self._close_follow_up(task_id, activity, control)
                     return
-            if (state == "completed" or (state == "failed" and follow_after_failure)) and isinstance(queued, dict):
+            if (state == "completed" or (state == "failed" and (follow_after_failure or team_chat))) and isinstance(queued, dict):
                 follow_up = {**queued, "state": "queued"}
                 activity.pop("follow_up")
                 self._activities[task_id] = follow_up
@@ -1161,7 +1224,8 @@ def make_handler(
                 with self._runtime() as rt:
                     return self._send_json(
                         [
-                            {**task_to_dict(task, include_content=False), "activity": activities.status(task.id)}
+                            {**task_to_dict(task, include_content=False, team=_team_view(rt, task.id)),
+                             "activity": activities.status(task.id)}
                             for task in rt.tasks()
                         ]
                     )
@@ -1239,7 +1303,7 @@ def make_handler(
                         if rt.task(task_id) is None:
                             return self._not_found()
                         try:
-                            raw = rt.delivery.archive(task_id)
+                            raw = rt.team.archive(task_id) if _team_enabled(rt, task_id) else rt.delivery.archive(task_id)
                         except ValueError as exc:
                             return self._conflict(str(exc))
                         self.send_response(HTTPStatus.OK)
@@ -1266,13 +1330,15 @@ def make_handler(
                     if task is None:
                         return self._not_found()
                     events = rt.log.read(task_id=task_id)
+                    team = _team_view(rt, task_id)
                     return self._send_html(
                         render_task(
                             task,
                             events,
-                            rt.review(task_id),
+                            None if team and team.get("enabled") else rt.review(task_id),
                             roles=rt.roles,
                             timeline_category=timeline_category,
+                            team=team,
                         )
                     )
             return self._not_found()
@@ -1346,12 +1412,14 @@ def make_handler(
                     try:
                         from .task_requests import prepare
                         task_id, created, activation = prepare(rt, {
-                            "goal": goal, "acceptance": acceptance, "project_id": data.get("project_id"),
+                            "goal": data.get("goal") if data.get("collaboration") == "team" else goal,
+                            "acceptance": acceptance, "project_id": data.get("project_id"),
                             "requested_route": requested_route, "assign_to": assign_owner,
                             "assign_objective": _optional_text(data.get("assign_objective")),
                             "assign_acceptance": _optional_text(data.get("assign_acceptance")),
                             "run": run_now, "battle": force_battle, "background": background,
                             "dispatch": _truthy(data.get("dispatch")),
+                            **({"collaboration": data["collaboration"]} if "collaboration" in data else {}),
                             **({"workspace_id": data["workspace_id"]} if "workspace_id" in data else {}),
                         }, data.get("request_id"))
                     except WorkConflict as exc:
@@ -1412,18 +1480,28 @@ def make_handler(
                             if created:
                                 background_action = "run"
                         elif action == "derive":
-                            if set(data) - {"goal", "acceptance", "request_id", "run", "background"}:
+                            if set(data) - {"goal", "acceptance", "request_id", "run", "background", "collaboration"}:
                                 return self._bad_request("来源背景与项目由服务器确定，不能由请求替换。")
-                            result = rt.derive_task(task_id, data.get("goal"),
-                                                    _acceptance_lines(data.get("acceptance")),
-                                                    request_id=data.get("request_id"))
-                            child_id = result["task_id"]
-                            if result["created"]:
-                                mentioned = rt.mentioned_workers(data["goal"])
-                                owner = mentioned[0] if len(mentioned) == 1 else None
-                                rt.intake(child_id, requested_route="direct" if owner else "auto", preferred_owner=owner)
-                                if _truthy(data.get("run")):
-                                    activities.submit(child_id, "run")
+                            if data.get("collaboration") not in (None, "team"):
+                                return self._bad_request("collaboration must be team")
+                            with rt.log.atomic():
+                                result = rt.derive_task(task_id, data.get("goal"),
+                                                        _acceptance_lines(data.get("acceptance")),
+                                                        request_id=data.get("request_id"))
+                                child_id = result["task_id"]
+                                if result["created"]:
+                                    team = getattr(rt, "team", None)
+                                    if (_team_enabled(rt, task_id) or
+                                            data.get("collaboration") == "team" and team is not None and team.available()):
+                                        source = next(rt.log.iter_events(task_id=child_id, event_types=("task.created",)))
+                                        team.enable(child_id)
+                                        team.receive(child_id, data["goal"], request_id=f"team-creation-{source.seq}")
+                                    else:
+                                        mentioned = rt.mentioned_workers(data["goal"])
+                                        owner = mentioned[0] if len(mentioned) == 1 else None
+                                        rt.intake(child_id, requested_route="direct" if owner else "auto", preferred_owner=owner)
+                            if result["created"] and _truthy(data.get("run")):
+                                activities.submit(child_id, "run")
                             return self._send_json(self._task_payload(child_id, activities),
                                                    status=HTTPStatus.CREATED if result["created"] else HTTPStatus.OK)
                         elif action == "project":
@@ -1434,6 +1512,8 @@ def make_handler(
                             if background:
                                 background_action = "run"
                             else:
+                                if _team_enabled(rt, task_id) and activities._control_failure(rt, task_id):
+                                    return self._conflict("execution is paused or cancelled; send a message to chat")
                                 rt.collaborate(task_id)
                         elif action == "battle":
                             if background:
@@ -1453,6 +1533,14 @@ def make_handler(
                                 acceptance=_optional_text(data.get("acceptance")),
                             )
                         elif action == "command":
+                            if data.get("collaboration") not in (None, "team"):
+                                return self._bad_request("collaboration must be team")
+                            team = getattr(rt, "team", None)
+                            if (_team_enabled(rt, task_id) or
+                                    data.get("collaboration") == "team" and team is not None and team.available()):
+                                message = activities.receive_team(rt, task_id, data.get("instruction"), data.get("request_id"))
+                                activities.continue_team(task_id, message)
+                                return self._send_json(self._task_payload(task_id, activities), status=HTTPStatus.ACCEPTED)
                             instruction = _optional_text(data.get("instruction")) or "Updated from Cater API"
                             command = rt.chat(
                                 task_id,
@@ -1529,6 +1617,8 @@ def make_handler(
                 with self._runtime() as rt:
                     if rt.task(task_id) is None:
                         return self._not_found()
+                    if _team_enabled(rt, task_id) and activities._control_failure(rt, task_id):
+                        return self._conflict("execution is paused or cancelled; send a message to chat")
                     rt.collaborate(task_id)
                 self._redirect(f"/tasks/{task_id}")
                 return
@@ -1577,6 +1667,12 @@ def make_handler(
                     if rt.task(task_id) is None:
                         return self._not_found()
                     try:
+                        if _team_enabled(rt, task_id):
+                            message = activities.receive_team(rt, task_id, data.get("instruction", [""])[0],
+                                                              data.get("request_id", [None])[0])
+                            activities.continue_team(task_id, message)
+                            self._redirect(f"/tasks/{task_id}")
+                            return
                         command = rt.chat(
                             task_id,
                             instruction or "Updated from Cater web",
@@ -1585,6 +1681,8 @@ def make_handler(
                             goal=goal,
                             acceptance=acceptance if acceptance_raw.strip() else None,
                         )
+                    except WorkConflict as exc:
+                        return self._conflict(str(exc))
                     except ValueError as exc:
                         return self._bad_request(str(exc))
                     if command.type == "conversation.received":
@@ -1755,6 +1853,7 @@ def make_handler(
                     rows = [
                         _task_summary(task, version=version, latest_seq=latest[task.id],
                                       execution_control=rt.execution_control.view(task.id),
+                                      team=_team_view(rt, task.id),
                                       conversation_count=_conversation_count(stats[task.id]))
                         for task in rt.tasks()
                     ]
@@ -2107,6 +2206,7 @@ def render_task(
     *,
     roles: list[Any] | None = None,
     timeline_category: str | None = None,
+    team: dict[str, Any] | None = None,
 ) -> str:
     message_cards = "\n".join(_message_card(item) for item in task.messages)
     timeline_events = _filtered_timeline_events(events, timeline_category)
@@ -2114,6 +2214,24 @@ def render_task(
     if not timeline:
         timeline = '<li class="empty-event">No events match this filter.</li>'
     filters = _timeline_filters(task.id, events, timeline_category)
+    if team and team.get("enabled"):
+        return page(f"Cater / {task.id}", f"""
+        <section class="topbar">
+          <div><p class="eyebrow"><a href="/">Cater Replay</a> / {escape(task.id)}</p>
+          <h1>{escape(team['objective'])}</h1></div>
+          <span class="status">{escape(team['status'])}</span>
+        </section>
+        <section class="panel"><h2>Current Work</h2><p>{escape(team['checkpoint'])}</p></section>
+        <section class="panel">
+          <form method="post" action="/tasks/{escape(task.id)}/command" class="compact-form">
+            <label>Message<textarea name="instruction" required></textarea></label>
+            <input type="hidden" name="request_id" value="{uuid.uuid4().hex}">
+            <button type="submit">Send</button>
+          </form>
+        </section>
+        <section class="panel"><h2>Messages</h2><div class="messages">{message_cards}</div></section>
+        <section class="panel"><h2>Timeline</h2>{filters}<ol class="timeline">{timeline}</ol></section>
+        """)
     ladder = "\n".join(_ladder_step(step) for step in decision_ladder(events))
     path = "\n".join(_path_step(step) for step in organization_path(task, events))
     governance = _governance_panel(task)
@@ -2197,8 +2315,9 @@ def page(title: str, body: str) -> str:
 """
 
 
-def task_to_dict(task: TaskSnapshot, *, include_content: bool = True) -> dict[str, Any]:
-    return {
+def task_to_dict(task: TaskSnapshot, *, include_content: bool = True,
+                 team: dict[str, Any] | None = None) -> dict[str, Any]:
+    result = {
         "id": task.id,
         "project_id": task.project_id,
         "goal": task.goal,
@@ -2230,6 +2349,14 @@ def task_to_dict(task: TaskSnapshot, *, include_content: bool = True) -> dict[st
         "tokens": task.tokens,
         "token_usage": task.token_usage,
     }
+    if team and team.get("enabled"):
+        result["goal"] = team["objective"]
+        result["status"] = team["status"]
+        for key in ("work", "brief", "plan", "interpretation", "route", "mission", "cabinet", "proposal", "decision"):
+            result[key] = None
+        for key in ("assignments", "reviews", "diagnoses", "handoffs", "verifications"):
+            result[key] = []
+    return result
 
 
 def _role_to_dict(role: Any) -> dict[str, str]:
@@ -2257,12 +2384,23 @@ def _event_version(rt: Runtime) -> int:
     return rt.log.db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
 
 
+def _team_enabled(rt: Runtime, task_id: str) -> bool:
+    team = getattr(rt, "team", None)
+    return team is not None and team.enabled(task_id)
+
+
+def _team_view(rt: Runtime, task_id: str) -> dict[str, Any] | None:
+    team = getattr(rt, "team", None)
+    return team.view(task_id) if team is not None else None
+
+
 # Count conversational records, not inline membership notices. Keep receipt
 # suppression in sync with App.conversationFor when adding message event types.
 _CHAT_TYPES = {
     "clarification.requested",
     "question.asked", "question.finished",
     "conversation.received", "conversation.finished",
+    "team.message_received",
     "collaboration.requested", "collaboration.finished",
     "verification.planning_started", "verification.planned",
     "task.created", "rule.recorded", "rule.updated", "activity.failed", "human.commanded",
@@ -2309,11 +2447,22 @@ def _task_status_label(task: TaskSnapshot) -> str:
 
 
 def _task_summary(task: TaskSnapshot, *, version: int, latest_seq: int, conversation_count: int,
-                  execution_control: dict[str, Any] | None = None) -> dict[str, Any]:
+                  execution_control: dict[str, Any] | None = None,
+                  team: dict[str, Any] | None = None) -> dict[str, Any]:
     control = execution_control or {"state": "running", "seq": None, "reason": ""}
-    return {"id": task.id, "goal": task.goal, "project_id": task.project_id, "status": task.status,
+    label = _task_status_label(task)
+    if team and team.get("enabled"):
+        label = {"idle": "团队待开始", "running": "团队协作中", "completed": "团队本轮完成",
+                 "done": "团队本轮完成", "blocked": "团队待处理", "failed": "团队执行失败",
+                 "uncertain": "团队结果待核实"}.get(team.get("status"), "团队协作")
+        if team.get("pending_count"):
+            label = "团队有待处理消息"
+    return {"id": task.id, "goal": team["objective"] if team and team.get("enabled") else task.goal,
+            "project_id": task.project_id, "status": team["status"] if team and team.get("enabled") else task.status,
             "execution_control": control,
-            "status_label": {"paused": "已暂停", "cancelled": "已取消"}.get(control["state"], _task_status_label(task)),
+            "status_label": {"paused": "已暂停", "cancelled": "已取消"}.get(control["state"], label),
+            **({"team": {key: team[key] for key in ("enabled", "status", "pending_count", "revision")
+                         if key in team}} if team and team.get("enabled") else {}),
             "conversation_count": conversation_count,
             "latest_seq": latest_seq, "version": version, "evaluated_at": time.time()}
 
@@ -2324,8 +2473,12 @@ def _summary_activity(row: dict[str, Any], activity: dict[str, Any]) -> dict[str
         state["follow_up"] = {"action": activity["follow_up"]["action"]}
     label = row["status_label"]
     if activity.get("active") and row.get("execution_control", {}).get("state", "running") == "running":
-        label = ("已收下新方向，当前轮结束后继续" if state.get("follow_up", {}).get("action") == "run"
-                 else "协作已排队" if state["state"] == "queued" else "正在协作")
+        if row.get("team", {}).get("enabled"):
+            label = ("已收下新消息，当前轮结束后继续" if state.get("follow_up", {}).get("action") == "run"
+                     else "消息处理已排队" if state["state"] == "queued" else "正在处理消息")
+        else:
+            label = ("已收下新方向，当前轮结束后继续" if state.get("follow_up", {}).get("action") == "run"
+                     else "协作已排队" if state["state"] == "queued" else "正在协作")
     return {**row, "activity": state, "status_label": label}
 
 
@@ -2345,10 +2498,12 @@ def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | N
     if task is None:
         raise KeyError(task_id)
     events = rt.log.read(task_id=task_id)
+    team = _team_view(rt, task_id)
     payload = {
         "summary": _summary_activity(
             _task_summary(task, version=version, latest_seq=events[-1].seq if events else 0,
                           execution_control=rt.execution_control.view(task_id),
+                          team=team,
                           conversation_count=_conversation_count(Counter(
                               (e.type, e.payload.get("phase") if e.type == "msg.said"
                                and e.payload.get("phase") in ("planning", "delivery_receipt", "clarification_receipt", "collaboration_request")
@@ -2356,7 +2511,8 @@ def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | N
                                else "status_receipt" if e.type == "conversation.finished" and e.payload.get("action") == "status_task"
                                and e.payload.get("progress_seq") else None)
                               for e in events))), activity or {"state": "idle", "active": False}),
-        "task": task_to_dict(task),
+        "task": task_to_dict(task, team=team),
+        "team": team,
         "execution_control": rt.execution_control.view(task_id),
         "workspace": rt.workspaces.view(task_id),
         "events": [event_to_dict(e) for e in events],
@@ -2365,9 +2521,9 @@ def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | N
         "questions": rt.questions.view(task_id),
         "conversation": rt.conversation.view(task_id),
         "clarifications": rt.clarifications.view(task_id),
-        "decision_ladder": decision_ladder(events),
-        "organization_path": organization_path(task, events),
-        "review": rt.review(task_id),
+        "decision_ladder": [] if team and team.get("enabled") else decision_ladder(events),
+        "organization_path": [] if team and team.get("enabled") else organization_path(task, events),
+        "review": None if team and team.get("enabled") else rt.review(task_id),
     }
     if activity is not None:
         payload["activity"] = activity

@@ -11,6 +11,9 @@ export type EventDetailsProps = { event: DetailEvent; actorName?: (id: string) =
 type Field = { label: string; value: string }
 
 const titles: Record<string, string> = {
+  'team.message_received': '团队收到消息', 'team.run_started': '开始处理消息', 'team.run_finished': '消息处理结果',
+  'team.objective_updated': '团队目标已更新', 'team.objective_completed': '店长交付结论',
+  'team.model_called': '团队模型用量', 'team.tool_started': '团队工具已发起', 'team.tool_finished': '团队工具回执',
   'task.created': '任务已创建', 'task.started': '任务已启动', 'task.interpreted': '任务理解',
   'task.routed': '协作安排', 'mission.created': '工作目标', 'task.decomposed': '任务分工',
   'subtask.assigned': '工作指派', 'plan.proposed': '协作计划', 'plan.amended': '计划调整',
@@ -116,6 +119,33 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
   if (!Object.hasOwn(titles, event.type)) return { fields, status, note: '已保存这条事件记录，暂无对应的中文摘要。' }
   add('工作项', p.work_item_id)
   switch (event.type) {
+    case 'team.message_received':
+      add('消息内容', p.text); add('接收成员', member(p.recipient)); number('回复消息', p.reply_to)
+      add('消息类型', label(p.kind, { message: '聊天消息', assignment: '工作交接', report: '内部报告' }, '消息'))
+      break
+    case 'team.run_started': case 'team.run_finished':
+      status = event.type === 'team.run_started' ? '正在处理消息' : label(p.status, { done: '消息处理完成', completed: '消息处理完成', finished: '消息处理完成', succeeded: '消息处理完成', waiting: '等待伙伴回复', interrupted: '消息处理中断', failed: '消息处理失败', blocked: '消息处理受阻', cancelled: '消息处理已取消' }, '消息处理结果待确认')
+      number('关联消息', p.message_seq); add('处理成员', member(p.role)); add('原因', p.reason)
+      note = '消息处理结束不代表任务已交付。'
+      break
+    case 'team.objective_updated': add('当前目标', p.goal); break
+    case 'team.objective_completed':
+      status = '店长确认可交付'; add('交付摘要', p.summary); add('验证范围', p.verification)
+      note = '这是店长记录的交付结论，实际验证范围按原文保留。'
+      break
+    case 'team.model_called': {
+      const usage = record(p.usage)
+      add('调用成员', member(p.role)); number('用量', p.tokens ?? usage.total_tokens, ' token')
+      number('输入用量', usage.input_tokens ?? usage.prompt_tokens, ' token'); number('输出用量', usage.output_tokens ?? usage.completion_tokens, ' token')
+      break
+    }
+    case 'team.tool_started': case 'team.tool_finished':
+      status = event.type === 'team.tool_started' ? '等待工具回执' : label(p.status ?? record(p.result).status, { ok: '工具已完成', completed: '工具已完成', succeeded: '工具已完成', error: '工具未完成', failed: '工具未完成' }, '工具结果待确认')
+      add('工具', p.name ?? p.tool); add('执行成员', member(p.role)); add('摘要', p.summary ?? record(p.result).summary)
+      number('关联消息', p.message_seq); number('发起事件', p.started_seq); number('退出码', record(p.result).exit_code)
+      add('原因', p.reason ?? record(record(p.result).error).message)
+      note = '工具回执仅说明这次操作的结果。'
+      break
     case 'collaboration.requested':
       status = '已发起咨询'
       add('咨询成员', member(p.requester)); add('咨询对象', member(p.recipient)); add('问题', p.question)

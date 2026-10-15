@@ -241,6 +241,8 @@ class Runtime:
         self.delivery = DeliveryService(self)
         self.rooms = RoomService(self)
         self.conversation = ConversationService(self)
+        from .team import TeamService
+        self.team = TeamService(self)
         self.consultations = ConsultationService(self)
         self.driver_attempts = max(1, driver_attempts)
         self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
@@ -393,6 +395,8 @@ class Runtime:
         self._execution_authorization = (task_id, dict(expected_scope)) if expected_scope is not None else None
         self._execution_control_authorization = (task_id, self.execution_control.view(task_id)["seq"])
         try:
+            if self.team.enabled(task_id):
+                return self.team.run(task_id)
             self._check_execution_authorization(task_id)
             return self._run_round(task_id, force_governance=False)
         finally:
@@ -2331,7 +2335,7 @@ class Runtime:
         """Count only provider-reported usage; unknown telemetry cannot be safely capped."""
         return sum(
             event.payload["tokens"]
-            for event in self.log.iter_events(event_types=("msg.said", "msg.challenge", "question.finished", "conversation.finished", "collaboration.finished", "verification.planned", "workspace.model_called"))
+            for event in self.log.iter_events(event_types=("msg.said", "msg.challenge", "question.finished", "conversation.finished", "collaboration.finished", "verification.planned", "workspace.model_called", "team.model_called"))
             if event.payload.get("driver") == driver_name
             and event.payload.get("token_usage") == "reported"
             and valid_token_count(event.payload.get("tokens"))

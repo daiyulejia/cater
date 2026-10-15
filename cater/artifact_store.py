@@ -232,6 +232,31 @@ def _verify(directory: Path, manifest: dict, bodies: dict[str, bytes]) -> None:
             raise ArtifactStoreError(f"artifact content tampering: {entry['path']}")
 
 
+def materialize_team_artifact(root: str | os.PathLike[str], task_id: str, artifact: dict) -> str:
+    """Save a ledger-derived team artifact without fabricating a legacy work submission."""
+    _name(task_id)
+    filename = _name(artifact["filename"])
+    content = artifact["content"].encode("utf-8")
+    sha = hashlib.sha256(content).hexdigest()
+    if (not _positive(artifact.get("seq")) or sha != artifact.get("content_sha256")
+            or len(content) > MAX_CONTENT_BYTES):
+        raise ArtifactStoreError("invalid team artifact")
+    base = Path(root).absolute()
+    _directories(base, create=True)
+    directory = base / ("team-" + hashlib.sha256(task_id.encode()).hexdigest())
+    _directories(directory, create=True)
+    with _lock(directory / ".publish.lock"):
+        version = directory / (str(artifact["seq"]) + "-" + sha)
+        _directories(version, create=True)
+        path = version / filename
+        if path.exists():
+            if _read(path, MAX_CONTENT_BYTES) != content:
+                raise ArtifactStoreError("saved team artifact was modified")
+        else:
+            _write(path, content)
+        return str(path)
+
+
 def materialize(root: str | os.PathLike[str], task_id: str, submission: dict[str, Any],
                 artifacts: list[dict[str, Any]]) -> dict[str, Any]:
     """Return a deterministic manifest after verifying a complete local version.

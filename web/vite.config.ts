@@ -11,6 +11,11 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              name: 'team-state',
+              test: /[\\/]src[\\/]team\.ts$/,
+              priority: 20,
+            },
+            {
               name: 'graph-vendor',
               test: /[\\/]node_modules[\\/](?:@xyflow[\\/]|@dagrejs[\\/]|d3-[^\\/]+[\\/]|zustand[\\/])/,
               priority: 30,
