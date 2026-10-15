@@ -264,9 +264,10 @@ class CliDriver:
         task_id = context.get("task_id") if isinstance(context, dict) else None
         work = context.get("work") if isinstance(context, dict) else None
         isolated = isinstance(context.get("background"), dict) if isinstance(context, dict) else False
+        isolated = isolated or isinstance(context, dict) and context.get("context_scope") == "task"
         isolated = isolated or isinstance(work, dict) and work.get("phase") == "explanation"
         if isinstance(task_id, str) and task_id and isolated:
-            # Snapshot calls carry explicit context and must not reuse process history.
+            # Isolated calls carry explicit context and must not reuse process history.
             worker = CliDriver(
                 self.name, self.command, cwd=self.cwd, timeout=self.timeout,
                 restart_limit=self.restart_limit, token_budget=self.token_budget,

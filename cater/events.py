@@ -37,6 +37,9 @@ EVENT_CATEGORIES = {
     "checks.contract_revised": "policy",
     "project.created": "planning",
     "task.project_bound": "planning",
+    "room.created": "lifecycle",
+    "room.task_attached": "planning",
+    "room.message_received": "dialogue",
     "rule.recorded": "policy",
     "rule.updated": "policy",
     "rules.applied": "policy",
@@ -178,9 +181,28 @@ class EventLog:
         payload: dict[str, Any] | None = None,
         expected_head: str | None = None,
     ) -> Event:
-        category = EVENT_CATEGORIES.get(type)
-        if category is None:
-            raise UnknownEventType(type)
+        return self.emit_many(
+            [{"actor": actor, "type": type, "task_id": task_id, "payload": payload}],
+            expected_head=expected_head,
+        )[0]
+
+    def emit_many(
+        self,
+        entries: Iterable[dict[str, Any]],
+        *,
+        expected_head: str | None = None,
+    ) -> list[Event]:
+        """Append entries atomically, checking the global head once under lock.
+
+        Entries use emit's actor/type/task_id/payload fields. An empty iterable
+        returns [] without opening a transaction or checking expected_head.
+        """
+        entries = list(entries)
+        if not entries:
+            return []
+        for entry in entries:
+            if EVENT_CATEGORIES.get(entry["type"]) is None:
+                raise UnknownEventType(entry["type"])
         # Multiple Web requests use independent SQLite connections.  Acquiring
         # the write transaction before reading the previous hash prevents two
         # writers from attaching different events to the same chain head.
@@ -189,58 +211,65 @@ class EventLog:
             prev = self.head_hash()
             if expected_head is not None and prev != expected_head:
                 raise HeadChanged("event head changed")
-            event_id = uuid.uuid4().hex
-            ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
-            payload = dict(payload or {})
-            fingerprint = self._fingerprint(
-                event_id=event_id,
-                ts=ts,
-                task_id=task_id,
-                actor=actor,
-                type=type,
-                category=category,
-                payload=payload,
-                prev_hash=prev,
-            )
-            signature = self._sign(fingerprint) if self.audit_key else None
-            key_id = self.key_id if signature else None
-            cur = self.db.execute(
-                """INSERT INTO events
-                   (id, ts, task_id, actor_json, type, category, payload_json, prev_hash, hash, key_id, signature)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
+            events = []
+            for entry in entries:
+                actor = entry["actor"]
+                type = entry["type"]
+                task_id = entry.get("task_id")
+                category = EVENT_CATEGORIES[type]
+                event_id = uuid.uuid4().hex
+                ts = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+                payload = dict(entry.get("payload") or {})
+                fingerprint = self._fingerprint(
+                    event_id=event_id,
+                    ts=ts,
+                    task_id=task_id,
+                    actor=actor,
+                    type=type,
+                    category=category,
+                    payload=payload,
+                    prev_hash=prev,
+                )
+                signature = self._sign(fingerprint) if self.audit_key else None
+                key_id = self.key_id if signature else None
+                cur = self.db.execute(
+                    """INSERT INTO events
+                       (id, ts, task_id, actor_json, type, category, payload_json, prev_hash, hash, key_id, signature)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        event_id,
+                        ts,
+                        task_id,
+                        json.dumps(actor.to_dict(), ensure_ascii=False, sort_keys=True),
+                        type,
+                        category,
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                        prev,
+                        fingerprint,
+                        key_id,
+                        signature,
+                    ),
+                )
+                events.append(Event(
+                    int(cur.lastrowid),
                     event_id,
                     ts,
                     task_id,
-                    json.dumps(actor.to_dict(), ensure_ascii=False, sort_keys=True),
+                    actor,
                     type,
                     category,
-                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    payload,
                     prev,
                     fingerprint,
                     key_id,
                     signature,
-                ),
-            )
+                ))
+                prev = fingerprint
             self.db.commit()
-        except Exception:
+        except BaseException:
             self.db.rollback()
             raise
-        seq = int(cur.lastrowid)
-        return Event(
-            seq,
-            event_id,
-            ts,
-            task_id,
-            actor,
-            type,
-            category,
-            payload,
-            prev,
-            fingerprint,
-            key_id,
-            signature,
-        )
+        return events
 
     def read(self, task_id: str | None = None) -> list[Event]:
         return list(self.iter_events(task_id=task_id))

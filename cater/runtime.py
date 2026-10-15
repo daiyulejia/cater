@@ -30,6 +30,7 @@ from .work import WorkLedger, WorkConflict, validate_items
 from .verification import run_check, validate_check
 from .delivery import DeliveryService
 from .explanations import ExplanationService
+from .rooms import RoomService
 
 
 MAX_TASK_GOAL_CHARS = 12_000
@@ -191,6 +192,7 @@ class Runtime:
         self.work = WorkLedger(self.log, self.rulebook)
         self.questions = ExplanationService(self)
         self.delivery = DeliveryService(self)
+        self.rooms = RoomService(self)
         self.driver_attempts = max(1, driver_attempts)
         self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
         self._driver_health = driver_health or DriverHealth()
@@ -242,6 +244,11 @@ class Runtime:
         from .conversations import background
 
         return background(self, task_id)
+
+    def task_context_isolated(self, task_id: str) -> bool:
+        created = next(self.log.iter_events(task_id=task_id, event_types=("task.created",)), None)
+        return created is not None and (created.payload.get("context_scope") == "task"
+                                        or created.payload.get("background") is not None)
 
     def derive_task(self, source_task_id: str, goal: str, acceptance: list[str] | None = None,
                     *, request_id: str) -> dict[str, Any]:
@@ -1500,12 +1507,12 @@ class Runtime:
         return shared_deliverable_memory(filtered, exclude_task_id=exclude_task_id)
 
     def _project_events(self, task_id: str, event_types: tuple[str, ...]) -> list[Event]:
-        if self.conversation_background(task_id) is not None:
+        if self.task_context_isolated(task_id):
             return list(self.log.iter_events(task_id=task_id, event_types=event_types))
         projects = self.rulebook.task_projects()
         project_id = self.rulebook.task_project(task_id)
         independent = {e.task_id for e in self.log.iter_events(event_types=("task.created",))
-                       if e.payload.get("background") is not None}
+                       if e.payload.get("background") is not None or e.payload.get("context_scope") == "task"}
         return [event for event in self.log.iter_events(event_types=event_types)
                 if event.task_id in projects and projects[event.task_id] == project_id
                 and event.task_id not in independent]
@@ -1605,6 +1612,8 @@ class Runtime:
         }
         if work_context is not None:
             context["work"] = work_context
+        if self.task_context_isolated(task_id):
+            context["context_scope"] = "task"
         background = self.conversation_background(task_id)
         if background is not None:
             context["background"] = background

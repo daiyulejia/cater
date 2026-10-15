@@ -507,6 +507,8 @@ def make_handler(
                 return self._send_html(render_index(self._runtime()))
             if path == "/api/task-summaries":
                 return self._send_task_summaries()
+            if path == "/api/rooms" or path.startswith("/api/rooms/"):
+                return self._get_rooms(path, parsed.query)
             if path == "/api/tasks":
                 with self._runtime() as rt:
                     return self._send_json(
@@ -628,6 +630,8 @@ def make_handler(
                 return self._unauthorized()
             if not self._is_same_origin_write():
                 return self._forbidden("cross-origin writes are not allowed")
+            if path == "/api/rooms" or path.startswith("/api/rooms/"):
+                return self._post_rooms(path)
             if path in {"/api/projects", "/api/rules"} or path.startswith("/api/rules/"):
                 data = self._read_json()
                 if data is None:
@@ -931,6 +935,86 @@ def make_handler(
 
         def _runtime(self) -> Runtime:
             return build_runtime()
+
+        def _get_rooms(self, path: str, raw_query: str) -> None:
+            parts = path.split("/")
+            if path != "/api/rooms" and not (
+                len(parts) in {4, 5} and parts[3] and (len(parts) == 4 or parts[4] == "events")
+            ):
+                return self._not_found()
+            with self._runtime() as rt:
+                try:
+                    if path == "/api/rooms":
+                        return self._send_json(rt.rooms.list())
+                    room = rt.rooms.get(parts[3])
+                    if room is None:
+                        return self._not_found()
+                    if len(parts) == 4:
+                        return self._send_json(room)
+                    query = parse_qs(raw_query, keep_blank_values=True)
+                    if set(query) - {"after_seq", "membership_seq", "limit"}:
+                        return self._bad_request("群聊消息不支持该查询参数。")
+                    if any(len(values) != 1 for values in query.values()):
+                        return self._bad_request("群聊消息的查询参数不能重复。")
+                    try:
+                        after_seq = int(query.get("after_seq", ["0"])[0])
+                        membership_seq = int(query["membership_seq"][0]) if "membership_seq" in query else None
+                        limit = int(query.get("limit", ["100"])[0])
+                    except ValueError:
+                        return self._bad_request("消息游标、任务归属版本与分页数量必须是整数。")
+                    result = rt.rooms.timeline(parts[3], after_seq=after_seq,
+                                               membership_seq=membership_seq, limit=limit)
+                    return self._send_json({**result, "events": [event_to_dict(event) for event in result["events"]]})
+                except WorkConflict as exc:
+                    return self._conflict(str(exc))
+                except ValueError as exc:
+                    return self._bad_request(str(exc))
+
+        def _post_rooms(self, path: str) -> None:
+            parts = path.split("/")
+            if path == "/api/rooms":
+                action = "create"
+            elif path == "/api/rooms/import-legacy":
+                action = "import-legacy"
+            elif len(parts) == 5 and parts[3] and parts[4] in {"messages", "tasks"}:
+                action = parts[4]
+            else:
+                return self._not_found()
+            data = self._read_json()
+            if data is None:
+                return
+            allowed = {
+                "create": {"title", "request_id"},
+                "import-legacy": set(),
+                "messages": {"text", "request_id", "task_id", "reply_to"},
+                "tasks": ({"task_id"} if "task_id" in data else
+                          {"message_id", "goal", "acceptance", "project_id", "request_id"}),
+            }[action]
+            with self._runtime() as rt:
+                try:
+                    if action in {"messages", "tasks"} and rt.rooms.get(parts[3]) is None:
+                        return self._not_found()
+                    if set(data) - allowed:
+                        return self._bad_request("群聊请求包含不支持的字段。")
+                    if action == "create":
+                        result = rt.rooms.create(data.get("title"), request_id=data.get("request_id"))
+                    elif action == "import-legacy":
+                        return self._send_json(rt.rooms.import_legacy())
+                    elif action == "messages":
+                        result = rt.rooms.receive(parts[3], data.get("text"), request_id=data.get("request_id"),
+                                                  task_id=data.get("task_id"), reply_to=data.get("reply_to"))
+                        result = {**result, "message": event_to_dict(result["message"])}
+                    elif "task_id" in data:
+                        result = rt.rooms.attach(parts[3], data.get("task_id"))
+                    else:
+                        result = rt.rooms.start_task(parts[3], message_id=data.get("message_id"),
+                                                     goal=data.get("goal"), acceptance=data.get("acceptance"),
+                                                     project_id=data.get("project_id"), request_id=data.get("request_id"))
+                except WorkConflict as exc:
+                    return self._conflict(str(exc))
+                except ValueError as exc:
+                    return self._bad_request(str(exc))
+                return self._send_json(result, status=HTTPStatus.CREATED if result["created"] else HTTPStatus.OK)
 
         def _send_task_summaries(self) -> None:
             nonlocal summaries_head, summaries_base, summaries_lease_version, summaries_deadline
