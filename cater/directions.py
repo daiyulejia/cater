@@ -6,6 +6,34 @@ import re
 from typing import Any, Iterable
 
 
+_STATUS_PHRASES = {
+    "进度", "查看进度", "进度怎么样", "现在进度怎么样", "目前进度怎么样", "做到哪了",
+    "现在做到哪了", "做完了吗", "现在做完了吗", "任务进度", "任务进度怎么样", "汇报进度",
+    "请汇报进度", "status", "progress", "what is the status", "what's the status",
+}
+_STATUS_QUESTION = re.compile(
+    r"(?:请问(?:一下)?|想问一下|我想问一下|我想知道|请告诉我|能告诉我|麻烦告诉我)?"
+    r"(?:现在|目前|刚才)?(?:你们|你|大家|(?:这个|这项|当前的)?(?:任务|工作|项目))?"
+    r"(?:现在|目前|已经)?(?:"
+    r"(?:开始|继续|恢复|启动|做完|做好|完成|结束)(?:工作|执行|推进|任务)?(?:了吗|了没(?:有)?|没(?:有)?)"
+    r"|(?:还|仍然)?在(?:做|工作|执行|推进|处理|运行|继续)(?:吗|么)"
+    r"|(?:进行|推进|做|执行|处理)?到(?:哪一步|哪(?:里|儿)?)(?:了)?"
+    r"|还(?:有|要|需要)(?:等)?(?:多久|多长时间)(?:才(?:能|可以)?|能|可以)?(?:完成|做完|做好|结束|交付)?"
+    r"|(?:什么时候|何时)(?:才)?(?:能|可以)?(?:完成|做完|做好|结束|交付|开始|继续)"
+    r"|(?:正在|在)(?:做|处理|忙)(?:什么|啥)"
+    r"|(?:进度|进展)(?:怎么样|如何)"
+    r")(?:呢|啊|呀|吗)?"
+)
+
+
+def _status_question(text: str) -> bool:
+    # A question about continuing is observational; a bare "continue" is not.
+    text = re.sub(r"^(?:请问(?:一下)?|想问一下|我想问一下)[，,]\s*", "", text)
+    clauses = re.split(r"[。！？!?，,；;\r\n]+", text)
+    return all(clause.strip() in _STATUS_PHRASES or _STATUS_QUESTION.fullmatch(
+        re.sub(r"[ \t]+", "", clause)) for clause in clauses)
+
+
 # Compose complete usage questions from bounded phrases; never accept an arbitrary
 # tail after "how", since it may contain another requirement or an execution request.
 _USAGE_OBJECT = (
@@ -45,11 +73,7 @@ def command_intent(instruction: str, aliases: Iterable[str] = ()) -> str:
             text = text[match.end():]
             break
     text = text.strip(" \t\r\n。.!！?？").casefold()
-    if text in {
-        "进度", "查看进度", "进度怎么样", "现在进度怎么样", "目前进度怎么样", "做到哪了",
-        "现在做到哪了", "做完了吗", "现在做完了吗", "任务进度", "任务进度怎么样", "汇报进度",
-        "请汇报进度", "status", "progress", "what is the status", "what's the status",
-    }:
+    if _status_question(text):
         return "status"
     if text in {"继续", "继续吧", "请继续", "继续执行", "继续推进", "继续任务", "接着做", "接着做吧", "continue", "resume"}:
         return "resume"
@@ -58,10 +82,10 @@ def command_intent(instruction: str, aliases: Iterable[str] = ()) -> str:
     explanation = re.match(r"^(?:请讲解|讲解|提问)\s*[:：]", text)
     if explanation:
         body = text[explanation.end():].strip()
-        # An explicit explanation prefix must not hide changes added to a usage question.
-        if any(_usage_question(clause.strip())
+        # An explanation prefix must not hide changes added to a read-only question.
+        if any(_usage_question(clause.strip()) or _status_question(clause.strip())
                for clause in re.split(r"[。！？!?，,；;\r\n]+|并且|并|然后|顺便|同时|另外", body)):
-            return "question" if _usage_question(body) else "direction"
+            return "status" if _status_question(body) else "question" if _usage_question(body) else "direction"
         return "question"
     if text in {"为什么这么改", "为什么这样改", "为什么这样做", "为什么改这里", "怎么验证", "如何验证", "如何复查", "我没看懂", "解释一下", "请解释一下"}:
         return "question"

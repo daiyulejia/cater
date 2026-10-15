@@ -24,7 +24,7 @@ export function workTransfers(events: Event[]) {
       claims.set(p.work_item_id, p.attempt_id)
       const inputs = p.inputs && typeof p.inputs === 'object' ? Object.keys(p.inputs) : []
       const from = [...new Set(inputs.map((id) => items.get(id)?.owner).filter((id): id is string => typeof id === 'string'))]
-      if (from.length) records.set(event.seq, { kind: 'started', owner: item.owner, from, objective: item.objective })
+      records.set(event.seq, { kind: 'started', owner: item.owner, from, objective: item.objective })
     } else if (event.type === 'work.submitted' && typeof p.attempt_id === 'string' && claims.get(p.work_item_id) === p.attempt_id) {
       records.set(event.seq, { kind: 'submitted', owner: item.owner, reviewer: typeof item.reviewer === 'string' ? item.reviewer : undefined, from: [], objective: item.objective })
       claims.delete(p.work_item_id)

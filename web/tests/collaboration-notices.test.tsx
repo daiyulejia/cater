@@ -11,9 +11,9 @@ const json = (value: unknown) => new Response(JSON.stringify(value), { headers: 
 const members = [{ id: 'dev', name: '米寇', role: 'dev' }, { id: 'test', name: '三角', role: 'test' }, { id: 'design', name: '罐头', role: 'design' }]
 const leader = { id: 'store_manager', name: '店长', role: 'leader' }
 
-async function mount(initial: Event[]) {
+async function mount(initial: Event[], questions: Record<string, unknown>[] = []) {
   let events = [event(1, 'task.created', { goal: '安排接力' }, 'human', 'human'), ...initial]
-  const makeDetail = () => ({ task: { id: 'notice', goal: '安排接力', acceptance: [], assignments: [], messages: [], deliverables: [], status: 'pending' }, events, activity: { active: false, state: 'idle' }, review: {} })
+  const makeDetail = () => ({ task: { id: 'notice', goal: '安排接力', acceptance: [], assignments: [], messages: [], deliverables: [], status: 'pending' }, events, questions, activity: { active: false, state: 'idle' }, review: {} })
   const fetchMock = vi.fn((url: string) => {
     if (url === '/api/task-summaries') return json({ tasks: [{ id: 'notice', goal: '安排接力', status: 'pending', status_label: '待开始', version: 1, latest_seq: 1, conversation_count: 1 }] })
     if (url === '/api/tasks/notice') return json(makeDetail())
@@ -34,6 +34,46 @@ async function mount(initial: Event[]) {
 const stream = () => screen.getByLabelText('聊天记录')
 const article = (seq: number) => within(stream()).getByText(`事件 #${seq} · 审计记录`).closest('article')!
 const count = (value: number) => expect(stream().querySelectorAll('article')).toHaveLength(value)
+
+test('自然聊天先显示原话，理解后的执行指令不重复显示成顾客再次改需求', async () => {
+  await mount([
+    event(2, 'conversation.received', { instruction: '@米寇 继需了吗？' }, 'human', 'human'),
+    event(3, 'conversation.started', { conversation_seq: 2 }, 'conversation'),
+    event(4, 'conversation.finished', { conversation_seq: 2, status: 'finished', action: 'discuss', reply: '米寇还在处理，尚未有新的提交。', speaker_id: 'store_manager' }, 'conversation'),
+    event(5, 'conversation.received', { instruction: '那接着做吧' }, 'human', 'human'),
+    event(6, 'human.commanded', { conversation_seq: 5, intent: 'resume', instruction: '那接着做吧' }, 'human', 'human'),
+    event(7, 'conversation.finished', { conversation_seq: 5, status: 'applied', action: 'resume_task', reply: '按原来的安排继续。', speaker_id: 'store_manager' }, 'conversation'),
+  ])
+  count(5)
+  expect(within(stream()).getAllByText('那接着做吧')).toHaveLength(1)
+  expect(within(stream()).getByText('@米寇 继需了吗？')).toBeTruthy()
+  expect(stream().textContent).not.toContain('方向更新')
+  expect(article(4).querySelector('[data-actor="store_manager"].is-agent')).toBeTruthy()
+})
+
+test('理解后转讲解不把同一句话再显示一次，也不显示内部理解过程', async () => {
+  await mount([
+    event(2, 'conversation.received', { instruction: '这个咋打开呀' }, 'human', 'human'),
+    event(3, 'question.asked', { question: '这个咋打开呀', role_id: 'dev' }, 'human', 'human'),
+    event(4, 'conversation.finished', { conversation_seq: 2, question_seq: 3, reply: '我核对一下现有成果的打开方式。', speaker_id: 'store_manager' }, 'conversation'),
+  ], [{ seq: 3, status: 'answering', role_id: 'store_manager' }])
+  count(3)
+  expect(within(stream()).getAllByText('这个咋打开呀')).toHaveLength(1)
+  expect(within(article(4)).getByText('正在核对成果并回答')).toBeTruthy()
+})
+
+test('查询进度只展示真实记录，执行分流不把模型的提前成功描述当作事实', async () => {
+  await mount([
+    event(2, 'conversation.received', { instruction: '继需了吗' }, 'human', 'human'),
+    event(3, 'task.progress_reported', { text: '任务尚未进入分项执行。' }, 'store_manager'),
+    event(4, 'conversation.finished', { action: 'status_task', status: 'finished', progress_seq: 3, reply: '已经全部做好' }, 'conversation'),
+    event(5, 'conversation.finished', { action: 'update_task', status: 'finished', reply: '正在开发，马上部署完成', speaker_id: 'store_manager' }, 'conversation'),
+  ])
+  expect(within(stream()).getByText('任务尚未进入分项执行。')).toBeTruthy()
+  expect(within(stream()).getByText('补充要求已记入当前任务。')).toBeTruthy()
+  expect(stream().textContent).not.toContain('已经全部做好')
+  expect(stream().textContent).not.toContain('马上部署完成')
+})
 
 test.each(['before', 'after'])('计划在店长回执 %s 时仅在原安排气泡显示交接与首次加入，不重复名单', async (order) => {
   const events = order === 'before' ? [plan(3, undefined, { planning: { attempt_seq: 2 } }), finished(4, { plan_seq: 3, attempt_seq: 2 })]
@@ -79,7 +119,7 @@ test('task.decomposed 的实际后继 assigned 只把首次增量附在已有分
   await waitFor(() => expect(within(article(2)).getByLabelText('协作通知').textContent).toBe('米寇、三角 加入协作'))
   count(2)
   expect(within(article(2)).queryByLabelText('工作交接')).toBeNull()
-  expect(within(article(2)).getByText('这次请 @米寇、@三角 一起接力。')).toBeTruthy()
+  expect(within(article(2)).getByText(/实现入口，交给 @米寇/)).toBeTruthy()
 })
 
 test('没有店长消息的手动 plan 与独立 assigned 保留一条必要中性通知，只有首次增量加入', async () => {
@@ -141,12 +181,15 @@ test('实际提交才通知复核人；依赖验收不伪装已开工，调度�
     workEvent(5, 'work.reviewed', 'a', 'run-a', { status: 'accepted', submission_seq: 4 }),
     workEvent(6, 'work.claimed', 'b', 'run-b', { inputs: { a: 'accepted-digest' } })]
   const projection = workTransfers(events)
-  expect([...projection.keys()]).toEqual([4, 6])
+  expect([...projection.keys()]).toEqual([3, 4, 6])
   await mount(events)
   expect(within(article(4)).getByText('@米寇 已提交成果，交给 @三角 复核。')).toBeTruthy()
   expect(within(article(6)).getByText('@罐头 已接手，接着 @米寇 的成果继续做。')).toBeTruthy()
   expect(within(article(4)).queryByRole('img')).toBeNull()
-  expect(within(article(6)).getByText('完善界面')).toBeTruthy()
+  expect(await within(article(6)).findByText('完善界面')).toBeTruthy()
+  expect(within(article(3)).getByText('@米寇 已接手这项工作。')).toBeTruthy()
+  expect(within(article(3)).getByText('工作过程 · 阶段验收通过')).toBeTruthy()
+  expect(within(article(6)).getByText('工作过程 · 处理中').closest('details')!.open).toBe(true)
 })
 
 test('多项依赖尚无领取记录时不编造下一位；旧计划、旧尝试和失效提交不形成交接', () => {
@@ -156,5 +199,17 @@ test('多项依赖尚无领取记录时不编造下一位；旧计划、旧尝�
     workEvent(7, 'work.submitted'),
     workEvent(8, 'work.reviewed', 'a', 'run-a', { status: 'accepted' }),
     plan(9), workEvent(10, 'work.claimed', 'b', 'run-b', { inputs: { a: 'digest' } })]
-  expect(workTransfers(events).size).toBe(0)
+  expect([...workTransfers(events).keys()]).toEqual([4])
+})
+
+test('分工正文展示工作到成员的对应关系，常规阶段播报不让店长重复插话', async () => {
+  await mount([workPlan(), finished(3, { plan_seq: 2 }),
+    event(4, 'brief.generated', { reason: 'work_checkpoint', brief: { checkpoint: { state: 'ready' }, dispute: '例行阶段播报' } }, 'store_manager'),
+    event(5, 'brief.generated', { reason: 'work_checkpoint', brief: { checkpoint: { state: 'uncertain' }, dispute: '执行结果需要核对' } }, 'store_manager'),
+    event(6, 'task.progress_reported', { text: '已完成一项，下一项尚未开始。' }, 'store_manager')])
+  expect(within(article(3)).getByLabelText('工作交接').textContent).toContain('实现棋盘，交给 @米寇')
+  expect(within(article(3)).getByLabelText('工作交接').textContent).toContain('完善界面，交给 @罐头')
+  expect(within(stream()).queryByText('例行阶段播报')).toBeNull()
+  expect(within(article(5)).getByText('执行结果需要核对')).toBeTruthy()
+  expect(within(article(6)).getByText('已完成一项，下一项尚未开始。')).toBeTruthy()
 })

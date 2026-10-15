@@ -74,6 +74,23 @@ class TaskSummaryTests(unittest.TestCase):
             # An unconditional second window also reuses the small row cache.
             self.assertEqual(self.rows()[0], rows)
 
+    def test_semantic_receipts_do_not_duplicate_visible_message_counts(self):
+        with self.factory() as rt:
+            task = rt.create_task("状态查询")
+            received = rt.log.emit(type="conversation.received", actor=Actor.human(), task_id=task,
+                                   payload={"instruction": "继需了吗"})
+            progress = rt.report_progress(task, command_seq=received.seq)
+            rt.log.emit(type="conversation.finished", actor=Actor.system("conversation"), task_id=task,
+                        payload={"conversation_seq": received.seq, "action": "status_task", "progress_seq": progress.seq})
+            second = rt.log.emit(type="conversation.received", actor=Actor.human(), task_id=task,
+                                 payload={"instruction": "继续"})
+            rt.log.emit(type="human.commanded", actor=Actor.human(), task_id=task,
+                        payload={"conversation_seq": second.seq, "instruction": "继续", "intent": "resume"})
+            rt.log.emit(type="conversation.finished", actor=Actor.system("conversation"), task_id=task,
+                        payload={"conversation_seq": second.seq, "action": "resume_task"})
+            self.assertEqual(task_api_payload(rt, task)["summary"]["conversation_count"], 5)
+        self.assertEqual(self.rows()[0][0]["conversation_count"], 5)
+
     def test_access_token_is_checked_before_etag_or_database(self):
         _, tag = self.rows()
         with patch.object(self.handler, "_runtime", side_effect=AssertionError("unauthorized read")):

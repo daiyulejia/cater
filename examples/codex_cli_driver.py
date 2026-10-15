@@ -431,7 +431,7 @@ def _valid_room_dialogue_payload(payload: Any) -> bool:
         return False
     target, goal, quote = payload["task_id"], payload["goal"], payload["quote"]
     if action == "discuss":
-        return all(value is None for value in (target, goal, acceptance, quote))
+        return all(value is None for value in (target, goal, acceptance))
     if action == "new_task":
         return target is None and goal is not None and acceptance is not None and quote is not None
     return (target is not None and quote is not None

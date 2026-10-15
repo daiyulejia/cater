@@ -19,7 +19,8 @@ from .artifacts import normalize_deliverables, safe_filename
 from .usage import usage_source, valid_token_count
 from .cabinet import CabinetPolicy, tally_votes
 from .clarifications import ClarificationService, normalize_question
-from .drivers import Driver, DriverResponse, driver_mode, load_drivers
+from .drivers import Driver, DriverResponse, OpenAICompatibleDriver, TextTransportFailure, driver_mode, load_drivers
+from .anthropic import AnthropicMessagesDriver
 from .directions import changes_direction, command_intent
 from .events import Actor, Event, EventLog, HeadChanged
 from .fold import TaskSnapshot, fold
@@ -32,6 +33,7 @@ from .verification import run_check, validate_check
 from .delivery import DeliveryService
 from .explanations import ExplanationService
 from .rooms import RoomService
+from .conversation import ConversationService
 from .review_contract import assessment, response_schema
 from .checkpoints import work_checkpoint
 
@@ -41,6 +43,17 @@ MAX_COMMAND_CHARS = 12_000
 MAX_ACCEPTANCE_ITEMS = 32
 MAX_ACCEPTANCE_CHARS = 2_000
 MAX_ASSIGNMENT_TEXT_CHARS = 12_000
+
+# Only these reviewed text-only implementations qualify. Remove this exemption
+# if either adapter gains tools; subclasses, wrappers and replaced methods do not
+# inherit it. The adapter must explicitly attest a TextTransportFailure.
+_TEXT_ONLY_CALLS = {AnthropicMessagesDriver: AnthropicMessagesDriver.complete,
+                    OpenAICompatibleDriver: OpenAICompatibleDriver.complete}
+_TEXT_TRANSPORT_FAILURE = object()
+
+
+class ExecutionScopeChanged(WorkConflict):
+    """A queued authorization expired before this round could enter execution."""
 
 
 def _required_text(value: object, field: str, limit: int) -> str:
@@ -197,6 +210,7 @@ class Runtime:
         self.questions = ExplanationService(self)
         self.delivery = DeliveryService(self)
         self.rooms = RoomService(self)
+        self.conversation = ConversationService(self)
         self.driver_attempts = max(1, driver_attempts)
         self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)
         self._driver_health = driver_health or DriverHealth()
@@ -207,6 +221,7 @@ class Runtime:
         self.organization_fingerprint = _organization_fingerprint(config)
         self.drivers = configured_drivers
         self._close_drivers_on_close = close_drivers_on_close
+        self._execution_authorization: tuple[str, dict[str, Any]] | None = None
 
     def close(self) -> None:
         if self._close_drivers_on_close:
@@ -346,8 +361,20 @@ class Runtime:
             self._publish_execution_plan(task_id, source="cabinet", route_reason=reason)
         return {"task_id": task_id, "interpretation": interpretation, "route": route_payload}
 
-    def collaborate(self, task_id: str) -> dict[str, Any]:
-        return self._run_round(task_id, force_governance=False)
+    def collaborate(self, task_id: str, *, expected_scope: dict[str, Any] | None = None) -> dict[str, Any]:
+        previous = self._execution_authorization
+        self._execution_authorization = (task_id, dict(expected_scope)) if expected_scope is not None else None
+        try:
+            self._check_execution_authorization(task_id)
+            return self._run_round(task_id, force_governance=False)
+        finally:
+            self._execution_authorization = previous
+
+    def _check_execution_authorization(self, task_id: str) -> None:
+        if self._execution_authorization is not None:
+            authorized_task, scope = self._execution_authorization
+            if task_id != authorized_task or self.work.scope(task_id) != scope:
+                raise ExecutionScopeChanged("这轮执行授权对应的任务方向已变化，未开始新的模型或工具调用。")
 
     def battle(self, task_id: str) -> dict[str, Any]:
         return self._run_round(task_id, force_governance=True)
@@ -813,10 +840,17 @@ class Runtime:
                         utterances.extend(outputs)
                         if output["contained"]:
                             invoked = output["invocation_started"]
+                            recoverable = (invoked and output.get("text_transport_failure") is _TEXT_TRANSPORT_FAILURE
+                                           and not output["artifact_seqs"] and not any(
+                                e.seq > claim.seq and e.payload.get("work_item_id") == candidate["id"]
+                                for e in self.log.iter_events(task_id=task.id, event_types=(
+                                    "deliverable.published", "work.submitted", "work.check_started", "verification.completed"))))
                             self.work.fail(task.id, claim,
+                                           "纯文本模型调用因传输失败暂停；本地无工具副作用，尚无成果提交。"
+                                           "远端是否计费未知，等待用户继续后再尝试；本轮不会自动重试。" if recoverable else
                                            "调用未正常返回，需核对副作用后再继续。" if invoked else
                                            "调用尚未发出，当前条件不允许执行；调整条件后可继续。",
-                                           uncertain=invoked)
+                                           uncertain=invoked and not recoverable)
                         elif output.get("clarification_seq"):
                             self.work.fail(task.id, claim, "已向顾客询问必要信息，回答或跳过后再整理安排。", uncertain=False)
                             break
@@ -1162,6 +1196,8 @@ class Runtime:
             item = {"event": event, "payload": payload, "role": role, "artifact_seqs": artifact_seqs,
                     "clarification_seq": clarification.seq if clarification else None,
                     "contained": isinstance(response.meta, dict) and bool(response.meta.get("contained")),
+                    "text_transport_failure": (response.meta or {}).get("_text_transport_failure")
+                    if isinstance(response.meta, dict) else None,
                     "invocation_started": not isinstance(response.meta, dict) or response.meta.get("invocation_started") is not False}
             self._record_rule_suggestions(task_id, parsed.get("rule_suggestions"), event)
             utterances.append(item)
@@ -1258,6 +1294,17 @@ class Runtime:
                 payload["delivery_review_seq"] = delivery["review_seq"]
             return "human.decided", payload, Actor.human("human")
         return self.work._write(task_id, build)
+
+    def chat(self, task_id: str, instruction: str, *, goal: str | None = None,
+             acceptance: list[str] | None = None, continue_work: bool = False,
+             request_id: str | None = None) -> Event:
+        """Receive natural conversation separately from explicit command fields."""
+        instruction = _required_text(instruction, "instruction", MAX_COMMAND_CHARS)
+        leader = self.organization.leader
+        if (goal is None and acceptance is None and leader.driver is not None
+                and driver_mode(self.drivers[leader.driver]) != "local_demo"):
+            return self.conversation.receive(task_id, instruction, continue_work=continue_work, request_id=request_id)
+        return self.command(task_id, instruction, goal=goal, acceptance=acceptance)
 
     def command(
         self,
@@ -1703,6 +1750,9 @@ class Runtime:
             context["work"] = work_context
         if self.task_context_isolated(task_id):
             context["context_scope"] = "task"
+        if work_context is not None and work_context.get("phase") == "room_dialogue":
+            context["conversation"] = work_context["conversation"]
+            context["context_scope"] = "request"
         background = self.conversation_background(task_id)
         if background is not None:
             context["background"] = background
@@ -1717,6 +1767,10 @@ class Runtime:
         # Do not replay it without a tool-specific idempotency/reconciliation contract.
         attempts = 1 if work_context is not None else self.driver_attempts
         for attempt in range(1, attempts + 1):
+            try:
+                self._check_execution_authorization(task_id)
+            except ExecutionScopeChanged as exc:
+                return self._contained_driver_failure(role, str(exc), invocation_started=False)
             if work_context is not None:
                 current_scope = self.work.scope(task_id)
                 if work_context.get("phase") == "explanation":
@@ -1732,12 +1786,13 @@ class Runtime:
             try:
                 response = driver.complete(role=role.role, prompt=prompt, context=context)
                 self._driver_health.record_success(role.driver)
+                meta = response.meta if isinstance(response.meta, dict) else {}
                 if work_context is not None:
                     # Only the gateway knows whether complete was entered; driver
                     # metadata cannot turn an actual invocation into a safe retry.
-                    meta = response.meta if isinstance(response.meta, dict) else {}
-                    return DriverResponse(text=response.text, tokens=response.tokens, meta={**meta, "invocation_started": True})
-                return response
+                    meta = {**meta, "invocation_started": True}
+                return DriverResponse(text=response.text, tokens=response.tokens,
+                                      meta={**meta, "_text_transport_failure": None})
             except Exception as exc:
                 last_error = exc
                 failures = self._driver_health.record_failure(role.driver)
@@ -1755,13 +1810,19 @@ class Runtime:
                 if failures >= self.circuit_breaker_threshold:
                     break
         assert last_error is not None
-        return self._contained_driver_failure(role, str(last_error))
+        response = self._contained_driver_failure(role, str(last_error))
+        implementation = _TEXT_ONLY_CALLS.get(type(driver))
+        if (implementation is not None and getattr(driver.complete, "__func__", None) is implementation
+                and type(last_error) is TextTransportFailure):
+            response = DriverResponse(text=response.text, tokens=response.tokens,
+                                      meta={**response.meta, "_text_transport_failure": _TEXT_TRANSPORT_FAILURE})
+        return response
 
     def _reported_driver_tokens(self, driver_name: str) -> int:
         """Count only provider-reported usage; unknown telemetry cannot be safely capped."""
         return sum(
             event.payload["tokens"]
-            for event in self.log.iter_events(event_types=("msg.said", "msg.challenge", "question.finished"))
+            for event in self.log.iter_events(event_types=("msg.said", "msg.challenge", "question.finished", "conversation.finished"))
             if event.payload.get("driver") == driver_name
             and event.payload.get("token_usage") == "reported"
             and valid_token_count(event.payload.get("tokens"))

@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -20,6 +21,49 @@ from cater.drivers import DriverResponse, OpenAICompatibleDriver
 from cater.events import Actor
 from cater.runtime import Runtime
 from cater.web import ActivityRunner, make_handler
+
+
+STATUS_QUESTIONS = (
+    "继续了吗", "开始了吗", "还在做吗", "进行到哪了", "到哪里了",
+    "还有多久", "还要多久", "什么时候完成", "现在在做什么",
+)
+
+
+class StatusIntentTests(unittest.TestCase):
+    def test_status_questions_and_complete_combinations(self):
+        questions = (*STATUS_QUESTIONS, "请问一下，继续了吗？", "@店长 继续了吗？",
+            "@dev：现在开始了吗", "目前这个任务进行到哪一步了", "你们现在还在做吗",
+            "这个项目还要多久才能完成", "我想知道现在在做什么", "能告诉我什么时候能完成吗",
+            "现在进度如何", "任务进度怎么样", "你们已经继续了没有", "开始了没",
+            "这个任务何时可以交付", "目前正在处理什么", "还需要等多久才能做好",
+            "继续了吗？还要多久？", "开始了吗，进行到哪了", "还在做吗\n什么时候完成",
+            "查看进度；继续了吗", "@店长 请问，继续了吗", "status", "what is the status",
+            "还在继续吗", "进行到哪里了", "这个任务开始了吗", "提问：继续了吗",
+            "还要多久能完成", "还有多长时间可以交付", "目前进展如何")
+        for instruction in questions:
+            with self.subTest(instruction=instruction):
+                self.assertEqual(command_intent(instruction, ("店长", "dev")), "status")
+
+    def test_resume_execution_requests_and_ambiguous_questions_are_not_status(self):
+        for instruction in ("继续", "继续吧", "请继续", "@店长 继续", "继续执行", "resume"):
+            with self.subTest(instruction=instruction):
+                self.assertEqual(command_intent(instruction, ("店长",)), "resume")
+        for instruction in ("开始", "现在开始", "继续吗", "能继续吗", "可以开始吗", "请继续做",
+                            "继续了吗顺便增加悔棋", "什么时候完成登录功能", "还有多久增加悔棋",
+                            "帮我继续", "继续做月亮", "@陌生人 继续了吗", "@devops 继续了吗",
+                            "任务目标改成什么时候完成", "目前进度怎么样并且修改颜色",
+                            "请讲解：继续了吗，顺便增加悔棋", "提问：还有多久并增加悔棋"):
+            with self.subTest(instruction=instruction):
+                self.assertEqual(command_intent(instruction, ("店长", "dev")), "direction")
+
+    def test_mixed_status_and_changes_in_either_order_are_not_swallowed(self):
+        for question in STATUS_QUESTIONS:
+            for separator in ("，", ",", "。", "？", "?", "；", ";", "\n", "\r\n", " ", ""):
+                for change in ("顺便增加悔棋", "把月亮改成红色", "继续", "帮我运行"):
+                    for parts in ((question, change), (change, question)):
+                        instruction = separator.join(parts)
+                        with self.subTest(instruction=instruction):
+                            self.assertEqual(command_intent(instruction), "direction")
 
 
 class UsageIntentTests(unittest.TestCase):
@@ -82,6 +126,13 @@ class UsageExplanationDriver:
 
     def complete(self, *, role, prompt, context):
         work = context["work"]
+        if "conversation" in context:
+            self.calls.append(copy.deepcopy({"prompt": prompt, "work": work}))
+            conversation = context["conversation"]
+            result = {"reply": "先结合已有成果说明运行方式。", "action": "explain_task",
+                      "task_id": conversation["tasks"][0]["id"], "goal": None,
+                      "acceptance": None, "quote": conversation["message"]}
+            return DriverResponse(json.dumps(result), 3, {"token_usage": "reported"})
         if work["phase"] != "explanation":
             raise AssertionError("A usage question must not invoke planning or execution")
         self.calls.append(copy.deepcopy({"prompt": prompt, "work": work}))
@@ -291,6 +342,43 @@ class UsageQuestionTests(unittest.TestCase):
                     self.assertEqual(getattr(rt.task(self.task), key), value)
         self.assertEqual(self.driver.calls, [])
 
+    def test_status_questions_preserve_work_and_emit_only_progress_without_model_calls(self):
+        with self.factory() as rt, patch.object(self.driver, "complete") as model:
+            before = self.snapshot(rt)
+            for instruction in STATUS_QUESTIONS:
+                with self.subTest(instruction=instruction):
+                    head = rt.log.read(task_id=self.task)[-1].seq
+                    command = rt.command(self.task, instruction)
+                    self.assertEqual(command.type, "human.commanded")
+                    self.assertEqual(command.payload["intent"], "status")
+                    self.assertEqual(command.payload["next_action"], "none")
+                    events = [e for e in rt.log.read(task_id=self.task) if e.seq > head]
+                    self.assertEqual([e.type for e in events], ["human.commanded", "task.progress_reported"])
+                    self.assertEqual(events[-1].payload["source"], "event_projection")
+                    self.assertEqual(events[-1].payload["command_seq"], command.seq)
+                    self.assertEqual(self.snapshot(rt), before)
+                    self.assertEqual(rt.questions.pending(self.task), [])
+            model.assert_not_called()
+
+    def test_status_questions_do_not_reopen_completed_task_or_override_explicit_changes(self):
+        with Runtime(":memory:") as rt:
+            task = rt.create_task("完成的月亮")
+            rt.decide(task, "done", "已人工确认")
+            before = self.snapshot(rt, task)
+            self.assertEqual(rt.command(task, "继续了吗").payload["intent"], "status")
+            self.assertEqual(self.snapshot(rt, task), before)
+        with self.factory() as rt, patch.object(self.driver, "complete") as model:
+            for changes in ({"goal": "新的月亮目标"}, {"acceptance": ["新的标准"]}, {"acceptance": []}):
+                with self.subTest(changes=changes):
+                    before = rt.work.scope(self.task)
+                    command = rt.command(self.task, "继续了吗", **changes)
+                    self.assertEqual(command.payload["intent"], "direction")
+                    self.assertEqual(command.payload["next_action"], "run")
+                    self.assertNotEqual(rt.work.scope(self.task), before)
+                    for key, value in changes.items():
+                        self.assertEqual(getattr(rt.task(self.task), key), value)
+            model.assert_not_called()
+
     def start_web(self, runner):
         with patch("cater.web.ActivityRunner", return_value=runner):
             handler = make_handler(self.db, runtime_factory=self.factory)
@@ -302,6 +390,20 @@ class UsageQuestionTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         return f"http://127.0.0.1:{server.server_port}"
 
+    def use_demo_leader(self):
+        config = json.loads(self.roles.read_text(encoding="utf-8"))
+        config["organization"]["leader"]["driver"] = None
+        self.roles.write_text(json.dumps(config), encoding="utf-8")
+
+    def wait_for_conversation(self, runner):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            with runner._lock:
+                if self.task not in runner._conversation_tasks:
+                    return
+            time.sleep(0.01)
+        self.fail("conversation queue did not finish")
+
     def post(self, base, *, form=False, **payload):
         path = f"/tasks/{self.task}/command" if form else f"/api/tasks/{self.task}/command"
         data = urlencode(payload).encode() if form else json.dumps(payload).encode()
@@ -312,6 +414,7 @@ class UsageQuestionTests(unittest.TestCase):
     def test_http_json_and_form_questions_never_queue_run_even_when_active(self):
         runner = ActivityRunner(self.factory)
         base = self.start_web(runner)
+        self.addCleanup(self.wait_for_conversation, runner)
 
         def answer(task_id):
             with self.factory() as rt:
@@ -333,7 +436,8 @@ class UsageQuestionTests(unittest.TestCase):
                         activity = runner.status(self.task)
                         status, body = self.post(base, form=form, instruction="我怎么运行",
                             **({"run_now": "on"} if form else {"continue": True}))
-                        self.assertEqual(status, 200)
+                        self.assertEqual(status, 200 if form else 202)
+                        self.wait_for_conversation(runner)
                         if not form:
                             payload = json.loads(body)
                             self.assertEqual(payload["activity"], activity)
@@ -343,14 +447,22 @@ class UsageQuestionTests(unittest.TestCase):
                             self.assertEqual(self.snapshot(rt), before)
                             events = [e for e in rt.log.read(task_id=self.task) if e.seq > head]
                             self.assertEqual([e.type for e in events],
-                                ["question.asked", "question.started", "question.finished"])
+                                ["conversation.received", "conversation.started", "question.asked",
+                                 "conversation.finished", "question.started", "question.finished"])
+                            self.assertEqual(rt.conversation.view(self.task)[-1]["action"], "explain_task")
                             self.assertEqual(rt.questions.view(self.task)[-1]["status"], "answered")
             self.assertEqual(questions.call_count, 4)
-            self.assertEqual(len(self.driver.calls), 4)
+            self.assertEqual([call["work"]["phase"] for call in self.driver.calls],
+                             ["room_dialogue", "explanation"] * 4)
+            with self.factory() as rt:
+                self.assertEqual(rt.task(self.task).tokens, 24)
+                self.assertEqual(rt._reported_driver_tokens("usage_explainer"), 24)
+                self.assertEqual(rt.task(self.task).commands, [])
             for mock in (queued, submitted, run, battle):
                 mock.assert_not_called()
 
     def test_http_execution_mixed_text_and_explicit_changes_still_schedule_run(self):
+        self.use_demo_leader()
         runner = ActivityRunner(self.factory)
         base = self.start_web(runner)
         with patch.object(runner, "answer_questions") as questions, \
@@ -367,12 +479,87 @@ class UsageQuestionTests(unittest.TestCase):
                     queued.assert_called_with(self.task, "run")
                     with self.factory() as rt:
                         self.assertNotEqual(rt.work.scope(self.task), scope)
-                        command = rt.log.read(task_id=self.task)[-1]
+                        command = list(rt.log.iter_events(task_id=self.task, event_types=("human.commanded",)))[-1]
                         self.assertEqual(command.type, "human.commanded")
                         self.assertEqual(command.payload["intent"], "direction")
             self.assertEqual(queued.call_count, 6)
             questions.assert_not_called()
             self.assertEqual(self.driver.calls, [])
+
+    def test_http_status_questions_never_queue_or_replan_idle_and_active_work(self):
+        self.use_demo_leader()
+        runner = ActivityRunner(self.factory)
+        base = self.start_web(runner)
+        with patch.object(runner, "answer_questions") as questions, \
+             patch.object(runner, "continue_after_current") as queued, \
+             patch.object(runner, "submit") as submitted, \
+             patch.object(Runtime, "collaborate") as run, patch.object(Runtime, "battle") as battle, \
+             patch.object(self.driver, "complete") as model:
+            for active in (False, True):
+                if active:
+                    # Keep a real work claim in flight while the HTTP status commands arrive.
+                    with self.factory() as rt:
+                        rt.work.rework(self.task, "board", "Prepare active-work fixture")
+                        claim = rt.work.claim(self.task, "board")
+                        self.assertTrue(rt.work.view(self.task)["items"][0]["in_flight"])
+                    runner._activities[self.task] = {"id": "existing_activity", "action": "run", "state": "running"}
+                for form in (False, True):
+                    for instruction in STATUS_QUESTIONS:
+                        with self.subTest(active=active, form=form, instruction=instruction):
+                            with self.factory() as rt:
+                                before = self.snapshot(rt)
+                                head = rt.log.read(task_id=self.task)[-1].seq
+                            activity = runner.status(self.task)
+                            status, body = self.post(base, form=form, instruction=instruction,
+                                **({"run_now": "on"} if form else {"continue": True}))
+                            self.assertEqual(status, 200)
+                            self.assertEqual(runner.status(self.task), activity)
+                            if not form:
+                                payload = json.loads(body)
+                                self.assertEqual(payload["activity"], activity)
+                                self.assertEqual(payload["task"]["work"]["plan_seq"], before["work"]["plan_seq"])
+                            with self.factory() as rt:
+                                self.assertEqual(self.snapshot(rt), before)
+                                events = [e for e in rt.log.read(task_id=self.task) if e.seq > head]
+                                self.assertEqual([e.type for e in events], ["human.commanded", "task.progress_reported"])
+                                self.assertEqual(events[0].payload["intent"], "status")
+                                self.assertEqual(events[0].payload["next_action"], "none")
+                                self.assertEqual(events[1].payload["counts"], {"running": 1} if active else {"submitted": 1})
+                                if active:
+                                    self.assertEqual(rt.work.view(self.task)["items"][0]["attempt_id"], claim.payload["attempt_id"])
+            for mock in (questions, queued, submitted, run, battle, model):
+                mock.assert_not_called()
+
+    def test_http_status_with_changes_still_queues_and_resume_keeps_scope(self):
+        self.use_demo_leader()
+        runner = ActivityRunner(self.factory)
+        base = self.start_web(runner)
+        runner._activities[self.task] = {"id": "existing_activity", "action": "run", "state": "running"}
+        with patch.object(runner, "answer_questions") as questions, \
+             patch.object(runner, "continue_after_current") as queued, \
+             patch.object(self.driver, "complete") as model:
+            for payload in ({"instruction": "继续了吗，顺便增加悔棋"},
+                            {"instruction": "把月亮改成红色。继续了吗"},
+                            {"instruction": "继续了吗", "goal": "新目标"},
+                            {"instruction": "还有多久", "acceptance": ["新标准"]},
+                            {"instruction": "继续"}):
+                with self.subTest(payload=payload):
+                    with self.factory() as rt:
+                        before = rt.work.scope(self.task)
+                    status, _ = self.post(base, **payload, **{"continue": True})
+                    self.assertEqual(status, 202)
+                    queued.assert_called_with(self.task, "run")
+                    with self.factory() as rt:
+                        command = list(rt.log.iter_events(task_id=self.task, event_types=("human.commanded",)))[-1]
+                        if payload["instruction"] == "继续":
+                            self.assertEqual(command.payload["intent"], "resume")
+                            self.assertEqual(rt.work.scope(self.task), before)
+                        else:
+                            self.assertEqual(command.payload["intent"], "direction")
+                            self.assertNotEqual(rt.work.scope(self.task), before)
+            self.assertEqual(queued.call_count, 5)
+            questions.assert_not_called()
+            model.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -172,7 +172,7 @@ class RoomDialogueCodexTests(unittest.TestCase):
             {"action": "discuss", "task_id": None, "goal": None, "acceptance": None, "quote": None},
             {"action": "new_task", "task_id": None, "goal": "New goal", "acceptance": [], "quote": "new work"},
             {"action": "update_task", "goal": "Changed goal", "acceptance": ["Check output"]},
-            {"action": "update_task"}, {"action": "explain_task"}, {"action": "resume_task"},
+            {"action": "update_task"}, {"action": "explain_task"}, {"action": "resume_task"}, {"action": "status_task"},
             {"task_id": "not-a-candidate", "quote": "Not in the current message"},
         ]
         for changes in cases:
@@ -190,6 +190,11 @@ class RoomDialogueCodexTests(unittest.TestCase):
                              ("acceptance", ["a"] * 33), ("acceptance", ["a" * 2001]), ("quote", "q" * 2001)):
             with self.subTest(field=field):
                 self.assertFalse(adapter._valid_room_dialogue_payload({**payload, field: value}))
+
+    def test_discussion_accepts_a_quote_without_adopting_a_task_change(self):
+        payload = {**self.payload, "action": "discuss", "task_id": None, "goal": None,
+                   "acceptance": None, "quote": "先聊聊天"}
+        self.assertTrue(adapter._valid_room_dialogue_payload(payload))
 
     def test_rejects_invalid_structure_and_action_field_combinations(self):
         cases = [None, [], {**self.payload, "extra": True}]

@@ -1,0 +1,10 @@
+[
+  {"id":"typo_status","message":"@米寇 继需了吗？我就问下进度","history":[],"tasks":[{"id":"gomoku","goal":"做一个网页版五子棋","status":"pending"}],"expected":{"actions":["status_task"],"task_id":"gomoku"}},
+  {"id":"typo_resume","message":"按原来的安排接这做吧，不用从头来","history":[],"tasks":[{"id":"gomoku","goal":"做一个网页版五子棋","status":"paused"}],"expected":{"actions":["resume_task"],"task_id":"gomoku"}},
+  {"id":"typo_update","message":"把网页按钮的颜射改成绿色，其他照旧","history":[],"tasks":[{"id":"gomoku","goal":"做一个网页版五子棋","status":"running"}],"expected":{"actions":["update_task"],"task_id":"gomoku"}},
+  {"id":"mention_not_execution","message":"@月亮 不是让你重做，我只想知道怎么打开这个网页","history":[{"actor":"store_manager","text":"已发布 gomoku.html 源码，尚未运行验证。"}],"tasks":[{"id":"gomoku","goal":"做一个网页版五子棋","status":"running"}],"expected":{"actions":["explain_task"],"task_id":"gomoku"}},
+  {"id":"social","message":"辛苦啦，今天先聊聊天，不安排新活","history":[],"tasks":[{"id":"gomoku","goal":"做一个网页版五子棋","status":"pending"}],"expected":{"actions":["discuss"],"task_id":null}},
+  {"id":"mixed","message":"现在做到哪了？另外把网页按钮改成蓝色","history":[],"tasks":[{"id":"gomoku","goal":"做一个网页版五子棋","status":"running"}],"expected":{"actions":["update_task"],"task_id":"gomoku"}},
+  {"id":"mixed_reverse","message":"按钮就用蓝色吧，别的不要动。对了，现在进展怎么样？","history":[],"tasks":[{"id":"gomoku","goal":"做一个网页版五子棋","status":"running"}],"expected":{"actions":["update_task"],"task_id":"gomoku"}},
+  {"id":"status_negated_change","message":"我只是想知道还要多久，先别修改颜色","history":[],"tasks":[{"id":"gomoku","goal":"做一个网页版五子棋","status":"running"}],"expected":{"actions":["status_task"],"task_id":"gomoku"}}
+]

@@ -45,6 +45,8 @@ class AvailabilityTests(unittest.TestCase):
                 self.assertEqual(self.member(rt, "cabinet_product")["status"], "available")
                 rt._driver_health.record_failure("product")
                 self.assertEqual(self.member(rt)["reason"], "recent_failure")
+                self.assertEqual(self.member(rt)["status"], "unverified")
+                self.assertEqual(self.member(rt, "cabinet_product")["status"], "unverified")
                 rt._driver_health.record_success("product")
             with patch("cater.runtime.time.monotonic", return_value=311):
                 self.assertEqual(self.member(rt)["status"], "unverified")

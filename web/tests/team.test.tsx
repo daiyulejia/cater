@@ -42,6 +42,14 @@ test('休假、演示与未知状态不冒充全员营业', () => {
   expect(screen.getByText('演示营业')).toBeTruthy()
 })
 
+test('共用通道一次失败仅显示待确认，不宣称全员休假', () => {
+  render(<Directory state={{ ...available, all_available: false, members: members.map((member) => ({ role_id: member.id, status: 'unverified', reason: 'recent_failure' })) }} refresh={vi.fn()} mention={vi.fn()} />)
+  expect(screen.getByText('状态待确认')).toBeTruthy()
+  expect(screen.queryByText(/位休假/)).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '今天在店里' }))
+  expect(screen.getAllByText('共用通道最近一次调用失败，当前可用性待确认')).toHaveLength(2)
+})
+
 test('全员营业须覆盖当前每位伙伴，缺失与未知状态不能被局部成功掩盖', () => {
   const view = render(<Directory state={{ ...available, members: [available.members[0]] }} refresh={vi.fn()} mention={vi.fn()} />)
   expect(screen.queryByText('全员营业')).toBeNull()

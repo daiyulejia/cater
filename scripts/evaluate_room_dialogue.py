@@ -25,7 +25,7 @@ from cater.usage import usage_source, valid_token_count
 
 FIXTURES = ROOT / "tests" / "fixtures" / "room_dialogue_cases.json"
 REPORT_DIR = ROOT / ".cater" / "evaluations"
-TARGET_ACTIONS = {"update_task", "explain_task", "resume_task"}
+TARGET_ACTIONS = {"update_task", "explain_task", "resume_task", "status_task"}
 USAGE_FIELDS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
                 "prompt_tokens", "completion_tokens", "total_tokens")
 STOP_REASONS = {"end_turn", "stop_sequence", "max_tokens", "tool_use", "pause_turn", "refusal",

@@ -56,6 +56,13 @@ class RoomDialogueEvaluationTests(unittest.TestCase):
     def driver(self, cases=None, **kwargs):
         return FakeDriver([response_for(case) for case in (self.cases if cases is None else cases)], **kwargs)
 
+    def test_semantic_routing_fixtures_keep_mixed_message_regressions(self):
+        cases = json.loads(evaluation.FIXTURES.with_name("conversation_routing_cases.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(evaluation.validate_cases(cases)), 8)
+        expectations = {case["id"]: case["expected"]["actions"] for case in cases}
+        self.assertEqual(expectations["mixed_reverse"], ["update_task"])
+        self.assertEqual(expectations["status_negated_change"], ["status_task"])
+
     def run_cli(self, driver, directory, *extra):
         output = Path(directory) / "report.json"
         stdout, stderr = io.StringIO(), io.StringIO()

@@ -27,6 +27,7 @@ from test_runtime import start_test_web
 class PlanningDriver:
     def __init__(self):
         self.calls = []
+        self.dialogue_calls = []
         self.prompts = []
         self.items = [item("implement", local=True)]
         self.reuse = False
@@ -35,6 +36,12 @@ class PlanningDriver:
 
     def complete(self, *, role, prompt, context):
         work = context["work"]
+        if work["phase"] == "room_dialogue":
+            self.dialogue_calls.append(copy.deepcopy(work))
+            payload = {"reply": "我会把中文错误信息补充到当前要求。", "action": "update_task",
+                       "task_id": context["task_id"], "goal": None, "acceptance": None,
+                       "quote": context["conversation"]["message"]}
+            return DriverResponse(json.dumps(payload), 5, {"token_usage": "reported"})
         self.calls.append(copy.deepcopy(work))
         self.prompts.append(prompt)
         if self.after:
@@ -415,17 +422,28 @@ class PlanningTests(unittest.TestCase):
         self.assertTrue(started.wait(3))
         queued = post("command", {"instruction": "还必须支持中文错误信息", "continue": True})
         self.assertTrue(queued["activity"]["active"])
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            with runtime_factory() as runtime:
+                interpreted = runtime.conversation.view(self.task)
+            if interpreted and interpreted[-1]["status"] == "finished":
+                break
+            time.sleep(0.01)
+        self.assertTrue(interpreted)
+        self.assertEqual(interpreted[-1]["action"], "update_task")
+        self.assertEqual(interpreted[-1]["status"], "finished")
         release.set()
         deadline = time.monotonic() + 6
         while time.monotonic() < deadline:
             with urlopen(f"{base}/api/tasks/{self.task}", timeout=2) as response:
                 data = json.load(response)
-            if not data["activity"]["active"]:
+            if not data["activity"]["active"] and len(self.planner.calls) == 2:
                 break
             time.sleep(0.02)
         self.assertFalse(data["activity"]["active"])
         self.assertTrue(data["task"]["work"]["scope_current"])
         self.assertEqual(len(self.planner.calls), 2)
+        self.assertEqual(len(self.planner.dialogue_calls), 1)
         self.assertIn("还必须支持中文错误信息", [s["text"] for s in self.planner.calls[-1]["sources"]])
         self.assertEqual(len(self.worker.calls), 1)
         finishes = [e["payload"]["status"] for e in data["events"] if e["type"] == "planning.finished"]

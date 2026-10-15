@@ -6,7 +6,7 @@ import { AtSign, Cat, RefreshCw, X } from 'lucide-react'
 export type TeamAvailability = { checked_at: string; all_available: boolean; members: { role_id: string; status: string; reason: string }[] }
 type Member = { id: string; name: string }
 const labels: Record<string, string> = { available: '营业', demo: '演示中', on_leave: '休假', unverified: '待确认' }
-const reasons: Record<string, string> = { local_policy: '本地调度就绪', local_demo: '本地演示，未调用真实模型', budget_exhausted: 'Cater 的已报告用量预算已耗尽', invalid_budget: '预算配置需要修正', missing_key: '尚未提供模型凭据', not_configured: '尚未配置连接', circuit_open: '连接连续失败，已暂停调用', recent_failure: '最近一次调用未成功', recent_success: '近五分钟内调用成功', not_recently_checked: '尚无近期调用证据' }
+const reasons: Record<string, string> = { local_policy: '本地调度就绪', local_demo: '本地演示，未调用真实模型', budget_exhausted: 'Cater 的已报告用量预算已耗尽', invalid_budget: '预算配置需要修正', missing_key: '尚未提供模型凭据', not_configured: '尚未配置连接', circuit_open: '连接连续失败，已暂停调用', recent_failure: '共用通道最近一次调用失败，当前可用性待确认', recent_success: '近五分钟内调用成功', not_recently_checked: '尚无近期调用证据' }
 
 function teamSummary(members: Member[], availability?: TeamAvailability): string {
   if (!members.length || !availability?.members.length) return '状态待确认'

@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { ComponentProps } from 'react'
 import {
   ArrowDown, Cat, CheckCircle2, ChevronDown, CircleHelp,
   CornerDownRight, FileText, GitBranch, GitFork, Info, LoaderCircle, PawPrint, Plus, RefreshCw, Search, ShieldCheck, TriangleAlert,
@@ -13,7 +14,6 @@ import { TeamDirectory } from './TeamDirectory'
 import { TaskList } from './TaskList'
 import { RulesPanel } from './RulesPanel'
 import { WorkItems } from './WorkItems'
-import { DeliveryPanel } from './DeliveryPanel'
 import { ConversationMembers } from './ConversationMembers'
 import { ConversationOrigin, DerivationDraftBar } from './ConversationOrigin'
 import type { ConversationBackground } from './ConversationOrigin'
@@ -27,6 +27,10 @@ import { collaborationProjection, workTransfers } from './collaborationProjectio
 import type { WorkAssignment } from './collaborationProjection'
 
 const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
+const LazyDeliveryPanel = lazy(() => import('./DeliveryPanel').then((module) => ({ default: module.DeliveryPanel })))
+const EventDetails = lazy(() => import('./EventDetails').then((module) => ({ default: module.EventDetails })))
+const WorkProgressPanel = lazy(() => import('./WorkProgressPanel').then((module) => ({ default: module.WorkProgressPanel })))
+const WorkAssignments = lazy(() => import('./WorkProgressPanel').then((module) => ({ default: module.WorkAssignments })))
 const ClarificationCard = lazy(() => import('./ClarificationCard').then((module) => ({ default: module.ClarificationCard })))
 const QuestionDetails = lazy(() => import('./QuestionDetails').then((module) => ({ default: module.QuestionDetails })))
 const LazyArtifactPreview = lazy(() => import('./Artifact').then((module) => ({ default: module.ArtifactPreview })))
@@ -62,9 +66,10 @@ type Task = {
 type Event = { seq: number; type: string; category: string; actor: { id: string; role: string; kind: string }; payload: Record<string, unknown> }
 type QuestionResult = { question_seq?: number; answer?: string; evidence?: { source_seq: number; quote: string }[]; limits?: string[]; reason?: string; speaker_id?: string; driver?: string; tokens?: number; token_usage?: string }
 type Question = QuestionResult & { seq: number; status: string; question: string; role_id: string; basis: QuestionBasis; outdated: boolean }
-type TaskDetail = { task: Task; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
+type ConversationReceipt = { seq: number; status: string }
+type TaskDetail = { task: Task; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string }; activity?: Activity }
 type DerivationSource = { id: string; goal: string }
-type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event }
+type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event }
 
 const accessToken = (() => {
   const fragment = new URLSearchParams(window.location.hash.slice(1))
@@ -205,12 +210,14 @@ function isSystemActor(actor: Event['actor'], identities: Record<string, OrgRole
   return !Object.hasOwn(identities, actor.id) && (actor.kind === 'system' || (!actor.kind && legacySystemActors.has(actor.id)))
 }
 
-function conversationFor(events: Event[], identities: Record<string, OrgRole>, organization: Organization | null, questions: Question[] = [], clarifications: Clarification[] = []): ChatItem[] {
+function conversationFor(events: Event[], identities: Record<string, OrgRole>, organization: Organization | null, questions: Question[] = [], clarifications: Clarification[] = [], receipts: ConversationReceipt[] = []): ChatItem[] {
   const hasAutonomousDecision = events.some((event) => event.type === 'agent.decided' || event.type === 'supreme.decided')
   const hasFinishedActivity = events.some((event) => event.type === 'activity.completed' || event.type === 'activity.failed')
   const questionRows = new Map(questions.map((question) => [question.seq, question]))
   const askedEvents = new Map(events.filter((event) => event.type === 'question.asked').map((event) => [event.seq, event]))
   const finishedQuestions = new Set(events.filter((event) => event.type === 'question.finished').map((event) => event.payload.question_seq))
+  const conversationRows = new Map(receipts.map((row) => [row.seq, row]))
+  const explainedMessages = new Set(events.filter((event) => event.type === 'conversation.finished').map((event) => event.payload.question_seq))
   const clarificationRows = new Map(clarifications.map((question) => [question.seq, question]))
   const collaboration = collaborationProjection(events, organization?.leader.id ?? 'store_manager')
   const transfers = workTransfers(events)
@@ -239,9 +246,18 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       const owner = `@${displayName(transfer.owner)}`
       const text = transfer.kind === 'submitted'
         ? `${owner} 已提交成果${transfer.reviewer ? `，交给 @${displayName(transfer.reviewer)} 复核` : '，等待安排复核'}。`
-        : `${owner} 已接手，接着 ${transfer.from.map((id) => `@${displayName(id)}`).join('、')} 的成果继续做。`
+        : transfer.from.length ? `${owner} 已接手，接着 ${transfer.from.map((id) => `@${displayName(id)}`).join('、')} 的成果继续做。` : `${owner} 已接手这项工作。`
       const item = message(undefined, text, 'system', 'collaboration', [transfer.objective])
-      item.notice = true
+      if (transfer.kind === 'started') {
+        item.actor = transfer.owner
+        item.display = displayName(transfer.owner)
+        item.role = publicIdentity(transfer.owner, organization)
+        item.kind = 'agent'
+        item.systemActor = false
+        item.title = '接手回执'
+        item.progress = events
+        item.details = undefined
+      } else item.notice = true
       return [item]
     }
     if (event.type === 'clarification.requested') {
@@ -256,8 +272,33 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       item.notice = true
       return [item]
     }
-    if (event.type === 'question.started') return []
+    if (event.type === 'question.started' || event.type === 'conversation.started') return []
+    if (event.type === 'conversation.received') {
+      const state = conversationRows.get(event.seq)?.status
+      const progress = ({ pending: '已收到，等待理解', answering: '正在结合上下文理解', uncertain: '这条消息的处理结果待确认' } as Record<string, string>)[state ?? '']
+      return [message(undefined, String(payload.instruction ?? ''), 'human', 'collaboration', progress ? [progress] : undefined)]
+    }
+    if (event.type === 'conversation.finished') {
+      if (payload.action === 'status_task' && events.some((record) => record.seq === payload.progress_seq && record.type === 'task.progress_reported')) return []
+      const question = questionRows.get(Number(payload.question_seq))
+      const routed = payload.status === 'finished' && ['update_task', 'resume_task', 'explain_task'].includes(String(payload.action))
+      const speaker = !routed && payload.status === 'finished' && typeof payload.speaker_id === 'string' ? payload.speaker_id : undefined
+      const receipt = payload.action === 'update_task' ? '补充要求已记入当前任务。'
+        : payload.action === 'resume_task' ? '继续请求已记入，沿用当前要求。'
+          : `已将这个问题交给 @${displayName(question?.role_id ?? organization?.leader.id ?? 'store_manager')}，核对现有成果后回答。`
+      const item = message(undefined, routed ? receipt : String(payload.reply ?? ''), speaker ? 'agent' : 'system', 'collaboration')
+      item.actor = speaker ?? 'system'
+      item.display = speaker ? displayName(speaker) : '系统'
+      item.role = publicIdentity(item.actor, organization)
+      item.systemActor = !speaker
+      if (question && !finishedQuestions.has(question.seq)) {
+        const progress = ({ pending: '等待回答', answering: '正在核对成果并回答', uncertain: '回答结果待确认' } as Record<string, string>)[question.status]
+        if (progress) item.details = [progress]
+      }
+      return [item]
+    }
     if (event.type === 'question.asked' || event.type === 'question.finished') {
+      if (event.type === 'question.asked' && explainedMessages.has(event.seq)) return []
       const asked = event.type === 'question.asked'
       const questionSeq = asked ? event.seq : typeof payload.question_seq === 'number' ? payload.question_seq : undefined
       const row = questionSeq === undefined ? undefined : questionRows.get(questionSeq)
@@ -305,7 +346,13 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     // conversation people actually want to read.
     if (event.type === 'activity.completed') return []
     if (event.type === 'activity.failed') return [message('协作异常', String(payload.message ?? '后台协作未能完成。'), 'system')]
-    if (event.type === 'human.commanded') return [message(payload.intent === 'status' ? '查看进度' : payload.intent === 'resume' ? '继续推进' : '方向更新', String(payload.instruction ?? ''), 'human')]
+    if (event.type === 'human.commanded') {
+      if (payload.conversation_seq) {
+        if (events.some((record) => record.type === 'conversation.finished' && record.payload.conversation_seq === payload.conversation_seq)) return []
+        return [message('安排回执待核对', '这条消息已转为工作安排，但后续处理回执尚不完整。', 'system', 'collaboration')]
+      }
+      return [message(payload.intent === 'status' ? '查看进度' : payload.intent === 'resume' ? '继续推进' : '方向更新', String(payload.instruction ?? ''), 'human')]
+    }
     if (event.type === 'task.progress_reported') return [message('当前进展', String(payload.text ?? ''), 'system', 'collaboration')]
     if (event.type === 'planning.started') return [message('店长在整理安排', '我先核对这次的要求、已有成果和前后依赖，再把具体工作交给伙伴。', 'system', 'collaboration')]
     if (event.type === 'planning.finished') {
@@ -346,21 +393,12 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     if (event.type === 'task.decomposed') {
       const names = memberNames(payload.members)
       const subtasks = Array.isArray(payload.subtasks) ? payload.subtasks.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object') : []
-      const assignees = subtasks.map((item) => identities[String(item.owner ?? '')]?.name ?? actorText(String(item.owner ?? ''))).filter(Boolean)
-      const details = subtasks.map((item) => {
-        const owner = String(item.owner ?? '')
-        const name = identities[owner]?.name ?? actorText(owner)
-        const lane = String(item.lane ?? '执行')
-        const acceptance = String(item.acceptance ?? '')
-        return `@${name} 负责${lane}${acceptance ? `，完成时：${acceptance}` : ''}`
-      })
+      const details = subtasks.filter((item) => item.acceptance).map((item) => `@${displayName(String(item.owner))} 验收：${String(item.acceptance)}`)
       const isCabinetPlan = String(payload.source) === 'cabinet'
       const planner = isCabinetPlan ? names.join('、') || '几位伙伴' : '店长'
-      const invitation = assignees.length === 1
-        ? `这次先请 @${assignees[0]} 接住这一单。`
-        : assignees.length > 1
-          ? `这次请 ${assignees.map((name) => `@${name}`).join('、')} 一起接力。`
-          : '这一单已经安排妥当，大家会依次接力推进。'
+      const invitation = subtasks.some((item) => typeof item.objective === 'string')
+        ? subtasks.map((item) => `${String(item.objective ?? item.lane ?? '这项工作')}，交给 @${displayName(String(item.owner ?? ''))}。`).join('\n')
+        : '具体分工已记录，伙伴会按依赖接力。'
       return [message(`${planner}把工作分好了`, invitation, 'system', 'decision', details)]
     }
     if (event.type === 'plan.amended') {
@@ -429,6 +467,9 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     if (event.type === 'agent.decided' || event.type === 'supreme.decided') return [message('自治决策', reasonText(String(payload.reason ?? '')), 'system', 'decision')]
     if (event.type === 'brief.generated' && !hasAutonomousDecision) {
       const brief = payload.brief as Record<string, unknown> | undefined
+      const checkpoint = brief?.checkpoint as { state?: string } | undefined
+      // Routine handoffs belong to the worker/reviewer, not another manager speech.
+      if (payload.reason === 'work_checkpoint' && ['running', 'waiting_check', 'delivery_checking', 'delivery_reviewing', 'ready', 'planned', 'accepted'].includes(checkpoint?.state ?? '')) return []
       return [message('本轮总结', reasonText(String(brief?.dispute ?? '团队已完成一轮协作。')), 'system')]
     }
     if (event.type === 'agent.discipline_flagged') {
@@ -451,6 +492,7 @@ function App() {
   const [questionMode, setQuestionMode] = useState(false)
   const questionModeRef = useRef(false)
   const questionRequests = useRef<Record<string, { text: string; requestId: string }>>({})
+  const conversationRequests = useRef<Record<string, { text: string; requestId: string }>>({})
   const [clarificationStore] = useState<ClarificationStore>(() => new Map())
   const derivationRef = useRef<DerivationSource | null>(null)
   const derivationRequests = useRef<Record<string, { text: string; requestId: string }>>({})
@@ -665,7 +707,7 @@ function App() {
         if (cancelled) return
         acceptDetail(next, order)
         setLoadErrors((current) => ({ ...current, [selectedId]: '' }))
-        delay = next.activity?.active ? 800 : 4000
+        delay = next.activity?.active || next.conversation?.some((row) => row.status === 'pending' || row.status === 'answering') ? 800 : 4000
       } catch (err) {
         if (!cancelled) setLoadErrors((current) => ({ ...current, [selectedId]: userFacingError(err, '暂时无法读取任务详情。') }))
       } finally {
@@ -692,7 +734,7 @@ function App() {
     return Object.fromEntries(members.map((member) => [member.id, member]))
   }, [organization, roles])
   const currentDetail = detail?.task.id === selectedId ? detail : null
-  const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization, currentDetail.questions, currentDetail.clarifications) : [], [currentDetail, identities, organization])
+  const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization, currentDetail.questions, currentDetail.clarifications, currentDetail.conversation) : [], [currentDetail, identities, organization])
   const visibleConversation = useMemo(() => chatFilter === 'all' ? conversation : conversation.filter((item) => item.category === chatFilter), [chatFilter, conversation])
   const selectedSummary = tasks.find((item) => item.id === selectedId)
   const task: Task | undefined = selectedId ? currentDetail?.task ?? (selectedSummary
@@ -867,10 +909,14 @@ function App() {
     const id = selectedId
     const submitted = message
     if (!id || questionModeRef.current || derivationRef.current || selectedRef.current !== id || loading || !submitted.trim() || pendingRef.current.has(id)) return
+    const previous = conversationRequests.current[id]
+    const attempt = previous?.text === submitted ? previous : { text: submitted, requestId: creationRequestId() }
+    conversationRequests.current[id] = attempt
     pendingRef.current.add(id); setPending(new Set(pendingRef.current))
     setSendErrors((current) => ({ ...current, [id]: '' }))
     try {
-      const { next: result, order } = await requestDetail(`/api/tasks/${id}/command`, { method: 'POST', body: JSON.stringify({ instruction: submitted.trim(), continue: true }) })
+      const { next: result, order } = await requestDetail(`/api/tasks/${id}/command`, { method: 'POST', body: JSON.stringify({ instruction: submitted.trim(), continue: true, request_id: attempt.requestId }) })
+      if (conversationRequests.current[id] === attempt) delete conversationRequests.current[id]
       setDrafts((current) => current[id] === submitted ? { ...current, [id]: '' } : current)
       acceptDetail(result, order)
     } catch (err) { setSendErrors((current) => ({ ...current, [id]: userFacingError(err, '发送指令失败') })) }
@@ -961,10 +1007,7 @@ function TaskComposer({ members, draft, isSending, onDraftChange, onCreate }: { 
 function MessageContext({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ClarificationControls }) {
   return <>
     {item.handoff && <div className="handoff-line" aria-label="工作交接">
-      {item.assignments?.length ? item.assignments.map((assignment, index) => <details key={index}>
-        <summary>@{assignment.owner} 接手{assignment.reviewer ? `，完成后交给 @${assignment.reviewer} 复核` : ''}</summary>
-        <p>{assignment.objective}</p>
-      </details>) : <>
+      {item.assignments?.length ? <Suspense fallback={null}><WorkAssignments items={item.assignments} /></Suspense> : <>
         {item.handoff.owners.length > 0 && <p>接手：{item.handoff.owners.map((name) => `@${name}`).join('、')}</p>}
         {item.handoff.reviewers.length > 0 && <p>复核：{item.handoff.reviewers.map((name) => `@${name}`).join('、')}</p>}
       </>}
@@ -979,9 +1022,10 @@ function MessageContext({ item, taskId, controls }: { item: ChatItem; taskId: st
 }
 
 function AuditTrail({ item }: { item: ChatItem }) {
-  return <details className="chat-audit">
+  const [open, setOpen] = useState(false)
+  return <details className="chat-audit" onToggle={(event) => { if (event.target === event.currentTarget) setOpen(event.currentTarget.open) }}>
     <summary>事件 #{item.id} · 审计记录</summary>
-    <pre>{JSON.stringify(item.systemActor ? item.evidence : item.evidence.payload, null, 2)}</pre>
+    {open && <Suspense fallback={<p>正在读取过程记录…</p>}><EventDetails event={item.evidence} actorName={actorText} /></Suspense>}
   </details>
 }
 
@@ -1029,12 +1073,17 @@ function ChatBubble({ item, taskId, controls }: { item: ChatItem; taskId: string
       <div className={`mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${human ? 'text-[#fff0e8]' : 'text-[#6e8981]'}`}><strong className={human ? 'text-white' : 'text-[#28433d]'}>{human ? '你' : item.display}</strong><span>{item.role}</span>{item.title && <span className={`text-[11px] font-semibold ${human ? 'text-[#fff4d9]' : 'text-[#a56049]'}`}>· {item.title}</span>}</div>
       <p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>
       <MessageContext item={item} taskId={taskId} controls={controls} />
+      {item.progress && <Suspense fallback={null}><WorkProgressPanel events={item.progress} claim={item.id} name={item.display} /></Suspense>}
       {item.evidence.type === 'deliverable.published' && <ArtifactPreview item={{ ...item.evidence.payload, seq: item.id } as Artifact} publisher={item.display} showSummary={false} />}
       {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
       {item.details?.length ? <details className={`mt-3 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#dfeae5] text-[#52766d]'}`}><summary className="cursor-pointer font-semibold">查看判断与依据</summary><ul className="mt-2 space-y-1.5 leading-5">{item.details.map((detail, index) => <li key={`${item.id}-${index}`}>{detail}</li>)}</ul></details> : null}
       <AuditTrail item={item} />
     </div>
   </article>
+}
+
+function DeliveryPanel(props: ComponentProps<typeof LazyDeliveryPanel>) {
+  return <Suspense fallback={<p className="text-xs text-stone-500" role="status">正在读取交付记录…</p>}><LazyDeliveryPanel {...props} /></Suspense>
 }
 
 function MemoryBoard({ items, names }: { items: MemoryItem[]; names: Record<string, string> }) {

@@ -122,7 +122,28 @@ test('完成任务在原群 POST questions，保留点名，不调用 command �
   toggle(); expect(normalInput().value).toBe('继续协作的草稿')
   await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送消息' })))
   expect(posts()[1][0]).toBe('/api/tasks/b/command')
-  expect(bodies()[1]).toEqual({ instruction: '继续协作的草稿', continue: true })
+  expect(bodies()[1]).toEqual({ instruction: '继续协作的草稿', continue: true, request_id: expect.stringMatching(uuid) })
+})
+
+test('普通消息发送失败后重试复用标识，成功后的下一条消息使用新标识', async () => {
+  await mount()
+  let calls = 0
+  handler = (url) => {
+    if (!url.endsWith('/command')) return
+    calls += 1
+    return calls === 1 ? new Response('连接中断', { status: 503 }) : json(detail())
+  }
+  const sendMessage = async () => { await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送消息' }))) }
+  write(normalInput(), '继需了吗')
+  await sendMessage()
+  expect(normalInput().value).toBe('继需了吗')
+  await sendMessage()
+  expect(bodies()[0].request_id).toMatch(uuid)
+  expect(bodies()[1]).toEqual(bodies()[0])
+  expect(normalInput().value).toBe('')
+  write(normalInput(), '继需了吗')
+  await sendMessage()
+  expect(bodies()[2].request_id).not.toBe(bodies()[0].request_id)
 })
 
 test('HTTP、网络及409失败保留草稿与 UUID，取消、切换和轮询后仍沿用', async () => {

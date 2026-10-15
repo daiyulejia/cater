@@ -8,7 +8,7 @@ import traceback
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from cater.anthropic import AnthropicMessagesDriver
 from cater.availability import team_availability
@@ -120,6 +120,58 @@ class AnthropicDriverTests(unittest.TestCase):
                     self.driver().complete(role="worker", prompt="test", context={})
                 self.assertNotIn("fixture-secret", str(caught.exception))
                 self.assertNotIn("fixture-secret", "".join(traceback.format_exception(caught.exception)))
+
+    def transport_failure(self, error, *, read=False):
+        response = io.BytesIO()
+        with patch.dict(os.environ, {"CATER_ANTHROPIC_FIXTURE": "fixture-secret"}), patch.object(
+            response, "read", side_effect=error if read else None
+        ), patch("cater.anthropic._open_api_request", return_value=response,
+                 side_effect=None if read else error) as opened:
+            with self.assertRaises(DriverUnavailable) as caught:
+                self.driver(timeout=90).complete(role="worker", prompt="synthetic", context={})
+        opened.assert_called_once()
+        self.assertEqual(opened.call_args.kwargs["timeout"], 90)
+        rendered = "".join(traceback.format_exception(caught.exception))
+        for private in ("fixture-secret", "provider.test", "PRIVATE_BODY"):
+            self.assertNotIn(private, rendered)
+        return str(caught.exception)
+
+    def test_request_timeout_including_urlerror_reason_is_identified_without_leaks(self):
+        private = "https://provider.test/?key=fixture-secret PRIVATE_BODY"
+        for error in (TimeoutError(private), URLError(TimeoutError(private))):
+            with self.subTest(error=type(error).__name__):
+                message = self.transport_failure(error)
+                self.assertEqual(message, "anthropic-test API request timed out (configured timeout: 90s)")
+                self.assertNotIn("endpoint is unavailable", message)
+
+    def test_response_read_timeout_is_identified_without_leaks(self):
+        private = "https://provider.test/?key=fixture-secret PRIVATE_BODY"
+        for error in (TimeoutError(private), URLError(TimeoutError(private))):
+            with self.subTest(error=type(error).__name__):
+                message = self.transport_failure(error, read=True)
+                self.assertEqual(message, "anthropic-test API response read timed out (configured timeout: 90s)")
+                self.assertNotIn("endpoint is unavailable", message)
+
+    def test_network_faults_remain_distinct_from_timeout_during_open_and_read(self):
+        private = "https://provider.test/?key=fixture-secret PRIVATE_BODY"
+        for read in (False, True):
+            for error in (URLError(private), URLError(ConnectionRefusedError(private)),
+                          ConnectionResetError(private), OSError(private)):
+                with self.subTest(read=read, error=type(error).__name__):
+                    message = self.transport_failure(error, read=read)
+                    phase = "response read" if read else "request"
+                    self.assertEqual(message, "anthropic-test API endpoint is unavailable "
+                                     f"(connection or network failure during {phase})")
+                    self.assertNotIn("timed out", message)
+
+    def test_http_statuses_and_invalid_headers_are_safe_and_not_network_timeouts(self):
+        private = "https://provider.test/?key=fixture-secret PRIVATE_BODY"
+        for status in (401, 429, 503, 504):
+            with self.subTest(status=status):
+                message = self.transport_failure(HTTPError(private, status, private, {}, io.BytesIO(private.encode())))
+                self.assertEqual(message, f"anthropic-test API request failed with HTTP {status}")
+        message = self.transport_failure(ValueError(private))
+        self.assertEqual(message, "anthropic-test API request failed (invalid request or headers)")
 
     def test_wrong_protocol_and_oversized_response_are_rejected(self):
         for data in ({"choices": [{"message": {"content": "other protocol"}}]}, [],

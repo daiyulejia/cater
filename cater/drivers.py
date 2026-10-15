@@ -64,6 +64,19 @@ class DriverUnavailable(DriverError):
     """The driver process or endpoint is unavailable."""
 
 
+class TextTransportFailure(DriverUnavailable):
+    """Network failure of a text-only call; no tool effects, remote billing unknown."""
+
+
+def _text_only_request(body: dict[str, Any]) -> bool:
+    """Fail closed on tool declarations, tool history or new request capabilities."""
+    return (not set(body) - {"model", "messages", "system", "max_tokens", "stream", "thinking", "temperature"}
+            and isinstance(body.get("messages"), list) and bool(body["messages"])
+            and all(isinstance(message, dict) and set(message) <= {"role", "content"}
+                    and message.get("role") in {"system", "user"} and isinstance(message.get("content"), str)
+                    for message in body["messages"]))
+
+
 class ScriptedDriver:
     def __init__(self, name: str, script: list[str], tokens_per_call: int = 200, token_budget: int | None = None):
         self.name = name
@@ -507,8 +520,11 @@ class OpenAICompatibleDriver:
                 raw = response.read(MAX_API_RESPONSE_BYTES + 1)
         except HTTPError as exc:
             raise DriverUnavailable(f"{self.name} API request failed with HTTP {exc.code}") from exc
-        except (URLError, TimeoutError, OSError) as exc:
-            raise DriverUnavailable(f"{self.name} API endpoint is unavailable") from exc
+        except (URLError, TimeoutError, OSError):
+            # Adding any local or server-side tools must remove the text-only
+            # recovery promise, even if their effects are not in this payload.
+            failure = TextTransportFailure if _text_only_request(payload) else DriverUnavailable
+            raise failure(f"{self.name} API endpoint is unavailable") from None
         if len(raw) > MAX_API_RESPONSE_BYTES:
             raise DriverProtocolError(
                 f"{self.name} API response exceeds {MAX_API_RESPONSE_BYTES} byte limit"

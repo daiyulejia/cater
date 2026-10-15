@@ -38,10 +38,12 @@ function visibleText(element: HTMLElement): string {
 
 function openDetails(details: HTMLDetailsElement) {
   fireEvent.click(details.querySelector('summary')!)
+  fireEvent(details, new Event('toggle'))
   expect(details.open).toBe(true)
 }
 
 test.each(['review_response_correction', 'review'])('内部复核修复 %s 收进中性过程记录，但最终失败仍公开', async (phase) => {
+  vi.useRealTimers()
   await mount([
     event(2, 'msg.said', 'dev', { phase, text: '这次卡在我的复核回复格式或引用上，还不能据此认定成果有错。我会按原成果重新整理一次回复。', tokens: 100 }, 'agent'),
     event(3, 'msg.said', 'dev', { phase: 'review', text: '复核仍未完成，引用需要核对。' }, 'agent'),
@@ -54,10 +56,13 @@ test.each(['review_response_correction', 'review'])('内部复核修复 %s 收�
   expect(visibleText(record(3))).toContain('复核仍未完成')
   openDetails(row.querySelector('details')!)
   openDetails(within(row).getByText('事件 #2 · 审计记录').closest('details')!)
+  await act(async () => { await vi.dynamicImportSettled() })
+  openDetails((await within(row).findByText('开发者详情')).closest('details')!)
   expect(visibleText(row)).toContain('100')
 })
 
 test.each([undefined, 'system'])('纪律记录（kind=%s）不再冒充成员，常规提醒默认收起且未知码只进入审计', async (kind) => {
+  vi.useRealTimers()
   await mount([event(2, 'agent.discipline_flagged', 'discipline', { issues: ['missing_claim', 'unknown_internal_issue'], message_seq: 1 }, kind)])
   const row = record(2)
   expect(within(row).queryByRole('img')).toBeNull()
@@ -72,12 +77,17 @@ test.each([undefined, 'system'])('纪律记录（kind=%s）不再冒充成员，
   expect(visibleText(row)).not.toMatch(/discipline|unknown_internal_issue/)
   const audit = within(row).getByText('事件 #2 · 审计记录').closest('details')!
   openDetails(audit)
+  await act(async () => { await vi.dynamicImportSettled() })
+  expect(visibleText(row)).not.toContain('unknown_internal_issue')
+  openDetails((await within(audit).findByText('开发者详情')).closest('details')!)
   expect(visibleText(row)).toContain('discipline')
   expect(visibleText(row)).toContain('unknown_internal_issue')
   expect(JSON.parse(audit.querySelector('pre')!.textContent!)).toMatchObject({ seq: 2, type: 'agent.discipline_flagged', actor: { id: 'discipline' } })
   const humanAudit = within(record(1)).getByText('事件 #1 · 审计记录').closest('details')!
   openDetails(humanAudit)
-  expect(JSON.parse(humanAudit.querySelector('pre')!.textContent!)).toEqual({ goal: '核对聊天系统记录' })
+  await act(async () => { await vi.dynamicImportSettled() })
+  await within(humanAudit).findByText('开发者详情')
+  expect(JSON.parse(humanAudit.querySelector('pre')!.textContent!)).toMatchObject({ payload: { goal: '核对聊天系统记录' } })
 })
 
 test.each([undefined, 'system'])('通过的本机检查（kind=%s）默认收起，展开可查实际命令及依据', async (kind) => {

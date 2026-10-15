@@ -14,10 +14,15 @@ class RoomDialogueTests(unittest.TestCase):
     def test_ordinary_discussion_carries_no_task_change(self):
         raw = response()
         self.assertEqual(validate_response(raw, message="先讨论系统设计", task_ids={"task_a"}), raw)
-        for field, value in (("task_id", "task_a"), ("goal", "another goal"), ("acceptance", []),
-                             ("quote", "系统设计")):
+        for field, value in (("task_id", "task_a"), ("goal", "another goal"), ("acceptance", [])):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 validate_response({**raw, field: value}, message="先讨论系统设计", task_ids={"task_a"})
+
+    def test_discussion_may_quote_the_customer_without_becoming_a_change(self):
+        raw = response(quote="先聊聊天")
+        self.assertEqual(validate_response(raw, message="先聊聊天，不安排新活", task_ids={"task_a"}), raw)
+        with self.assertRaises(ValueError):
+            validate_response({**raw, "quote": "伪造的原话"}, message="先聊聊天", task_ids={"task_a"})
 
     def test_new_work_does_not_reuse_existing_task_identity(self):
         raw = response("new_task", goal="整理交接说明", acceptance=[], quote="交接说明")
@@ -35,7 +40,7 @@ class RoomDialogueTests(unittest.TestCase):
                 validate_response({**raw, **changes}, message="原来的页面也要支持中文", task_ids={"task_a"})
 
     def test_explain_and_resume_never_smuggle_goal_or_acceptance_edits(self):
-        for action in ("explain_task", "resume_task"):
+        for action in ("explain_task", "resume_task", "status_task"):
             raw = response(action, task_id="task_a", quote="这项工作")
             self.assertEqual(validate_response(raw, message="说说这项工作", task_ids={"task_a"}), raw)
             for field, value in (("goal", "changed"), ("acceptance", [])):

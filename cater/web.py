@@ -30,7 +30,7 @@ from .ladder import decision_ladder
 from .messages import message_relation
 from .path import organization_path
 from .review import build_review
-from .runtime import DriverHealth, Runtime
+from .runtime import DriverHealth, ExecutionScopeChanged, Runtime
 from .rules import RuleConflict
 from .work import WorkConflict
 
@@ -52,6 +52,62 @@ class ActivityRunner:
         self._activities: dict[str, dict[str, Any]] = {}
         self._revision = 0
         self._question_tasks: dict[str, str] = {}
+        self._conversation_tasks: dict[str, str] = {}
+
+    def answer_conversations(self, task_id: str) -> None:
+        with self._lock:
+            if task_id in self._conversation_tasks:
+                return
+            owner = uuid.uuid4().hex
+            self._conversation_tasks[task_id] = owner
+        try:
+            threading.Thread(target=self._answer_conversations, args=(task_id, owner),
+                             name=f"cater-chat-{task_id}", daemon=True).start()
+        except Exception:
+            with self._lock:
+                if self._conversation_tasks.get(task_id) == owner:
+                    self._conversation_tasks.pop(task_id, None)
+            raise
+
+    def _answer_conversations(self, task_id: str, owner: str) -> None:
+        last_message = None
+        attempts = read_failures = 0
+        try:
+            while True:
+                try:
+                    with self._lock:
+                        with self._runtime_factory() as runtime:
+                            pending = runtime.conversation.pending(task_id)
+                        if not pending:
+                            if self._conversation_tasks.get(task_id) == owner:
+                                self._conversation_tasks.pop(task_id, None)
+                            return
+                except Exception:
+                    read_failures += 1
+                    _LOGGER.exception("Cannot read conversation queue for %s", task_id)
+                    if read_failures >= MAX_QUESTION_QUEUE_ATTEMPTS:
+                        return
+                    continue
+                read_failures = 0
+                if pending[0] != last_message:
+                    last_message, attempts = pending[0], 0
+                if attempts >= MAX_QUESTION_QUEUE_ATTEMPTS:
+                    return
+                attempts += 1
+                try:
+                    with self._runtime_factory() as runtime:
+                        result = runtime.conversation.resolve_next(task_id)
+                    if result and result.get("next_action") == "explain":
+                        self.answer_questions(task_id)
+                    elif result and result.get("next_action") == "run":
+                        self.dispatch_conversation(task_id, result)
+                except Exception:
+                    # Started calls remain durable and are never blindly repeated.
+                    _LOGGER.exception("Conversation handling failed for %s at %s", task_id, last_message)
+        finally:
+            with self._lock:
+                if self._conversation_tasks.get(task_id) == owner:
+                    self._conversation_tasks.pop(task_id, None)
 
     def answer_questions(self, task_id: str) -> None:
         with self._lock:
@@ -158,6 +214,23 @@ class ActivityRunner:
                 }
                 self._revision += 1
         self._recover_pending_questions()
+        with self._runtime_factory() as runtime:
+            queued = {(event.task_id, event.payload.get("conversation_seq"))
+                      for event in runtime.log.iter_events(event_types=("activity.queued",))
+                      if event.actor == EventActor.system("orchestrator")}
+            undispatched = [event for event in runtime.log.iter_events(event_types=("conversation.finished",))
+                            if event.actor == EventActor.system("conversation")
+                            and event.payload.get("next_action") == "run"
+                            and (event.task_id, event.payload.get("conversation_seq")) not in queued]
+            task_ids = {event.task_id for event in runtime.log.iter_events(event_types=("conversation.received",))
+                        if event.task_id and event.actor == EventActor.human()}
+        for event in undispatched:
+            try:
+                self.dispatch_conversation(event.task_id, {**event.payload, "finish_seq": event.seq})
+            except Exception:
+                _LOGGER.exception("Cannot recover conversation dispatch for %s at %s", event.task_id, event.seq)
+        for task_id in sorted(task_ids):
+            self.answer_conversations(task_id)
         return len(pending)
 
     def _recover_pending_questions(self) -> None:
@@ -197,6 +270,43 @@ class ActivityRunner:
     def submit(self, task_id: str, action: str) -> dict[str, Any]:
         return self._submit(task_id, action, queue_after_current=False)
 
+    def dispatch_conversation(self, task_id: str, result: dict[str, Any]) -> dict[str, Any]:
+        """Adopt only durable execution authorization, once per conversation."""
+        seq = result.get("conversation_seq")
+        if type(seq) is not int:
+            return self.status(task_id)
+        with self._lock:
+            with self._runtime_factory() as runtime:
+                events = runtime.log.read(task_id=task_id)
+                finished = next((event for event in events if event.type == "conversation.finished"
+                    and event.actor == EventActor.system("conversation")
+                    and event.payload.get("conversation_seq") == seq), None)
+                if finished is None or (result.get("finish_seq") is not None and result["finish_seq"] != finished.seq):
+                    return self.status(task_id)
+                payload = finished.payload
+                if (payload.get("status") != "finished" or payload.get("next_action") != "run"
+                        or payload.get("action") not in {"update_task", "resume_task"}
+                        or not isinstance(payload.get("scope_before"), dict) or not payload["scope_before"]):
+                    return self.status(task_id)
+                command = next((event for event in events if event.type == "human.commanded"
+                    and event.actor == EventActor.human() and event.payload.get("conversation_seq") == seq), None)
+                intent = "direction" if payload["action"] == "update_task" else "resume"
+                if (command is None or command.payload.get("intent") != intent
+                        or (payload.get("command_seq") is not None and payload["command_seq"] != command.seq)):
+                    return self.status(task_id)
+                if any(event.type == "activity.queued" and event.actor == EventActor.system("orchestrator")
+                       and event.payload.get("conversation_seq") == seq for event in events):
+                    return self.status(task_id)
+                expected_scope = dict(payload["scope_before"])
+                if intent == "direction":
+                    expected_scope["direction_seq"] = command.seq
+                binding = {"conversation_seq": seq, "expected_scope": expected_scope, "finished_seq": finished.seq}
+            try:
+                return self._submit(task_id, "run", queue_after_current=True, binding=binding)
+            except WorkConflict:
+                # Another runner may have durably queued the same authorization.
+                return self.status(task_id)
+
     def continue_after_current(self, task_id: str, action: str) -> dict[str, Any]:
         """Queue one follow-up round without racing the active one.
 
@@ -207,7 +317,8 @@ class ActivityRunner:
         """
         return self._submit(task_id, action, queue_after_current=True)
 
-    def _submit(self, task_id: str, action: str, *, queue_after_current: bool) -> dict[str, Any]:
+    def _submit(self, task_id: str, action: str, *, queue_after_current: bool,
+                binding: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
             current = self._activities.get(task_id)
             if current and current["state"] in {"queued", "running"}:
@@ -218,6 +329,7 @@ class ActivityRunner:
                             "id": "activity_" + uuid.uuid4().hex[:10],
                             "action": action,
                             "queued_at": _now_iso(),
+                            **(binding or {}),
                         }
                         current["follow_up"] = queued
                         try:
@@ -226,37 +338,28 @@ class ActivityRunner:
                         except Exception:
                             current.pop("follow_up", None)
                             raise
-                    elif queued["action"] != action:
-                        previous_action = queued["action"]
-                        queued["action"] = action
-                        queued["revised_at"] = _now_iso()
-                        try:
-                            self._record_queued(
-                                task_id,
-                                queued,
-                                after_activity_id=current["id"],
-                                replaces_action=previous_action,
-                            )
-                            self._revision += 1
-                        except Exception:
-                            queued["action"] = previous_action
-                            queued.pop("revised_at", None)
-                            raise
+                    elif (queued["action"] != action or
+                          {key: queued[key] for key in ("conversation_seq", "expected_scope", "finished_seq") if key in queued}
+                          != (binding or {})):
+                        revised = {key: value for key, value in queued.items()
+                                   if key not in {"conversation_seq", "expected_scope", "finished_seq"}}
+                        revised.update(action=action, revised_at=_now_iso(), **(binding or {}))
+                        self._record_queued(task_id, revised, after_activity_id=current["id"],
+                                            replaces_action=queued["action"])
+                        current["follow_up"] = revised
+                        self._revision += 1
                 return self.status(task_id)
             activity = {
                 "id": "activity_" + uuid.uuid4().hex[:10],
                 "action": action,
                 "state": "queued",
                 "queued_at": _now_iso(),
+                **(binding or {}),
             }
+            # Publish to the in-memory queue only after the durable claim succeeds.
+            self._record_queued(task_id, activity)
             self._activities[task_id] = activity
             self._revision += 1
-
-        try:
-            self._record_queued(task_id, activity)
-        except Exception as exc:
-            self._finish(task_id, activity["id"], "failed", error=str(exc))
-            raise
 
         self._start(task_id, activity)
         return self.status(task_id)
@@ -277,6 +380,17 @@ class ActivityRunner:
                 payload["after_activity_id"] = after_activity_id
             if replaces_action:
                 payload["replaces_action"] = replaces_action
+            payload.update({key: activity[key] for key in ("conversation_seq", "expected_scope", "finished_seq")
+                            if key in activity})
+            if "conversation_seq" in payload:
+                def claim():
+                    if any(event.actor == EventActor.system("orchestrator")
+                           and event.payload.get("conversation_seq") == payload["conversation_seq"]
+                           for event in runtime.log.iter_events(task_id=task_id, event_types=("activity.queued",))):
+                        raise WorkConflict("这条消息已排队，不重复执行。")
+                    return "activity.queued", payload, EventActor.system("orchestrator")
+                runtime.work._write(task_id, claim)
+                return
             runtime.log.emit(
                 actor=EventActor.system("orchestrator"),
                 type="activity.queued",
@@ -291,14 +405,27 @@ class ActivityRunner:
             name=f"cater-{activity['action']}-{task_id}",
             daemon=True,
         )
-        thread.start()
+        try:
+            thread.start()
+        except Exception as exc:
+            self._fail_activity(task_id, activity["id"], activity["action"], exc)
+            raise
 
     def _run(self, task_id: str, activity_id: str, action: str) -> None:
-        self._mark_running(task_id, activity_id)
         try:
             with self._runtime_factory() as runtime:
+                queued = [event for event in runtime.log.iter_events(task_id=task_id, event_types=("activity.queued",))
+                          if event.actor == EventActor.system("orchestrator")
+                          and event.payload.get("activity_id") == activity_id]
+                binding = queued[-1].payload if queued else {}
+                if "conversation_seq" in binding and runtime.work.scope(task_id) != binding.get("expected_scope"):
+                    raise ExecutionScopeChanged("这条消息授权的任务方向已变化，本轮未开始执行；请确认最新方向后继续。")
+                self._mark_running(task_id, activity_id)
                 if action == "run":
-                    runtime.collaborate(task_id)
+                    if "conversation_seq" in binding:
+                        runtime.collaborate(task_id, expected_scope=binding["expected_scope"])
+                    else:
+                        runtime.collaborate(task_id)
                 elif action == "battle":
                     runtime.battle(task_id)
                 else:
@@ -310,25 +437,21 @@ class ActivityRunner:
                     payload={"activity_id": activity_id, "action": action},
                 )
         except Exception as exc:
-            try:
-                with self._runtime_factory() as runtime:
-                    if runtime.task(task_id) is not None:
-                        runtime.log.emit(
-                            actor=EventActor.system("orchestrator"),
-                            type="activity.failed",
-                            task_id=task_id,
-                            payload={
-                                "activity_id": activity_id,
-                                "action": action,
-                                "error_type": type(exc).__name__,
-                                "message": str(exc),
-                            },
-                        )
-            except Exception:
-                pass
-            self._finish(task_id, activity_id, "failed", error=str(exc))
+            self._fail_activity(task_id, activity_id, action, exc)
             return
         self._finish(task_id, activity_id, "completed")
+
+    def _fail_activity(self, task_id: str, activity_id: str, action: str, exc: Exception) -> None:
+        try:
+            with self._runtime_factory() as runtime:
+                if runtime.task(task_id) is not None:
+                    runtime.log.emit(actor=EventActor.system("orchestrator"), type="activity.failed", task_id=task_id,
+                        payload={"activity_id": activity_id, "action": action,
+                                 "error_type": type(exc).__name__, "message": str(exc)})
+        except Exception:
+            _LOGGER.exception("Cannot record activity failure for %s at %s", task_id, activity_id)
+        self._finish(task_id, activity_id, "failed", error=str(exc),
+                     follow_after_failure=isinstance(exc, ExecutionScopeChanged))
 
     def _mark_running(self, task_id: str, activity_id: str) -> None:
         with self._lock:
@@ -338,7 +461,8 @@ class ActivityRunner:
                 activity["started_at"] = _now_iso()
                 self._revision += 1
 
-    def _finish(self, task_id: str, activity_id: str, state: str, *, error: str | None = None) -> None:
+    def _finish(self, task_id: str, activity_id: str, state: str, *, error: str | None = None,
+                follow_after_failure: bool = False) -> None:
         follow_up: dict[str, Any] | None = None
         with self._lock:
             activity = self._activities.get(task_id)
@@ -349,7 +473,7 @@ class ActivityRunner:
             if error:
                 activity["error"] = error
             queued = activity.pop("follow_up", None)
-            if state == "completed" and isinstance(queued, dict):
+            if (state == "completed" or (state == "failed" and follow_after_failure)) and isinstance(queued, dict):
                 follow_up = {**queued, "state": "queued"}
                 self._activities[task_id] = follow_up
             self._revision += 1
@@ -787,9 +911,11 @@ def make_handler(
                             )
                         elif action == "command":
                             instruction = _optional_text(data.get("instruction")) or "Updated from Cater API"
-                            command = rt.command(
+                            command = rt.chat(
                                 task_id,
                                 instruction,
+                                continue_work=_truthy(data.get("continue")),
+                                request_id=data.get("request_id"),
                                 goal=_optional_text(data.get("goal")),
                                 acceptance=(
                                     _acceptance_lines(data.get("acceptance"))
@@ -797,7 +923,10 @@ def make_handler(
                                     else None
                                 ),
                             )
-                            if command.type == "question.asked":
+                            if command.type == "conversation.received":
+                                activities.answer_conversations(task_id)
+                                return self._send_json(self._task_payload(task_id, activities), status=HTTPStatus.ACCEPTED)
+                            elif command.type == "question.asked":
                                 activities.answer_questions(task_id)
                             elif _truthy(data.get("continue")) and command.payload.get("next_action") != "none":
                                 background_action = str(command.payload.get("next_action") or "run")
@@ -905,15 +1034,19 @@ def make_handler(
                     if rt.task(task_id) is None:
                         return self._not_found()
                     try:
-                        command = rt.command(
+                        command = rt.chat(
                             task_id,
                             instruction or "Updated from Cater web",
+                            continue_work=data.get("run_now", [""])[0] == "on",
+                            request_id=data.get("request_id", [None])[0],
                             goal=goal,
                             acceptance=acceptance if acceptance_raw.strip() else None,
                         )
                     except ValueError as exc:
                         return self._bad_request(str(exc))
-                    if command.type == "question.asked":
+                    if command.type == "conversation.received":
+                        activities.answer_conversations(task_id)
+                    elif command.type == "question.asked":
                         activities.answer_questions(task_id)
                     elif data.get("run_now", [""])[0] == "on" and command.payload.get("next_action") != "none":
                         if command.payload.get("next_action") == "battle":
@@ -1065,7 +1198,12 @@ def make_handler(
                         SELECT task_id, type,
                             CASE WHEN type = 'msg.said' AND json_extract(payload_json, '$.phase')
                                 IN ('planning', 'delivery_receipt', 'clarification_receipt')
-                                THEN json_extract(payload_json, '$.phase') END AS phase,
+                                THEN json_extract(payload_json, '$.phase')
+                                WHEN type = 'human.commanded' AND json_extract(payload_json, '$.conversation_seq') IS NOT NULL
+                                THEN 'conversation_receipt'
+                                WHEN type = 'conversation.finished' AND json_extract(payload_json, '$.action') = 'status_task'
+                                AND json_extract(payload_json, '$.progress_seq') IS NOT NULL
+                                THEN 'status_receipt' END AS phase,
                             COUNT(*) AS n, MAX(seq) AS latest
                         FROM events WHERE task_id IS NOT NULL GROUP BY task_id, type, phase
                     """):
@@ -1561,6 +1699,7 @@ def _event_version(rt: Runtime) -> int:
 _CHAT_TYPES = {
     "clarification.requested",
     "question.asked", "question.finished",
+    "conversation.received", "conversation.finished",
     "task.created", "rule.recorded", "rule.updated", "activity.failed", "human.commanded",
     "task.progress_reported", "planning.started", "planning.finished", "delivery.review_started",
     "delivery.review_finished", "task.interpreted", "cabinet.convened",
@@ -1572,7 +1711,9 @@ _CHAT_TYPES = {
 
 def _conversation_count(counts: Counter) -> int:
     count = sum(n for (kind, phase), n in counts.items() if kind in _CHAT_TYPES
-                and not (kind == "msg.said" and phase in {"planning", "delivery_receipt", "clarification_receipt"}))
+                and not (kind == "msg.said" and phase in {"planning", "delivery_receipt", "clarification_receipt"})
+                and not (kind == "human.commanded" and phase == "conversation_receipt")
+                and not (kind == "conversation.finished" and phase == "status_receipt"))
     if not (counts[("activity.completed", None)] or counts[("activity.failed", None)]):
         count += counts[("activity.queued", None)]
     if not (counts[("agent.decided", None)] or counts[("supreme.decided", None)]):
@@ -1640,13 +1781,17 @@ def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | N
             _task_summary(task, version=version, latest_seq=events[-1].seq if events else 0,
                           conversation_count=_conversation_count(Counter(
                               (e.type, e.payload.get("phase") if e.type == "msg.said"
-                               and e.payload.get("phase") in ("planning", "delivery_receipt", "clarification_receipt") else None)
+                               and e.payload.get("phase") in ("planning", "delivery_receipt", "clarification_receipt")
+                               else "conversation_receipt" if e.type == "human.commanded" and e.payload.get("conversation_seq")
+                               else "status_receipt" if e.type == "conversation.finished" and e.payload.get("action") == "status_task"
+                               and e.payload.get("progress_seq") else None)
                               for e in events))), activity or {"state": "idle", "active": False}),
         "task": task_to_dict(task),
         "events": [event_to_dict(e) for e in events],
         "organization_memory": rt.shared_memory(exclude_task_id=task_id),
         "background": rt.conversation_background(task_id),
         "questions": rt.questions.view(task_id),
+        "conversation": rt.conversation.view(task_id),
         "clarifications": rt.clarifications.view(task_id),
         "decision_ladder": decision_ladder(events),
         "organization_path": organization_path(task, events),

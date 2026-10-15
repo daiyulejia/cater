@@ -11,7 +11,8 @@ from urllib.parse import urlparse
 from urllib.request import Request
 
 from .drivers import (MAX_API_RESPONSE_BYTES, DriverProtocolError, DriverResponse,
-                      DriverUnavailable, _open_api_request, _safe_api_endpoint, _token_budget)
+                      DriverUnavailable, TextTransportFailure, _open_api_request, _safe_api_endpoint,
+                      _text_only_request, _token_budget)
 from .usage import valid_token_count
 
 
@@ -72,13 +73,25 @@ class AnthropicMessagesDriver:
         request = Request(self.endpoint, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
                           headers={"X-Api-Key": key, "anthropic-version": self.version,
                                    "Content-Type": "application/json", "Accept": "application/json"}, method="POST")
+        phase = "request"
         try:
             with _open_api_request(request, timeout=self.timeout) as response:
+                phase = "response read"
                 raw = response.read(MAX_API_RESPONSE_BYTES + 1)
         except HTTPError as exc:
             raise DriverUnavailable(f"{self.name} API request failed with HTTP {exc.code}") from None
-        except (URLError, TimeoutError, OSError, ValueError) as exc:
-            raise DriverUnavailable(f"{self.name} API endpoint is unavailable") from None
+        except (URLError, TimeoutError, OSError) as exc:
+            reason = exc.reason if isinstance(exc, URLError) else exc
+            if isinstance(reason, TimeoutError):
+                message = f"{self.name} API {phase} timed out (configured timeout: {self.timeout:g}s)"
+            else:
+                message = f"{self.name} API endpoint is unavailable (connection or network failure during {phase})"
+            # Adding any local or server-side tools must remove the text-only
+            # recovery promise, even if their effects are not in this body.
+            failure = TextTransportFailure if _text_only_request(body) else DriverUnavailable
+            raise failure(message) from None
+        except ValueError:
+            raise DriverUnavailable(f"{self.name} API request failed (invalid request or headers)") from None
         if len(raw) > MAX_API_RESPONSE_BYTES:
             raise DriverProtocolError("Anthropic response exceeds the byte limit")
         try:

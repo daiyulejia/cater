@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 def team_availability(rt: Runtime) -> dict[str, Any]:
     totals: dict[str, int] = {}
     budgeted = {name for name, driver in rt.drivers.items() if valid_token_count(getattr(driver, "token_budget", None))}
-    for event in rt.log.iter_events(event_types=("msg.said", "msg.challenge", "question.finished")) if budgeted else ():
+    for event in rt.log.iter_events(event_types=("msg.said", "msg.challenge", "question.finished", "conversation.finished")) if budgeted else ():
         name = event.payload.get("driver")
         if isinstance(name, str) and name in budgeted and event.payload.get("token_usage") == "reported" and valid_token_count(event.payload.get("tokens")):
             totals[name] = totals.get(name, 0) + event.payload["tokens"]
@@ -43,7 +43,7 @@ def team_availability(rt: Runtime) -> dict[str, Any]:
                 state = ("demo", "local_demo")
             else:
                 recent = rt._driver_health.recent_state(role.driver)
-                state = ("available", "recent_success") if recent == "succeeded" else ("on_leave", "recent_failure") if recent == "failed" else ("unverified", "not_recently_checked")
+                state = ("available", "recent_success") if recent == "succeeded" else ("unverified", "recent_failure") if recent == "failed" else ("unverified", "not_recently_checked")
             states[role.driver] = state
         status, reason = states[role.driver]
         members.append({"role_id": role.id, "status": status, "reason": reason})
