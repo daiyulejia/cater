@@ -2115,6 +2115,7 @@ def render_index(rt: Runtime) -> str:
             profiles=profiles,
             chain=chain,
             scope="workspace",
+            member_ids=frozenset(role.id for role in [rt.organization.leader, *rt.roles]),
         )
     rows = "\n".join(_task_row(task, task.id in inbox) for task in tasks)
     if not rows:

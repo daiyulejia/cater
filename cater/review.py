@@ -31,16 +31,18 @@ def build_review(
     profiles: dict[str, dict[str, Any]],
     chain: ChainReport,
     scope: str = "workspace",
+    member_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
+    native_tasks = _native_chat_tasks(events, member_ids)
     lenses = [
         _product_lens(tasks),
         _design_lens(tasks, events),
-        _distribution_lens(tasks),
+        _distribution_lens(tasks, native_tasks),
         _collaboration_lens(tasks),
         _cost_lens(tasks),
         _testing_lens(tasks, chain),
         _ui_lens(tasks),
-        _logic_lens(tasks),
+        _logic_lens(tasks, native_tasks),
         _discipline_lens(tasks),
         _reliability_lens(tasks, events),
         _adoption_lens(tasks, profiles),
@@ -134,7 +136,21 @@ def _design_lens(tasks: list[TaskSnapshot], events: list[Event]) -> dict[str, st
     return _lens("design", "ok", "The process has timeline and brief data.", "Keep replay views compact and scannable.")
 
 
-def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
+def _native_chat_tasks(events: list[Event], member_ids: frozenset[str]) -> frozenset[str]:
+    started, routed = set(), set()
+    for event in events:
+        if not event.task_id:
+            continue
+        if event.type == "team.started" and event.actor == Actor.system("team"):
+            started.add(event.task_id)
+        elif (event.task_id in started and event.type == "team.message_received"
+              and (event.actor == Actor.human() or event.actor.kind == "agent" and event.actor.id in member_ids)
+              and isinstance(event.payload.get("recipient"), str) and event.payload["recipient"] in member_ids):
+            routed.add(event.task_id)
+    return frozenset(routed)
+
+
+def _distribution_lens(tasks: list[TaskSnapshot], native_tasks: frozenset[str] = frozenset()) -> dict[str, str]:
     if not tasks:
         return _lens("distribution", "needs_attention", "No task distribution pattern exists yet.", "Create one small task before evaluating distribution weight.")
     planned = [task for task in tasks if task.work and task.work.get("items")]
@@ -152,7 +168,7 @@ def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     unassigned_active = [
         task for task in tasks
         if any(message.get("phase") != "planning" for message in task.messages)
-        and not task.assignments and not (task.work and task.work.get("items"))
+        and not task.assignments and not (task.work and task.work.get("items")) and task.id not in native_tasks
     ]
     overloaded = [
         task for task in tasks
@@ -183,6 +199,9 @@ def _distribution_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
         return _lens("distribution", "watch", "Only full cabinet dispatch is represented, but no dependency structure is visible.", "Review whether dispatch is adding real sequencing or only ceremony.")
     if any(task.assignments for task in tasks):
         return _lens("distribution", "ok", "Leader or command assignments record visible ownership.", "Keep the task's current ownership clear; do not require cabinet dispatch merely for coverage.")
+    if any(task.id in native_tasks for task in tasks):
+        return _lens("distribution", "ok", "Native chat messages record explicit recipients without legacy assignment records.",
+                     "Inspect the actual message, handoff and result; extra dispatch is not required for ownership coverage.")
     return _lens("distribution", "watch", "Tasks exist but no distribution path is visible.", "Choose direct assignment for simple work or dispatch for complex work.")
 
 
@@ -287,7 +306,7 @@ def _ui_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     )
 
 
-def _logic_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
+def _logic_lens(tasks: list[TaskSnapshot], native_tasks: frozenset[str] = frozenset()) -> dict[str, str]:
     governed = [task for task in tasks if task.cabinet]
     skipped = [
         task
@@ -296,12 +315,19 @@ def _logic_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
         and isinstance(task.brief.get("governance"), dict)
         and task.brief["governance"].get("status") == "not_needed"
     ]
-    if governed and skipped:
+    completed_chat = any(task.id in native_tasks and task.status == "done" for task in tasks)
+    if governed and (skipped or completed_chat):
         return _lens("logic", "ok", "Both normal collaboration and governance paths are represented.", "Keep triggers configurable and explainable.")
     if governed:
         return _lens("logic", "watch", "Only governance-heavy paths are represented; trigger proportionality needs review.", "Inspect the recorded risk signals and whether each escalation was necessary; do not manufacture another task for path coverage.")
     if skipped:
         return _lens("logic", "ok", "Normal collaboration completed without requiring governance.", "Escalate when actual disagreement or risk justifies it; validate escalation behavior in tests, not by forcing a customer task.")
+    if completed_chat:
+        return _lens("logic", "ok", "A task with routed native chat has a recorded completion without requiring legacy governance.",
+                     "Inspect the delivery's actual verification scope; completion is not independent proof of correctness.")
+    if any(task.id in native_tasks for task in tasks):
+        return _lens("logic", "ok", "Native chat has routed messages; no completed outcome is asserted here.",
+                     "Observe progress and actual results; do not force governance merely because a task is still in progress.")
     return _lens("logic", "needs_attention", "No collaboration or governance path has completed.", "Run a task before evaluating the organization logic.")
 
 

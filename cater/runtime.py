@@ -2057,6 +2057,7 @@ class Runtime:
             profiles=self.profiles(),
             chain=self.verify_chain(),
             scope=task_id or "workspace",
+            member_ids=frozenset(role.id for role in [self.organization.leader, *self.roles]),
         )
         if record:
             self.log.emit(

@@ -1,12 +1,99 @@
 import unittest
 
+from cater.events import Actor
 from cater.runtime import Runtime
 from cater.fold import TaskSnapshot
 from cater.review import _distribution_lens
+from cater.team import HOST
 from test_work import item
 
 
 class ReviewSemanticsTests(unittest.TestCase):
+    def native_task(self, rt, *, done=False):
+        task = rt.create_task("通过消息交代一份工作")
+        rt.log.emit(type="team.started", task_id=task, actor=HOST, payload={"version": 1})
+        source = rt.log.emit(type="team.message_received", task_id=task, actor=Actor.human(),
+                             payload={"text": "请先看看", "recipient": "dev", "kind": "message"})
+        rt.log.emit(type="msg.said", task_id=task, actor=Actor.agent("dev", "developer"),
+                    payload={"text": "我已收到，先分析。", "phase": "team", "reply_to": source.seq})
+        if done:
+            rt.log.emit(type="team.objective_completed", task_id=task, actor=HOST,
+                        payload={"summary": "店长确认交付", "verification": "仅检查说明，未运行"})
+        return task
+
+    def test_native_delivery_does_not_require_legacy_dispatch_or_governance(self):
+        with Runtime(":memory:") as rt:
+            task = self.native_task(rt, done=True)
+            before = rt.log.head_hash()
+            review = rt.review(task)
+            lenses = {lens["id"]: lens for lens in review["lenses"]}
+            self.assertEqual(rt.task(task).assignments, [])
+            self.assertEqual(lenses["distribution"]["status"], "ok")
+            self.assertIn("explicit recipients", lenses["distribution"]["finding"])
+            self.assertEqual(lenses["logic"]["status"], "ok")
+            self.assertIn("not independent proof", lenses["logic"]["action"])
+            self.assertEqual(before, rt.log.head_hash())
+
+    def test_in_progress_native_chat_is_not_a_completed_outcome_or_a_governance_defect(self):
+        with Runtime(":memory:") as rt:
+            task = self.native_task(rt)
+            lens = next(lens for lens in rt.review(task)["lenses"] if lens["id"] == "logic")
+            self.assertEqual(rt.task(task).status, "running")
+            self.assertEqual(lens["status"], "ok")
+            self.assertIn("no completed outcome", lens["finding"])
+
+    def test_native_route_does_not_hide_another_unassigned_legacy_task(self):
+        with Runtime(":memory:") as rt:
+            self.native_task(rt, done=True)
+            task = rt.create_task("确实缺少分工的旧任务")
+            rt.log.emit(type="msg.said", task_id=task, actor=Actor.agent("dev", "developer"),
+                        payload={"text": "我开始了", "phase": "execution"})
+            lens = next(lens for lens in rt.review()["lenses"] if lens["id"] == "distribution")
+            self.assertEqual(lens["status"], "watch")
+            self.assertIn("no visible assignment path", lens["finding"])
+
+    def test_native_receipt_requires_trusted_start_and_a_real_recipient(self):
+        for case in ("untrusted-start", "missing-recipient", "empty-recipient", "invalid-recipient", "unknown-recipient",
+                     "system-sender", "unknown-agent", "unknown-human", "wrong-order", "other-task"):
+            with self.subTest(case=case), Runtime(":memory:") as rt:
+                task = rt.create_task("核对原生消息来源")
+                other = rt.create_task("其他群") if case == "other-task" else task
+                actor = Actor.agent("team", "team") if case == "untrusted-start" else HOST
+                payload = {"text": "请看看", "recipient": "dev", "kind": "message"}
+                if case == "missing-recipient":
+                    payload.pop("recipient")
+                elif case == "empty-recipient":
+                    payload["recipient"] = "  "
+                elif case == "invalid-recipient":
+                    payload["recipient"] = ["dev"]
+                elif case == "unknown-recipient":
+                    payload["recipient"] = "nonexistent-role"
+                if case == "wrong-order":
+                    rt.log.emit(type="team.message_received", task_id=task, actor=Actor.human(), payload=payload)
+                rt.log.emit(type="team.started", task_id=other, actor=actor, payload={"version": 1})
+                if case != "wrong-order":
+                    sender = HOST if case == "system-sender" else Actor.human()
+                    if case == "unknown-agent":
+                        sender = Actor.agent("outsider", "developer")
+                    elif case == "unknown-human":
+                        sender = Actor.human("outsider")
+                    rt.log.emit(type="team.message_received", task_id=task, actor=sender, payload=payload)
+                rt.log.emit(type="msg.said", task_id=task, actor=Actor.agent("dev", "developer"),
+                            payload={"text": "没有可核实的投递关联", "phase": "team"})
+                lens = next(lens for lens in rt.review(task)["lenses"] if lens["id"] == "distribution")
+                self.assertEqual(lens["status"], "watch")
+                self.assertIn("no visible assignment path", lens["finding"])
+
+    def test_native_completion_is_not_misreported_as_only_governance_heavy_history(self):
+        with Runtime(":memory:") as rt:
+            self.native_task(rt, done=True)
+            legacy = rt.create_task("独立的治理记录")
+            rt.log.emit(type="cabinet.voted", task_id=legacy, actor=Actor.system("cabinet"),
+                        payload={"votes": [], "winner": "A"})
+            lens = next(lens for lens in rt.review()["lenses"] if lens["id"] == "logic")
+            self.assertEqual(lens["status"], "ok")
+            self.assertIn("Both", lens["finding"])
+
     def test_lens_ids_are_unique_and_cost_has_its_own_identity(self):
         with Runtime(":memory:") as rt:
             task = rt.create_task("复盘角度")

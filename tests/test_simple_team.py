@@ -89,6 +89,9 @@ class SimpleTeamTests(unittest.TestCase):
         artifact, = self.rt.task(self.task).deliverables
         self.assertEqual(Path(artifact["local_path"]).read_text(encoding="utf-8"), artifact["content"])
         self.assertEqual(self.rt.task(self.task).status, "done")
+        lenses = {lens["id"]: lens for lens in self.rt.review(self.task)["lenses"]}
+        self.assertEqual(lenses["distribution"]["status"], "ok")
+        self.assertEqual(lenses["logic"]["status"], "ok")
         self.assertEqual(self.rt.task(self.task).tokens, 42)
         self.assertEqual(self.rt._reported_driver_tokens("team_test"), 42)
         with zipfile.ZipFile(io.BytesIO(self.rt.team.archive(self.task))) as archive:
