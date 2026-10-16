@@ -417,6 +417,7 @@ class TeamService:
                     self.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
                         payload={"text": turn.text, "claim": turn.text[:180], "phase": "team",
                                  "run_id": started.payload["run_id"], "reply_to": message.seq,
+                                 "response_kind": "progress" if any(call.name != "wait_for_reply" for call in turn.calls) else "reply",
                                  "audience": "customer" if customer_facing else "team",
                                  "recipient": "human" if customer_facing else message.actor.id,
                                  **({"delivery_seq": delivery} if delivery is not None else {})})

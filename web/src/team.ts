@@ -98,14 +98,34 @@ export function groupTeamConversation<T extends { internal?: boolean }>(items: T
   return groups
 }
 
+export function teamProgressMessages(events: TeamEvent[]): Set<number> {
+  const progress = new Set<number>(), pending = new Map<string, TeamEvent>()
+  for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
+    const p = event.payload
+    if (event.type === 'msg.said' && p.phase === 'team' && (event.actor.kind === 'agent' || isTeamHost(event))) {
+      if (typeof p.run_id === 'string') pending.delete(p.run_id)
+      if (typeof p.delivery_seq === 'number') continue
+      if (p.response_kind === 'progress') progress.add(event.seq)
+      else if (p.response_kind === undefined && typeof p.run_id === 'string') pending.set(p.run_id, event)
+    } else if (isTeamHost(event) && typeof p.run_id === 'string') {
+      const said = pending.get(p.run_id)
+      if (said && p.role === teamSpeaker(said)) {
+        if (event.type === 'team.tool_started' && p.name !== 'wait_for_reply') progress.add(said.seq)
+        if (event.type === 'team.run_finished') pending.delete(p.run_id)
+      }
+    }
+  }
+  return progress
+}
+
 export const hasActiveTeamMessages = (team: TeamSummary) => team.pending_count > 0 || Boolean(team.runs?.some((run) =>
   (run.revision === undefined || run.revision === team.revision) && ['running', 'started'].includes(run.status ?? '')))
 
 export function teamStatus(team: TeamSummary): string {
+  if (hasActiveTeamMessages(team)) return team.status === 'done' ? '正在处理后续消息' : '正在处理消息'
   if (team.status === 'done') return '店长确认可交付'
   if (team.status === 'failed' || team.status === 'blocked') return '任务需要跟进'
   const currentRuns = (team.runs ?? []).filter((run) => run.revision === undefined || run.revision === team.revision)
-  if (hasActiveTeamMessages(team)) return '正在处理消息'
   const latest = currentRuns.at(-1)
   return ['done', 'finished', 'completed', 'succeeded'].includes(latest?.status ?? '') ? '消息处理完成，任务待交付' : '任务进行中'
 }

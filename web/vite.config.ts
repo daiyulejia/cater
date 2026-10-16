@@ -11,6 +11,11 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              name: 'chat-conversation',
+              test: /[\\/]src[\\/]ChatConversation\.tsx$/,
+              priority: 20,
+            },
+            {
               name: 'team-state',
               test: /[\\/]src[\\/]team\.ts$/,
               priority: 20,

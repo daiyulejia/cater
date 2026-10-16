@@ -3,7 +3,7 @@ import { beforeEach, expect, test, vi } from 'vitest'
 import App from '../src/App'
 import type { TaskDetail } from '../src/App'
 import type { TeamState } from '../src/team'
-import { teamDeliveries, teamMessageAudience, teamMessageEchoes, teamStatus } from '../src/team'
+import { teamDeliveries, teamMessageAudience, teamMessageEchoes, teamProgressMessages, teamStatus } from '../src/team'
 
 type EventRecord = TaskDetail['events'][number]
 const event = (seq: number, type: string, payload: Record<string, unknown> = {}, id = 'team', kind = 'system'): EventRecord => ({
@@ -25,6 +25,46 @@ const stream = () => within(screen.getByLabelText('聊天记录'))
 const board = () => within(screen.getByRole('complementary', { name: '成果与过程' }))
 beforeEach(() => window.sessionStorage.clear())
 
+test('已交付后的追问仍显示消息在处理，不把旧交付当成本轮答复', () => {
+  expect(teamStatus(teamState({ status: 'done', pending_count: 1 }))).toBe('正在处理后续消息')
+  expect(teamStatus(teamState({ status: 'done', runs: [{ role: 'dev', revision: 1, status: 'running' }] }))).toBe('正在处理后续消息')
+  expect(teamStatus(teamState({ status: 'done', runs: [{ role: 'dev', revision: 0, status: 'running' }] }))).toBe('店长确认可交付')
+})
+
+test('工具调用阶段的对客过程发言归入过程，实际答复保持主对话可见', async () => {
+  const acknowledgement = event(3, 'msg.said', { text: '收到，我先核对文件。', phase: 'team', run_id: 'read', reply_to: 2,
+    audience: 'customer', recipient: 'human', response_kind: 'progress' }, 'store_manager', 'agent')
+  const answer = event(5, 'msg.said', { text: '双击网页文件就能打开。', phase: 'team', run_id: 'read', reply_to: 2,
+    audience: 'customer', recipient: 'human', response_kind: 'reply' }, 'store_manager', 'agent')
+  await mount(detail([event(2, 'team.message_received', { text: '怎么打开？', recipient: 'store_manager', kind: 'message' }, 'human', 'human'),
+    acknowledgement, event(4, 'team.tool_started', { run_id: 'read', role: 'store_manager', name: 'workspace_read' }), answer]))
+  expect(stream().getByText('收到，我先核对文件。').closest('details.team-collaboration')?.open).toBe(false)
+  expect(stream().getByText('双击网页文件就能打开。').closest('details.team-collaboration')).toBeNull()
+})
+
+test.each([true, false])('等待信息的对客发言不自动收起，避免隐藏真实澄清（明确类型=%s）', async (explicit) => {
+  const said = event(3, 'msg.said', { text: '请补充你要处理的文件路径。', phase: 'team', run_id: 'waiting', reply_to: 2,
+    audience: 'customer', recipient: 'human', ...(explicit ? { response_kind: 'reply' } : {}) }, 'store_manager', 'agent')
+  const waiting = event(4, 'team.tool_started', { run_id: 'waiting', role: 'store_manager', name: 'wait_for_reply' })
+  expect(teamProgressMessages([said, waiting])).toEqual(new Set())
+  await mount(detail([event(2, 'team.message_received', { text: '请处理一下', recipient: 'store_manager', kind: 'message' }, 'human', 'human'), said, waiting]))
+  expect(stream().getByText('请补充你要处理的文件路径。').closest('details.team-collaboration')).toBeNull()
+})
+
+test.each(['other-run', 'wrong-role', 'untrusted', 'after-finish', 'explicit-reply', 'official-delivery'])
+('旧发言只有可信的同轮工具开始才作为过程合并，不误藏答复：%s', (caseName) => {
+  const said = event(2, 'msg.said', { phase: 'team', run_id: 'run', text: '正在查看。' }, 'dev', 'agent')
+  const tool = event(4, 'team.tool_started', { run_id: 'run', role: 'dev', name: 'workspace_read' })
+  expect(teamProgressMessages([tool, said])).toEqual(new Set([2]))
+  if (caseName === 'other-run') tool.payload.run_id = 'other'
+  if (caseName === 'wrong-role') tool.payload.role = 'test'
+  if (caseName === 'untrusted') tool.actor.kind = 'agent'
+  if (caseName === 'explicit-reply') said.payload.response_kind = 'reply'
+  if (caseName === 'official-delivery') said.payload.delivery_seq = 1
+  const finish = event(3, 'team.run_finished', { run_id: 'run', role: 'dev', status: 'completed' })
+  expect(teamProgressMessages([said, ...(caseName === 'after-finish' ? [finish] : []), tool])).toEqual(new Set())
+})
+
 async function mount(initial: TaskDetail) {
   let current = initial
   const fetchMock = vi.fn((url: string, init: RequestInit = {}) => {
@@ -43,7 +83,7 @@ async function mount(initial: TaskDetail) {
   })
   vi.stubGlobal('fetch', fetchMock)
   render(<App />)
-  await screen.findByRole('region', { name: '团队进度' })
+  await screen.findByRole('region', { name: '团队进度' }, { timeout: 3000 })
   await waitFor(() => expect(screen.getByLabelText('聊天记录').getAttribute('aria-busy')).toBe('false'))
   return { fetchMock, update: async (next: TaskDetail) => {
     current = next

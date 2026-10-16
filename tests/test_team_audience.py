@@ -9,7 +9,7 @@ class TeamAudienceTests(SimpleTeamTests):
         self.driver.steps = {
             self.manager: [turn("I will coordinate this.", ("delegate", {
                 "recipient": self.worker, "instruction": "Check the result and return it to me"})),
-                turn("", ("wait_for_reply", {})),
+                turn("Please clarify the input if needed.", ("wait_for_reply", {})),
                 turn("I received the stage result.", ("finish_work", {
                     "summary": "Final delivery", "verification": "Fixture only"})),
                 turn("This is the final delivery for the customer.")],
@@ -24,6 +24,9 @@ class TeamAudienceTests(SimpleTeamTests):
         self.assertNotIn("delivery_seq", worker.payload)
         first, = [e for e in said if e.payload["text"] == "I will coordinate this."]
         self.assertEqual(first.payload["audience"], "customer")
+        self.assertEqual(first.payload["response_kind"], "progress")
+        question, = [e for e in said if e.payload["text"] == "Please clarify the input if needed."]
+        self.assertEqual(question.payload["response_kind"], "reply")
         completed, = self.events("team.objective_completed")
         official, = [e for e in said if "delivery_seq" in e.payload]
         self.assertEqual(official.actor.id, self.manager)
@@ -31,6 +34,7 @@ class TeamAudienceTests(SimpleTeamTests):
         self.assertEqual(official.payload["run_id"], completed.payload["run_id"])
         self.assertEqual(official.payload["audience"], "customer")
         self.assertEqual(official.payload["recipient"], "human")
+        self.assertEqual(official.payload["response_kind"], "reply")
 
     def test_progress_question_after_done_is_not_another_official_delivery(self):
         self.driver.steps[self.manager] = [turn("", ("finish_work", {

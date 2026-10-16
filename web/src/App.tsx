@@ -15,6 +15,7 @@ import { TaskList } from './TaskList'
 import { RulesPanel } from './RulesPanel'
 import { WorkItems } from './WorkItems'
 import { ConversationMembers } from './ConversationMembers'
+import { ChatConversation } from './ChatConversation'
 import { ConversationOrigin, DerivationDraftBar } from './ConversationOrigin'
 import type { ConversationBackground } from './ConversationOrigin'
 import { QuestionComposerBar } from './QuestionComposerBar'
@@ -33,7 +34,7 @@ import { controlLabels, executionLabel } from './executionControl'
 import type { ControlAction, ExecutionControl } from './executionControl'
 import { clearCreationRecovery, CREATION_RECOVERY_TTL, loadCreationRecovery, readAccessToken, saveCreationRecovery } from './creationRecovery'
 import type { CreationAttempt } from './creationRecovery'
-import { groupTeamConversation, hasActiveTeamMessages, isTeamHost, resolveTeam, teamDeliveries, teamMessageAudience, teamMessageEchoes, teamRunStatus, teamSpeaker, teamStatus } from './team'
+import { hasActiveTeamMessages, isTeamHost, resolveTeam, teamDeliveries, teamMessageAudience, teamMessageEchoes, teamProgressMessages, teamRunStatus, teamSpeaker, teamStatus } from './team'
 import type { TeamState, TeamSummary } from './team'
 
 const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
@@ -46,7 +47,7 @@ const ClarificationCard = lazy(() => import('./ClarificationCard').then((module)
 const QuestionDetails = lazy(() => import('./QuestionDetails').then((module) => ({ default: module.QuestionDetails })))
 const LazyArtifactPreview = lazy(() => import('./Artifact').then((module) => ({ default: module.ArtifactPreview })))
 const TeamWorkboard = lazy(() => import('./TeamProgressPanel').then((module) => ({ default: module.TeamWorkboard })))
-const TeamToolProgress = lazy(() => import('./TeamProgressPanel').then((module) => ({ default: module.TeamToolProgress })))
+const ConversationActivity = lazy(() => import('./ConversationActivity').then((module) => ({ default: module.ConversationActivity })))
 const ChatMarkdown = lazy(() => import('./ChatMarkdown').then((module) => ({ default: module.ChatMarkdown })))
 
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
@@ -78,13 +79,13 @@ type Task = {
   interpretation?: { summary?: string; objective?: string; scope?: string[]; risks?: string[]; basis?: string[]; complexity?: string }
   route?: { route?: string; reason?: string }
 }
-type Event = { seq: number; type: string; category: string; actor: { id: string; role: string; kind: string }; payload: Record<string, unknown> }
+type Event = { seq: number; ts?: string; type: string; category: string; actor: { id: string; role: string; kind: string }; payload: Record<string, unknown> }
 type QuestionResult = { question_seq?: number; answer?: string; evidence?: { source_seq: number; quote: string }[]; limits?: string[]; reason?: string; speaker_id?: string; driver?: string; tokens?: number; token_usage?: string }
 type Question = QuestionResult & { seq: number; status: string; question: string; role_id: string; basis: QuestionBasis; outdated: boolean }
 type ConversationReceipt = { seq: number; status: string }
 export type TaskDetail = { task: Task; team?: TeamState | null; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string } | null; activity?: Activity; execution_control?: ExecutionControl; workspace?: WorkspaceBinding }
 type DerivationSource = { id: string; goal: string }
-type ChatItem = { internal?: boolean; historicalDelivery?: boolean; id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event; retryStatus?: 'waiting' | 'succeeded' | 'failed' | 'cancelled'; auditEvents?: Event[]; auditName?: (id: string) => string }
+export type ChatItem = { internal?: boolean; historicalDelivery?: boolean; id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event; retryStatus?: 'waiting' | 'succeeded' | 'failed' | 'cancelled'; auditEvents?: Event[]; auditName?: (id: string) => string }
 
 const accessToken = readAccessToken()
 
@@ -226,6 +227,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
   const humanRequests = new Set(humanMessages.map((event) => event.payload.request_id).filter((id) => typeof id === 'string' && id))
   const shownRequests = new Set<string>()
   const teamEchoes = teamMessageEchoes(events)
+  const teamProgress = teamProgressMessages(events)
   const leader = organization?.leader.id ?? 'store_manager'
   const deliveries = teamDeliveries(events, leader)
   const latestTeamObjective = events.filter((event) => isTeamHost(event)
@@ -351,7 +353,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       item.display = displayName(speaker)
       item.role = publicIdentity(speaker, organization)
       item.systemActor = false
-      item.internal = teamEnabled && audience.audience === 'team'
+      item.internal = teamEnabled && (audience.audience === 'team' || teamProgress.has(event.seq))
       if (audience.recipient) item.targets = [displayName(audience.recipient)]
       return item.text ? [item] : []
     }
@@ -1045,7 +1047,9 @@ function App() {
         if (cancelled || signal.aborted || !pageVisible()) return
         acceptDetail(next, order)
         setLoadErrors((current) => ({ ...current, [selectedId]: '' }))
-        delay = next.activity?.active || next.conversation?.some((row) => row.status === 'pending' || row.status === 'answering') ? 800 : 4000
+        const team = resolveTeam(next.team ?? next.task.team, next.events)
+        delay = next.activity?.active || (team?.enabled && hasActiveTeamMessages(team))
+          || next.conversation?.some((row) => row.status === 'pending' || row.status === 'answering') ? 800 : 4000
       } catch (err) {
         if (!cancelled && !signal.aborted) setLoadErrors((current) => ({ ...current, [selectedId]: userFacingError(err, '暂时无法读取任务详情。') }))
       } finally {
@@ -1428,12 +1432,18 @@ function App() {
             </p>}
             {graphLoaded && task.work?.items.length ? <Suspense fallback={<p role="status" className="px-4 py-2 text-xs text-[#52766d]">正在打开任务脉络…</p>}><TaskGraph key={task.id} work={task.work} open={graphOpen} onOpenChange={setGraphOpen} returnFocusRef={graphTriggerRef} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></Suspense> : null}
             <div className="relative flex min-h-0 flex-1 flex-col">
-              <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>{loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : visibleConversation.length ? <ChatConversation key={task.id} items={visibleConversation} artifacts={task.deliverables ?? []} taskId={task.id} controls={clarificationControls} events={currentDetail?.events ?? []} names={names} /> : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
+              <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>
+                {loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : <>
+                  {visibleConversation.length ? <Suspense fallback={<p role="status" className="text-xs text-[#52766d]">正在读取对话…</p>}><ChatConversation key={task.id} items={visibleConversation} events={currentDetail?.events ?? []} names={names} renderItem={(item) => <ChatBubble key={item.id} item={item} artifact={task.deliverables?.find((artifact) => artifact.seq === item.evidence.seq)} taskId={task.id} controls={clarificationControls} />} /></Suspense>
+                    : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}
+                </>}
+              </div>
               {!loading && unread > 0 && <button onClick={jumpToLatest} className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-md border border-[#d9b9a5] bg-[#fff7eb] px-3 py-2 text-xs font-semibold text-[#915340] shadow-md" title="返回最新消息"><ArrowDown size={15} /> 查看新消息 · {unread}</button>}
             </div>
+            {!loading && currentDetail && task.team?.enabled && <div className="shrink-0 px-4 sm:px-7"><Suspense fallback={<p role="status" className="py-2 text-xs text-[#52766d]">正在读取工作进展…</p>}><ConversationActivity key={task.id} team={task.team} events={currentDetail.events} names={names} leaderId={organization?.leader.id ?? 'store_manager'} sending={pending.has(task.id)} activity={currentDetail.activity} executionState={executionState} syncError={loadError} controlBusy={controlBusy} portrait={(id) => <Portrait id={id} size="sm" />} onInspect={() => setShowMobileBoard(true)} onRefresh={() => setReloadToken((current) => current + 1)} onPause={() => void controlTask('pause')} /></Suspense></div>}
             {derivation ? <DerivationDraftBar goal={derivation.goal} onCancel={cancelDerivation} /> : legacyQuestionMode ? <QuestionComposerBar onCancel={toggleQuestion} /> : rulesControl}
             <DirectionComposer key={composerKey} members={team} message={message} isSending={isSending} isLoading={loading} deriving={Boolean(derivation)} questioning={legacyQuestionMode} onMessageChange={setMessage} onSend={() => void (derivation ? deriveTask() : legacyQuestionMode ? sendQuestion() : sendDirection())} />
-          </> : <><EmptyConversation onChoose={setDraft} />{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} disabled={!recoveryReady || Boolean(recovery)} workspaceControl={<WorkspacePanel draft workspaceId={newWorkspaceId} disabled={!recoveryReady || Boolean(recovery)} loadOptions={loadWorkspaceOptions} onSelect={selectDraftWorkspace} />} onDraftChange={setDraft} onCreate={() => void createTask()} />{recoveryNotice && <p role="status" className="px-4 pb-2 text-xs text-amber-800 sm:px-7">{recoveryNotice}</p>}</>}
+          </> : <><EmptyConversation onChoose={setDraft} />{isSending && <div className="px-4 sm:px-7"><ChatWaiting text="正在发送给店长，等待接收回执" error="" onRetry={() => {}} /></div>}{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} disabled={!recoveryReady || Boolean(recovery)} workspaceControl={<WorkspacePanel draft workspaceId={newWorkspaceId} disabled={!recoveryReady || Boolean(recovery)} loadOptions={loadWorkspaceOptions} onSelect={selectDraftWorkspace} />} onDraftChange={setDraft} onCreate={() => void createTask()} />{recoveryNotice && <p role="status" className="px-4 pb-2 text-xs text-amber-800 sm:px-7">{recoveryNotice}</p>}</>}
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
         {task && <WorkboardPanel taskId={task.id} open={showMobileBoard} onOpenChange={setShowMobileBoard}>
@@ -1444,8 +1454,8 @@ function App() {
   )
 }
 
-function ChatWaiting({ error, onRetry }: { error: string; onRetry: () => void }) {
-  return <div className="flex items-start gap-3 py-5"><Portrait id="store_manager" /><div className="min-w-0 text-sm leading-6 text-[#6e8175]"><p role={error ? 'alert' : 'status'} className="flex items-center gap-2">{!error && <LoaderCircle size={16} className="shrink-0 motion-safe:animate-spin" />}{error || '正在接上这段对话'}</p>{error && <button onClick={onRetry} className="mt-3 inline-flex items-center gap-2 rounded-md border border-[#dec8b8] bg-white px-3 py-1.5 text-xs text-[#9e5946]"><RefreshCw size={14} /> 重新连接</button>}</div></div>
+function ChatWaiting({ error, onRetry, text = '正在接上这段对话' }: { error: string; onRetry: () => void; text?: string }) {
+  return <div className="flex items-start gap-3 py-5"><Portrait id="store_manager" /><div className="min-w-0 text-sm leading-6 text-[#6e8175]"><p role={error ? 'alert' : 'status'} className="flex items-center gap-2">{!error && <LoaderCircle size={16} className="shrink-0 motion-safe:animate-spin" />}{error || text}</p>{error && <button onClick={onRetry} className="mt-3 inline-flex items-center gap-2 rounded-md border border-[#dec8b8] bg-white px-3 py-1.5 text-xs text-[#9e5946]"><RefreshCw size={14} /> 重新连接</button>}</div></div>
 }
 
 function DirectionComposer({ members, message, isSending, isLoading, deriving = false, questioning = false, onMessageChange, onSend }: { members: OrgRole[]; message: string; isSending: boolean; isLoading: boolean; deriving?: boolean; questioning?: boolean; onMessageChange: (value: string) => void; onSend: () => void }) {
@@ -1535,33 +1545,6 @@ function untrustedArtifact(event: Event): Artifact {
   delete item.local_path
   delete item.local_save_error
   return item
-}
-
-function ChatConversation({ items, artifacts, taskId, controls, events, names }: {
-  items: ChatItem[]; artifacts: Artifact[]; taskId: string; controls: ClarificationControls; events: Event[]; names: Record<string, string>
-}) {
-  const renderChatBubble = (item: ChatItem) => <ChatBubble key={item.id} item={item} artifact={artifacts.find((artifact) => artifact.seq === item.evidence.seq)} taskId={taskId} controls={controls} />
-  return groupTeamConversation(items).map((group) => {
-    const item = group.items[0]
-    if (item.historicalDelivery) return <details key={`delivery:${item.id}`} className="delivery-history min-w-0 border-l-2 border-[#dce8e1] pl-3">
-      <summary className="cursor-pointer text-xs font-semibold leading-5 text-[#52766d]">店长交付记录</summary>
-      <div className="mt-4">{renderChatBubble(item)}</div>
-    </details>
-    if (!group.internal) return renderChatBubble(group.items[0])
-    const sources = new Set(group.items.filter((item) => item.evidence.type === 'team.message_received').map((item) => item.id))
-    const runs = new Set([
-      ...group.items.map((item) => item.evidence.payload.run_id).filter((id): id is string => typeof id === 'string'),
-      ...events.filter((event) => isTeamHost(event) && event.type === 'team.run_started'
-        && typeof event.payload.message_seq === 'number' && sources.has(event.payload.message_seq)).map((event) => event.payload.run_id),
-    ])
-    const tools = events.filter((event) => typeof event.payload.run_id === 'string' && runs.has(event.payload.run_id))
-    return <details key={`team:${group.items[0].id}`} className="team-collaboration">
-      <summary>团队协作 · {group.items.length} 条</summary>
-      <div className="mt-4 space-y-4">{group.items.map(renderChatBubble)}
-        <Suspense fallback={null}><TeamToolProgress events={tools} names={names} full /></Suspense>
-      </div>
-    </details>
-  })
 }
 
 function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; artifact?: Artifact; taskId: string; controls: ClarificationControls }) {
