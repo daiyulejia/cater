@@ -12,6 +12,16 @@ from typing import Any
 from .usage import valid_token_count
 
 
+def json_utf8(value: Any, *, sort_keys: bool = False, allow_nan: bool = True) -> bytes:
+    """Keep normal JSON bytes; escape lone surrogates without changing their values."""
+    text = json.dumps(value, ensure_ascii=False, sort_keys=sort_keys, allow_nan=allow_nan)
+    try:
+        return text.encode("utf-8")
+    except UnicodeEncodeError:
+        return json.dumps(value, ensure_ascii=True, sort_keys=sort_keys,
+                          allow_nan=allow_nan).encode("utf-8")
+
+
 @dataclass(frozen=True)
 class ToolCall:
     id: str
@@ -194,7 +204,7 @@ def openai_history(system: str, prompt: str, history: list[dict]) -> list[dict]:
             if message.get("tool_calls"):
                 native["tool_calls"] = [
                     {"id": c["id"], "type": "function", "function": {
-                        "name": c["name"], "arguments": json.dumps(c["arguments"], ensure_ascii=False, allow_nan=False)}}
+                        "name": c["name"], "arguments": json_utf8(c["arguments"], allow_nan=False).decode("utf-8")}}
                     for c in message["tool_calls"]]
             messages.append(native)
         else:

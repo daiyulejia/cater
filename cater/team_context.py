@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import json
-
-from .tool_protocol import prepare_tool_turn
+from .tool_protocol import json_utf8, prepare_tool_turn
 
 
 CONVERSATION_BYTES = 16000
@@ -12,7 +10,7 @@ HISTORY_BYTES = 96000
 
 
 def json_bytes(value):
-    return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+    return len(json_utf8(value))
 
 
 def _preview(row, key, limit):

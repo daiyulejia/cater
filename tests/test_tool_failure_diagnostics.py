@@ -141,7 +141,7 @@ class ToolFailureDiagnosticsTests(unittest.TestCase):
                     "https://user:" + PRIVATE + "@fixture.invalid", "https://fixture.invalid/#" + PRIVATE,
                     "https://fixture.invalid:0", "https://fixture.invalid:65536", "https://fixture.invalid:private")]
         values += [("headers", v) for v in (None, [], {"Authorization": None}, {1: PRIVATE})]
-        values += [("body", v) for v in (None, [], {"private": float("nan")}, {"private": object()}, {"private": "\ud800"})]
+        values += [("body", v) for v in (None, [], {"private": float("nan")}, {"private": object()})]
         circular = {}
         circular["private"] = circular
         values.append(("body", circular))

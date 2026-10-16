@@ -14,6 +14,7 @@ from .activity_owner import activity_owner
 from .drivers import DriverResponse, DriverUnavailable
 from .events import Actor
 from .responses import load_response_object
+from .tool_protocol import json_utf8
 from .usage import valid_token_count
 from .work import WorkConflict
 
@@ -328,7 +329,7 @@ class WorkspaceService:
                 budget = getattr(driver, "token_budget", None)
                 if valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget:
                     raise DriverUnavailable("工程工具回合已达到配置的累计用量上限。")
-                if len(json.dumps(history, ensure_ascii=False).encode("utf-8")) > MAX_HISTORY_BYTES:
+                if len(json_utf8(history)) > MAX_HISTORY_BYTES:
                     raise DriverUnavailable("工程执行上下文已达到上限；已有文件与工具回执保留。")
                 turn = turn_method(role=role.role, prompt=prompt, history=history, tools=tools)
                 count = turn.tokens if valid_token_count(turn.tokens) else 0
@@ -372,7 +373,7 @@ class WorkspaceService:
                         self._check(task_id, work_context, role.id, binding)
                         started = self.rt.log.emit(type="workspace.tool_started", task_id=task_id, actor=HOST,
                             payload={"call_id": call.id, "name": call.name, "arguments_sha256": hashlib.sha256(
-                                json.dumps(call.arguments, sort_keys=True, ensure_ascii=False).encode()).hexdigest(),
+                                json_utf8(call.arguments, sort_keys=True)).hexdigest(),
                                 "arguments": self._public_arguments(call.name, call.arguments),
                                 "root": binding["root"], "workspace_revision": binding["revision"],
                                 "role": role.id, **{k: work_context[k] for k in ("work_item_id", "attempt_id", "plan_seq", "scope")}})
@@ -436,7 +437,13 @@ class WorkspaceService:
     @staticmethod
     def _public_arguments(name, arguments):
         # Persist file identities and command parameters, but not a second copy of source bodies.
-        return {key: value for key, value in arguments.items() if key != "content"}
+        public = {key: value for key, value in arguments.items() if key != "content"}
+        try:
+            json.dumps(public, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:
+            # Evidence only: never pass this JSON wrapper back to the executor.
+            return {"encoding": "escaped_json", "json": json_utf8(public).decode("ascii")}
+        return public
 
     @staticmethod
     def _capture_files(executor, text):

@@ -241,6 +241,39 @@ def _integer(value: object, minimum: int, maximum: int) -> int:
     return value
 
 
+def _argument_valid(value: object, field: dict) -> bool:
+    """Check the simple field declarations used by workspace tools, without coercion."""
+    expected = field.get("type")
+    expected = expected if isinstance(expected, list) else [expected]
+    actual = {type(None): "null", bool: "boolean", str: "string", int: "integer",
+              float: "number", list: "array"}.get(type(value))
+    if actual is None or actual not in expected and not (actual == "integer" and "number" in expected):
+        return False
+    if "enum" in field and value not in field["enum"]:
+        return False
+    if type(value) in (int, float):
+        if type(value) is float and not math.isfinite(value):
+            return False
+        if ("minimum" in field and value < field["minimum"]
+                or "maximum" in field and value > field["maximum"]
+                or "exclusiveMinimum" in field and value <= field["exclusiveMinimum"]
+                or "exclusiveMaximum" in field and value >= field["exclusiveMaximum"]):
+            return False
+    if isinstance(value, str):
+        if len(value) < field.get("minLength", 0) or len(value) > field.get("maxLength", len(value)):
+            return False
+        try:
+            value.encode("utf-8")
+        except UnicodeError:
+            return False
+    if isinstance(value, list):
+        if (len(value) < field.get("minItems", 0) or len(value) > field.get("maxItems", len(value))
+                or not isinstance(field.get("items"), dict)):
+            return False
+        return all(_argument_valid(item, field["items"]) for item in value)
+    return True
+
+
 @contextmanager
 def _write_lock(root: Path) -> Iterator[None]:
     # Never unlink: all contenders must keep locking the same inode.
@@ -288,7 +321,7 @@ class WorkspaceExecutor:
 
     def schemas(self) -> list[dict]:
         string = {"type": "string"}
-        relative = {"type": "string", "description":
+        relative = {"type": "string", "maxLength": 2048, "description":
             "Relative to the bound workspace root. Use '.' for that root; do not prepend its title or directory name."}
         path = {**relative, "default": "."}
         definitions = [
@@ -297,19 +330,20 @@ class WorkspaceExecutor:
              {"path": relative, "offset": {"type": "integer", "minimum": 0, "default": 0},
               "limit": {"type": "integer", "minimum": 1, "maximum": MAX_READ_BYTES, "default": DEFAULT_READ_BYTES}}, ["path"]),
             ("workspace_search", "Search literal UTF-8 text, skipping binary, vendor and protected paths.",
-             {"query": string, "path": path,
+             {"query": {**string, "maxLength": 1024}, "path": path,
               "limit": {"type": "integer", "minimum": 1, "maximum": MAX_MATCHES, "default": 50}}, ["query"]),
         ]
         if self.policy.mode in {"edit", "execute"}:
             definitions.append(("workspace_write", "Atomically write UTF-8 text. To update an existing file, first workspace_read it and pass that result's sha256 as expected_sha256. Null is ONLY for creating a file that does not exist. On conflict, read again and reconcile before retrying; never blindly overwrite.",
-                                {"path": relative, "content": string, "expected_sha256": {
-                                    "type": ["string", "null"], "description":
+                                {"path": relative, "content": {**string, "maxLength": MAX_FILE_BYTES}, "expected_sha256": {
+                                    "type": ["string", "null"], "maxLength": 64, "description":
                                     "Copy sha256 from the latest workspace_read of this file; null only if the file does not exist."}},
                                 ["path", "content", "expected_sha256"]))
         if self.policy.mode == "execute":
             definitions.append(("workspace_run", "Run a trusted host program alias (not an OS sandbox or task acceptance).",
                                 {"command": {"type": "string", "enum": sorted(self.policy.commands)},
-                                 "args": {"type": "array", "items": string, "default": []}, "cwd": path,
+                                 "args": {"type": "array", "maxItems": 100,
+                                          "items": {**string, "maxLength": 8192}, "default": []}, "cwd": path,
                                  "timeout": {"type": "number", "exclusiveMinimum": 0, "maximum": self.policy.timeout,
                                              "default": self.policy.timeout}}, ["command"]))
         return [{"name": name, "description": description,
@@ -323,11 +357,16 @@ class WorkspaceExecutor:
             if not isinstance(name, str) or name not in schemas:
                 _deny("tool_denied", "Unknown or unavailable workspace tool.")
             schema = schemas[name]
+            invalid = sorted(key for key, field in schema["properties"].items()
+                             if isinstance(arguments, dict) and key in arguments
+                             and not _argument_valid(arguments[key], field))
             if (not isinstance(arguments, dict) or arguments.keys() - schema["properties"].keys()
-                    or not set(schema["required"]) <= arguments.keys()):
-                _deny("invalid_arguments", "Invalid workspace tool arguments.")
-            if name == "workspace_run" and any(arguments.get(key, 0) is None for key in ("args", "timeout")):
-                _deny("invalid_arguments", "Command args and timeout cannot be null.")
+                    or not set(schema["required"]) <= arguments.keys() or invalid):
+                # Only this pure check can assert that no workspace executor was dispatched.
+                return {"status": "error", "complete": True, "outcome": "not_started",
+                        "error": {"code": "invalid_arguments", "message": "工作区参数的字段、类型、取值或范围不符合工具声明，未执行动作；请按字段说明修正。"},
+                        "invalid_fields": invalid, "allowed_fields": sorted(schema["properties"]),
+                        "required_fields": sorted(schema["required"])}
             result = getattr(self, "_" + name.removeprefix("workspace_"))(**arguments)
             return {"status": "ok", **result}
         except _Denied as exc:

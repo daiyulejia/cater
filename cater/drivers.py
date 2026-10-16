@@ -23,7 +23,7 @@ from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .processes import ProcessScope
-from .tool_protocol import (ToolTurn, openai_history, openai_turn, prepare_tool_turn,
+from .tool_protocol import (ToolTurn, json_utf8, openai_history, openai_turn, prepare_tool_turn,
                             strict_json)
 from .usage import usage_source, valid_token_count
 
@@ -207,7 +207,7 @@ def _tool_api_request(*, endpoint: str, body: dict, headers: dict, name: str,
         raise _tool_failure(DriverProtocolError("Invalid tool API request parameters"), "invalid_request") from None
     encoded = None
     try:
-        encoded = json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        encoded = json_utf8(body, allow_nan=False)
     except (TypeError, ValueError, UnicodeError, RecursionError):
         pass
     if encoded is None:
