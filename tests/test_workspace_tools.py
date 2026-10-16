@@ -122,6 +122,29 @@ class WorkspaceToolsTests(unittest.TestCase):
         self.assertTrue(window["truncated"])
         self.assertEqual(window["sha256"], result["sha256"])
 
+    def test_schema_explains_bound_root_and_existing_file_updates(self):
+        schemas = {tool['name']: tool for tool in self.run_executor().schemas()}
+        for name in ('workspace_list', 'workspace_read', 'workspace_search', 'workspace_write', 'workspace_run'):
+            field = 'cwd' if name == 'workspace_run' else 'path'
+            description = schemas[name]['input_schema']['properties'][field]['description']
+            self.assertIn('bound workspace root', description)
+            self.assertIn('do not prepend', description)
+        update = schemas['workspace_write']
+        self.assertIn('workspace_read', update['description'])
+        self.assertIn('sha256', update['input_schema']['properties']['expected_sha256']['description'])
+
+    def test_null_update_error_explains_recovery_without_changing_the_file(self):
+        self.write('original')
+        rejected = self.write('accidental overwrite')
+        self.assert_error(rejected, 'conflict')
+        self.assertIn('workspace_read', rejected['error']['message'])
+        self.assertIn('sha256', rejected['error']['message'])
+        self.assertEqual((self.root / 'sample.txt').read_text(), 'original')
+        current = self.executor.execute('workspace_read', {'path': 'sample.txt'})
+        recovered = self.write('deliberate update', current['sha256'])
+        self.assertEqual(recovered['status'], 'ok')
+        self.assertEqual((self.root / 'sample.txt').read_text(), 'deliberate update')
+
     def test_write_new_nested_utf8_and_cas_existing(self):
         first = self.write("\u4e2d\u6587\r\n", path="new/sub/sample.txt")
         self.assertEqual(first["status"], "ok", first)

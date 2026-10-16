@@ -288,19 +288,23 @@ class WorkspaceExecutor:
 
     def schemas(self) -> list[dict]:
         string = {"type": "string"}
-        path = {"type": "string", "default": "."}
+        relative = {"type": "string", "description":
+            "Relative to the bound workspace root. Use '.' for that root; do not prepend its title or directory name."}
+        path = {**relative, "default": "."}
         definitions = [
             ("workspace_list", "List safe workspace entries (bounded).", {"path": path}, []),
             ("workspace_read", "Read UTF-8 text using byte offsets; sha256 covers the whole file.",
-             {"path": string, "offset": {"type": "integer", "minimum": 0, "default": 0},
+             {"path": relative, "offset": {"type": "integer", "minimum": 0, "default": 0},
               "limit": {"type": "integer", "minimum": 1, "maximum": MAX_READ_BYTES, "default": DEFAULT_READ_BYTES}}, ["path"]),
             ("workspace_search", "Search literal UTF-8 text, skipping binary, vendor and protected paths.",
              {"query": string, "path": path,
               "limit": {"type": "integer", "minimum": 1, "maximum": MAX_MATCHES, "default": 50}}, ["query"]),
         ]
         if self.policy.mode in {"edit", "execute"}:
-            definitions.append(("workspace_write", "Atomically write UTF-8 text with whole-file SHA-256 CAS; null creates a new file.",
-                                {"path": string, "content": string, "expected_sha256": {"type": ["string", "null"]}},
+            definitions.append(("workspace_write", "Atomically write UTF-8 text. To update an existing file, first workspace_read it and pass that result's sha256 as expected_sha256. Null is ONLY for creating a file that does not exist. On conflict, read again and reconcile before retrying; never blindly overwrite.",
+                                {"path": relative, "content": string, "expected_sha256": {
+                                    "type": ["string", "null"], "description":
+                                    "Copy sha256 from the latest workspace_read of this file; null only if the file does not exist."}},
                                 ["path", "content", "expected_sha256"]))
         if self.policy.mode == "execute":
             definitions.append(("workspace_run", "Run a trusted host program alias (not an OS sandbox or task acceptance).",
@@ -505,7 +509,7 @@ class WorkspaceExecutor:
                 _deny("conflict", "Expected file no longer exists.")
             return None
         if expected is None or hashlib.sha256(body).hexdigest() != expected:
-            _deny("conflict", "File hash does not match expected_sha256.")
+            _deny("conflict", "File hash does not match expected_sha256. Read this file again with workspace_read, reconcile any changes, then use its returned sha256; null is only for new files.")
         _text(body)
         return signature
 

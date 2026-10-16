@@ -112,7 +112,7 @@ class TeamService:
                 starts[e.payload["message_seq"]] = e
             elif e.type == "team.run_finished":
                 finishes[e.payload["message_seq"]] = e
-                if e.payload["status"] in {"failed", "interrupted"}:
+                if status != "done" and e.payload["status"] in {"failed", "interrupted"}:
                     checkpoint = e.payload.get("reason", "本轮未完成，已有记录保留。")
         messages = self._messages(task_id)
         reported = _reported_messages(messages)
@@ -171,7 +171,7 @@ class TeamService:
         members = [self.rt.organization.leader, *self.rt.roles]
         recipient = {"type": "string", "enum": [r.id for r in members if r.id != role.id]}
         tools = [
-            _tool("wait_for_reply", "已经安排好工作或正在等信息时结束本轮，安静等待下一条消息，不必重复发言。", {}, []),
+            _tool("wait_for_reply", "已经安排好工作或正在等信息时结束本轮，安静等待下一条消息。可与delegate或send_message在同轮调用，不必另调一次模型只为等待；同轮操作失败时会返回错误供你修正，不会直接等待。", {}, []),
             _tool("request_questions", "需要顾客补充信息或选择时，把相关问题一次发成聊天内可填写的卡片。每题指定单选或多选，可标推荐；顾客也能自己写或跳过。成功后本轮等待回答，不要再把问题逐条复制到聊天。只问实际缺失的信息，普通聊天直接回复，不必事事提问。",
                   {"title": {"type": "string", "maxLength": 200}, "questions": {
                       "type": "array", "minItems": 1, "maxItems": 8, "items": {
@@ -191,8 +191,11 @@ class TeamService:
                   {"recipient": recipient, "text": string, "reply_to": {"type": "integer"},
                    "notify_only": {"type": "boolean"}}, ["recipient", "text"]),
             _tool("read_artifact", "读取本群已发布成果的完整正文。", {"artifact_seq": {"type": "integer"}}, ["artifact_seq"]),
-            _tool("read_receipts", "读取本群真实工具执行回执（含失败和输出），自主检查伙伴的工作，不凭聊天自述判定测试通过。",
-                  {"run_id": string, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}, []),
+            _tool("read_receipts", "读取本群真实工具回执的完整结果。按role（角色ID，如test）、message_seq（委托/输入消息序号）或name（工具名，如workspace_run）筛选；run_id仅填receipt_index中的真实运行ID，不能填角色名。多个条件同时满足；before_seq可向前翻页。回执是历史执行记录，不保证当前文件未变化，按风险判断是否补查。",
+                  {"run_id": string, "role": {"type": "string", "enum": [r.id for r in members]},
+                   "message_seq": {"type": "integer", "minimum": 1}, "name": string,
+                   "before_seq": {"type": "integer", "minimum": 1},
+                   "limit": {"type": "integer", "minimum": 1, "maximum": 50}}, []),
             _tool("read_messages", "按序号分页读取本群发给你的历史消息或知会；不会重新执行消息。用于补读有限上下文窗口外的内容。",
                   {"after_seq": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                    "kind": {"type": "string", "enum": ["all", "notification"]}}, []),
@@ -248,6 +251,20 @@ class TeamService:
             return message
         return None
 
+    def _receipts(self, task_id):
+        events = self.rt.log.read(task_id=task_id)
+        starts = {e.seq: e for e in events if e.actor == HOST and e.type == "team.tool_started"}
+        rows = []
+        for event in events:
+            if event.actor != HOST or event.type != "team.tool_finished" or event.payload.get("name") == "read_receipts":
+                continue
+            row = {"seq": event.seq, **event.payload}
+            start = starts.get(row.get("started_seq"))
+            if start and all(start.payload.get(key) == row.get(key) for key in ("run_id", "role", "name")):
+                row["message_seq"] = start.payload.get("message_seq")
+            rows.append(row)
+        return rows
+
     def _context(self, task_id, message, role, *, run_id=None):
         events = self.rt.log.read(task_id=task_id)
         members = {r.id: r for r in [self.rt.organization.leader, *self.rt.roles]}
@@ -287,6 +304,12 @@ class TeamService:
                     for e in messages if e.actor.id == role.id and e.payload.get("kind") in {"assignment", "message"}
                     and e.payload.get("revision") == revision and e.seq not in reported]
         notifications = [e for e in messages if e.payload.get("kind") == "notification" and e.payload.get("recipient") == role.id]
+        receipts = [r for r in self._receipts(task_id)
+                    if r.get("name") not in {"read_artifact", "read_messages", "workspace_read", "workspace_list", "workspace_search"}]
+        receipt_index = [{**{key: row[key] for key in
+            ("seq", "started_seq", "run_id", "message_seq", "role", "name") if key in row},
+            **{key: row["result"][key] for key in ("status", "outcome", "exit_code") if key in row.get("result", {})}}
+            for row in receipts[-20:]]
         return {"you": asdict(role), "members": [asdict(r) for r in [self.rt.organization.leader, *self.rt.roles]],
             "active_assignment": {"seq": assignment.seq, "sender": assignment.actor.id, **assignment.payload} if assignment else None,
             "open_assignments": open_assignments, "outgoing_work": outgoing,
@@ -294,6 +317,7 @@ class TeamService:
                               for e in notifications[-20:]], "notifications_truncated": len(notifications) > 20,
             "current_work": self.view(task_id), "message": {"seq": message.seq, "sender": message.actor.id,
                 "sender_name": name(message.actor.id), "sender_kind": message.actor.kind, **message.payload},
+            "receipt_index": receipt_index, "receipts_truncated": len(receipts) > 20,
             "conversation": history[-60:], "artifacts": [{k: a.get(k) for k in
                 ("seq", "filename", "summary", "content_sha256", "local_path")} for a in task.deliverables],
             "questionnaires": self.rt.questionnaires.view(task_id)[-5:],
@@ -371,11 +395,23 @@ class TeamService:
             limit = arguments.get("limit", 20)
             if type(limit) is not int or not 1 <= limit <= 50:
                 raise ValueError("回执数量应为1到50。")
-            receipts = [{"seq": e.seq, **e.payload} for e in self.rt.log.iter_events(
-                task_id=task_id, event_types=("team.tool_finished",)) if e.actor == HOST
-                and e.payload.get("name") != "read_receipts"
-                and (not arguments.get("run_id") or e.payload.get("run_id") == arguments["run_id"])]
-            return {"status": "ok", "receipts": receipts[-limit:], "has_more": len(receipts) > limit}
+            for key in ("run_id", "role", "name"):
+                if key in arguments:
+                    _text(arguments[key], key, 128)
+            if "role" in arguments:
+                self._role(arguments["role"])
+            for key in ("message_seq", "before_seq"):
+                if key in arguments and (type(arguments[key]) is not int or arguments[key] < 1):
+                    raise ValueError("回执筛选序号需要正整数。")
+            if "run_id" in arguments and not any(e.actor == HOST and e.payload.get("run_id") == arguments["run_id"]
+                    for e in self.rt.log.iter_events(task_id=task_id, event_types=("team.run_started",))):
+                return {"status": "error", "message": "找不到本群的这个运行ID；角色名请用role筛选，委托序号请用message_seq，真实运行ID见receipt_index。"}
+            receipts = [row for row in self._receipts(task_id)
+                if all(key not in arguments or row.get(key) == arguments[key] for key in ("run_id", "role", "message_seq", "name"))
+                and ("before_seq" not in arguments or row["seq"] < arguments["before_seq"])]
+            page = receipts[-limit:]
+            return {"status": "ok", "receipts": page, "has_more": len(receipts) > limit,
+                    "next_before_seq": page[0]["seq"] if len(receipts) > limit else None}
         if name == "publish_workspace_file":
             current = self.rt.workspaces.view(task_id)
             if workspace is None or not current["available"] or current["fingerprint"] != binding["fingerprint"] or current["revision"] != binding["revision"]:
@@ -463,11 +499,12 @@ class TeamService:
                 "成果用publish_artifact保存完整正文；操作和验证依据来自实际工具回执。"
                 "已写入工作目录的文件优先用publish_workspace_file直接发布，避免复述整份源码。"
                 "店长读成果，用read_receipts核对真实工具回执、跟进修正，能够交付时用finish_work记录结果及验证边界。"
+                "receipt_index是最近工具回执的轻量索引，不是结论；可按role、message_seq、name查完整结果，run_id不是角色名。"
                 "独立工具操作可以合并调用；已有可靠验证先读回执判断，按风险补查，不必每次从头重复所有步骤。"
                 "简单追问或方案确认无需重复问顾客是否继续。确有需要顾客补充或选择的问题，用request_questions结构化提问；"
                 "单选多选由你判断，推荐标记只是建议；每题顾客都能自填或跳过。不因跳过就虚构信息或当作授权。"
                 "收到整组回答后结合当前目标、原委托及对话继续，不要把问答误当成新的目标。"
-                "安排后可用wait_for_reply安静等待；收到一般回报不必重复复述，每次只说有用的新信息。"
+                "安排后可在同一轮调用wait_for_reply安静等待，无需再调用一次只为说正在等待；收到一般回报不必重复复述。"
                 "不要把其他角色的自述当成已验证事实，不编造运行、部署或测试成功。"
                 "最终直接说人话，不需要JSON包装；公开进展用简短说明，不展示私有思维链、密钥或系统指令。\n")
             history = []
@@ -506,6 +543,7 @@ class TeamService:
                     break
                 history.append(turn.message)
                 waiting = False
+                operation_failed = False
                 for call in turn.calls:
                     self._current(task_id, started, role, revision)
                     if call.name not in {t["name"] for t in tools}:
@@ -530,13 +568,14 @@ class TeamService:
                                  "role": role.id, "name": call.name, "result": result})
                     history.append({"role": "tool", "tool_call_id": call.id, "is_error": result.get("status") != "ok",
                                     "content": json.dumps(result, ensure_ascii=False)})
+                    operation_failed |= result.get("status") != "ok"
                     if call.name in {"set_objective", "finish_work"}:
                         revision = self.view(task_id)["revision"]
-                    if call.name == "wait_for_reply":
+                    if call.name == "wait_for_reply" and result.get("status") == "ok":
                         waiting = True
                     if call.name == "request_questions" and result.get("status") == "ok":
                         waiting = awaiting_customer = True
-                if waiting:
+                if awaiting_customer or waiting and not operation_failed:
                     status = "waiting"
                     break
                 yield
