@@ -10,6 +10,7 @@
 - [本机检查](local-verification.zh-CN.md)：显式命令核验的证据与进程运行边界。
 - [工程工作目录](workspaces.zh-CN.md)：绑定预配置目录，调用文件与命令工具，检查真实源码副本并核对中断。
 - [MCP stdio 工具](mcp.zh-CN.md)：可选宿主配置、按需目录与调用、独立授权和未知结果恢复边界。
+- [同项目历史背景](project-history.zh-CN.md)：原生协作按需读取同项目交付版本，不共享任意聊天或继承旧验收。
 - [自动浏览器检查](browser-checks.zh-CN.md)：可选 Playwright 执行器、按需检查指引与版本绑定回执。
 - [项目与店规](project-rules.zh-CN.md)：在聊天中保留工作要求、查看来源和版本，以及当前的保证边界。
 - [衍生对话](conversations.zh-CN.md)：从创建时的背景快照开展新工作，原群与新群独立推进。

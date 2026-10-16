@@ -337,10 +337,13 @@ class EventLog:
     def iter_events(
         self, *, task_id: str | None = None, event_types: Iterable[str] | None = None,
         after_seq: int = 0,
+        before_seq: int | None = None,
     ) -> Iterator[Event]:
         """Stream selected immutable events without materializing other payloads."""
         if type(after_seq) is not int or after_seq < 0:
             raise ValueError("after_seq must be a non-negative integer")
+        if before_seq is not None and (type(before_seq) is not int or before_seq < 1):
+            raise ValueError("before_seq must be a positive integer")
         if isinstance(event_types, str):
             raise ValueError("event_types must be an iterable of names, not a string")
         types = tuple(dict.fromkeys(event_types)) if event_types is not None else None
@@ -353,6 +356,9 @@ class EventLog:
         sql = "SELECT * FROM events"
         clauses = ["seq > ?"]
         params: list[Any] = [after_seq]
+        if before_seq is not None:
+            clauses.append("seq < ?")
+            params.append(before_seq)
         if task_id is not None:
             clauses.append("task_id = ?")
             params.append(task_id)

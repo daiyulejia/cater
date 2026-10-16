@@ -19,6 +19,10 @@ def shared_deliverable_memory(
     prompts, and model-private reasoning are intentionally not treated as
     organization memory.
     """
+    if type(limit) is not int or limit < 0:
+        raise ValueError("memory limit must be a non-negative integer")
+    if limit == 0:
+        return []
     items: list[dict[str, Any]] = []
     for event in events:
         if event.type != "deliverable.published" or event.task_id == exclude_task_id:
@@ -37,4 +41,4 @@ def shared_deliverable_memory(
                 "kind": str(event.payload.get("kind") or "")[:80],
             }
         )
-    return items[-max(0, limit):]
+    return items[-limit:]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 import tempfile
 import unittest
 from pathlib import Path
@@ -88,8 +89,27 @@ class EventQueryTests(unittest.TestCase):
                 with self.subTest(seq=seq), self.assertRaises(ValueError): list(log.iter_events(after_seq=seq))
             with self.assertRaises(UnknownEventType): list(log.iter_events(event_types=["not.registered"]))
             with self.assertRaises(ValueError): list(log.iter_events(event_types="msg.said"))
+            for seq in (0, -1, True, "1"):
+                with self.subTest(before=seq), self.assertRaises(ValueError):
+                    list(log.iter_events(before_seq=seq))
         finally:
             log.close()
+
+    def test_exclusive_upper_bound_filters_in_sql_before_deserializing_future_artifact(self):
+        with closing(EventLog(":memory:")) as log:
+            events = self.populate(log)
+            original = log._row_to_event
+            seen = []
+            def before_only(row):
+                self.assertLess(row["seq"], events[-1].seq)
+                seen.append(row["seq"])
+                return original(row)
+            with patch.object(log, "_row_to_event", side_effect=before_only):
+                self.assertEqual(list(log.iter_events(after_seq=1, before_seq=4)), events[1:3])
+                self.assertEqual(list(log.iter_events(task_id="b", before_seq=4)), [events[2]])
+                self.assertEqual(list(log.iter_events(after_seq=4, before_seq=4)), [])
+            self.assertEqual(seen, [2, 3, 3])
+            self.assertEqual(log.read(), events)
 
     def test_task_snapshot_matches_full_projection_without_reading_other_tasks(self):
         with Runtime(":memory:") as rt:

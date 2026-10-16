@@ -2643,7 +2643,7 @@ def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | N
         "execution_control": rt.execution_control.view(task_id),
         "workspace": rt.workspaces.view(task_id),
         "events": [event_to_dict(e) for e in events],
-        "organization_memory": rt.shared_memory(exclude_task_id=task_id),
+        "organization_memory": [] if team and team.get("enabled") else rt.shared_memory(exclude_task_id=task_id),
         "background": rt.conversation_background(task_id),
         "questions": rt.questions.view(task_id),
         "conversation": rt.conversation.view(task_id),

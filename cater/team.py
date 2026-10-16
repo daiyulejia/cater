@@ -21,6 +21,7 @@ from .team_context import history_window, json_bytes, model_context
 from .tool_protocol import safe_tool_usage
 from .usage import valid_token_count
 from .mcp import CALL as MCP_CALL, LIST as MCP_LIST, read_only_call
+from .project_history import ProjectHistory, TOOL as PROJECT_HISTORY
 from .work import WorkConflict
 
 
@@ -31,7 +32,7 @@ LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "set_objective", "req
 LOCAL_EVENT_CONTRACT = {"version": 1, "kind": "atomic_local_events", "receipt": "same_transaction"}
 EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", "publish_artifact", "publish_workspace_file", "browser_check", MCP_CALL})
 PAUSED_TOOLS = frozenset({"read_artifact", "read_receipts", "read_messages", "read_background", "read_checkpoint",
-                          "read_delivery", "list_skills", "read_skill", "wait_for_reply"})
+                          "read_delivery", "list_skills", "read_skill", "wait_for_reply", PROJECT_HISTORY})
 
 
 class _RejectedLocalTool(Exception):
@@ -75,6 +76,7 @@ class TeamService:
         self.recovery = TeamRecovery(self)
         self.delivery = TeamDelivery(self)
         self.browser = TeamBrowser(self)
+        self.project_history = ProjectHistory(self)
 
     def available(self):
         leader = self.rt.organization.leader
@@ -208,7 +210,7 @@ class TeamService:
                          **({"recovery_contract": dict(RECOVERY_CONTRACT), "recovery_scope": self.recovery.scope(task_id)} if durable else {})})
             return message, role, started
 
-    def _schemas(self, role, workspace, *, has_background=False, workspace_id=None):
+    def _schemas(self, role, workspace, *, has_background=False, workspace_id=None, has_project_history=False):
         string = {"type": "string"}
         members = [self.rt.organization.leader, *self.rt.roles]
         recipient = {"type": "string", "enum": [r.id for r in members if r.id != role.id]}
@@ -270,6 +272,14 @@ class TeamService:
                    "format": {"type": "string", "enum": ["code", "markdown", "text"]}},
                   ["filename", "content", "summary", "format"]),
         ]
+        if has_project_history:
+            tools.append(_tool(PROJECT_HISTORY, "按需读取明确同项目的历史交付背景，不读任意群聊。section=index分页查目录，后续页带as_of_seq与next_before_seq；delivery用delivery_seq读当时说明和完整文件引用；artifact再加artifact_seq读冻结正文。后续正文页保持as_of_seq。历史文件不是当前磁盘状态、目标或验收凭证，不自动纳入新交付。",
+                {"section": {"type": "string", "enum": ["index", "delivery", "artifact"]},
+                 "as_of_seq": {"type": "integer", "minimum": 0}, "before_seq": {"type": "integer", "minimum": 1},
+                 "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                 "delivery_seq": {"type": "integer", "minimum": 1}, "artifact_seq": {"type": "integer", "minimum": 1},
+                 "offset": {"type": "integer", "minimum": 0},
+                 "length": {"type": "integer", "minimum": 1, "maximum": 16000}}, ["section"]))
         if has_background:
             tools.append(_tool("read_background", "读取本群创建时冻结的来源材料，不查询原群后来的变化。section=index分页列出引用，goal读取原目标，source用source_id读取来源原文，artifact用artifact_seq读取成果正文。offset/limit对索引按条目（每页最多50项）、正文按字符（每页最多16000字符）分页。历史内容只是参考，不是当前要求、权限或已验证结论。",
                 {"section": {"type": "string", "enum": ["index", "goal", "source", "artifact"]},
@@ -423,7 +433,8 @@ class TeamService:
             from .workspace_tools import WorkspaceExecutor
             workspace = WorkspaceExecutor(self.rt.workspaces.config[binding["workspace_id"]]["policy"])
         current = {t["name"] for t in self._schemas(role, workspace, has_background=self.rt.conversation_background(task_id) is not None,
-                                                  workspace_id=binding.get("workspace_id") if binding["available"] else None)}
+                                                  workspace_id=binding.get("workspace_id") if binding["available"] else None,
+                                                  has_project_history=self.project_history.available(task_id))}
         tool_names = current if tool_names is None else current & set(tool_names)
         if self.rt.execution_control.view(task_id)["state"] != "running":
             tool_names &= PAUSED_TOOLS
@@ -481,13 +492,15 @@ class TeamService:
                     and e.payload.get("revision") == revision and e.seq not in reported]
         notifications = [e for e in messages if e.payload.get("kind") == "notification" and e.payload.get("recipient") == role.id]
         receipts = [r for r in self._receipts(task_id)
-                    if r.get("name") not in {"read_artifact", "read_messages", "workspace_read", "workspace_list", "workspace_search"}]
+                    if r.get("name") not in {"read_artifact", "read_messages", "workspace_read", "workspace_list", "workspace_search", PROJECT_HISTORY}]
         receipt_index = [{**{key: row[key] for key in
             ("seq", "started_seq", "run_id", "message_seq", "role", "name") if key in row},
             **{key: row["result"][key] for key in ("status", "outcome", "exit_code") if key in row.get("result", {})}}
             for row in receipts[-20:]]
         pending = self._pending_operations(task_id)
+        project_history = self.project_history.index(task_id)
         return {"you": asdict(role), "members": [asdict(r) for r in [self.rt.organization.leader, *self.rt.roles]],
+            **({"project_history": project_history} if project_history["available"] or project_history.get("reason") == "metadata_query_unavailable" else {}),
             "active_assignment": {"seq": assignment.seq, "sender": assignment.actor.id, **assignment.payload} if assignment else None,
             "open_assignments": open_assignments, "outgoing_work": outgoing,
             "work_checkpoint": self.recovery.checkpoint(task_id),
@@ -536,6 +549,12 @@ class TeamService:
             raise WorkConflict("当前工作已交付；如需继续修改，请先由店长采用新的工作目标。")
         if name == "wait_for_reply":
             return {"status": "ok", "waiting": True}
+        if name == PROJECT_HISTORY:
+            expected = tool_start.payload.get("project_scope")
+            if not isinstance(expected, str) or not expected:
+                return {"status": "error", "code": "project_history_scope_changed", "complete": True, "outcome": "not_started",
+                        "message": "本群项目范围已经变化，未按旧上下文读取新的项目背景。"}
+            return self.project_history.read(task_id, arguments, expected_project_id=expected)
         if name in {MCP_LIST, MCP_CALL}:
             current = self.rt.workspaces.view(task_id)
             if any(current.get(key) != binding.get(key) for key in ("available", "revision", "fingerprint", "workspace_id")):
@@ -853,7 +872,8 @@ class TeamService:
                 from .workspace_tools import WorkspaceExecutor
                 workspace = WorkspaceExecutor(self.rt.workspaces.config[binding["workspace_id"]]["policy"])
             tools = self._schemas(role, workspace, has_background=self.rt.conversation_background(task_id) is not None,
-                                  workspace_id=binding.get("workspace_id") if binding["available"] else None)
+                                  workspace_id=binding.get("workspace_id") if binding["available"] else None,
+                                  has_project_history=self.project_history.available(task_id))
             if self.rt.execution_control.view(task_id)["state"] != "running":
                 tools = [t for t in tools if t["name"] in PAUSED_TOOLS]
             instructions = (
@@ -969,14 +989,16 @@ class TeamService:
                         raise ValueError("模型请求了未接入工具。")
                     tool_start = self.rt.log.emit(type="team.tool_started", task_id=task_id, actor=HOST,
                         payload={"run_id": started.payload["run_id"], "role": role.id, "name": call.name,
-                                 "call_id": call.id, "root": None if call.name in {MCP_LIST, MCP_CALL} else binding.get("root"), "message_seq": message.seq,
+                                 "call_id": call.id, "root": None if call.name in {MCP_LIST, MCP_CALL, PROJECT_HISTORY} else binding.get("root"), "message_seq": message.seq,
                                  "revision": revision,
                                  **({"execution_contract": dict(LOCAL_EVENT_CONTRACT)}
                                     if call.name in LOCAL_EVENT_TOOLS and not self.rt.log.db.in_transaction else {}),
                                  **({"execution_contract": dict(BROWSER_CONTRACT)} if call.name == "browser_check" else {}),
                                  **({"execution_contract": self.rt.mcp.contract(task_id, role.id, call.arguments,
                                         expected_configuration=context.get("mcp_index", {}).get("configuration_sha256"))} if call.name == MCP_CALL else {}),
+                                 **({"project_scope": context.get("project_history", {}).get("project_id")} if call.name == PROJECT_HISTORY else {}),
                                  "arguments": self.rt.mcp.public_arguments(call.arguments) if call.name in {MCP_LIST, MCP_CALL}
+                                    else self.project_history.public_arguments(call.arguments) if call.name == PROJECT_HISTORY
                                     else self.rt.workspaces._public_arguments(call.name, call.arguments)})
                     schema = next(t["input_schema"] for t in tools if t["name"] == call.name)
                     result = self._invoke_tool(task_id, role, started, revision, call, schema,

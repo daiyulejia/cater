@@ -38,11 +38,79 @@ const tools: Record<string, string> = {
   request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论',
   list_skills: '查看工作指引目录', read_skill: '阅读工作指引',
   list_mcp_tools: '查看外部工具目录', call_mcp_tool: '调用外部工具',
+  read_project_history: '读取同项目历史',
 }
 
 const skillCount = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 const skillText = (value: unknown): value is string => typeof value === 'string' && Boolean(value.trim())
 const skillHash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value)
+
+const historyId = (value: unknown) => skillText(value) && value.length <= 256 && Array.from(value).length <= 128
+const historyPositive = (value: unknown): value is number => skillCount(value) && value > 0
+function historyReferences(value: unknown, delivery: number, limit: number): value is Record<string, unknown>[] {
+  return Array.isArray(value) && value.length <= limit && value.every(item => {
+    const ref = object(item)
+    return historyPositive(ref.seq) && ref.seq < delivery && skillText(ref.filename) && new TextEncoder().encode(ref.filename).length <= 180 && skillHash(ref.content_sha256)
+  }) && new Set(value.map(item => item.seq)).size === value.length && new Set(value.map(item => item.filename)).size === value.length
+}
+
+export function nativeProjectHistoryReceiptStatus(event: TeamEvent): string {
+  if (!isTeamHost(event)) return '历史回执来源待核对'
+  if ((event.payload.name ?? event.payload.tool) !== 'read_project_history') return '历史回执待核对'
+  if (event.type === 'team.tool_started') return '已发起，等待回执'
+  const result = object(event.payload.result), args = object(event.payload.arguments), uncertain = '历史回执待核对'
+  if (event.type !== 'team.tool_finished') return uncertain
+  if (result.status === 'error' && result.complete === true && result.outcome === 'not_started'
+    && skillText(result.code) && skillText(result.message)) return '未开始读取历史'
+  if (result.status !== 'ok' || result.complete !== true || result.historical_only !== true || result.truncated === true || result.outcome !== undefined
+    || ![undefined, 'ok', 'completed', 'succeeded'].includes(event.payload.status as string | undefined)
+    || !skillCount(result.as_of_seq) || !skillHash(result.as_of_hash)
+    || args.section !== undefined && args.section !== result.section
+    || args.as_of_seq !== undefined && args.as_of_seq !== result.as_of_seq) return uncertain
+  if (event.payload.project_scope !== undefined && (!historyId(event.payload.project_scope)
+    || event.payload.project_scope !== (result.section === 'index' ? result.project_id : object(result.source).project_id))) return uncertain
+  if (result.section === 'index') {
+    const rows = result.entries, before = result.before_seq
+    if (result.available !== true || !historyId(result.project_id) || !Array.isArray(rows) || rows.length > 10
+      || !skillCount(result.total) || rows.length > result.total || typeof result.has_more !== 'boolean'
+      || !(before === null || historyPositive(before) && before <= result.as_of_seq + 1)
+      || args.before_seq !== undefined && args.before_seq !== before
+      || args.limit !== undefined && (!historyPositive(args.limit) || args.limit > 10 || rows.length > args.limit)) return uncertain
+    if (rows.some((value, index) => {
+      const row = object(value)
+      return !historyId(row.task_id) || !historyPositive(row.delivery_seq) || row.delivery_seq > (result.as_of_seq as number)
+        || before !== null && row.delivery_seq >= before || index > 0 && row.delivery_seq >= (object(rows[index - 1]).delivery_seq as number)
+        || !skillHash(row.delivery_hash) || typeof row.objective_excerpt !== 'string' || row.objective_excerpt.length > 640
+        || typeof row.summary_excerpt !== 'string' || row.summary_excerpt.length > 640
+        || typeof row.objective_truncated !== 'boolean' || typeof row.summary_truncated !== 'boolean'
+        || row.verification_kind !== 'manager_declared' || !skillCount(row.artifact_count) || row.artifact_count > 128
+        || !historyReferences(row.artifacts, row.delivery_seq, 3) || row.artifacts.length !== Math.min(row.artifact_count, 3)
+        || row.artifacts_truncated !== (row.artifact_count > row.artifacts.length)
+    }) || new Set(rows.map(row => object(row).task_id)).size !== rows.length
+      || new Set(rows.map(row => object(row).delivery_seq)).size !== rows.length) return uncertain
+    if (result.has_more ? rows.length === 0 || result.total <= rows.length || result.next_before_seq !== object(rows.at(-1)).delivery_seq
+      : result.next_before_seq !== null) return uncertain
+    if (before === null && result.has_more !== (rows.length < result.total)) return uncertain
+    return '历史目录已读取'
+  }
+  if (result.section !== 'delivery' && result.section !== 'artifact') return uncertain
+  const source = object(result.source)
+  if (!historyId(source.project_id) || !historyId(source.task_id) || !historyPositive(source.delivery_seq)
+    || source.delivery_seq > result.as_of_seq || !skillHash(source.delivery_hash)
+    || args.delivery_seq !== undefined && args.delivery_seq !== source.delivery_seq
+    || args.offset !== undefined && args.offset !== result.offset
+    || source.filename !== undefined && !skillText(source.filename) || source.author !== undefined && !historyId(source.author)) return uncertain
+  if (result.section === 'artifact' && (!historyPositive(source.artifact_seq) || source.artifact_seq >= source.delivery_seq
+    || !skillHash(source.content_sha256) || args.artifact_seq !== undefined && args.artifact_seq !== source.artifact_seq)) return uncertain
+  if (typeof result.content !== 'string' || result.content.length > 32000 || !skillCount(result.offset) || !skillCount(result.total_chars)
+    || typeof result.has_more !== 'boolean') return uncertain
+  const size = Array.from(result.content).length, end = result.offset + size
+  if (size > 16000 || end > result.total_chars || result.has_more !== (end < result.total_chars)
+    || (result.has_more ? size === 0 || result.next_offset !== end : result.next_offset !== null)
+    || args.length !== undefined && (!historyPositive(args.length) || args.length > 16000 || size > args.length)) return uncertain
+  return result.section === 'delivery' ? '历史交付说明已读取' : '历史文件已读取'
+}
+
 export const isNativeMcpTool = (name: unknown) => name === 'list_mcp_tools' || name === 'call_mcp_tool'
 export const nativeMcpToolTitle = (name: unknown) => name === 'list_mcp_tools' ? '查看外部工具目录' : '调用外部工具'
 
@@ -211,6 +279,7 @@ function receiptFor(start: TeamEvent, events: TeamEvent[]) {
 }
 
 function toolOutcome(event: TeamEvent, name = event.payload.name) {
+  if (name === 'read_project_history') return nativeProjectHistoryReceiptStatus(event)
   if (isNativeMcpTool(name)) return nativeMcpReceiptStatus(event, name)
   if (name === 'browser_check') return nativeBrowserReceiptStatus(event)
   if (name === 'list_skills' || name === 'read_skill') return nativeSkillReceiptStatus(event, name)
@@ -355,9 +424,9 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   let anyOpenTool = false
   for (const role of roles) {
     const run = roleRuns.get(role), tool = latestTools.get(role)
-    const toolName = tool?.payload.name ?? (isNativeMcpTool(tool?.payload.tool) ? tool?.payload.tool : undefined)
+    const toolName = tool?.payload.name ?? (isNativeMcpTool(tool?.payload.tool) || tool?.payload.tool === 'read_project_history' ? tool?.payload.tool : undefined)
     const receipt = tool ? receiptFor(tool, hosts) : undefined
-    const finished = receipt && tool && (['list_skills', 'read_skill'].includes(String(tool.payload.name)) || isNativeMcpTool(toolName))
+    const finished = receipt && tool && (['list_skills', 'read_skill'].includes(String(tool.payload.name)) || isNativeMcpTool(toolName) || toolName === 'read_project_history')
       ? { ...receipt, payload: { ...tool.payload, ...receipt.payload } } : receipt
     const toolBelongs = tool && (!run?.start || tool.seq > run.start.seq
       && (run.start.payload.run_id === undefined || tool.payload.run_id === run.start.payload.run_id))
@@ -381,7 +450,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
           : successful(run?.status) ? '本轮消息处理已结束' : '执行结果待确认'
     if (action && tool?.payload.name !== 'wait_for_reply' && !awaitingCustomer) text = `${action} · ${finished ? toolOutcome(finished, toolName) : '已发起，等待回执'}；${text}`
     lines.push({ id: role, role, text: `${label(role)} · ${text}`, moving,
-      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回'].includes(toolOutcome(finished, toolName))) })
+      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回', '历史目录已读取', '历史交付说明已读取', '历史文件已读取'].includes(toolOutcome(finished, toolName))) })
   }
   const reported = new Set(events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'agent'
     && event.payload.kind === 'report' && (() => {
