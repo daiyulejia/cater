@@ -113,32 +113,49 @@ class WorkspaceService:
         team = Actor.system("team")
         starts = {e.seq: e for e in events if (e.type == "workspace.tool_started" and e.actor == HOST
                   or e.type == "team.tool_started" and e.actor == team
-                  and e.payload.get("name", "").startswith("workspace_"))
+                  and isinstance(e.payload.get("name"), str) and e.payload["name"].startswith("workspace_"))
                   and (root is None or e.payload.get("root") == root)}
         for event in events:
-            if event.actor not in (HOST, team) and not (event.type == "workspace.tool_reconciled" and event.actor == Actor.human()):
-                continue
             if event.type not in {"workspace.tool_finished", "workspace.tool_reconciled", "team.tool_finished"}:
                 continue
-            start = starts.get(event.payload.get("started_seq"))
-            if event.type != "workspace.tool_reconciled" and (start is None or
-                    (event.type == "team.tool_finished") != (start.type == "team.tool_started")
-                    or event.actor != (team if start.type == "team.tool_started" else HOST)):
+            started_seq = event.payload.get("started_seq")
+            if type(started_seq) is not int or started_seq <= 0:
                 continue
-            if (start and event.task_id == start.task_id and event.seq > start.seq
-                    and (event.payload.get("call_id") == start.payload.get("call_id")
-                         or event.type == "team.tool_finished" and start.type == "team.tool_started"
-                         and event.payload.get("run_id") == start.payload.get("run_id"))):
-                if event.type == "workspace.tool_reconciled" and (
-                    event.payload.get("invocation_stopped") is not True or event.payload.get("started_hash") != start.hash):
+            start = starts.get(started_seq)
+            if start is None or event.task_id != start.task_id or event.seq <= start.seq:
+                continue
+            call_id = start.payload.get("call_id")
+            if not isinstance(call_id, str) or not call_id.strip():
+                continue
+            if event.type == "workspace.tool_reconciled":
+                if (event.actor != Actor.human() or event.payload.get("call_id") != call_id
+                        or event.payload.get("invocation_stopped") is not True
+                        or event.payload.get("started_hash") != start.hash):
                     continue
-                result = event.payload.get("result", {})
-                if event.type in {"workspace.tool_finished", "team.tool_finished"} and (
-                    not isinstance(result, dict) or result.get("status") not in {"ok", "error"} or result.get("complete") is False
-                    or result.get("outcome") == "timeout"
-                    or isinstance(result.get("error"), dict) and result["error"].get("code") == "process_failed"):
+            else:
+                is_team = start.type == "team.tool_started"
+                if ((event.type == "team.tool_finished") != is_team
+                        or event.actor != (team if is_team else HOST)):
                     continue
-                starts.pop(start.seq, None)
+                if is_team:
+                    if not all(isinstance(start.payload.get(key), str) and start.payload[key].strip()
+                               and event.payload.get(key) == start.payload[key] for key in ("run_id", "role", "name")):
+                        continue
+                    # Native team finishes omit call_id; an explicit value must still bind.
+                    if "call_id" in event.payload and event.payload["call_id"] != call_id:
+                        continue
+                elif event.payload.get("call_id") != call_id:
+                    continue
+                result = event.payload.get("result")
+                if (not isinstance(result, dict) or result.get("status") not in ("ok", "error")
+                        or result.get("complete") is False or result.get("outcome") == "timeout"
+                        or isinstance(result.get("error"), dict) and result["error"].get("code") == "process_failed"):
+                    continue
+                # Older mutation receipts can report failure after applying an effect.
+                if (start.payload.get("name") in ("workspace_write", "workspace_run")
+                        and isinstance(result.get("error"), dict) and result["error"].get("code") == "operation_failed"):
+                    continue
+            starts.pop(start.seq, None)
         return list(starts.values())
 
     def view(self, task_id):

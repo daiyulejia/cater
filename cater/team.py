@@ -6,6 +6,7 @@ import io
 import json
 import uuid
 import zipfile
+from contextlib import nullcontext
 from dataclasses import asdict
 
 from .artifacts import normalize_deliverables
@@ -18,6 +19,15 @@ from .work import WorkConflict
 
 HOST = Actor.system("team")
 MAX_ACTOR_TURNS = 32
+LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "set_objective", "request_questions",
+                               "request_review", "record_review", "finish_work"})
+LOCAL_EVENT_CONTRACT = {"version": 1, "kind": "atomic_local_events", "receipt": "same_transaction"}
+EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", "publish_artifact", "publish_workspace_file"})
+
+
+class _RejectedLocalTool(Exception):
+    def __init__(self, result):
+        self.result = result
 
 
 def _text(value, label="内容", limit=32000):
@@ -121,7 +131,7 @@ class TeamService:
         reported = _reported_messages(messages)
         pending = [e for e in messages if e.payload.get("kind") != "notification"
                    and e.seq not in starts and e.seq not in reported]
-        runs = [{"message_seq": seq, "role": e.payload["role"], "revision": e.payload.get("revision", 0),
+        runs = [{"message_seq": seq, "role": e.payload["role"], "run_id": e.payload.get("run_id"), "revision": e.payload.get("revision", 0),
                  "reason": finishes[seq].payload.get("reason", "") if seq in finishes else "",
                  "status": finishes[seq].payload["status"] if seq in finishes else "running"}
                 for seq, e in starts.items()]
@@ -208,6 +218,7 @@ class TeamService:
                   {"run_id": string, "role": {"type": "string", "enum": [r.id for r in members]},
                    "message_seq": {"type": "integer", "minimum": 1}, "name": string,
                    "before_seq": {"type": "integer", "minimum": 1},
+                   "include_pending": {"type": "boolean", "description": "同时读取未结算操作详情；上下文pending_operations提供索引。继续读取旧项时将pending_next_before_seq填入before_seq。这不代表可以重放原操作。"},
                    "limit": {"type": "integer", "minimum": 1, "maximum": 50}}, []),
             _tool("read_messages", "按序号分页读取本群发给你的历史消息或知会；不会重新执行消息。用于补读有限上下文窗口外的内容。",
                   {"after_seq": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 50},
@@ -285,6 +296,55 @@ class TeamService:
             rows.append(row)
         return rows
 
+    def _pending_operations(self, task_id):
+        events = self.rt.log.read(task_id=task_id)
+        workspace_pending = {e.seq for e in self.rt.workspaces.pending(task_id=task_id)}
+        rows = []
+        for start in events:
+            if start.type != "team.tool_started" or start.actor != HOST or start.payload.get("name") == "read_receipts":
+                continue
+            p = start.payload
+            binding_valid = (all(isinstance(p.get(key), str) and p[key].strip() for key in ("run_id", "role", "name", "call_id"))
+                             and type(p.get("message_seq")) is int and p["message_seq"] > 0)
+            run = next((e for e in events if binding_valid and e.type == "team.run_started" and e.actor == HOST and e.seq < start.seq
+                and all(e.payload.get(key) == p[key] for key in ("run_id", "role", "message_seq"))
+                and any(source.type == "team.message_received" and source.seq == p["message_seq"] and source.seq < e.seq
+                        and source.payload.get("recipient") == p["role"] for source in events)), None)
+            finished = next((e for e in events if run is not None and e.type == "team.tool_finished" and e.actor == HOST
+                and e.seq > start.seq and type(e.payload.get("started_seq")) is int
+                and e.payload["started_seq"] == start.seq
+                and all(e.payload.get(key) == p.get(key) for key in ("run_id", "role", "name"))
+                and ("call_id" not in e.payload or e.payload["call_id"] == p["call_id"])
+                and isinstance(e.payload.get("result"), dict) and e.payload["result"].get("status") in ("ok", "error")), None)
+            reconciled = (isinstance(p.get("call_id"), str) and bool(p["call_id"].strip())
+                and isinstance(p.get("name"), str) and p["name"] in {"workspace_write", "workspace_run"} and any(
+                e.type == "workspace.tool_reconciled" and e.actor == Actor.human() and e.seq > start.seq
+                and type(e.payload.get("started_seq")) is int and e.payload["started_seq"] == start.seq
+                and e.payload.get("started_hash") == start.hash and e.payload.get("call_id") == p.get("call_id")
+                and e.payload.get("invocation_stopped") is True for e in events))
+            if reconciled:
+                continue
+            result = finished.payload["result"] if finished else {}
+            unknown = (result.get("complete") is False or result.get("outcome") in ("timeout", "effects_unknown")
+                       or isinstance(result.get("error"), dict) and (
+                           result["error"].get("code") == "process_failed"
+                           or isinstance(p.get("name"), str) and p["name"] in EXTERNAL_EFFECT_TOOLS
+                           and result["error"].get("code") == "operation_failed"))
+            if finished and not unknown and start.seq not in workspace_pending:
+                continue
+            ended = run is not None and any(e.type == "team.run_finished" and e.actor == HOST and e.seq > start.seq
+                and e.payload.get("status") in ("completed", "waiting", "failed", "interrupted")
+                and all(e.payload.get(key) == p.get(key) for key in ("run_id", "role", "message_seq")) for e in events)
+            contract = p.get("execution_contract")
+            local = (isinstance(p.get("name"), str) and p["name"] in LOCAL_EVENT_TOOLS and isinstance(contract, dict)
+                     and type(contract.get("version")) is int and contract == LOCAL_EVENT_CONTRACT)
+            outcome = "not_committed" if ended and local and not finished else "unknown" if ended else "unsettled"
+            rows.append({"seq": start.seq, "started_seq": start.seq,
+                **{key: p.get(key) for key in ("run_id", "role", "message_seq", "name", "arguments")},
+                "outcome": outcome, "run_ended": ended, "replay_authorized": False,
+                **({"finished_seq": finished.seq} if finished else {})})
+        return rows
+
     def _context(self, task_id, message, role, *, run_id=None):
         from .conversations import dialogue_background
 
@@ -334,6 +394,7 @@ class TeamService:
             ("seq", "started_seq", "run_id", "message_seq", "role", "name") if key in row},
             **{key: row["result"][key] for key in ("status", "outcome", "exit_code") if key in row.get("result", {})}}
             for row in receipts[-20:]]
+        pending = self._pending_operations(task_id)
         return {"you": asdict(role), "members": [asdict(r) for r in [self.rt.organization.leader, *self.rt.roles]],
             "active_assignment": {"seq": assignment.seq, "sender": assignment.actor.id, **assignment.payload} if assignment else None,
             "open_assignments": open_assignments, "outgoing_work": outgoing,
@@ -343,6 +404,8 @@ class TeamService:
             "current_work": current_work, "message": {"seq": message.seq, "sender": message.actor.id,
                 "sender_name": name(message.actor.id), "sender_kind": message.actor.kind, **message.payload},
             "receipt_index": receipt_index, "receipts_truncated": len(receipts) > 20,
+            "pending_operations": [{k: row[k] for k in row if k != "arguments"} for row in pending[-20:]],
+            "pending_operations_truncated": len(pending) > 20,
             "conversation": history[-60:], "artifacts": [{k: a.get(k) for k in
                 ("seq", "filename", "summary", "content_sha256", "local_path")} for a in task.deliverables],
             "questionnaires": self.rt.questionnaires.view(task_id)[-5:],
@@ -425,6 +488,8 @@ class TeamService:
             limit = arguments.get("limit", 20)
             if type(limit) is not int or not 1 <= limit <= 50:
                 raise ValueError("回执数量应为1到50。")
+            if type(arguments.get("include_pending", False)) is not bool:
+                raise ValueError("include_pending需要布尔值。")
             for key in ("run_id", "role", "name"):
                 if key in arguments:
                     _text(arguments[key], key, 128)
@@ -440,8 +505,15 @@ class TeamService:
                 if all(key not in arguments or row.get(key) == arguments[key] for key in ("run_id", "role", "message_seq", "name"))
                 and ("before_seq" not in arguments or row["seq"] < arguments["before_seq"])]
             page = receipts[-limit:]
-            return {"status": "ok", "receipts": page, "has_more": len(receipts) > limit,
-                    "next_before_seq": page[0]["seq"] if len(receipts) > limit else None}
+            response = {"status": "ok", "receipts": page, "has_more": len(receipts) > limit,
+                        "next_before_seq": page[0]["seq"] if len(receipts) > limit else None}
+            if arguments.get("include_pending"):
+                pending = [row for row in self._pending_operations(task_id)
+                    if all(key not in arguments or row.get(key) == arguments[key] for key in ("run_id", "role", "message_seq", "name"))
+                    and ("before_seq" not in arguments or row["seq"] < arguments["before_seq"])]
+                response.update(pending_operations=pending[-limit:], pending_has_more=len(pending) > limit,
+                    pending_next_before_seq=pending[-limit]["seq"] if len(pending) > limit else None)
+            return response
         if name == "publish_workspace_file":
             current = self.rt.workspaces.view(task_id)
             if workspace is None or not current["available"] or current["fingerprint"] != binding["fingerprint"] or current["revision"] != binding["revision"]:
@@ -476,6 +548,37 @@ class TeamService:
                     raise WorkConflict("工作目录有未结束或待核对操作，不能重复执行。")
                 return workspace.execute(name, arguments)
         raise ValueError("工具尚未接入。")
+
+    def _invoke_tool(self, task_id, role, started, revision, call, schema, workspace, binding, tool_start, assignment):
+        def settle(result):
+            self.rt.log.emit(type="team.tool_finished", task_id=task_id, actor=HOST,
+                payload={"started_seq": tool_start.seq, "run_id": started.payload["run_id"],
+                         "role": role.id, "name": call.name, "result": result})
+            return result
+
+        try:
+            # Only event-only host tools share a transaction with their receipt.
+            with self.rt.log.atomic() if call.name in LOCAL_EVENT_TOOLS else nullcontext():
+                self._current(task_id, started, role, revision)
+                if (set(call.arguments) - set(schema["properties"])
+                        or not set(schema["required"]) <= set(call.arguments)):
+                    raise ValueError("工具参数需要符合已提供的字段。")
+                result = self._execute(task_id, role, call.name, call.arguments, workspace, binding, tool_start, assignment)
+                if (call.name in EXTERNAL_EFFECT_TOOLS and result.get("status") == "error"
+                        and isinstance(result.get("error"), dict) and result["error"].get("code") == "operation_failed"):
+                    result = {**result, "complete": False, "outcome": "effects_unknown"}
+                if call.name in LOCAL_EVENT_TOOLS and result.get("status") != "ok":
+                    raise _RejectedLocalTool(result)
+                return settle(result)
+        except _RejectedLocalTool as exc:
+            result = exc.result
+        except WorkConflict as exc:
+            result = {"status": "error", "message": str(exc)}
+        except (ValueError, KeyError, TypeError, OSError):
+            result = {"status": "error", "message": "操作未完成，请核对工具参数、权限与已有记录后修正。"}
+            if call.name in EXTERNAL_EFFECT_TOOLS:
+                result.update(complete=False, outcome="effects_unknown")
+        return settle(result)
 
     def _finish_work(self, task_id, role, arguments, tool_start):
         with self.rt.log.atomic():
@@ -583,6 +686,8 @@ class TeamService:
                 "已写入工作目录的文件优先用publish_workspace_file直接发布，避免复述整份源码。"
                 "店长读成果，用read_receipts核对真实工具回执、跟进修正，能够交付时用finish_work记录结果及验证边界。"
                 "receipt_index是最近工具回执的轻量索引，不是结论；可按role、message_seq、name查完整结果，run_id不是角色名。"
+                "pending_operations列出没有可信结算的操作；可用read_receipts的include_pending读取详情。"
+                "not_committed仅表示该版本契约下的本地事件未提交，不是外部命令或计费未发生；unknown需核对实际影响，不重放旧操作。"
                 "独立工具操作可以合并调用；已有可靠验证先读回执判断，按风险补查，不必每次从头重复所有步骤。"
                 "简单追问或方案确认无需重复问顾客是否继续。确有需要顾客补充或选择的问题，用request_questions结构化提问；"
                 "单选多选由你判断，推荐标记只是建议；每题顾客都能自填或跳过。不因跳过就虚构信息或当作授权。"
@@ -635,20 +740,12 @@ class TeamService:
                         payload={"run_id": started.payload["run_id"], "role": role.id, "name": call.name,
                                  "call_id": call.id, "root": binding.get("root"), "message_seq": message.seq,
                                  "revision": revision,
+                                 **({"execution_contract": dict(LOCAL_EVENT_CONTRACT)}
+                                    if call.name in LOCAL_EVENT_TOOLS and not self.rt.log.db.in_transaction else {}),
                                  "arguments": self.rt.workspaces._public_arguments(call.name, call.arguments)})
-                    try:
-                        schema = next(t["input_schema"] for t in tools if t["name"] == call.name)
-                        if (set(call.arguments) - set(schema["properties"])
-                                or not set(schema["required"]) <= set(call.arguments)):
-                            raise ValueError("工具参数需要符合已提供的字段。")
-                        result = self._execute(task_id, role, call.name, call.arguments, workspace, binding, tool_start, assignment)
-                    except WorkConflict as exc:
-                        result = {"status": "error", "message": str(exc)}
-                    except (ValueError, KeyError, TypeError, OSError):
-                        result = {"status": "error", "message": "操作未完成，请核对工具参数、权限与已有记录后修正。"}
-                    self.rt.log.emit(type="team.tool_finished", task_id=task_id, actor=HOST,
-                        payload={"started_seq": tool_start.seq, "run_id": started.payload["run_id"],
-                                 "role": role.id, "name": call.name, "result": result})
+                    schema = next(t["input_schema"] for t in tools if t["name"] == call.name)
+                    result = self._invoke_tool(task_id, role, started, revision, call, schema,
+                                               workspace, binding, tool_start, assignment)
                     history.append({"role": "tool", "tool_call_id": call.id, "is_error": result.get("status") != "ok",
                                     "content": json.dumps(result, ensure_ascii=False)})
                     operation_failed |= result.get("status") != "ok"
