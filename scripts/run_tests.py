@@ -15,6 +15,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from scripts.test_progress import ProgressWatchdog
+
 SLOWEST_LIMIT = 10
 
 
@@ -60,13 +62,24 @@ def escape_annotation(value: str, *, property_value: bool = False) -> str:
     return value
 
 
+def progress_call(progress, method: str, *args) -> None:
+    try:
+        if progress is not None:
+            getattr(progress, method)(*args)
+    except Exception:
+        # Optional diagnostics must never replace the suite's outcome.
+        pass
+
+
 class AnnotatedResult(unittest.TextTestResult):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, progress=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.progress = progress
         self.slowest: list[tuple[float, str]] = []
         self._started = 0.0
 
     def startTest(self, test) -> None:
+        progress_call(self.progress, "start_case", test)
         super().startTest(test)
         self._started = time.perf_counter()
 
@@ -78,6 +91,7 @@ class AnnotatedResult(unittest.TextTestResult):
         else:
             heapq.heappushpop(self.slowest, entry)
         super().stopTest(test)
+        progress_call(self.progress, "stop_case")
 
     def annotate(self, test, detail: str) -> None:
         if os.environ.get("GITHUB_ACTIONS", "").lower() != "true":
@@ -110,8 +124,27 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--list-tests", action="store_true", help="List selected test IDs without executing tests")
     args = parser.parse_args([] if argv is None else argv)
     if os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
-        sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+        try:
+            reconfigure = getattr(sys.stdout, "reconfigure", None)
+            if reconfigure is not None:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+        except Exception:
+            pass
 
+    progress = None
+    try:
+        if not args.list_tests and os.environ.get("GITHUB_ACTIONS", "").lower() == "true":
+            try:
+                progress = ProgressWatchdog(sys.stdout, escape_annotation)
+            except Exception:
+                pass
+        progress_call(progress, "start")
+        return run_selected(args, progress)
+    finally:
+        progress_call(progress, "close")
+
+
+def run_selected(args, progress) -> int:
     loader = unittest.defaultTestLoader
     loader.errors.clear()
     try:
@@ -157,7 +190,14 @@ def main(argv: list[str] | None = None) -> int:
 
     # Keep the discovered tree intact for full runs, including load_tests order.
     execution = unittest.TestSuite(selected) if args.shard else suite
-    result = unittest.TextTestRunner(verbosity=2, resultclass=AnnotatedResult).run(execution)
+    resultclass = AnnotatedResult
+    if progress is not None:
+        progress_call(progress, "select", len(selected))
+
+        def resultclass(*args, **kwargs):
+            return AnnotatedResult(*args, progress=progress, **kwargs)
+
+    result = unittest.TextTestRunner(verbosity=2, resultclass=resultclass).run(execution)
     if result.slowest:
         print(f"Slowest tests (up to {SLOWEST_LIMIT}; includes per-test setup/cleanup, "
               "excludes discovery and module/class fixtures):", file=sys.stderr, flush=True)

@@ -271,7 +271,7 @@ class TestRunnerCLITests(unittest.TestCase):
         self.root = Path(temporary.name)
         (self.root / "scripts").mkdir()
         (self.root / "tests").mkdir()
-        for name in ("run_tests.py", "check.py", "check.ps1"):
+        for name in ("run_tests.py", "test_progress.py", "check.py", "check.ps1"):
             shutil.copyfile(ROOT / "scripts" / name, self.root / "scripts" / name)
         for name in ("alpha", "beta", "gamma", "delta"):
             (self.root / "tests" / f"test_fixture_{name}.py").write_text(
