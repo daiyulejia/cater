@@ -12,6 +12,11 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              name: 'command-output',
+              test: /[\\/]src[\\/](?:CommandOutputPreview|outputPreview)\.tsx?$/,
+              priority: 20,
+            },
+            {
               name: 'page-recovery',
               test: /[\\/]src[\\/](?:AsyncPanel|pageRecovery|pageReload|pageReloadContext)\.tsx?$/,
               priority: 20,

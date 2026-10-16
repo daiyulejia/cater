@@ -68,6 +68,8 @@ python -m cater --drivers drivers.json --roles roles.json --workspaces workspace
 
 工具会在分派工作区动作前核对声明中的字段、类型、取值和范围，不自动把字符串数字或布尔值转换为数字。此时拒绝返回 `invalid_arguments` 和 `not_started`，指出已声明的错误字段，不回显参数值；原生聊天与旧工作项均可据此修正请求，不把它当成未知命令副作用。实际执行后的错误及既有待核对操作不会因此解除。
 
+命令回执中的 stdout/stderr 摘录各不超过 8 KiB。短输出照常返回；长输出分别保留开头 `excerpt` 和末尾 `tail_excerpt`（`preview_mode=head_tail`），不能拼成连续全文。中间内容未保存，展开回执也无法恢复；先读已保存的失败末尾，不因截断就自动重跑命令。`bytes`、`sha256` 对应实际采集的完整原始流，`complete` 表示采集是否结束，与预览是否截断分开；无效 UTF-8 的显示会使用替换字符，不是二进制日志副本。
+
 ## 实际成果与验收
 
 消息协作中的角色可以直接使用 `workspace_read`、`workspace_write`、`workspace_run` 等已提供工具；已写好的文件可用 `publish_workspace_file` 读取真实正文后发布。未绑定目录时仍可发布文本成果，但不能因此声称已经运行命令或完成浏览器验证。下面的 `workspace_files`、独立验收门等说明针对旧治理工作项，不是普通聊天必须经过的流程。

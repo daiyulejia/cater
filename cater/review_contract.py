@@ -6,6 +6,8 @@ from copy import deepcopy
 import json
 from importlib.resources import files
 
+from .verification import output_metadata
+
 
 SCHEMA = json.loads(files("cater.packs").joinpath("review-response.schema.json").read_text(encoding="utf-8"))
 
@@ -17,7 +19,7 @@ def receipt_context(event) -> dict:
             and value["browser_report"].get("outcome") in {"passed", "failed"}
             and value.get("stdout", {}).get("complete") is True
             and value.get("stdout", {}).get("truncated") is False):
-        value["stdout"] = {k: v for k, v in value["stdout"].items() if k != "excerpt"}
+        value["stdout"] = output_metadata(value["stdout"])
     return value
 
 
@@ -96,6 +98,9 @@ def execution_observations(receipt: dict | None) -> list[str]:
             capture = receipt.get(stream)
             if isinstance(capture, dict) and isinstance(capture.get("excerpt"), str) and capture["excerpt"].strip():
                 values.append(capture["excerpt"])
+            if (isinstance(capture, dict) and capture.get("preview_mode") == "head_tail"
+                    and isinstance(capture.get("tail_excerpt"), str) and capture["tail_excerpt"].strip()):
+                values.append(capture["tail_excerpt"])
         return values
     rows = receipt.get("suite")
     if not isinstance(rows, list) or not rows:
@@ -111,6 +116,9 @@ def execution_observations(receipt: dict | None) -> list[str]:
             capture = result.get(stream)
             if isinstance(capture, dict) and isinstance(capture.get("excerpt"), str) and capture["excerpt"].strip():
                 observations.append(capture["excerpt"])
+            if (isinstance(capture, dict) and capture.get("preview_mode") == "head_tail"
+                    and isinstance(capture.get("tail_excerpt"), str) and capture["tail_excerpt"].strip()):
+                observations.append(capture["tail_excerpt"])
     return observations
 
 

@@ -53,9 +53,8 @@ test('通过回执在现有折叠过程和审计展示实际观察、固定版�
   expect(auditContent(audit.container)).toContain('检查通过')
   expect(auditContent(audit.container)).toContain('实际观察：1')
   expect(auditContent(audit.container)).not.toMatch(/RAW_STDOUT_REPORT|RAW_STDERR|TEMP_ONLY|temp\.invalid/)
-  const developer = within(audit.container).getByText('开发者详情').closest('details')!
-  expect(developer.open).toBe(false)
-  expect(developer.textContent).toContain('RAW_STDOUT_REPORT')
+  expect(within(audit.container).queryByLabelText('原始事件 JSON')).toBeNull()
+  expect(audit.container.textContent).not.toContain('RAW_STDOUT_REPORT')
   const line = activity(receipt).lines.find(line => line.role === 'dev')!
   expect(line.text).toContain('浏览器检查 · 检查通过')
   expect(line.warning).toBe(false)

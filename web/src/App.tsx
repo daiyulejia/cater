@@ -1,4 +1,6 @@
 import { lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { hasBrowserReceipt, outputSummaryLines } from './outputPreview'
+import { CommandOutputs } from './CommandOutputPreview'
 import type { ComponentProps, ReactNode } from 'react'
 import {
   ArrowDown, Cat, CheckCircle2, ChevronDown, CircleHelp,
@@ -751,10 +753,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       ]
       if (outcome === 'unavailable') details.push('检查工具不可用或回执不完整，不能据此认定成果错误。')
       for (const [key, label] of [['stdout', '标准输出'], ['stderr', '错误输出']] as const) {
-        const output = payload[key] as { excerpt?: unknown; complete?: unknown; truncated?: unknown } | undefined
-        if (!(key === 'stdout' && payload.browser_report) && typeof output?.excerpt === 'string' && output.excerpt) details.push(`${label}：${output.excerpt}`)
-        if (output?.complete === false) details.push(`${label}采集未完成。`)
-        if (output?.truncated === true) details.push(`${label}已截断，当前展示不是完整输出。`)
+        details.push(...outputSummaryLines(label, payload[key], 800, true))
       }
       if (typeof payload.launch_error === 'string') details.push(`启动错误：${payload.launch_error}`)
       if (typeof payload.cleanup_error === 'string') details.push(`清理错误：${payload.cleanup_error}`)
@@ -1660,8 +1659,9 @@ function SystemRecord({ item, taskId, controls }: { item: ChatItem; taskId: stri
   const heading = <><strong>系统</strong>{item.title && <span> · {item.title}</span>}</>
   const body = <>
     <p className={checking ? 'font-mono' : undefined}>{item.text}</p>
-    {item.details?.length ? <ul>{item.details.map((detail, index) => <li key={index}>{detail}</li>)}</ul> : null}
-    {checking && expanded && item.evidence.payload.browser_report !== undefined && <AsyncPanel fallback={<p>正在读取浏览器执行回执…</p>}>
+    {item.details?.length ? <ul>{item.details.map((detail, index) => <li key={index} className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{detail}</li>)}</ul> : null}
+    {checking && <CommandOutputs stdout={hasBrowserReceipt(item.evidence.payload) ? undefined : item.evidence.payload.stdout} stderr={item.evidence.payload.stderr} limit={800} />}
+    {checking && expanded && hasBrowserReceipt(item.evidence.payload) && <AsyncPanel fallback={<p>正在读取浏览器执行回执…</p>}>
       <BrowserReport report={item.evidence.payload.browser_report} />
     </AsyncPanel>}
     <MessageContext item={item} taskId={taskId} controls={controls} />
@@ -1744,4 +1744,3 @@ function EmptyConversation({ onChoose }: { onChoose: (value: string) => void }) 
 }
 
 export default App
-

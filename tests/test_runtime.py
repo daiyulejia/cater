@@ -2425,15 +2425,19 @@ class CliTests(unittest.TestCase):
         task_id = created.splitlines()[0].split()[1]
         code, _ = self.run_cli(
             "verify", task_id, "--record-output", "--",
-            sys.executable, "-c", "import sys; sys.stdout.write('x' * 12000)",
+            sys.executable, "-c", "import sys; sys.stdout.write('H' * 4096 + 'M' * 3808 + 'T' * 4096)",
         )
         self.assertEqual(code, 0)
         with Runtime(self.db) as rt:
             output = rt.task(task_id).verifications[0]["stdout"]
         self.assertEqual(output["bytes"], 12000)
         self.assertTrue(output["truncated"])
-        self.assertEqual(len(output["excerpt"].encode()), 8192)
-        self.assertEqual(output["sha256"], hashlib.sha256(b"x" * 12000).hexdigest())
+        self.assertTrue(output["complete"])
+        self.assertEqual(output["preview_mode"], "head_tail")
+        self.assertEqual(output["excerpt"], "H" * 4096)
+        self.assertEqual(output["tail_excerpt"], "T" * 4096)
+        self.assertEqual(len((output["excerpt"] + output["tail_excerpt"]).encode()), 8192)
+        self.assertEqual(output["sha256"], hashlib.sha256(b"H" * 4096 + b"M" * 3808 + b"T" * 4096).hexdigest())
 
     def test_cli_doctor_can_probe_cli_drivers(self):
         driver_script = Path(__file__).resolve().parent / "fixtures" / "ndjson_driver.py"

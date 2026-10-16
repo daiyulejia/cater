@@ -20,9 +20,15 @@ from .processes import ProcessScope as _ProcessScope
 PREVIEW_LIMIT = 8192
 
 
-def _decode_preview(value: bytearray) -> str:
+def output_metadata(output: dict) -> dict:
+    """Whitelist capture metadata where raw output must not be repeated."""
+    return {key: output[key] for key in ("bytes", "sha256", "truncated", "complete") if key in output}
+
+
+def _decode_preview(value: bytearray, *, limit: int = PREVIEW_LIMIT, tail: bool = False) -> str:
     decoded = value.decode("utf-8", errors="replace")
-    return decoded.encode("utf-8")[:PREVIEW_LIMIT].decode("utf-8", errors="ignore")
+    encoded = decoded.encode("utf-8")
+    return (encoded[-limit:] if tail else encoded[:limit]).decode("utf-8", errors="ignore")
 
 
 @dataclass
@@ -30,6 +36,7 @@ class _Capture:
     digest: object = field(default_factory=hashlib.sha256)
     size: int = 0
     preview: bytearray = field(default_factory=bytearray)
+    tail: bytearray = field(default_factory=bytearray)
     complete: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -42,6 +49,8 @@ class _Capture:
                     remaining = PREVIEW_LIMIT - len(self.preview)
                     if remaining > 0:
                         self.preview.extend(chunk[:remaining])
+                    self.tail.extend(chunk)
+                    del self.tail[:-(PREVIEW_LIMIT // 2)]
             with self.lock:
                 self.complete = True
         finally:
@@ -57,7 +66,16 @@ class _Capture:
                 "complete": self.complete,
             }
             if record_output:
-                result["excerpt"] = _decode_preview(self.preview)
+                if result["truncated"]:
+                    # These are separate segments, never a fabricated continuous log.
+                    half = PREVIEW_LIMIT // 2
+                    head_size = min(half, self.size // 2)
+                    tail_size = min(half, self.size - head_size)
+                    result.update(excerpt=_decode_preview(self.preview[:head_size], limit=half),
+                                  tail_excerpt=_decode_preview(self.tail[-tail_size:], limit=half, tail=True),
+                                  preview_mode="head_tail")
+                else:
+                    result["excerpt"] = _decode_preview(self.preview)
             return result
 
     def preview_text(self) -> str:

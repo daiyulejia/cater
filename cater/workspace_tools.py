@@ -340,7 +340,7 @@ class WorkspaceExecutor:
                                     "Copy sha256 from the latest workspace_read of this file; null only if the file does not exist."}},
                                 ["path", "content", "expected_sha256"]))
         if self.policy.mode == "execute":
-            definitions.append(("workspace_run", "Run a trusted host program alias (not an OS sandbox or task acceptance).",
+            definitions.append(("workspace_run", "Run a trusted host program alias (not an OS sandbox or task acceptance). Long stdout/stderr previews have separate excerpt and tail_excerpt (preview_mode=head_tail); the missing middle is not saved. complete means capture finished, not that the preview is the full log.",
                                 {"command": {"type": "string", "enum": sorted(self.policy.commands)},
                                  "args": {"type": "array", "maxItems": 100,
                                           "items": {**string, "maxLength": 8192}, "default": []}, "cwd": path,

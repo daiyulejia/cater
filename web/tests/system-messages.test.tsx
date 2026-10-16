@@ -580,3 +580,45 @@ test('未知伙伴使用自然中文兜底，不泄漏机器角色名或吞掉�
   expect(visibleText(stream)).not.toContain('worker_internal_7')
   expect(visibleText(record(2))).toContain('RAW_CONNECTION_ERROR')
 })
+
+test.each([true, false])('App检查摘要分别压缩首尾，两流最后错误不被二次截断，complete=%s', async complete => {
+  const output = (end: string) => ({ preview_mode: 'head_tail', excerpt: `HEAD_${end}${'中'.repeat(4000)}`,
+    tail_excerpt: `${'尾'.repeat(4000)}FATAL_${end}`, truncated: true, complete, bytes: 20000 })
+  await mount([event(2, 'verification.completed', 'local_verifier', { command: ['mock-check'], outcome: 'failed', exit_code: 1,
+    stdout: output('STDOUT'), stderr: output('STDERR') }, 'system')])
+  const row = record(2)
+  const visible = visibleText(row)
+  for (const end of ['STDOUT', 'STDERR']) {
+    expect(visible).toContain(`HEAD_${end}`)
+    expect(visible).toContain(`FATAL_${end}`)
+  }
+  expect(visible).toContain('中间省略，非完整原文')
+  expect(visible).toContain(complete ? '末尾（已保存片段）' : '已采集末尾（已保存片段）')
+  const parts = Array.from(row.querySelectorAll('pre')).filter(pre => pre.textContent?.includes('FATAL_') && !pre.closest('details:not([open])'))
+  expect(parts).toHaveLength(2)
+  expect(parts.every(li => li.textContent!.length < 900 && li.className.includes('[overflow-wrap:anywhere]'))).toBe(true)
+  expect(visible).not.toContain('完整日志')
+  expect(vi.mocked(fetch).mock.calls.every(([, init]) => !init?.method || init.method === 'GET')).toBe(true)
+})
+
+test.each([null, undefined])('browser报告缺失或畸形时，App及展开审计不回退显示原始首尾：%j', async browser_report => {
+  await mount([event(2, 'verification.completed', 'local_verifier', { command: ['mock-browser'], outcome: 'unavailable',
+    browser_report, check_kind: 'browser', stdout: { preview_mode: 'head_tail', excerpt: 'RAW_JSON_HEAD', tail_excerpt: 'RAW_JSON_TAIL', complete: false, truncated: true } }, 'system')])
+  const row = record(2)
+  expect(visibleText(row)).not.toMatch(/RAW_JSON_HEAD|RAW_JSON_TAIL/)
+  const audit = within(row).getByText('事件 #2 · 审计记录').closest('details')!
+  await act(async () => openDetails(audit))
+  await act(async () => { await vi.dynamicImportSettled() })
+  expect(row.textContent).not.toMatch(/RAW_JSON_HEAD|RAW_JSON_TAIL/)
+  expect(within(row).queryByLabelText('原始事件 JSON')).toBeNull()
+})
+
+test.each([null, false, ''])('普通命令带空browser字段仍显示首尾与错误：%j', async value => {
+  await mount([event(2, 'verification.completed', 'local_verifier', { command: ['mock-command'], outcome: 'failed', check_kind: 'command',
+    browser_plan: value, browser_report: value,
+    stdout: { preview_mode: 'head_tail', excerpt: '普通命令开头', tail_excerpt: '普通命令最后错误', complete: true, truncated: true } }, 'system')])
+  const row = record(2)
+  expect(visibleText(row)).toContain('普通命令开头')
+  expect(visibleText(row)).toContain('普通命令最后错误')
+  expect(visibleText(row)).not.toContain('浏览器回执')
+})

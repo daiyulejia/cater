@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import { FilePenLine, FileSearch, Folder, FolderCog, LoaderCircle, RefreshCw, Save, Terminal, Unlink, X } from 'lucide-react'
 import { sameWorkScope } from './participants'
+import { CommandOutputs } from './CommandOutputPreview'
 
 export type WorkspaceMode = 'read_only' | 'edit' | 'execute'
 export type WorkspaceOption = { id: string; title: string; root: string; mode: WorkspaceMode; commands: string[] }
@@ -223,8 +224,7 @@ export function WorkspaceToolProgress({ events, claim, name }: { events: ToolEve
               : result.outcome === 'failed' ? `运行失败${typeof result.exit_code === 'number' ? ` · 退出码 ${result.exit_code}` : ''}`
                 : result.status === 'error' ? '未完成' : '运行结果待核对'
             : result.status !== 'ok' ? '未完成' : '已完成'
-        const output = p.name === 'workspace_run' ? [excerpt(stdout.excerpt), excerpt(stderr.excerpt)].filter(Boolean).join('\n')
-          : p.name === 'workspace_read' ? excerpt(result.content) : ''
+        const output = p.name === 'workspace_read' ? excerpt(result.content) : ''
         return <li key={start.seq} className="leading-5">
           <p className="flex items-start gap-1.5"><Icon size={14} className="mt-0.5 shrink-0" aria-hidden="true" /><strong>{toolText(p.name)}</strong><span>· {outcome}</span></p>
           {uncertain && !reconciled && <p>{result.outcome === 'timeout' ? '运行超时' : result.complete === false || stdout.complete === false || stderr.complete === false ? '输出不完整' : '进程影响未确认'}，请先人工核对实际影响，勿重复执行。</p>}
@@ -243,6 +243,7 @@ export function WorkspaceToolProgress({ events, claim, name }: { events: ToolEve
           {p.name === 'workspace_write' && result.status === 'ok' && !uncertain && <p>{result.created ? '已创建文件' : '已写入文件'}{typeof result.bytes === 'number' ? ` · ${result.bytes} 字节` : ''}</p>}
           {result.status === 'error' && <p>{excerpt(record(result.error).message) || '工具未能完成，请核对后重试。'}</p>}
           {output && <pre className="mt-1 whitespace-pre-wrap font-mono text-[11px]">{output}</pre>}
+          {p.name === 'workspace_run' && <CommandOutputs stdout={result.stdout} stderr={result.stderr} limit={1600} />}
           {(result.truncated === true || stdout.truncated === true || stderr.truncated === true) && <p>结果仅返回部分内容。</p>}
           {p.name === 'workspace_run' && finished && <p className="mt-1">命令回执不代表任务验收通过。</p>}
         </li>

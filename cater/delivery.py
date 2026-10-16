@@ -24,7 +24,7 @@ from .planning import _TEXT_CONTRACTS, _execution_contract, requirement_sources
 from .responses import load_response_object
 from .review_contract import execution_observations, receipt_context
 from .usage import valid_token_count
-from .verification import CheckResult, run_check, validate_check
+from .verification import CheckResult, output_metadata, run_check, validate_check
 from .work import WorkConflict, digest
 
 if TYPE_CHECKING:
@@ -1055,7 +1055,7 @@ class DeliveryService:
                     text += "实际命令参数：\n\n```json\n" + json.dumps(receipt["command"], ensure_ascii=False, indent=2) + "\n```\n"
                 else:
                     text += "旧记录未保存命令参数。\n"
-                outputs = {key: {k: v for k, v in receipt[key].items() if k != "excerpt"}
+                outputs = {key: output_metadata(receipt[key])
                            for key in ("stdout", "stderr") if isinstance(receipt.get(key), dict)}
                 text += "\n输出摘要（已保存的正文见交付元数据清单）：\n\n```json\n" + json.dumps(outputs, ensure_ascii=False, indent=2) + "\n```\n"
             if self.rt.log.head_hash() != head:

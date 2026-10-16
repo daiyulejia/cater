@@ -91,7 +91,7 @@ test('浏览器回执安全展示已知字段，工具不可用不是成果错�
   expect(ordinary(container)).toContain('<script>alert(1)</script>')
   expect(ordinary(container)).not.toMatch(/PRIVATE_SCRIPT|PRIVATE_REPORT|命令失败/)
   expect(container.querySelector('script')).toBeNull()
-  expect(screen.getByText('开发者详情').closest('details')!.open).toBe(false)
+  expect(screen.queryByLabelText('原始事件 JSON')).toBeNull()
 })
 
 test('浏览器审计显示runner实际步骤、错误、观察与截图摘要，不漏掉隐藏stdout的截断提示', () => {
@@ -130,7 +130,7 @@ test('浏览器审计显示runner实际步骤、错误、观察与截图摘要�
   expect(visible).toContain('截图清理前记录异常')
   expect(visible).not.toMatch(/TEMP_ONLY|HIDDEN_REPORT/)
   expect(container.querySelector('img, script, a')).toBeNull()
-  expect(screen.getByText('开发者详情').closest('details')!.open).toBe(false)
+  expect(screen.queryByLabelText('原始事件 JSON')).toBeNull()
 })
 
 test('浏览器报告字段异常不崩溃，界面省略长内容时明确提示', () => {
@@ -232,7 +232,8 @@ test('真实本机回执展示参数边界、退出码、耗时和采集正文',
   expect(screen.getByText('通过三项检查')).toBeTruthy()
   expect(screen.getByText('无输出。')).toBeTruthy()
   expect(ordinary(container)).toContain('不代表应用已部署')
-  expect(container.querySelectorAll('pre')).toHaveLength(1)
+  expect(screen.getByLabelText('标准输出输出文本').textContent).toBe('通过三项检查')
+  expect(screen.getByLabelText('原始事件 JSON')).toBeTruthy()
 })
 
 test.each([

@@ -11,7 +11,7 @@ import unicodedata
 
 from .browser_checks import ACTION_FIELDS, MAX_BROWSER_STEPS, PLAN_FILE, browser_receipt, normalize_plan
 from .events import Actor
-from .verification import run_check
+from .verification import output_metadata, run_check
 from .work import WorkConflict
 
 
@@ -139,7 +139,7 @@ class TeamBrowser:
                 and result.payload["stderr"].get("complete") is True),
             "checked_artifacts": [{k: a[k] for k in ("seq", "filename", "content_sha256")} for a in files],
             **{k: result.payload[k] for k in ("exit_code", "duration_ms", "process_scope", "stdout", "stderr")},
-            "stdout": {k: v for k, v in result.payload["stdout"].items() if k != "excerpt"},
+            "stdout": output_metadata(result.payload["stdout"]),
             "note": ("仅检查固定已发布文件副本；截图只保留元数据，原临时文件已清理。"
                      + ("目标、控制或文件版本已变化，本回执仅作历史记录。" if not same_scope else ""
                         "回执不等于业务覆盖完整或伙伴验收通过。"))}

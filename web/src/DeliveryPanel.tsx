@@ -1,14 +1,18 @@
 import { useState } from 'react'
 import { request } from './request'
 import { Download, FileCheck2, PackageCheck, LoaderCircle } from 'lucide-react'
+import { OutputPreview } from './CommandOutputPreview'
+import type { CheckOutput } from './outputPreview'
+import { hasBrowserReceipt } from './outputPreview'
+import { BrowserReport } from './browserReport'
 
 type Evidence = { artifact_seq: number; quote: string }
 type Result = { id: string; status: string; reason?: string; text?: string; evidence?: Evidence[]; source_quote?: string | null; receipt_seq?: number | null }
-type CheckOutput = { bytes?: number; sha256?: string; truncated?: boolean; complete?: boolean; excerpt?: string }
 type CheckReceipt = {
   receipt_seq: number; attempt_seq: number; at: string; command?: string[]; outcome?: string
   exit_code?: number | null; duration_ms?: number; stdout?: CheckOutput; stderr?: CheckOutput
   artifacts_unchanged?: boolean; environment?: string
+  check_kind?: string; browser_plan?: unknown; browser_report?: unknown
 }
 export type DeliveryState = {
   status: string; reason: string; digest?: string; reviewer?: string | null; review_seq?: number
@@ -26,20 +30,12 @@ const outcomeLabels: Record<string, string> = {
   passed: '通过', failed: '未通过', timeout: '超时', launch_error: '启动失败',
 }
 
-function ReceiptOutput({ name, output }: { name: string; output?: CheckOutput }) {
-  const empty = output?.bytes === 0 && output.complete === true
-  const excerpt = output?.excerpt
-  const bodyStatus = empty ? '无输出。' : excerpt === '' ? '已保存的输出文本为空。'
-    : output?.bytes === 0 && output.complete === false ? '未采集到输出，采集尚未完成。'
-    : output?.bytes !== undefined && output.bytes > 0 && output.sha256 !== undefined ? '未保存输出正文，仅提供字节数与 SHA256。'
-    : '输出正文未记录。'
+function ReceiptOutput({ name, output, hideBody = false }: { name: string; output?: CheckOutput; hideBody?: boolean }) {
   return <div className="mt-2 min-w-0" role="group" aria-label={name}>
     <p className="font-semibold">{name} · {output?.bytes === undefined ? '字节数未记录' : `${output.bytes} 字节`}</p>
     <p className="break-all">SHA256：{output?.sha256 ?? '未记录'}</p>
     <p>采集：{output?.complete === undefined ? '未记录' : output.complete ? '完整' : '未完成'} · 预览截断：{output?.truncated === undefined ? '未记录' : output.truncated ? '是' : '否'}</p>
-    {excerpt !== undefined && excerpt !== ''
-      ? <pre tabIndex={0} aria-label={`${name}输出文本`} className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all font-mono">{excerpt}</pre>
-      : <p className="mt-1 text-stone-500">{bodyStatus}</p>}
+    {hideBody ? <p>正文以浏览器专用回执为准。</p> : <OutputPreview name={name} output={output} limit={1600} />}
   </div>
 }
 
@@ -93,8 +89,9 @@ export function DeliveryPanel({ taskId, delivery, names, accessToken = '' }: {
           <p className="mt-2 font-semibold">实际命令（JSON 参数数组）</p>
           {receipt.command === undefined ? <p className="mt-1 text-stone-500">实际命令未记录。</p>
             : <pre tabIndex={0} aria-label={`回执 #${receipt.receipt_seq} 的实际命令参数数组`} className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all font-mono">{JSON.stringify(receipt.command, null, 2)}</pre>}
-          <ReceiptOutput name="标准输出（stdout）" output={receipt.stdout} />
+          <ReceiptOutput name="标准输出（stdout）" output={receipt.stdout} hideBody={hasBrowserReceipt(receipt)} />
           <ReceiptOutput name="标准错误（stderr）" output={receipt.stderr} />
+          {hasBrowserReceipt(receipt) && <BrowserReport report={receipt.browser_report} />}
         </li>)}</ol>
       </details>}
     </div>)}

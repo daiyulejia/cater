@@ -45,7 +45,11 @@ def _receipt_text(result):
     for key in ("content", "stdout", "stderr"):
         value = result.get(key)
         if isinstance(value, dict):
-            value = value.get("excerpt", value.get("preview"))
+            segments = [value.get("excerpt", value.get("preview"))]
+            if value.get("preview_mode") == "head_tail":
+                segments.append(value.get("tail_excerpt"))
+            parts.extend(part for part in segments if isinstance(part, str))
+            continue
         if isinstance(value, str):
             parts.append(value)
     error = result.get("error")

@@ -3,6 +3,8 @@ import { isTeamHost, isTeamRecovery } from './team'
 import { nativeBrowserReceiptStatus, nativeSkillReceiptStatus } from './conversationActivityState'
 import { NativeSkillReceipt } from './TeamProgressPanel'
 import { usageSummary } from './modelUsage'
+import { CommandOutputs } from './CommandOutputPreview'
+import { hasBrowserReceipt } from './outputPreview'
 
 export type DetailEvent = {
   seq: number
@@ -321,7 +323,6 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       if (typeof p.artifacts_unchanged === 'boolean') add('成果正文', p.artifacts_unchanged ? '检查期间未改变' : '检查期间发生变化')
       for (const [key, name] of [['stdout', '标准输出'], ['stderr', '错误输出']]) {
         const output = record(p[key])
-        if (!(key === 'stdout' && p.browser_report)) add(name, text(output.excerpt) || (output.bytes === 0 && output.complete === true ? '无输出。' : '未记录输出正文。'))
         if (output.complete === false || output.truncated === true) add(`${name}采集`, [output.complete === false ? '采集未完成' : '', output.truncated === true ? '输出已截断' : ''].filter(Boolean).join('；'))
       }
       break
@@ -393,6 +394,10 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
   const { fields, status, note } = describe(event, actorName)
   const title = label(event.type, titles, '事件记录')
   const recorder = resolvedName(event.actor.id, actorName) || label(event.actor.kind, { human: '用户', system: '系统', agent: '成员' }, '记录来源待核对')
+  const nativeBrowser = ['team.tool_started', 'team.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'browser_check'
+  const browser = nativeBrowser || event.type === 'verification.completed' && hasBrowserReceipt(event.payload)
+  const outputs = event.type === 'verification.completed' ? event.payload
+    : ['team.tool_finished', 'workspace.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'workspace_run' ? record(event.payload.result) : undefined
   return <section aria-label={`事件 #${event.seq} 详情`} className="min-w-0 space-y-3 text-xs leading-5 text-[#52695e] [overflow-wrap:anywhere]">
     <header className="flex flex-wrap items-start justify-between gap-2">
       <div className="min-w-0"><h3 className="text-sm font-semibold text-[#294a40]">{title}</h3><p className="text-[#728679]">事件 #{event.seq} · {recorder}</p></div>
@@ -401,7 +406,8 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
     {fields.length > 0 && <dl className="space-y-2">{fields.map((field, index) => <div key={index} className="min-w-0 sm:grid sm:grid-cols-[7rem_minmax(0,1fr)] sm:gap-3">
       <dt className="font-semibold">{field.label}</dt><dd className="min-w-0 whitespace-pre-wrap">{field.value}</dd>
     </div>)}</dl>}
-    {event.type === 'verification.completed' && event.payload.browser_report !== undefined && <BrowserReport report={event.payload.browser_report} />}
+    {event.type === 'verification.completed' && browser && <BrowserReport report={event.payload.browser_report} />}
+    {outputs && <CommandOutputs stdout={browser ? undefined : outputs.stdout} stderr={nativeBrowser ? undefined : outputs.stderr} />}
     {event.type === 'team.tool_finished' && (event.payload.name ?? event.payload.tool) === 'browser_check' && <NativeBrowserReceipt event={event} />}
     {skillTool(event) && event.type === 'team.tool_finished' && <NativeSkillReceipt event={event} />}
     {note && <p className="text-[#728679]">{note}</p>}
@@ -413,7 +419,7 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
         {event.payload.evidence.filter((entry) => entry && Number.isInteger(entry.artifact_seq) && entry.artifact_seq > 0 && typeof entry.quote === 'string')
           .map((entry, index) => <blockquote key={index} className="mt-2 whitespace-pre-wrap">成果 #{entry.artifact_seq}：{entry.quote}</blockquote>)}
       </details>}
-    {!skillTool(event) && <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
+    {!skillTool(event) && !browser && <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
       <summary className="cursor-pointer text-[#728679]">开发者详情</summary>
       <pre tabIndex={0} aria-label="原始事件 JSON" className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(event, null, 2)}</pre>
     </details>}

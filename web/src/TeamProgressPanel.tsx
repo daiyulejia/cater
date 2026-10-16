@@ -6,6 +6,7 @@ import { nativeBrowserReceiptStatus, nativeSkillReceiptStatus } from './conversa
 import { TeamArtifacts } from './TeamArtifacts'
 import { ModelUsagePanel } from './ModelUsagePanel'
 import type { ExecutionControl } from './executionControl'
+import { CommandOutputs } from './CommandOutputPreview'
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const excerpt = (value: unknown, limit = 800): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（仅显示部分内容）' : '') : ''
@@ -68,13 +69,13 @@ export function NativeSkillReceipt({ event }: { event: TeamEvent }) {
 
 function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean }) {
   if (['list_skills', 'read_skill'].includes((event.payload.name ?? event.payload.tool) as string)) return <NativeSkillReceipt event={event} />
-  if (event.payload.name === 'browser_check') return <NativeBrowserReceipt event={event} />
+  if ((event.payload.name ?? event.payload.tool) === 'browser_check') return <NativeBrowserReceipt event={event} />
   const detail = (value: unknown) => excerpt(value, full ? Number.MAX_SAFE_INTEGER : 800)
   const p = event.payload
   const args = record(p.arguments)
   const result = record(p.result)
   const stdout = record(result.stdout), stderr = record(result.stderr)
-  const output = [detail(result.content), detail(stdout.preview ?? stdout.excerpt ?? result.stdout), detail(stderr.preview ?? stderr.excerpt ?? result.stderr)].filter(Boolean).join('\n')
+  const output = detail(result.content)
   const rawCommand = args.command ?? result.command
   const command = Array.isArray(rawCommand) ? rawCommand.filter((part): part is string => typeof part === 'string').join(' ') : rawCommand
   const reason = detail(p.reason ?? result.reason ?? result.message ?? record(result.error).message ?? result.error)
@@ -126,6 +127,7 @@ function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean
     {Array.isArray(result.matches) && <p>找到 {result.matches.length} 处匹配</p>}
     {reason && <p>{reason}</p>}
     {output && <pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px]">{output}</pre>}
+    <CommandOutputs stdout={result.stdout} stderr={result.stderr} limit={full ? undefined : 800} />
     {(result.truncated === true || stdout.truncated === true || stderr.truncated === true || result.complete === false || stdout.complete === false || stderr.complete === false) && <p>回执内容不完整。</p>}
   </div>
 }
