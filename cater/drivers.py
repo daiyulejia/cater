@@ -443,6 +443,7 @@ class CliDriver:
         timeout: float = 120.0,
         restart_limit: int = 1,
         token_budget: int | None = None,
+        env: dict[str, str] | None = None,
     ):
         self.name = name
         self.command = list(command)
@@ -450,6 +451,7 @@ class CliDriver:
         self.timeout = timeout
         self.restart_limit = restart_limit
         self.token_budget = token_budget
+        self.env = None if env is None else dict(env)
         self._proc: subprocess.Popen[str] | None = None
         self._scope: ProcessScope | None = None
         self._io_thread: threading.Thread | None = None
@@ -468,7 +470,7 @@ class CliDriver:
             # Isolated calls carry explicit context and must not reuse process history.
             worker = CliDriver(
                 self.name, self.command, cwd=self.cwd, timeout=self.timeout,
-                restart_limit=self.restart_limit, token_budget=self.token_budget,
+                restart_limit=self.restart_limit, token_budget=self.token_budget, env=self.env,
             )
             try:
                 return worker._complete(role=role, prompt=prompt, context=context)
@@ -497,6 +499,10 @@ class CliDriver:
             return self._request({"type": "ping"}).get("pong") is True
         except DriverError:
             return False
+
+    def exchange(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Exchange an opaque NDJSON request once, never replaying a lost response."""
+        return self._request({**payload, "type": "complete"})
 
     def close(self) -> None:
         with self._lock:
@@ -590,7 +596,7 @@ class CliDriver:
                 [sys.executable, "-I", str(Path(__file__).with_name("_driver_worker.py"))],
                 cwd=self.cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1,
-                shell=False, start_new_session=os.name != "nt",
+                shell=False, start_new_session=os.name != "nt", env=self.env,
             )
             self._scope = ProcessScope(self._proc)
             ready = self._exchange(self._proc, json.dumps(self.command, ensure_ascii=False), deadline)

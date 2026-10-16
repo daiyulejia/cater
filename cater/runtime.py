@@ -10,6 +10,7 @@ import threading
 import time
 import tempfile
 import uuid
+from contextlib import ExitStack
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -43,6 +44,7 @@ from .review_contract import receipt_context
 from .checkpoints import work_checkpoint
 from .execution_control import ExecutionControl
 from .skills import SkillLibrary
+from .mcp import McpPool, McpService
 
 
 MAX_TASK_GOAL_CHARS = 12_000
@@ -202,6 +204,8 @@ class Runtime:
         browser_checker_path: str | Path | None = None,
         workspaces_path: str | Path | None = None,
         skills_path: str | Path | None = None,
+        mcp_path: str | Path | None = None,
+        mcp_pool: McpPool | None = None,
         driver_attempts: int = 2,
         circuit_breaker_threshold: int = 2,
         audit_key: str | bytes | None = None,
@@ -263,14 +267,17 @@ class Runtime:
         self._close_drivers_on_close = close_drivers_on_close
         self._execution_authorization: tuple[str, dict[str, Any]] | None = None
         self._execution_control_authorization: tuple[str, int | None] | None = None
+        self.mcp = McpService(self, mcp_path, pool=mcp_pool)
 
     def close(self) -> None:
-        if self._close_drivers_on_close:
-            for driver in self.drivers.values():
-                close = getattr(driver, "close", None)
-                if callable(close):
-                    close()
-        self.log.close()
+        with ExitStack() as resources:
+            resources.callback(self.log.close)
+            if self._close_drivers_on_close:
+                for driver in reversed(list(self.drivers.values())):
+                    close = getattr(driver, "close", None)
+                    if callable(close):
+                        resources.callback(close)
+            resources.callback(self.mcp.close)
 
     def __enter__(self) -> "Runtime":
         return self

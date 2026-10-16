@@ -2,6 +2,18 @@
 
 本目录展示如何接入外部工具，同时不让它们渗入 Cater 核心。
 
+## 可选 MCP stdio 服务
+
+[`mcp.example.json`](mcp.example.json) 是宿主配置模板，显式指定绝对命令路径、工作目录、角色、工具读写分类和环境变量映射。替换为本机已安装且可信的桥与服务，核对 `roles`、`workspaces` 和真实工具名后使用：
+
+```powershell
+python -m cater --mcp C:/Cater/config/mcp.json web
+```
+
+示例中的记录服务需自行提供；不传 `--mcp` 不启动 MCP 进程。Python 核心零第三方运行依赖，可选 Node 桥使用官方 SDK，不自动通过 `npx` 安装服务。JSON 只填写环境变量名，不填写密钥。
+
+MCP 授权与目录模式独立，工作区只读不会限制外部 MCP 进程的写入能力，进程管理也不提供 OS 沙箱。目录和调用按需启动，失败不自动重放；正常 `isError` 与可能已有副作用的未知结果分别处理。配置字段、pool 生命周期和恢复说明见 [MCP 使用文档](../docs/mcp.zh-CN.md)。
+
 ## 精简编队
 
 [`compact_roles.json`](compact_roles.json) 配置店长和月亮、罐头、米寇、三角，不设固定中间层：

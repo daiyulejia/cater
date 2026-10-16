@@ -37,11 +37,96 @@ const tools: Record<string, string> = {
   set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复',
   request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论',
   list_skills: '查看工作指引目录', read_skill: '阅读工作指引',
+  list_mcp_tools: '查看外部工具目录', call_mcp_tool: '调用外部工具',
 }
 
 const skillCount = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 const skillText = (value: unknown): value is string => typeof value === 'string' && Boolean(value.trim())
 const skillHash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value)
+export const isNativeMcpTool = (name: unknown) => name === 'list_mcp_tools' || name === 'call_mcp_tool'
+export const nativeMcpToolTitle = (name: unknown) => name === 'list_mcp_tools' ? '查看外部工具目录' : '调用外部工具'
+
+function pageValid(result: Record<string, unknown>, size: number) {
+  return skillCount(result.offset) && skillCount(result.total) && skillCount(result.next_offset)
+    && result.offset + size === result.next_offset && result.next_offset <= result.total
+    && typeof result.has_more === 'boolean' && result.has_more === (result.next_offset < result.total)
+    && (!result.has_more || size > 0)
+}
+
+function terminalDataValid(result: Record<string, unknown>): boolean {
+  if (result.representation_complete === false && result.result_encoding === 'escaped_json') {
+    const decoded = nativeMcpEscapedResult(result)
+    return decoded !== undefined && decoded.status === result.status && decoded.complete === true && decoded.outcome === result.outcome
+      && ['server_id', 'tool_name', 'effect', 'invocation_id', 'configuration_current'].every(key => decoded[key] === result[key])
+      && decoded.result_encoding !== 'escaped_json' && terminalDataValid(decoded)
+  }
+  const data = object(result.mcp_result)
+  if (!Array.isArray(data.content)
+    || !data.content.every(value => object(value).type === 'text' && typeof object(value).text === 'string')
+    || Object.hasOwn(data, 'isError') && typeof data.isError !== 'boolean'
+    || (data.isError ?? false) !== (result.outcome === 'tool_error')) return false
+  if (result.representation_complete === false) {
+    return skillCount(result.result_bytes) && skillHash(result.result_sha256) && typeof result.result_excerpt === 'string'
+      && (result.unsupported_content_types === undefined || Array.isArray(result.unsupported_content_types) && result.unsupported_content_types.every(skillText))
+  }
+  return result.representation_complete === undefined || result.representation_complete === true
+}
+
+// The escaped envelope is data only; its status never replaces the host envelope.
+export function nativeMcpEscapedResult(result: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (typeof result.result_json !== 'string' || result.result_json.length > 1024 * 1024) return undefined
+  try { return object(JSON.parse(result.result_json)) } catch { return undefined }
+}
+
+export function nativeMcpReceiptStatus(event: TeamEvent, name = event.payload.name ?? event.payload.tool): string {
+  if (!isTeamHost(event)) return '外部工具回执来源待核对'
+  if (event.type === 'team.tool_started') return '已发起，等待回执'
+  const result = object(event.payload.result), args = object(event.payload.arguments)
+  const listing = name === 'list_mcp_tools'
+  const uncertain = '外部工具结果待确认'
+  if (event.type !== 'team.tool_finished' || !isNativeMcpTool(name)) return uncertain
+  if (result.status === 'error' && result.complete === true && result.outcome === 'not_started') {
+    return listing ? '未开始读取目录' : '未开始调用'
+  }
+  if (listing && result.status === 'error' && result.complete === true && result.outcome === 'discovery_failed') return '工具目录读取失败'
+  if (!listing && result.status === 'error' && result.complete === false && result.outcome === 'effects_unknown') return '调用结果及实际影响待核对'
+  let status: string
+  if (listing) {
+    if (result.status !== 'ok' || result.complete !== true || ![undefined, 'ok', 'completed', 'succeeded'].includes(event.payload.status as string | undefined)) return uncertain
+    if (args.offset !== undefined && args.offset !== result.offset) return uncertain
+    if (result.operation === 'servers') {
+      const rows = result.servers
+      if (args.server_id !== undefined || !Array.isArray(rows) || rows.length > 20 || !pageValid(result, rows.length)
+        || !['ok', 'unavailable', 'not_configured'].includes(String(result.configuration_status))
+        || rows.some(value => { const row = object(value); return !skillText(row.id) || !skillText(row.title) || !skillText(row.description) || !skillCount(row.tool_count) })
+        || new Set(rows.map(value => object(value).id)).size !== rows.length) return uncertain
+      return result.configuration_status === 'ok' ? '宿主服务目录已读取（未连接）' : '宿主服务配置不可用（未连接）'
+    }
+    const rows = result.tools
+    if (result.operation !== 'list' || !Array.isArray(rows) || rows.length > 20 || !pageValid(result, rows.length)
+      || rows.some(value => { const row = object(value); return !skillText(row.name) || !skillHash(row.schema_sha256)
+        || row.input_schema === null || typeof row.input_schema !== 'object' || Array.isArray(row.input_schema) || !['read', 'write'].includes(String(row.effect))
+        || row.title !== undefined && typeof row.title !== 'string' || row.description !== undefined && typeof row.description !== 'string' })
+      || new Set(rows.map(value => object(value).name)).size !== rows.length) return uncertain
+    status = '工具目录已读取'
+  } else {
+    if (result.complete !== true || !['returned', 'tool_error'].includes(String(result.outcome))
+      || !['read', 'write'].includes(String(result.effect)) || !skillText(result.invocation_id)
+      || result.status !== (result.outcome === 'tool_error' ? 'error' : 'ok')
+      || result.outcome === 'returned' && ![undefined, 'ok', 'completed', 'succeeded'].includes(event.payload.status as string | undefined)
+      || !terminalDataValid(result)) return uncertain
+    status = result.outcome === 'tool_error' ? '调用已结束，工具报错' : '调用已返回'
+    if (result.representation_complete === false) status += '（结果表示不完整）'
+  }
+  if (!skillText(result.server_id) || !skillText(result.tool_name) && !listing
+    || args.server_id !== undefined && args.server_id !== result.server_id
+    || !listing && args.tool_name !== undefined && args.tool_name !== result.tool_name
+    || typeof result.configuration_current !== 'boolean') return uncertain
+  if (!listing && typeof event.payload.started_seq === 'number' && typeof event.payload.call_id === 'string'
+    && result.invocation_id !== `${event.payload.started_seq}:${event.payload.call_id}`) return uncertain
+  return result.configuration_current === false ? `历史回执：${status}` : status
+}
+
 const skillMetadata = (value: unknown) => {
   const item = object(value)
   return skillText(item.id) && skillText(item.title) && skillText(item.description)
@@ -126,6 +211,7 @@ function receiptFor(start: TeamEvent, events: TeamEvent[]) {
 }
 
 function toolOutcome(event: TeamEvent, name = event.payload.name) {
+  if (isNativeMcpTool(name)) return nativeMcpReceiptStatus(event, name)
   if (name === 'browser_check') return nativeBrowserReceiptStatus(event)
   if (name === 'list_skills' || name === 'read_skill') return nativeSkillReceiptStatus(event, name)
   const result = object(event.payload.result)
@@ -269,8 +355,9 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   let anyOpenTool = false
   for (const role of roles) {
     const run = roleRuns.get(role), tool = latestTools.get(role)
+    const toolName = tool?.payload.name ?? (isNativeMcpTool(tool?.payload.tool) ? tool?.payload.tool : undefined)
     const receipt = tool ? receiptFor(tool, hosts) : undefined
-    const finished = receipt && tool && ['list_skills', 'read_skill'].includes(String(tool.payload.name))
+    const finished = receipt && tool && (['list_skills', 'read_skill'].includes(String(tool.payload.name)) || isNativeMcpTool(toolName))
       ? { ...receipt, payload: { ...tool.payload, ...receipt.payload } } : receipt
     const toolBelongs = tool && (!run?.start || tool.seq > run.start.seq
       && (run.start.payload.run_id === undefined || tool.payload.run_id === run.start.payload.run_id))
@@ -286,15 +373,15 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       .filter((event): event is TeamEvent => Boolean(event)).sort((a, b) => a.seq - b.seq)
     const awaitingCustomer = pendingQuestions.has(role) && !running
     const moving = !awaitingCustomer && running && freshness(records)
-    const action = toolBelongs ? tools[string(tool.payload.name) ?? ''] ?? '工具调用' : undefined
+    const action = toolBelongs ? tools[string(toolName) ?? ''] ?? '工具调用' : undefined
     const handling = bySeq.get(run?.message_seq ?? -1)?.actor.kind === 'human' ? '正在处理消息' : '正在处理工作'
     let text = awaitingCustomer ? '等待你的补充' : running ? moving ? handling : '暂无新反馈，执行状态待确认'
       : run?.status === 'waiting' ? '等待伙伴回复'
         : failed(run?.status) ? '本轮处理未完成，需核对过程'
           : successful(run?.status) ? '本轮消息处理已结束' : '执行结果待确认'
-    if (action && tool?.payload.name !== 'wait_for_reply' && !awaitingCustomer) text = `${action} · ${finished ? toolOutcome(finished, tool?.payload.name) : '已发起，等待回执'}；${text}`
+    if (action && tool?.payload.name !== 'wait_for_reply' && !awaitingCustomer) text = `${action} · ${finished ? toolOutcome(finished, toolName) : '已发起，等待回执'}；${text}`
     lines.push({ id: role, role, text: `${label(role)} · ${text}`, moving,
-      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取'].includes(toolOutcome(finished, tool?.payload.name))) })
+      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回'].includes(toolOutcome(finished, toolName))) })
   }
   const reported = new Set(events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'agent'
     && event.payload.kind === 'report' && (() => {

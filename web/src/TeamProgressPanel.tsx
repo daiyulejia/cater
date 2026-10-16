@@ -2,11 +2,12 @@ import type { Artifact } from './Artifact'
 import { isTeamHost, teamRuns, teamRunStatus, teamStatus } from './team'
 import type { TeamEvent, TeamReview, TeamState } from './team'
 import { NativeBrowserReceipt } from './browserReport'
-import { nativeBrowserReceiptStatus, nativeSkillReceiptStatus } from './conversationActivityState'
+import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle } from './conversationActivityState'
 import { TeamArtifacts } from './TeamArtifacts'
 import { ModelUsagePanel } from './ModelUsagePanel'
 import type { ExecutionControl } from './executionControl'
 import { CommandOutputs } from './CommandOutputPreview'
+import { NativeMcpReceipt } from './NativeMcpReceipt'
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const excerpt = (value: unknown, limit = 800): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（仅显示部分内容）' : '') : ''
@@ -68,6 +69,7 @@ export function NativeSkillReceipt({ event }: { event: TeamEvent }) {
 }
 
 function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean }) {
+  if (isNativeMcpTool(event.payload.name ?? event.payload.tool)) return <NativeMcpReceipt event={event} />
   if (['list_skills', 'read_skill'].includes((event.payload.name ?? event.payload.tool) as string)) return <NativeSkillReceipt event={event} />
   if ((event.payload.name ?? event.payload.tool) === 'browser_check') return <NativeBrowserReceipt event={event} />
   const detail = (value: unknown) => excerpt(value, full ? Number.MAX_SAFE_INTEGER : 800)
@@ -154,6 +156,7 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
       const role = typeof p.role === 'string' ? p.role : event.actor.id
       const status = p.status ?? result.status ?? result.outcome
       const label = name === 'browser_check' ? nativeBrowserReceiptStatus(finished ?? event)
+        : isNativeMcpTool(name) ? nativeMcpReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } }, name)
         : name === 'list_skills' || name === 'read_skill' ? nativeSkillReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } }, name)
         : !finished ? '已发起，等待回执'
         : result.complete === false || record(result.stdout).complete === false || record(result.stderr).complete === false ? '工具结果待确认'
@@ -162,7 +165,7 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
         : [status, result.outcome].some((value) => ['error', 'failed', 'timeout', 'launch_error', 'blocked'].includes(String(value))) ? '工具未完成'
         : ['ok', 'done', 'completed', 'succeeded', 'passed', 'success'].includes(String(status)) ? '工具已完成' : '工具结果待确认'
       return <li key={event.seq}>
-        <p><strong>{toolNames[name] ?? name}</strong> · {label} · @{names[role] ?? role}</p>
+        <p><strong>{isNativeMcpTool(name) ? nativeMcpToolTitle(name) : toolNames[name] ?? name}</strong> · {label} · @{names[role] ?? role}</p>
         <ToolReceipt event={{ ...(finished ?? event), payload: { ...event.payload, ...p } }} full={full} />
       </li>
     })}</ol>

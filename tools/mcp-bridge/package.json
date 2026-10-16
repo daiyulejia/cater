@@ -1,0 +1,16 @@
+{
+  "name": "cater-mcp-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Optional isolated MCP stdio adapter using the official SDK",
+  "engines": { "node": ">=18.14.1" },
+  "scripts": { "test": "node --test test/bridge.test.mjs" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "zod": "4.6.7"
+  },
+  "overrides": { "@hono/node-server": "1.19.15" }
+}

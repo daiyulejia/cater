@@ -1,10 +1,11 @@
 import { BrowserReport, NativeBrowserReceipt } from './browserReport'
 import { isTeamHost, isTeamRecovery } from './team'
-import { nativeBrowserReceiptStatus, nativeSkillReceiptStatus } from './conversationActivityState'
+import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle } from './conversationActivityState'
 import { NativeSkillReceipt } from './TeamProgressPanel'
 import { usageSummary } from './modelUsage'
 import { CommandOutputs } from './CommandOutputPreview'
 import { hasBrowserReceipt } from './outputPreview'
+import { NativeMcpReceipt } from './NativeMcpReceipt'
 
 export type DetailEvent = {
   seq: number
@@ -187,6 +188,14 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       break
     }
     case 'team.tool_started': case 'team.tool_finished':
+      if (isNativeMcpTool(p.name ?? p.tool)) {
+        status = nativeMcpReceiptStatus(event)
+        add('工具', nativeMcpToolTitle(p.name ?? p.tool))
+        if (isTeamHost(event)) {
+          add('执行成员', member(p.role)); number('关联消息', p.message_seq); number('发起事件', p.started_seq)
+        } else note = '来源未通过团队系统身份核对，不能作为外部工具调用依据。'
+        break
+      }
       if (skillTool(event)) {
         status = nativeSkillReceiptStatus(event)
         add('工具', (p.name ?? p.tool) === 'list_skills' ? '查看工作指引目录' : '阅读工作指引')
@@ -395,6 +404,7 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
   const title = label(event.type, titles, '事件记录')
   const recorder = resolvedName(event.actor.id, actorName) || label(event.actor.kind, { human: '用户', system: '系统', agent: '成员' }, '记录来源待核对')
   const nativeBrowser = ['team.tool_started', 'team.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'browser_check'
+  const nativeMcp = ['team.tool_started', 'team.tool_finished'].includes(event.type) && isNativeMcpTool(event.payload.name ?? event.payload.tool)
   const browser = nativeBrowser || event.type === 'verification.completed' && hasBrowserReceipt(event.payload)
   const outputs = event.type === 'verification.completed' ? event.payload
     : ['team.tool_finished', 'workspace.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'workspace_run' ? record(event.payload.result) : undefined
@@ -410,6 +420,7 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
     {outputs && <CommandOutputs stdout={browser ? undefined : outputs.stdout} stderr={nativeBrowser ? undefined : outputs.stderr} />}
     {event.type === 'team.tool_finished' && (event.payload.name ?? event.payload.tool) === 'browser_check' && <NativeBrowserReceipt event={event} />}
     {skillTool(event) && event.type === 'team.tool_finished' && <NativeSkillReceipt event={event} />}
+    {nativeMcp && event.type === 'team.tool_finished' && <NativeMcpReceipt key={event.seq} event={event} />}
     {note && <p className="text-[#728679]">{note}</p>}
     {event.type === 'collaboration.finished' && ['answered', 'declined'].includes(String(event.payload.status))
       && event.actor.kind === 'system' && event.actor.id === 'collaboration' && event.actor.role === 'collaboration'
@@ -419,7 +430,7 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
         {event.payload.evidence.filter((entry) => entry && Number.isInteger(entry.artifact_seq) && entry.artifact_seq > 0 && typeof entry.quote === 'string')
           .map((entry, index) => <blockquote key={index} className="mt-2 whitespace-pre-wrap">成果 #{entry.artifact_seq}：{entry.quote}</blockquote>)}
       </details>}
-    {!skillTool(event) && !browser && <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
+    {!skillTool(event) && !browser && !nativeMcp && <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
       <summary className="cursor-pointer text-[#728679]">开发者详情</summary>
       <pre tabIndex={0} aria-label="原始事件 JSON" className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(event, null, 2)}</pre>
     </details>}

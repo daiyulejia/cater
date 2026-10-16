@@ -29,6 +29,7 @@ from .events import Actor as EventActor, Event
 from .fold import TaskSnapshot
 from .ladder import decision_ladder
 from .messages import message_relation
+from .mcp import McpPool
 from .path import organization_path
 from .review import build_review
 from .runtime import DriverHealth, ExecutionScopeChanged, Runtime
@@ -1124,6 +1125,7 @@ def serve(
     browser_checker_path: str | Path | None = None,
     workspaces_path: str | Path | None = None,
     skills_path: str | Path | None = None,
+    mcp_path: str | Path | None = None,
     driver_attempts: int = 2,
     circuit_breaker_threshold: int = 2,
     text_retry: bool = True,
@@ -1146,37 +1148,40 @@ def serve(
             "refusing to expose the Cater control plane beyond localhost without an access token; "
             "set CATER_WEB_ACCESS_TOKEN or use --access-token-file"
         )
-    # Each request needs its own thread-bound SQLite connection.  CLI drivers
-    # are process resources, so the server owns one pool for its full lifetime.
-    driver_owner = Runtime(":memory:", drivers_path=drivers_path, roles_path=roles_path)
-    driver_health = DriverHealth()
-    handler = make_handler(
-        db_path,
-        drivers_path=drivers_path,
-        roles_path=roles_path,
-        browser_checker_path=browser_checker_path,
-        workspaces_path=workspaces_path,
-        skills_path=skills_path,
-        driver_attempts=driver_attempts,
-        circuit_breaker_threshold=circuit_breaker_threshold,
-        text_retry=text_retry,
-        audit_key=audit_key,
-        audit_key_id=audit_key_id,
-        audit_keys=audit_keys,
-        static_dir=_workroom_dist(),
-        shared_drivers=driver_owner.drivers,
-        shared_driver_health=driver_health,
-        access_token=access_token,
-    )
-    server = ThreadingHTTPServer((host, port), handler)
-    print(f"Cater web listening on http://{host}:{port}")
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        server.server_close()
-        driver_owner.close()
+    # SQLite connections stay thread-local; drivers and MCP processes share
+    # a server-lifetime owner, including cleanup when server setup fails.
+    driver_owner = Runtime(":memory:", drivers_path=drivers_path, roles_path=roles_path,
+                           mcp_path=mcp_path)
+    with ExitStack() as resources:
+        resources.callback(driver_owner.close)
+        driver_health = DriverHealth()
+        handler = make_handler(
+            db_path,
+            drivers_path=drivers_path,
+            roles_path=roles_path,
+            browser_checker_path=browser_checker_path,
+            workspaces_path=workspaces_path,
+            skills_path=skills_path,
+            mcp_path=mcp_path,
+            driver_attempts=driver_attempts,
+            circuit_breaker_threshold=circuit_breaker_threshold,
+            text_retry=text_retry,
+            audit_key=audit_key,
+            audit_key_id=audit_key_id,
+            audit_keys=audit_keys,
+            static_dir=_workroom_dist(),
+            shared_drivers=driver_owner.drivers,
+            shared_driver_health=driver_health,
+            shared_mcp_pool=driver_owner.mcp.pool,
+            access_token=access_token,
+        )
+        server = ThreadingHTTPServer((host, port), handler)
+        resources.callback(server.server_close)
+        print(f"Cater web listening on http://{host}:{port}")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -1214,6 +1219,7 @@ def make_handler(
     browser_checker_path: str | Path | None = None,
     workspaces_path: str | Path | None = None,
     skills_path: str | Path | None = None,
+    mcp_path: str | Path | None = None,
     driver_attempts: int = 2,
     circuit_breaker_threshold: int = 2,
     text_retry: bool = True,
@@ -1224,6 +1230,7 @@ def make_handler(
     runtime_factory: Callable[[], Runtime] | None = None,
     shared_drivers: dict[str, Any] | None = None,
     shared_driver_health: DriverHealth | None = None,
+    shared_mcp_pool: McpPool | None = None,
     access_token: str | None = None,
 ):
     if access_token is not None and not access_token.strip():
@@ -1240,6 +1247,8 @@ def make_handler(
             browser_checker_path=browser_checker_path,
             workspaces_path=workspaces_path,
             skills_path=skills_path,
+            mcp_path=mcp_path,
+            mcp_pool=shared_mcp_pool,
             driver_attempts=driver_attempts,
             circuit_breaker_threshold=circuit_breaker_threshold,
             audit_key=audit_key,

@@ -1,0 +1,28 @@
+{
+  "bridge_command": [
+    "C:/Program Files/nodejs/node.exe",
+    "C:/Cater/tools/mcp-bridge/bridge.mjs"
+  ],
+  "servers": [
+    {
+      "id": "notes",
+      "title": "本地记录",
+      "description": "按需读取和更新项目记录",
+      "command": [
+        "C:/Program Files/nodejs/node.exe",
+        "C:/Cater/mcp-servers/notes/server.mjs"
+      ],
+      "cwd": "C:/Cater/mcp-servers/notes",
+      "roles": ["dev", "test"],
+      "tools": {
+        "read_note": "read",
+        "write_note": "write"
+      },
+      "workspaces": ["project"],
+      "env": {
+        "SERVER_TOKEN": "CATER_MCP_SERVER_TOKEN"
+      },
+      "timeout": 30
+    }
+  ]
+}

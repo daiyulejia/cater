@@ -189,6 +189,10 @@ class TeamRecovery:
         return self._reconcile_tool(task_id, started_seq, reason=reason, invocation_stopped=invocation_stopped,
                                     names={"browser_check"})
 
+    def reconcile_mcp_call(self, task_id, started_seq, *, reason, invocation_stopped=False):
+        return self._reconcile_tool(task_id, started_seq, reason=reason, invocation_stopped=invocation_stopped,
+                                    names={"call_mcp_tool"})
+
     def _reconcile_tool(self, task_id, started_seq, *, reason, invocation_stopped, names):
         """Trusted local operator only; models receive no self-unlock tool."""
         if (type(started_seq) is not int or started_seq < 1 or invocation_stopped is not True
