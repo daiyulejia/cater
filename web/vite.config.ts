@@ -6,10 +6,16 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
+    manifest: 'workroom-manifest.json',
     rolldownOptions: {
       output: {
         codeSplitting: {
           groups: [
+            {
+              name: 'page-recovery',
+              test: /[\\/]src[\\/](?:AsyncPanel|pageRecovery|pageReload|pageReloadContext)\.tsx?$/,
+              priority: 20,
+            },
             {
               name: 'chat-conversation',
               test: /[\\/]src[\\/]ChatConversation\.tsx$/,

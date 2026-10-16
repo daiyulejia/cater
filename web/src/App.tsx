@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { ComponentProps, ReactNode } from 'react'
 import {
   ArrowDown, Cat, CheckCircle2, ChevronDown, CircleHelp,
@@ -37,6 +37,11 @@ import { clearCreationRecovery, CREATION_RECOVERY_TTL, loadCreationRecovery, rea
 import type { CreationAttempt } from './creationRecovery'
 import { hasActiveTeamMessages, isTeamHost, isTeamRecovery, resolveTeam, teamDeliveries, teamMessageAudience, teamMessageEchoes, teamProgressMessages, teamRunStatus, teamSpeaker, teamStatus } from './team'
 import type { TeamState, TeamSummary } from './team'
+import { AsyncPanel } from './AsyncPanel'
+import { ReloadContext } from './pageReloadContext'
+import { loadPageRecovery } from './pageRecovery'
+import type { PageDraftSnapshot } from './pageRecovery'
+import { reloadBlocker, reloadPage } from './pageReload'
 
 const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
 const LazyDeliveryPanel = lazy(() => import('./DeliveryPanel').then((module) => ({ default: module.DeliveryPanel })))
@@ -101,6 +106,29 @@ const apiRead = <T,>(path: string, read: (response: Response) => Promise<T>, ini
 }
 const api = <T,>(path: string, init?: RequestInit): Promise<T> => apiRead(path, readJsonResponse<T>, init)
 const loadWorkspaceOptions = () => api<WorkspaceOption[]>('/api/workspaces')
+
+function validateTaskDetail(value: TaskDetail, expectedId?: string): void {
+  if (typeof value?.task?.id !== 'string' || !value.task.id || (expectedId && value.task.id !== expectedId)
+    || typeof value.task.goal !== 'string' || typeof value.task.status !== 'string'
+    || !Array.isArray(value.events) || !value.events.every(event => event && Number.isSafeInteger(event.seq) && event.seq > 0
+      && typeof event.type === 'string' && event.actor && typeof event.actor.id === 'string'
+      && (event.actor.kind === undefined || typeof event.actor.kind === 'string')
+      && (event.actor.role === undefined || typeof event.actor.role === 'string')
+      && event.payload && typeof event.payload === 'object' && !Array.isArray(event.payload))
+    || !Array.isArray(value.task.messages)
+    || !Array.isArray(value.task.assignments) || !Array.isArray(value.task.deliverables)
+    || [value.questions, value.clarifications, value.questionnaires, value.conversation, value.organization_memory]
+      .some(items => items !== undefined && !Array.isArray(items))
+    || (value.summary != null && (value.summary.id !== value.task.id || typeof value.summary.goal !== 'string'
+      || typeof value.summary.status !== 'string' || typeof value.summary.status_label !== 'string'
+      || [value.summary.version, value.summary.latest_seq, value.summary.conversation_count]
+        .some(clock => !Number.isSafeInteger(clock) || clock < 0)
+      || (value.summary.evaluated_at !== undefined && (!Number.isFinite(value.summary.evaluated_at) || value.summary.evaluated_at < 0))
+      || (value.summary.activity?.revision !== undefined && (!Number.isSafeInteger(value.summary.activity.revision) || value.summary.activity.revision < 0))
+      || (value.summary.team?.revision !== undefined && (!Number.isSafeInteger(value.summary.team.revision) || value.summary.team.revision < 0))))) {
+    throw new Error('提交响应不完整或对话不匹配，提交结果未知。草稿已保留，请核对后手动重试。')
+  }
+}
 
 const summaryOrder = (next: TaskSummary, current: TaskSummary) => next.version - current.version
   || (next.team?.revision ?? 0) - (current.team?.revision ?? 0)
@@ -768,6 +796,7 @@ function App() {
   // API authentication is fixed for this page; detect changes to its session context too.
   const [creationSessionToken] = useState(readAccessToken)
   const [recoveryReady, setRecoveryReady] = useState(false)
+  const [pageReady, setPageReady] = useState(false)
   const [recovery, setRecovery] = useState<CreationAttempt | null>(null)
   const [recoveryNotice, setRecoveryNotice] = useState('')
   const creationMounted = useRef(true)
@@ -801,7 +830,6 @@ function App() {
   const [taskSearchOpen, setTaskSearchOpen] = useState(false)
   const [graphOpen, setGraphOpen] = useState(false)
   const [graphLoaded, setGraphLoaded] = useState(false)
-  const [graphLoading, setGraphLoading] = useState(false)
   const [teamOpen, setTeamOpen] = useState(false)
   const [teamRefreshing, setTeamRefreshing] = useState(false)
   const [teamError, setTeamError] = useState('')
@@ -833,6 +861,11 @@ function App() {
   const draft = drafts[newKey] ?? ''
   const message = selectedId ? drafts[composerKey] ?? '' : ''
   const isSending = pending.has(composerKey)
+  const pageSnapshot = useRef<PageDraftSnapshot>({ drafts: {}, selectedId: null, questionMode: false, derivation: null, project: null })
+  useLayoutEffect(() => {
+    pageSnapshot.current = { drafts, selectedId, questionMode: legacyQuestionMode, derivation, project: newProject, workspaceId: newWorkspaceId,
+      requests: { conversation: conversationRequests.current, questions: questionRequests.current, derivations: derivationRequests.current } }
+  })
 
   const updateDraft = (key: string, value: string | ((current: string) => string)) => {
     setDrafts((current) => ({ ...current, [key]: typeof value === 'function' ? value(current[key] ?? '') : value }))
@@ -894,11 +927,40 @@ function App() {
     void loadCreationRecovery(accessToken).then(({ attempt, notice }) => {
       if (cancelled) return
       setRecovery(attempt)
-      setRecoveryNotice(notice)
+      if (notice) setRecoveryNotice(current => [current, notice].filter(Boolean).join(' '))
       setRecoveryReady(true)
     })
     return () => { cancelled = true; creationMounted.current = false }
   }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    const navigation = navigationRef.current
+    void loadPageRecovery(creationSessionToken, () => !cancelled).then(page => {
+      if (cancelled) return
+      if (page.notice) setRecoveryNotice(current => [current, page.notice].filter(Boolean).join(' '))
+      if (page.snapshot) {
+        const saved = page.snapshot
+        setDrafts(current => ({ ...saved.drafts, ...current }))
+        if (saved.requests) {
+          conversationRequests.current = { ...saved.requests.conversation, ...conversationRequests.current }
+          questionRequests.current = { ...saved.requests.questions, ...questionRequests.current }
+          derivationRequests.current = { ...saved.requests.derivations, ...derivationRequests.current }
+        }
+        if (navigationRef.current === navigation && !pendingRef.current.size) {
+          setNewProject(saved.project)
+          setNewWorkspaceId(saved.workspaceId)
+          chooseTask(saved.selectedId)
+          questionModeRef.current = saved.questionMode
+          setQuestionMode(saved.questionMode)
+          derivationRef.current = saved.derivation
+          setDerivation(saved.derivation)
+        }
+      }
+      setPageReady(true)
+    })
+    return () => { cancelled = true }
+  }, [creationSessionToken, chooseTask])
 
   const restoreCreation = async () => {
     const navigation = navigationRef.current
@@ -923,7 +985,9 @@ function App() {
 
   const requestDetail = useCallback(async (path: string, init?: RequestInit) => {
     const order = ++detailOrderRef.current
-    return { next: await api<TaskDetail>(path, init), order }
+    const next = await api<TaskDetail>(path, init)
+    validateTaskDetail(next)
+    return { next, order }
   }, [])
 
   const acceptControls = useCallback((items: { id: string; execution_control?: ExecutionControl }[]) => {
@@ -938,21 +1002,24 @@ function App() {
     setExecutionControls((current) => ({ ...current, ...updates }))
   }, [])
 
-  const acceptDetail = useCallback((next: TaskDetail, order: number) => {
+  const acceptDetail = useCallback((next: TaskDetail, order: number, activate = false) => {
     const team = resolveTeam(next.team ?? next.task.team, next.events)
     if (team?.enabled) next = { ...next, task: { ...next.task, team, work: undefined,
       goal: team.objective || next.task.goal, status: team.status === 'done' ? 'done' : 'running' } }
     const id = next.task.id
-    acceptControls([{ id, execution_control: next.execution_control }, { id, execution_control: next.summary?.execution_control }])
     const seq = next.events.at(-1)?.seq ?? 0
     const version = next.summary?.version ?? seq
+    const conversationCount = conversationFor(next.events, {}, null, next.questions, next.clarifications, next.conversation,
+      Boolean(team?.enabled), next.questionnaires).filter((item) => !item.notice).length
     const base = next.summary ?? { id, goal: next.task.goal, project_id: next.task.project_id,
       status: next.task.status, status_label: taskListStatus({ ...next.task, activity: next.activity }),
-      activity: next.activity, conversation_count: conversationFor(next.events, {}, null, next.questions, next.clarifications, next.conversation, Boolean(team?.enabled), next.questionnaires).filter((item) => !item.notice).length, latest_seq: seq, version }
+      activity: next.activity, conversation_count: conversationCount, latest_seq: seq, version }
     const item = team?.enabled ? { ...base, team, goal: next.task.goal, status: next.task.status, status_label: teamStatus(team),
-      conversation_count: conversationFor(next.events, {}, null, next.questions, next.clarifications, next.conversation, true, next.questionnaires).filter((item) => !item.notice).length } : base
+      conversation_count: conversationCount } : base
     const previous = versionsRef.current[id]
     const comparison = previous ? summaryOrder(item, previous.summary) : 1
+    if (activate) chooseTask(id)
+    acceptControls([{ id, execution_control: next.execution_control }, { id, execution_control: next.summary?.execution_control }])
     if (comparison < 0 || (comparison === 0 && previous && order < previous.order)) return
     versionsRef.current[id] = { summary: item, order }
     setTasks((current) => {
@@ -960,9 +1027,10 @@ function App() {
         ? current.map((task) => task.id === id && summaryOrder(item, task) >= 0 ? item : task) : [...current, item]
     })
     if (selectedRef.current === id) setDetail(next)
-  }, [acceptControls])
+  }, [acceptControls, chooseTask])
 
   useEffect(() => {
+    if (!recoveryReady || !pageReady) return
     let cancelled = false
     let fetching = false
     let initialized = false
@@ -1022,7 +1090,7 @@ function App() {
       cancelled = true; controller?.abort(); window.clearTimeout(timer)
       document.removeEventListener('visibilitychange', visibilityChanged)
     }
-  }, [chooseTask, acceptControls])
+  }, [chooseTask, acceptControls, recoveryReady, pageReady])
   useEffect(() => {
     void api<OrgRole[]>('/api/organization').then((nextRoles) => {
       setRoles(nextRoles)
@@ -1071,6 +1139,7 @@ function App() {
       try {
         const { next, order } = await requestDetail(`/api/tasks/${selectedId}`, { signal })
         if (cancelled || signal.aborted || !pageVisible()) return
+        validateTaskDetail(next, selectedId)
         acceptDetail(next, order)
         setLoadErrors((current) => ({ ...current, [selectedId]: '' }))
         const team = resolveTeam(next.team ?? next.task.team, next.events)
@@ -1186,27 +1255,16 @@ function App() {
     finally { setCheckingChain(false) }
   }
 
-  const openTaskGraph = async () => {
-    const id = selectedId
-    if (!id || graphLoading) return
-    setGraphLoading(true)
-    try {
-      await import('./TaskGraph')
-      if (selectedRef.current === id) {
-        setGraphLoaded(true); setGraphOpen(true)
-        setError((current) => current.startsWith('任务脉络暂时无法打开') ? '' : current)
-      }
-    } catch {
-      if (selectedRef.current === id) setError('任务脉络暂时无法打开，聊天和草稿仍保留。请稍后重试。')
-    } finally {
-      setGraphLoading(false)
-    }
+  const openTaskGraph = () => {
+    if (!selectedId) return
+    setGraphLoaded(true)
+    setGraphOpen(true)
   }
 
   const createTask = async () => {
     const submitted = draft
     const goal = submitted.trim()
-    if (!goal || selectedRef.current !== null || pendingRef.current.has(newKey) || !recoveryReady || recovery) return
+    if (!goal || selectedRef.current !== null || pendingRef.current.has(newKey) || !recoveryReady || !pageReady || recovery) return
     if (readAccessToken() !== creationSessionToken) {
       clearCreationRecovery()
       creationRequest.current = null
@@ -1243,10 +1301,8 @@ function App() {
         }),
       })
       if (!creationMounted.current || readAccessToken() !== creationSessionToken) return
-      if (typeof result?.task?.id !== 'string' || !result.task.id || !Array.isArray(result.events)
-        || !Array.isArray(result.task.messages) || !Array.isArray(result.task.assignments)) {
-        throw new Error('创建响应不完整，提交结果未知。请核对任务列表后手动重试。')
-      }
+      validateTaskDetail(result)
+      acceptDetail(result, order, navigationRef.current === navigation && selectedRef.current === null)
       clearCreationRecovery(attempt.requestId)
       if (creationRequest.current === attempt) {
         creationRequest.current = null
@@ -1254,8 +1310,6 @@ function App() {
         setRecoveryNotice('')
         setDrafts((current) => current[newKey] === submitted ? { ...current, [newKey]: '' } : current)
       }
-      if (navigationRef.current === navigation && selectedRef.current === null) chooseTask(result.task.id)
-      acceptDetail(result, order)
     } catch (err) {
       if (creationMounted.current && creationRequest.current === attempt) setSendErrors((current) => ({ ...current, [newKey]: userFacingError(err, '创建任务失败') }))
     }
@@ -1305,11 +1359,12 @@ function App() {
       const { next: result, order } = await requestDetail(`/api/tasks/${encodeURIComponent(id)}/questions`, {
         method: 'POST', body: JSON.stringify({ question: submitted.trim(), request_id: attempt.requestId }),
       })
+      validateTaskDetail(result, id)
+      acceptDetail(result, order)
       if (questionRequests.current[key] === attempt) {
         delete questionRequests.current[key]
         setDrafts((current) => current[key] === submitted ? { ...current, [key]: '' } : current)
       }
-      acceptDetail(result, order)
     } catch (err) {
       if (questionRequests.current[key] === attempt) setSendErrors((current) => ({ ...current, [key]: userFacingError(err, '提问发送失败，请重试。') }))
     } finally {
@@ -1333,13 +1388,14 @@ function App() {
       const { next: result, order } = await requestDetail(`/api/tasks/${encodeURIComponent(source.id)}/derive`, {
         method: 'POST', body: JSON.stringify({ goal, request_id: attempt.requestId, collaboration: 'team', run: true, background: true }),
       })
+      validateTaskDetail(result)
+      if (result.task.id === source.id) throw new Error('新对话尚未确认，草稿已保留，请核对任务列表后手动重试。')
+      acceptDetail(result, order, navigationRef.current === navigation && derivationRef.current === source && selectedRef.current === source.id)
       // Edits invalidate this attempt, even when the user later restores the same text.
       if (derivationRequests.current[key] === attempt) {
         delete derivationRequests.current[key]
         setDrafts((current) => current[key] === submitted ? { ...current, [key]: '' } : current)
       }
-      if (navigationRef.current === navigation && derivationRef.current === source && selectedRef.current === source.id) chooseTask(result.task.id)
-      acceptDetail(result, order)
     } catch (err) {
       if (derivationRequests.current[key] === attempt) setSendErrors((current) => ({ ...current, [key]: userFacingError(err, '创建新任务失败，请重试。') }))
     } finally {
@@ -1359,9 +1415,10 @@ function App() {
     setSendErrors((current) => ({ ...current, [id]: '' }))
     try {
       const { next: result, order } = await requestDetail(`/api/tasks/${id}/command`, { method: 'POST', body: JSON.stringify({ instruction: submitted.trim(), collaboration: 'team', continue: true, request_id: attempt.requestId }) })
+      validateTaskDetail(result, id)
+      acceptDetail(result, order)
       if (conversationRequests.current[id] === attempt) delete conversationRequests.current[id]
       setDrafts((current) => current[id] === submitted ? { ...current, [id]: '' } : current)
-      acceptDetail(result, order)
     } catch (err) { setSendErrors((current) => ({ ...current, [id]: userFacingError(err, '发送指令失败') })) }
     finally { pendingRef.current.delete(id); setPending(new Set(pendingRef.current)) }
   }
@@ -1417,6 +1474,7 @@ function App() {
     }
   }} onRecorded={(text) => { const key = selectedId ?? newKey; setDrafts((current) => current[key]?.trim() === text ? { ...current, [key]: '' } : current) }} onUpdated={() => setReloadToken((value) => value + 1)} />
   return (
+    <ReloadContext.Provider value={() => reloadPage(() => pageSnapshot.current, creationSessionToken, () => reloadBlocker(Boolean(pendingRef.current.size), clarificationStore, questionnaireStore))}>
     <div className="cater-app text-[#253d38]">
       <header className="app-header flex h-[72px] items-center justify-between px-4 sm:px-6">
         <button type="button" onClick={() => chooseTask(null)} aria-label="Cater · 返回新对话" title="返回新对话" className="brand-home flex min-w-0 items-center gap-3 rounded-lg text-left">
@@ -1470,7 +1528,7 @@ function App() {
                 {!task.team?.enabled && <button type="button" className="origin-tool" aria-label="提问" title={questionMode ? '取消提问，返回协作草稿' : '向当前对话提问'} aria-pressed={questionMode} disabled={loading} onClick={toggleQuestion}><CircleHelp size={17} aria-hidden="true" /></button>}
                 <button type="button" className="origin-tool" aria-label="基于此对话开新任务" title="基于此对话开新任务" aria-pressed={Boolean(derivation)} disabled={loading || Boolean(derivation)} onClick={beginDerivation}><GitFork size={17} aria-hidden="true" /></button>
                 <TaskControlMenu key={`control:${task.id}`} state={executionState} busy={controlBusy} disabled={loading} retry={sendErrors[controlKey] ? controlRequests[task.id]?.action : undefined} onAction={(action) => void controlTask(action)} />
-                {task.team?.enabled || task.work?.items.length ? <button ref={graphTriggerRef} id="task-graph-trigger" type="button" aria-haspopup="dialog" aria-expanded={graphOpen} aria-busy={graphLoading} disabled={graphLoading} onClick={() => void openTaskGraph()} className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-semibold text-[#34786e] hover:bg-[#e7f0ec]">{graphLoading ? <LoaderCircle size={15} className="motion-safe:animate-spin" /> : <GitBranch size={15} />}任务脉络</button> : null}
+                {task.team?.enabled || task.work?.items.length ? <button ref={graphTriggerRef} id="task-graph-trigger" type="button" aria-haspopup="dialog" aria-expanded={graphOpen} onClick={openTaskGraph} className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-semibold text-[#34786e] hover:bg-[#e7f0ec]"><GitBranch size={15} />任务脉络</button> : null}
               </div>
             </div>
             {!loading && (executionState !== 'running' || controlBusy) && <p role="status" aria-label="执行状态" className="shrink-0 break-words px-4 py-2 text-xs leading-5 text-[#52766d] sm:px-7">
@@ -1479,20 +1537,21 @@ function App() {
               {executionState !== 'running' && executionControl?.reason ? ` 原因：${executionControl.reason}` : ''}
               {controlBusy && controlRequests[task.id] ? ` ${controlLabels[controlRequests[task.id].action]}请求待确认。` : ''}
             </p>}
-            {graphLoaded && (task.team?.enabled || task.work?.items.length) ? <Suspense fallback={<p role="status" className="px-4 py-2 text-xs text-[#52766d]">正在打开任务脉络…</p>}><TaskGraph key={task.id} {...(task.team?.enabled ? { team: task.team, events: currentDetail?.events ?? [] } : { work: task.work! })} open={graphOpen} onOpenChange={setGraphOpen} returnFocusRef={graphTriggerRef} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></Suspense> : null}
+            {graphLoaded && (task.team?.enabled || task.work?.items.length) ? <AsyncPanel onFailure={() => setGraphOpen(false)} fallback={<p role="status" className="px-4 py-2 text-xs text-[#52766d]">正在打开任务脉络…</p>}><TaskGraph key={task.id} {...(task.team?.enabled ? { team: task.team, events: currentDetail?.events ?? [] } : { work: task.work! })} open={graphOpen} onOpenChange={setGraphOpen} returnFocusRef={graphTriggerRef} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></AsyncPanel> : null}
             <div className="relative flex min-h-0 flex-1 flex-col">
               <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>
                 {loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : <>
-                  {visibleConversation.length ? <Suspense fallback={<p role="status" className="text-xs text-[#52766d]">正在读取对话…</p>}><ChatConversation key={task.id} items={visibleConversation} events={currentDetail?.events ?? []} names={names} renderItem={(item) => <ChatBubble key={item.id} item={item} artifact={task.deliverables?.find((artifact) => artifact.seq === item.evidence.seq)} taskId={task.id} controls={clarificationControls} />} /></Suspense>
+                  {visibleConversation.length ? <AsyncPanel fallback={<p role="status" className="text-xs text-[#52766d]">正在读取对话…</p>}><ChatConversation key={task.id} items={visibleConversation} events={currentDetail?.events ?? []} names={names} renderItem={(item) => <ChatBubble key={item.id} item={item} artifact={task.deliverables?.find((artifact) => artifact.seq === item.evidence.seq)} taskId={task.id} controls={clarificationControls} />} /></AsyncPanel>
                     : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}
                 </>}
               </div>
               {!loading && unread > 0 && <button onClick={jumpToLatest} className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-md border border-[#d9b9a5] bg-[#fff7eb] px-3 py-2 text-xs font-semibold text-[#915340] shadow-md" title="返回最新消息"><ArrowDown size={15} /> 查看新消息 · {unread}</button>}
             </div>
-            {!loading && currentDetail && task.team?.enabled && <div className="shrink-0 px-4 sm:px-7"><Suspense fallback={<p role="status" className="py-2 text-xs text-[#52766d]">正在读取工作进展…</p>}><ConversationActivity key={task.id} team={task.team} events={currentDetail.events} names={names} leaderId={organization?.leader.id ?? 'store_manager'} sending={pending.has(task.id)} activity={currentDetail.activity} executionState={executionState} syncError={loadError} controlBusy={controlBusy} portrait={(id) => <Portrait id={id} size="sm" />} onInspect={() => setShowMobileBoard(true)} onRefresh={() => setReloadToken((current) => current + 1)} onPause={() => void controlTask('pause')} /></Suspense></div>}
+            {!loading && currentDetail && task.team?.enabled && <div className="shrink-0 px-4 sm:px-7"><AsyncPanel fallback={<p role="status" className="py-2 text-xs text-[#52766d]">正在读取工作进展…</p>}><ConversationActivity key={task.id} team={task.team} events={currentDetail.events} names={names} leaderId={organization?.leader.id ?? 'store_manager'} sending={pending.has(task.id)} activity={currentDetail.activity} executionState={executionState} syncError={loadError} controlBusy={controlBusy} portrait={(id) => <Portrait id={id} size="sm" />} onInspect={() => setShowMobileBoard(true)} onRefresh={() => setReloadToken((current) => current + 1)} onPause={() => void controlTask('pause')} /></AsyncPanel></div>}
             {derivation ? <DerivationDraftBar goal={derivation.goal} onCancel={cancelDerivation} /> : legacyQuestionMode ? <QuestionComposerBar onCancel={toggleQuestion} /> : rulesControl}
             <DirectionComposer key={composerKey} members={team} message={message} isSending={isSending} isLoading={loading} deriving={Boolean(derivation)} questioning={legacyQuestionMode} onMessageChange={setMessage} onSend={() => void (derivation ? deriveTask() : legacyQuestionMode ? sendQuestion() : sendDirection())} />
-          </> : <><EmptyConversation onChoose={setDraft} />{isSending && <div className="px-4 sm:px-7"><ChatWaiting text="正在发送给店长，等待接收回执" error="" onRetry={() => {}} /></div>}{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} disabled={!recoveryReady || Boolean(recovery)} workspaceControl={<WorkspacePanel draft workspaceId={newWorkspaceId} disabled={!recoveryReady || Boolean(recovery)} loadOptions={loadWorkspaceOptions} onSelect={selectDraftWorkspace} />} onDraftChange={setDraft} onCreate={() => void createTask()} />{recoveryNotice && <p role="status" className="px-4 pb-2 text-xs text-amber-800 sm:px-7">{recoveryNotice}</p>}</>}
+          </> : <><EmptyConversation onChoose={setDraft} />{isSending && <div className="px-4 sm:px-7"><ChatWaiting text="正在发送给店长，等待接收回执" error="" onRetry={() => {}} /></div>}{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} disabled={!recoveryReady || !pageReady || Boolean(recovery)} workspaceControl={<WorkspacePanel draft workspaceId={newWorkspaceId} disabled={!recoveryReady || !pageReady || Boolean(recovery)} loadOptions={loadWorkspaceOptions} onSelect={selectDraftWorkspace} />} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
+          {recoveryNotice && <p role="status" className="shrink-0 px-4 pb-2 text-xs text-amber-800 sm:px-7">{recoveryNotice}</p>}
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
         {task && <WorkboardPanel taskId={task.id} open={showMobileBoard} onOpenChange={setShowMobileBoard}>
@@ -1500,6 +1559,7 @@ function App() {
         </WorkboardPanel>}
       </main>
     </div>
+    </ReloadContext.Provider>
   )
 }
 
@@ -1519,17 +1579,17 @@ function TaskComposer({ members, draft, isSending, disabled, workspaceControl, o
 function MessageContext({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ChatControls }) {
   return <>
     {item.handoff && <div className="handoff-line" aria-label="工作交接">
-      {item.assignments?.length ? <Suspense fallback={null}><WorkAssignments items={item.assignments} /></Suspense> : <>
+      {item.assignments?.length ? <AsyncPanel fallback={null}><WorkAssignments items={item.assignments} /></AsyncPanel> : <>
         {item.handoff.owners.length > 0 && <p>接手：{item.handoff.owners.map((name) => `@${name}`).join('、')}</p>}
         {item.handoff.reviewers.length > 0 && <p>复核：{item.handoff.reviewers.map((name) => `@${name}`).join('、')}</p>}
       </>}
     </div>}
     {item.joined?.length ? <p className="collaboration-joined" aria-label="协作通知">{item.joined.join('、')} 加入协作</p> : null}
-    {item.question && <Suspense fallback={<p className="question-progress">正在读取提问详情…</p>}><QuestionDetails question={item.question} human={item.kind === 'human'} /></Suspense>}
-    {item.questionnaire && <Suspense fallback={<p role="status" className="question-progress">正在读取补充问题…</p>}><QuestionnaireCard taskId={taskId} questionnaire={item.questionnaire} controls={controls.questionnaire} /></Suspense>}
+    {item.question && <AsyncPanel fallback={<p className="question-progress">正在读取提问详情…</p>}><QuestionDetails question={item.question} human={item.kind === 'human'} /></AsyncPanel>}
+    {item.questionnaire && <AsyncPanel fallback={<p role="status" className="question-progress">正在读取补充问题…</p>}><QuestionnaireCard taskId={taskId} questionnaire={item.questionnaire} controls={controls.questionnaire} /></AsyncPanel>}
     {item.evidence.type === 'clarification.requested' && <>
       <p className="mt-2 text-xs text-teal-700">@你</p>
-      {item.clarification ? <Suspense fallback={<p role="status" className="question-progress">正在读取补充问题…</p>}><ClarificationCard taskId={taskId} question={item.clarification} controls={controls} /></Suspense> : <p className="question-progress">此条历史问题暂无可提交状态</p>}
+      {item.clarification ? <AsyncPanel fallback={<p role="status" className="question-progress">正在读取补充问题…</p>}><ClarificationCard taskId={taskId} question={item.clarification} controls={controls} /></AsyncPanel> : <p className="question-progress">此条历史问题暂无可提交状态</p>}
     </>}
   </>
 }
@@ -1538,12 +1598,12 @@ function AuditTrail({ item }: { item: ChatItem }) {
   const [open, setOpen] = useState(false)
   return <details className="chat-audit" onToggle={(event) => { if (event.target === event.currentTarget) setOpen(event.currentTarget.open) }}>
     <summary>事件 #{item.id} · 审计记录</summary>
-    {open && <Suspense fallback={<p>正在读取过程记录…</p>}>{(item.auditEvents ?? [item.evidence]).map((event) => <EventDetails key={event.seq} event={event} actorName={item.auditName ?? actorText} />)}</Suspense>}
+    {open && <AsyncPanel fallback={<p>正在读取过程记录…</p>}>{(item.auditEvents ?? [item.evidence]).map((event) => <EventDetails key={event.seq} event={event} actorName={item.auditName ?? actorText} />)}</AsyncPanel>}
   </details>
 }
 
 function ArtifactPreview(props: { item: Artifact; publisher?: string; showSummary?: boolean }) {
-  return <Suspense fallback={<p role="status" className="question-progress">正在读取成果…</p>}><LazyArtifactPreview {...props} /></Suspense>
+  return <AsyncPanel fallback={<p role="status" className="question-progress">正在读取成果…</p>}><LazyArtifactPreview {...props} /></AsyncPanel>
 }
 
 function browserCheckDetails(planValue: unknown): string[] {
@@ -1573,9 +1633,9 @@ function SystemRecord({ item, taskId, controls }: { item: ChatItem; taskId: stri
   const body = <>
     <p className={checking ? 'font-mono' : undefined}>{item.text}</p>
     {item.details?.length ? <ul>{item.details.map((detail, index) => <li key={index}>{detail}</li>)}</ul> : null}
-    {checking && expanded && item.evidence.payload.browser_report !== undefined && <Suspense fallback={<p>正在读取浏览器执行回执…</p>}>
+    {checking && expanded && item.evidence.payload.browser_report !== undefined && <AsyncPanel fallback={<p>正在读取浏览器执行回执…</p>}>
       <BrowserReport report={item.evidence.payload.browser_report} />
-    </Suspense>}
+    </AsyncPanel>}
     <MessageContext item={item} taskId={taskId} controls={controls} />
     <AuditTrail item={item} />
   </>
@@ -1611,20 +1671,20 @@ function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; arti
     <div className={`message-bubble min-w-0 max-w-[min(86%,700px)] px-4 py-3 ${item.questionnaire ? 'w-full' : ''} ${human ? 'is-human text-white' : 'is-agent'}`} data-actor={item.actor}>
       <div className={`mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${human ? 'text-[#fff0e8]' : 'text-[#6e8981]'}`}><strong className={human ? 'text-white' : 'text-[#28433d]'}>{human ? '你' : item.display}</strong><span>{item.role}</span>{item.title && <span className={`text-[11px] font-semibold ${human ? 'text-[#fff4d9]' : 'text-[#a56049]'}`}>· {item.title}</span>}</div>
       {human ? <p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>
-        : <Suspense fallback={<p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>}><ChatMarkdown text={item.text} /></Suspense>}
+        : <AsyncPanel fallback={<p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>}><ChatMarkdown text={item.text} /></AsyncPanel>}
       <MessageContext item={item} taskId={taskId} controls={controls} />
-      {item.progress && <Suspense fallback={null}><WorkProgressPanel events={item.progress} claim={item.id} name={item.display} /></Suspense>}
+      {item.progress && <AsyncPanel fallback={null}><WorkProgressPanel events={item.progress} claim={item.id} name={item.display} /></AsyncPanel>}
       {item.progress && <WorkspaceToolProgress events={item.progress} claim={item.id} name={item.display} />}
       {item.evidence.type === 'deliverable.published' && <ArtifactPreview item={artifact ?? untrustedArtifact(item.evidence)} publisher={item.display} showSummary={false} />}
       {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.internal && item.targets.length > 0 && <span>收件人：</span>}{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
-      {(item.details?.length || item.evidence.type === 'team.objective_completed') ? <Suspense fallback={null}><MessageDetails item={item} /></Suspense> : null}
+      {(item.details?.length || item.evidence.type === 'team.objective_completed') ? <AsyncPanel fallback={null}><MessageDetails item={item} /></AsyncPanel> : null}
       <AuditTrail item={item} />
     </div>
   </article>
 }
 
 function DeliveryPanel(props: ComponentProps<typeof LazyDeliveryPanel>) {
-  return <Suspense fallback={<p className="text-xs text-stone-500" role="status">正在读取交付记录…</p>}><LazyDeliveryPanel {...props} /></Suspense>
+  return <AsyncPanel fallback={<p className="text-xs text-stone-500" role="status">正在读取交付记录…</p>}><LazyDeliveryPanel {...props} /></AsyncPanel>
 }
 
 function MemoryBoard({ items, names }: { items: MemoryItem[]; names: Record<string, string> }) {
@@ -1638,7 +1698,7 @@ function VerificationBoard({ items }: { items: Verification[] }) {
 }
 
 function Workboard({ task, detail, names, accessToken, driverCoverage, showEvidence, onToggleEvidence }: { task: Task; detail: TaskDetail | null; names: Record<string, string>; accessToken?: string; driverCoverage?: DriverCoverage[]; showEvidence: boolean; onToggleEvidence: () => void }) {
-  if (task.team?.enabled) return <Suspense fallback={<p role="status" className="text-xs text-[#52766d]">正在读取团队进度…</p>}><TeamWorkboard team={task.team} taskId={task.id} artifacts={task.deliverables ?? []} events={detail?.events ?? []} names={names} accessToken={accessToken} /></Suspense>
+  if (task.team?.enabled) return <AsyncPanel fallback={<p role="status" className="text-xs text-[#52766d]">正在读取团队进度…</p>}><TeamWorkboard team={task.team} taskId={task.id} artifacts={task.deliverables ?? []} events={detail?.events ?? []} names={names} accessToken={accessToken} /></AsyncPanel>
   const assignments = [...task.assignments].reverse().filter((item, index, all) => all.findIndex((other) => other.owner === item.owner) === index).filter((item) => item.status === undefined || item.status === 'assigned')
   const participants = assignments.length
     ? assignments.map((item) => item.owner)
@@ -1652,7 +1712,7 @@ function Workboard({ task, detail, names, accessToken, driverCoverage, showEvide
 }
 
 function EmptyConversation({ onChoose }: { onChoose: (value: string) => void }) {
-  return <Suspense fallback={<p role="status" className="p-5 text-sm text-[#52766d]">正在打开猫咖…</p>}><WelcomeView onChoose={onChoose} portrait={<Portrait id="store_manager" size="lg" />} /></Suspense>
+  return <AsyncPanel fallback={<p role="status" className="p-5 text-sm text-[#52766d]">正在打开猫咖…</p>}><WelcomeView onChoose={onChoose} portrait={<Portrait id="store_manager" size="lg" />} /></AsyncPanel>
 }
 
 export default App

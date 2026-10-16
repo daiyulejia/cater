@@ -27,6 +27,8 @@ type Draft = {
   attempt?: QuestionnaireReply
 }
 type Session = {
+  serverStatus: Questionnaire['status']
+  readonly initialDraft: Draft
   getSnapshot: () => Draft
   subscribe: (listener: () => void) => () => void
   update: (patch: Partial<Draft>) => void
@@ -43,13 +45,19 @@ export type QuestionnaireControls = {
 type Question = Questionnaire['questions'][number]
 const emptyDraft = (question: Question): QuestionDraft => ({ mode: question.options.length ? 'choice' : 'custom', optionIds: [], text: '' })
 
-function sessionFor(store: QuestionnaireStore, key: string, questions: Question[]): Session {
+function sessionFor(store: QuestionnaireStore, key: string, questions: Question[], serverStatus: Questionnaire['status']): Session {
   const existing = store.get(key)
-  if (existing) return existing
-  let draft: Draft = { questions: new Map(questions.map((question) => [question.id, emptyDraft(question)])), busy: false, sent: false, error: '' }
+  if (existing) {
+    existing.serverStatus = serverStatus
+    return existing
+  }
+  const initialDraft: Draft = { questions: new Map(questions.map((question) => [question.id, emptyDraft(question)])), busy: false, sent: false, error: '' }
+  let draft = initialDraft
   const listeners = new Set<() => void>()
   // Keep the submission and its listeners alive across chat navigation.
   const session: Session = {
+    serverStatus,
+    initialDraft,
     getSnapshot: () => draft,
     subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     update: (patch) => { draft = { ...draft, ...patch }; listeners.forEach((listener) => listener()) },
@@ -78,7 +86,7 @@ export function QuestionnaireCard({ taskId, questionnaire, controls }: {
 }) {
   const id = useId()
   const formRef = useRef<HTMLFormElement>(null)
-  const entry = sessionFor(controls.store, JSON.stringify([taskId, questionnaire.seq]), questionnaire.questions)
+  const entry = sessionFor(controls.store, JSON.stringify([taskId, questionnaire.seq]), questionnaire.questions, questionnaire.status)
   const draft = useSyncExternalStore(entry.subscribe, entry.getSnapshot, entry.getSnapshot)
   const answers = questionnaire.questions.map((question) => answerFor(question, draft.questions.get(question.id) ?? emptyDraft(question)))
   const completed = answers.filter(isComplete).length

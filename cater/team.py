@@ -12,6 +12,7 @@ from dataclasses import asdict
 from .artifacts import normalize_deliverables, safe_filename
 from .activity_owner import activity_owner
 from .events import Actor
+from .drivers import tool_failure_diagnostics
 from .room_dialogue import addressed_role
 from .team_recovery import RECOVERY_CONTRACT, TeamRecovery
 from .team_delivery import HandoffError, TeamDelivery, handoff_schema
@@ -928,11 +929,22 @@ class TeamService:
         except Exception as exc:
             status, reason = "failed", f"{role.name}的本轮调用未完成，已有成果和操作记录保留；需要核对接入或执行记录。"
             failure["error_type"] = type(exc).__name__
+            failure.update(tool_failure_diagnostics(exc))
             code = getattr(exc, "status_code", None)
             if type(code) is int and 100 <= code <= 599:
                 failure["status_code"] = code
                 if code == 429:
                     reason = f"{role.name}本轮模型请求被服务商限流（HTTP 429），不是工作已完成；已有成果和操作记录保留。"
+                else:
+                    reason = f"{role.name}本轮模型请求未成功（HTTP {code}）；已有成果和操作记录保留，不代表工作已完成。"
+            elif failure.get("failure_kind") in {"network_error", "timeout"}:
+                phase = "接收响应时" if failure.get("transport_phase") == "response_read" else "请求过程中"
+                issue = "超时" if failure["failure_kind"] == "timeout" else "连接或传输失败"
+                reason = f"{role.name}本轮模型{phase}{issue}；已有成果和操作记录保留，远端是否已处理或计费尚不确定。"
+            elif failure.get("failure_kind") == "missing_credentials":
+                reason = f"{role.name}本轮模型调用未启动：本机未读到该通道的凭据；已有成果和操作记录保留。"
+            elif failure.get("failure_kind") == "invalid_request":
+                reason = f"{role.name}本轮模型请求参数或接入配置未通过检查；已有成果和操作记录保留，需要核对配置及请求格式。"
         with self.rt.log.atomic():
             self._finish_message(task_id, message, role, started, revision, assignment,
                                  status=status, reason=reason, final=final, failure=failure, awaiting_customer=awaiting_customer)

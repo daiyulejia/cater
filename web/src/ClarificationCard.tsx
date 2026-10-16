@@ -9,7 +9,13 @@ export type Clarification = {
 }
 export type ClarificationReply = { question_seq: number; kind: 'choice' | 'custom' | 'skip'; option_index?: number; answer?: string; request_id: string }
 type Draft = { mode: 'choice' | 'custom'; option?: number; custom: string; busy?: boolean; sent?: boolean; error?: string; attempt?: ClarificationReply }
-type Session = { getSnapshot: () => Draft; subscribe: (listener: () => void) => () => void; update: (patch: Partial<Draft>) => void }
+type Session = {
+  serverStatus: Clarification['status']
+  readonly initialDraft: Draft
+  getSnapshot: () => Draft
+  subscribe: (listener: () => void) => () => void
+  update: (patch: Partial<Draft>) => void
+}
 export type ClarificationStore = Map<string, Session>
 export type ClarificationControls = {
   store: ClarificationStore
@@ -18,13 +24,19 @@ export type ClarificationControls = {
   submit: (taskId: string, reply: ClarificationReply) => Promise<void>
 }
 
-function sessionFor(store: ClarificationStore, key: string, mode: Draft['mode']): Session {
+function sessionFor(store: ClarificationStore, key: string, mode: Draft['mode'], serverStatus: Clarification['status']): Session {
   const existing = store.get(key)
-  if (existing) return existing
-  let draft: Draft = { mode, custom: '' }
+  if (existing) {
+    existing.serverStatus = serverStatus
+    return existing
+  }
+  const initialDraft: Draft = { mode, custom: '' }
+  let draft = initialDraft
   const listeners = new Set<() => void>()
   // Subscribers let a remounted question observe an in-flight response after navigation.
   const session: Session = {
+    serverStatus,
+    initialDraft,
     getSnapshot: () => draft,
     subscribe: (listener) => { listeners.add(listener); return () => { listeners.delete(listener) } },
     update: (patch) => { draft = { ...draft, ...patch }; listeners.forEach((listener) => listener()) },
@@ -35,7 +47,7 @@ function sessionFor(store: ClarificationStore, key: string, mode: Draft['mode'])
 
 export function ClarificationCard({ taskId, question, controls }: { taskId: string; question: Clarification; controls: ClarificationControls }) {
   const key = JSON.stringify([taskId, question.seq])
-  const entry = sessionFor(controls.store, key, question.options.length ? 'choice' : 'custom')
+  const entry = sessionFor(controls.store, key, question.options.length ? 'choice' : 'custom', question.status)
   const draft = useSyncExternalStore(entry.subscribe, entry.getSnapshot)
   const update = entry.update
   const edit = (patch: Partial<Draft>) => {

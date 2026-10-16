@@ -36,7 +36,7 @@ export function readAccessToken(): string {
   } catch { return memoryToken }
 }
 
-async function accountBinding(token: string): Promise<string> {
+export async function accountBinding(token: string): Promise<string> {
   if (!token) return 'anonymous'
   // Authenticated HTTP contexts without Web Crypto cannot safely persist recovery.
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token))

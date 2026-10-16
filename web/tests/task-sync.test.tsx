@@ -280,6 +280,7 @@ test('卸载中止读取并清理刷新计时器', async () => {
   const pending = deferred<Response>()
   handler = (url) => url === '/api/task-summaries' ? pending.promise : undefined
   const view = render(<App />)
+  await tick(0)
   const signal = summaryCalls()[0][1].signal!
   view.unmount()
   expect(signal.aborted).toBe(true)

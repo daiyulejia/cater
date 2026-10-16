@@ -19,7 +19,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Mapping
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit
 
 from .assignments import latest_assignments_by_owner
 from .activity_owner import activity_owner
@@ -34,6 +34,7 @@ from .review import build_review
 from .runtime import DriverHealth, ExecutionScopeChanged, Runtime
 from .rules import RuleConflict
 from .work import WorkConflict
+from .web_assets import asset_path, capture_web_assets
 
 
 MAX_REQUEST_BYTES = 1_048_576
@@ -1189,13 +1190,20 @@ def _is_loopback_host(host: str) -> bool:
 
 
 def _workroom_dist() -> Path | None:
-    """Return a development build first, then the workroom bundled with Cater."""
+    """Prefer the packaged workroom; web/dist is an unpackaged fallback."""
     package_root = Path(__file__).resolve().parents[1]
     candidates = (
-        package_root / "web" / "dist",
         Path(__file__).resolve().parent / "static" / "workroom",
+        package_root / "web" / "dist",
     )
-    return next((candidate for candidate in candidates if (candidate / "index.html").is_file()), None)
+    # Select an existing source even when incomplete, so capture fails explicitly.
+    for candidate in candidates:
+        try:
+            candidate.lstat()
+        except FileNotFoundError:
+            continue
+        return candidate
+    return None
 
 
 def make_handler(
@@ -1220,7 +1228,7 @@ def make_handler(
 ):
     if access_token is not None and not access_token.strip():
         raise ValueError("web access token must not be empty")
-    static_root = Path(static_dir).resolve() if static_dir is not None else None
+    static_assets = capture_web_assets(static_dir) if static_dir is not None else None
 
     def build_runtime() -> Runtime:
         if runtime_factory is not None:
@@ -1257,15 +1265,12 @@ def make_handler(
                 return self._forbidden("untrusted Host header")
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/") or "/"
-            if static_root is not None and (path == "/" or path.startswith("/assets/") or path == "/favicon.svg"):
-                static_path = static_root / "index.html" if path == "/" else static_root / unquote(path.lstrip("/"))
-                try:
-                    static_path.resolve().relative_to(static_root)
-                except ValueError:
+            if static_assets is not None:
+                key = asset_path(urlsplit(self.path).path)
+                if key is not None and key in static_assets.files:
+                    return self._send_static(key, static_assets.files[key])
+                if path == "/" or path == "/index.html" or path.startswith("/assets/") or path == "/favicon.svg":
                     return self._not_found()
-                if static_path.is_file():
-                    return self._send_static(static_path)
-                return self._not_found()
             if self._requires_access_token(path) and not self._has_valid_access_token():
                 return self._unauthorized()
             if path == "/":
@@ -1986,18 +1991,18 @@ def make_handler(
             self.end_headers()
             self.wfile.write(raw)
 
-        def _send_static(self, path: Path) -> None:
-            raw = path.read_bytes()
-            content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        def _send_static(self, path: str, raw: bytes) -> None:
+            content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
             # The entry document chooses the current hashed bundle, so it must
             # revalidate after an upgrade. Immutable bundle assets can remain
             # aggressively cached without trapping the UI on an old release.
-            if path.name == "index.html":
-                self.send_header("Cache-Control", "no-cache")
-            elif "/assets/" in path.as_posix():
+            if path.startswith("/assets/"):
                 self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+            else:
+                self.send_header("Cache-Control", "no-cache")
+            self.send_header("X-Cater-UI-Version", static_assets.version)
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -2006,6 +2011,7 @@ def make_handler(
             raw = b"not found"
             self.send_response(HTTPStatus.NOT_FOUND)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -2014,6 +2020,7 @@ def make_handler(
             raw = message.encode("utf-8")
             self.send_response(HTTPStatus.BAD_REQUEST)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.send_header("Content-Length", str(len(raw)))
             self.end_headers()
             self.wfile.write(raw)
@@ -2055,7 +2062,7 @@ def make_handler(
             return access_token is not None and (
                 path.startswith("/api/")
                 or path.startswith("/tasks")
-                or (path == "/" and static_root is None)
+                or (path == "/" and static_assets is None)
             )
 
         def _has_valid_request_host(self) -> bool:
@@ -2102,7 +2109,16 @@ def make_handler(
             parsed = urlparse(origin)
             return parsed.scheme in {"http", "https"} and parsed.netloc == self.headers.get("Host", "")
 
+        def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
+            self._sending_error = True
+            try:
+                super().send_error(code, message, explain)
+            finally:
+                self._sending_error = False
+
         def end_headers(self) -> None:
+            if getattr(self, "_sending_error", False):
+                self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("X-Frame-Options", "DENY")
             self.send_header("Referrer-Policy", "no-referrer")

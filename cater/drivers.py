@@ -15,6 +15,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -144,42 +145,100 @@ class ToolRequestRejected(DriverUnavailable):
         self.status_code = status_code
 
 
+TOOL_FAILURE_KINDS = frozenset({"http_error", "network_error", "timeout", "invalid_request", "missing_credentials"})
+TOOL_TRANSPORT_PHASES = frozenset({"request", "response_read"})
+
+
+def tool_failure_diagnostics(error: BaseException) -> dict[str, str | int]:
+    """Return only safe tool-failure fields, never a message or transport object.
+
+    Phase describes where an error surfaced, not whether remote work or billing
+    started. Missing fields mean unknown; this metadata does not authorize retry.
+    """
+    if not isinstance(error, DriverError):
+        return {}
+    fields = vars(error)
+    kind = fields.get("failure_kind")
+    if type(kind) is not str or kind not in TOOL_FAILURE_KINDS:
+        return {}
+    result: dict[str, str | int] = {"failure_kind": kind}
+    phase = fields.get("transport_phase")
+    if type(phase) is str and phase in TOOL_TRANSPORT_PHASES:
+        result["transport_phase"] = phase
+    status = fields.get("status_code")
+    if kind == "http_error" and type(status) is int and 100 <= status <= 599:
+        result["status_code"] = status
+    return result
+
+
+def _tool_failure(error: DriverError, kind: str, phase: str | None = None,
+                  status_code: object = None) -> DriverError:
+    error.failure_kind = kind
+    if phase is not None:
+        error.transport_phase = phase
+    if type(status_code) is int and 100 <= status_code <= 599:
+        error.status_code = status_code
+    return error
+
+
 def _tool_api_request(*, endpoint: str, body: dict, headers: dict, name: str,
                       timeout: float, opener: Any, byte_limit: int) -> dict:
+    invalid = False
     try:
         if not isinstance(endpoint, str) or not _safe_api_endpoint(endpoint):
             raise ValueError
         parsed = urlparse(endpoint)
         if not parsed.hostname or parsed.username or parsed.password or parsed.fragment:
             raise ValueError
-        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
-                or not math.isfinite(timeout) or timeout <= 0):
+        if parsed.port is not None and not 1 <= parsed.port <= 65535:
+            raise ValueError
+        if (type(timeout) not in (int, float) or not math.isfinite(timeout)
+                or not 0 < timeout <= threading.TIMEOUT_MAX):
+            raise ValueError
+        if type(byte_limit) is not int or not 1 <= byte_limit <= MAX_API_RESPONSE_BYTES:
+            raise ValueError
+        if not isinstance(body, dict) or not isinstance(headers, dict):
+            raise ValueError
+        if any(type(key) is not str or type(value) is not str for key, value in headers.items()):
             raise ValueError
     except (ValueError, TypeError, OverflowError):
-        raise DriverProtocolError("Invalid tool API endpoint or timeout") from None
+        invalid = True
+    if invalid:
+        raise _tool_failure(DriverProtocolError("Invalid tool API request parameters"), "invalid_request") from None
+    encoded = None
     try:
         encoded = json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8")
     except (TypeError, ValueError, UnicodeError, RecursionError):
-        raise DriverProtocolError("Tool request is not valid JSON") from None
+        pass
+    if encoded is None:
+        raise _tool_failure(DriverProtocolError("Tool request is not valid JSON"), "invalid_request") from None
     phase = "request"
+    failure = None
     try:
         request = Request(endpoint, data=encoded, headers=headers, method="POST")
         with opener(request, timeout=timeout) as response:
-            phase = "response read"
+            phase = "response_read"
             raw = response.read(byte_limit + 1)
     except HTTPError as exc:
-        if exc.code == 429:
-            raise ToolRequestRejected(f"{name} API request failed with HTTP 429", status_code=429) from None
-        raise DriverUnavailable(f"{name} API request failed with HTTP {exc.code}") from None
-    except (URLError, TimeoutError, OSError) as exc:
-        reason = exc.reason if isinstance(exc, URLError) else exc
-        if isinstance(reason, TimeoutError):
-            message = f"{name} API {phase} timed out (configured timeout: {timeout:g}s)"
+        status = exc.code if type(exc.code) is int and 100 <= exc.code <= 599 else None
+        message = "Tool API HTTP request failed" if status is None else f"Tool API request failed with HTTP {status}"
+        error = ToolRequestRejected(message, status_code=429) if status == 429 else DriverUnavailable(message)
+        failure = _tool_failure(error, "http_error", phase, status)
+    except (URLError, TimeoutError, OSError, HTTPException) as exc:
+        timed_out = isinstance(exc.reason if isinstance(exc, URLError) else exc, TimeoutError)
+        display_phase = "response read" if phase == "response_read" else "request"
+        if timed_out:
+            message = f"Tool API {display_phase} timed out (configured timeout: {timeout:g}s)"
         else:
-            message = f"{name} API endpoint is unavailable (connection or network failure during {phase})"
-        raise DriverUnavailable(message) from None
+            message = f"Tool API endpoint is unavailable (connection or network failure during {display_phase})"
+        failure = _tool_failure(DriverUnavailable(message), "timeout" if timed_out else "network_error", phase)
     except (ValueError, TypeError, UnicodeError):
-        raise DriverUnavailable(f"{name} API request failed (invalid request or headers)") from None
+        failure = _tool_failure(DriverUnavailable("Tool API request failed (invalid request or headers)"),
+                                "invalid_request", phase)
+    # Raise outside the handlers so the public error does not retain a raw
+    # HTTP/transport exception as its exception context.
+    if failure is not None:
+        raise failure from None
     if not isinstance(raw, bytes) or len(raw) > byte_limit:
         raise DriverProtocolError("Tool response is not bytes or exceeds the byte limit")
     try:
@@ -617,7 +676,7 @@ class OpenAICompatibleDriver:
             raise DriverProtocolError("Invalid client tool schemas or history") from None
         key = os.environ.get(self.api_key_env)
         if not key:
-            raise DriverUnavailable(f"{self.name} API key is unavailable; set {self.api_key_env}")
+            raise _tool_failure(DriverUnavailable("Tool API credentials are unavailable"), "missing_credentials")
         data = _tool_api_request(endpoint=self.endpoint, body=payload,
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "Accept": "application/json"},
             name=self.name, timeout=self.timeout, opener=_open_api_request, byte_limit=MAX_API_RESPONSE_BYTES)

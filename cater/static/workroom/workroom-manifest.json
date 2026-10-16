@@ -1,0 +1,284 @@
+{
+  "_chat-conversation-CtXdGeoV.js": {
+    "file": "assets/chat-conversation-CtXdGeoV.js",
+    "name": "chat-conversation",
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_react-vendor-BvB9BS1T.js"
+    ],
+    "dynamicImports": [
+      "src/TeamProgressPanel.tsx"
+    ]
+  },
+  "_conversationActivityState-KxfqBjXb.js": {
+    "file": "assets/conversationActivityState-KxfqBjXb.js",
+    "name": "conversationActivityState",
+    "imports": [
+      "_chat-conversation-CtXdGeoV.js"
+    ]
+  },
+  "_graph-vendor-B1dum-A4.js": {
+    "file": "assets/graph-vendor-B1dum-A4.js",
+    "name": "graph-vendor",
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_react-vendor-BvB9BS1T.js"
+    ],
+    "css": [
+      "assets/graph-vendor-DLioOiRN.css"
+    ]
+  },
+  "_graph-vendor-DLioOiRN.css": {
+    "file": "assets/graph-vendor-DLioOiRN.css",
+    "src": "_graph-vendor-DLioOiRN.css"
+  },
+  "_page-recovery-UBiKxlEY.js": {
+    "file": "assets/page-recovery-UBiKxlEY.js",
+    "name": "page-recovery",
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_react-vendor-BvB9BS1T.js"
+    ]
+  },
+  "_react-vendor-BvB9BS1T.js": {
+    "file": "assets/react-vendor-BvB9BS1T.js",
+    "name": "react-vendor",
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js"
+    ]
+  },
+  "_rolldown-runtime-hePW80VL.js": {
+    "file": "assets/rolldown-runtime-hePW80VL.js",
+    "name": "rolldown-runtime"
+  },
+  "_vendor-z7jk05vn.js": {
+    "file": "assets/vendor-z7jk05vn.js",
+    "name": "vendor",
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_react-vendor-BvB9BS1T.js",
+      "_page-recovery-UBiKxlEY.js"
+    ]
+  },
+  "index.html": {
+    "file": "assets/index-DTZQKtko.js",
+    "name": "index",
+    "src": "index.html",
+    "isEntry": true,
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_react-vendor-BvB9BS1T.js",
+      "_page-recovery-UBiKxlEY.js",
+      "_vendor-z7jk05vn.js",
+      "_chat-conversation-CtXdGeoV.js"
+    ],
+    "dynamicImports": [
+      "src/TaskGraph.tsx",
+      "src/DeliveryPanel.tsx",
+      "src/EventDetails.tsx",
+      "src/browserReport.tsx",
+      "src/WorkProgressPanel.tsx",
+      "src/ClarificationCard.tsx",
+      "src/QuestionnaireCard.tsx",
+      "src/QuestionDetails.tsx",
+      "src/Artifact.tsx",
+      "src/TeamProgressPanel.tsx",
+      "src/ConversationActivity.tsx",
+      "src/ChatMarkdown.tsx",
+      "src/MessageDetails.tsx",
+      "src/WelcomeView.tsx"
+    ],
+    "css": [
+      "assets/index-CTYiGzzS.css"
+    ],
+    "assets": [
+      "assets/cat-portraits-Du5p3Ya6.jpg",
+      "assets/staff-portraits-DwzRDYqT.jpg",
+      "assets/cafe-welcome-v2-BNgiednD.jpg"
+    ]
+  },
+  "src/Artifact.tsx": {
+    "file": "assets/Artifact-Dqai8NzB.js",
+    "name": "Artifact",
+    "src": "src/Artifact.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_react-vendor-BvB9BS1T.js",
+      "_vendor-z7jk05vn.js"
+    ]
+  },
+  "src/ChatMarkdown.tsx": {
+    "file": "assets/ChatMarkdown-FEKnipmF.js",
+    "name": "ChatMarkdown",
+    "src": "src/ChatMarkdown.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_react-vendor-BvB9BS1T.js",
+      "_vendor-z7jk05vn.js"
+    ]
+  },
+  "src/ClarificationCard.tsx": {
+    "file": "assets/ClarificationCard-D1C6ij-n.js",
+    "name": "ClarificationCard",
+    "src": "src/ClarificationCard.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_react-vendor-BvB9BS1T.js",
+      "_vendor-z7jk05vn.js"
+    ],
+    "css": [
+      "assets/ClarificationCard-DQLIzVc7.css"
+    ]
+  },
+  "src/ConversationActivity.tsx": {
+    "file": "assets/ConversationActivity-BL4bSgLV.js",
+    "name": "ConversationActivity",
+    "src": "src/ConversationActivity.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_react-vendor-BvB9BS1T.js",
+      "_page-recovery-UBiKxlEY.js",
+      "_vendor-z7jk05vn.js",
+      "_conversationActivityState-KxfqBjXb.js"
+    ]
+  },
+  "src/DeliveryPanel.tsx": {
+    "file": "assets/DeliveryPanel-CJoq2xZ7.js",
+    "name": "DeliveryPanel",
+    "src": "src/DeliveryPanel.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_react-vendor-BvB9BS1T.js",
+      "_vendor-z7jk05vn.js",
+      "index.html"
+    ]
+  },
+  "src/EventDetails.tsx": {
+    "file": "assets/EventDetails-B92eOQol.js",
+    "name": "EventDetails",
+    "src": "src/EventDetails.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_react-vendor-BvB9BS1T.js",
+      "_chat-conversation-CtXdGeoV.js",
+      "_conversationActivityState-KxfqBjXb.js",
+      "src/browserReport.tsx",
+      "src/TeamProgressPanel.tsx"
+    ]
+  },
+  "src/MessageDetails.tsx": {
+    "file": "assets/MessageDetails-BOEXgSvI.js",
+    "name": "MessageDetails",
+    "src": "src/MessageDetails.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_react-vendor-BvB9BS1T.js",
+      "_chat-conversation-CtXdGeoV.js"
+    ]
+  },
+  "src/QuestionDetails.tsx": {
+    "file": "assets/QuestionDetails-WGBHD_c-.js",
+    "name": "QuestionDetails",
+    "src": "src/QuestionDetails.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_react-vendor-BvB9BS1T.js"
+    ]
+  },
+  "src/QuestionnaireCard.tsx": {
+    "file": "assets/QuestionnaireCard-BYNqZraQ.js",
+    "name": "QuestionnaireCard",
+    "src": "src/QuestionnaireCard.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_react-vendor-BvB9BS1T.js",
+      "_vendor-z7jk05vn.js"
+    ],
+    "css": [
+      "assets/QuestionnaireCard-Bq3az5bH.css"
+    ]
+  },
+  "src/TaskGraph.tsx": {
+    "file": "assets/TaskGraph-CtPcNIaI.js",
+    "name": "TaskGraph",
+    "src": "src/TaskGraph.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_react-vendor-BvB9BS1T.js",
+      "_vendor-z7jk05vn.js",
+      "_chat-conversation-CtXdGeoV.js",
+      "_graph-vendor-B1dum-A4.js"
+    ],
+    "css": [
+      "assets/TaskGraph-DKl3f9fy.css"
+    ]
+  },
+  "src/TeamProgressPanel.tsx": {
+    "file": "assets/TeamProgressPanel-BlLOO5sX.js",
+    "name": "TeamProgressPanel",
+    "src": "src/TeamProgressPanel.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_react-vendor-BvB9BS1T.js",
+      "_vendor-z7jk05vn.js",
+      "_chat-conversation-CtXdGeoV.js",
+      "index.html",
+      "_conversationActivityState-KxfqBjXb.js",
+      "src/browserReport.tsx"
+    ],
+    "dynamicImports": [
+      "src/Artifact.tsx"
+    ]
+  },
+  "src/WelcomeView.tsx": {
+    "file": "assets/WelcomeView-B9HbJNF4.js",
+    "name": "WelcomeView",
+    "src": "src/WelcomeView.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_react-vendor-BvB9BS1T.js",
+      "index.html"
+    ]
+  },
+  "src/WorkProgressPanel.tsx": {
+    "file": "assets/WorkProgressPanel-BC-UkbKh.js",
+    "name": "WorkProgressPanel",
+    "src": "src/WorkProgressPanel.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_rolldown-runtime-hePW80VL.js",
+      "_react-vendor-BvB9BS1T.js",
+      "index.html"
+    ]
+  },
+  "src/assets/cafe-welcome-v2.jpg": {
+    "file": "assets/cafe-welcome-v2-BNgiednD.jpg",
+    "src": "src/assets/cafe-welcome-v2.jpg"
+  },
+  "src/assets/cat-portraits.jpg": {
+    "file": "assets/cat-portraits-Du5p3Ya6.jpg",
+    "src": "src/assets/cat-portraits.jpg"
+  },
+  "src/assets/staff-portraits.jpg": {
+    "file": "assets/staff-portraits-DwzRDYqT.jpg",
+    "src": "src/assets/staff-portraits.jpg"
+  },
+  "src/browserReport.tsx": {
+    "file": "assets/browserReport-Do_RZ-Sf.js",
+    "name": "browserReport",
+    "src": "src/browserReport.tsx",
+    "isDynamicEntry": true,
+    "imports": [
+      "_react-vendor-BvB9BS1T.js",
+      "_chat-conversation-CtXdGeoV.js",
+      "_conversationActivityState-KxfqBjXb.js"
+    ]
+  }
+}
