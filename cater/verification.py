@@ -103,7 +103,7 @@ def validate_check(command: list[str], timeout: float) -> None:
 
 def run_check(
     command: list[str], *, cwd: Path, timeout: float = 60,
-    record_output: bool = False,
+    record_output: bool = False, env: dict[str, str] | None = None,
 ) -> CheckResult:
     validate_check(command, timeout)
     if not cwd.is_dir():
@@ -126,7 +126,7 @@ def run_check(
             process = subprocess.Popen(
                 [sys.executable, "-I", str(Path(__file__).with_name("_verification_worker.py")), str(status_path)],
                 cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                shell=False, start_new_session=os.name != "nt",
+                shell=False, start_new_session=os.name != "nt", env=env,
             )
             # The worker waits on stdin, so no target process can escape before attachment.
             scope = _ProcessScope(process)

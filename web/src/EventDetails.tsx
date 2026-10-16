@@ -1,5 +1,6 @@
-import { BrowserReport } from './browserReport'
-import { isTeamRecovery } from './team'
+import { BrowserReport, NativeBrowserReceipt } from './browserReport'
+import { isTeamHost, isTeamRecovery } from './team'
+import { nativeBrowserReceiptStatus } from './conversationActivityState'
 
 export type DetailEvent = {
   seq: number
@@ -167,6 +168,14 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       break
     }
     case 'team.tool_started': case 'team.tool_finished':
+      if ((p.name ?? p.tool) === 'browser_check') {
+        status = nativeBrowserReceiptStatus(event)
+        add('工具', '浏览器检查')
+        if (isTeamHost(event)) {
+          add('执行成员', member(p.role)); number('关联消息', p.message_seq); number('发起事件', p.started_seq)
+        } else note = '来源未通过团队系统身份核对，不能作为宿主检查依据。'
+        break
+      }
       status = event.type === 'team.tool_started' ? '等待工具回执' : label(p.status ?? record(p.result).status, { ok: '工具已完成', completed: '工具已完成', succeeded: '工具已完成', error: '工具未完成', failed: '工具未完成' }, '工具结果待确认')
       add('工具', (p.name ?? p.tool) === 'read_checkpoint' ? '读取工作检查点' : (p.name ?? p.tool) === 'read_delivery' ? '读取交付说明' : p.name ?? p.tool); add('执行成员', member(p.role)); add('摘要', p.summary ?? record(p.result).summary)
       number('关联消息', p.message_seq); number('发起事件', p.started_seq); number('退出码', record(p.result).exit_code)
@@ -368,6 +377,7 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
       <dt className="font-semibold">{field.label}</dt><dd className="min-w-0 whitespace-pre-wrap">{field.value}</dd>
     </div>)}</dl>}
     {event.type === 'verification.completed' && event.payload.browser_report !== undefined && <BrowserReport report={event.payload.browser_report} />}
+    {event.type === 'team.tool_finished' && (event.payload.name ?? event.payload.tool) === 'browser_check' && <NativeBrowserReceipt event={event} />}
     {note && <p className="text-[#728679]">{note}</p>}
     {event.type === 'collaboration.finished' && ['answered', 'declined'].includes(String(event.payload.status))
       && event.actor.kind === 'system' && event.actor.id === 'collaboration' && event.actor.role === 'collaboration'

@@ -77,6 +77,8 @@ def browser_observations(receipt: dict | None) -> list[str]:
                 break
             fields = {key: step[key] for key in ("index", "action", "status", "actual") if key in step}
             observed.append(json.dumps(fields, ensure_ascii=False))
+            if isinstance(step.get("observed"), str) and step["observed"].strip():
+                observed.append(step["observed"])
             # The runner stops at its first failure; later plan rows were not executed.
             if step["status"] == "failed":
                 break

@@ -6,6 +6,7 @@ import hashlib
 import json
 
 from .events import Actor
+from .review_contract import browser_observations
 
 
 HOST = Actor.system("team")
@@ -30,7 +31,7 @@ def _strings(value, *, count=12):
 def handoff_schema():
     strings = {"type": "array", "maxItems": 12, "items": {"type": "string", "maxLength": 1000}}
     return {"type": "object", "additionalProperties": False, "required": ["why", "reproduce", "limits"],
-        "description": "可选的对客原因、复查与边界说明，不是私有思维。保存的完整说明（含宿主补充引用信息）总计不超过24KB UTF-8。quote从文件正文、回执stdout/stderr/content或当前复核反馈逐字摘录。",
+        "description": "可选的对客原因、复查与边界说明，不是私有思维。保存的完整说明（含宿主补充引用信息）总计不超过24KB UTF-8。quote从文件正文、回执stdout/stderr/content、浏览器实际观测或当前复核反馈逐字摘录，不引用计划标签作为执行证据。",
         "properties": {"why": {"type": "string", "maxLength": 4000},
             **{key: strings for key in ("changed", "impact", "alternatives", "reproduce", "limits")},
             "evidence": {"type": "array", "maxItems": 16, "items": {"type": "object", "additionalProperties": False,
@@ -85,7 +86,7 @@ class TeamDelivery:
             run = runs.get(s.get("run_id")) if isinstance(s.get("run_id"), str) else None
             message = messages.get(s.get("message_seq")) if type(s.get("message_seq")) is int else None
             result = p.get("result")
-            if (not isinstance(name, str) or not name.startswith("workspace_") or run is None or message is None
+            if (not isinstance(name, str) or not (name.startswith("workspace_") or name == "browser_check") or run is None or message is None
                     or not message.seq < run.seq < start.seq or s.get("role") not in members or message.payload.get("recipient") != s.get("role")
                     or run.payload.get("role") != s.get("role") or run.payload.get("message_seq") != message.seq
                     or s.get("revision") != revision or type(s.get("revision")) is not int
@@ -105,7 +106,24 @@ class TeamDelivery:
                 metadata["truncated"] = result["truncated"]
             if any(isinstance(result.get(key), dict) and result[key].get("truncated") is True for key in ("stdout", "stderr")):
                 metadata["truncated"] = True
-            sources[event.seq] = (event, _receipt_text(result), metadata)
+            if name == "browser_check":
+                checked = result.get("checked_artifacts")
+                if (result.get("scope_current") is not True or result.get("artifacts_unchanged") is not True
+                        or result.get("check_kind") != "browser" or result.get("outcome") not in {"passed", "failed"}
+                        or not isinstance(checked, list) or not checked
+                        or any(not isinstance(a, dict) or a not in artifacts for a in checked)):
+                    continue
+                from .team_browser import BrowserInputError
+                try:
+                    self.team.browser._files(task_id, [a["seq"] for a in checked])
+                except BrowserInputError:
+                    continue
+                metadata["status"] = result["outcome"]
+                report = result.get("browser_report")
+                metadata["truncated"] = bool(metadata.get("truncated") or isinstance(report, dict) and report.get("truncated"))
+                sources[event.seq] = (event, browser_observations(result), metadata)
+            else:
+                sources[event.seq] = (event, _receipt_text(result), metadata)
         for review in self.rt.team_reviews.view(task_id):
             event = by_seq.get(review.get("decision_seq"))
             if (review["status"] not in {"stale", "outdated"} and event and event.actor == HOST
@@ -177,7 +195,7 @@ class TeamDelivery:
         evidence = note.get("evidence", [])
         if isinstance(evidence, list):
             labels = {"artifact": "成果原文", "tool_receipt": "历史工具回执", "peer_review": "伙伴复核意见"}
-            statuses = {"ok": "正常返回", "error": "返回错误", "approved": "伙伴同意", "changes_requested": "伙伴要求修改"}
+            statuses = {"ok": "正常返回", "error": "返回错误", "passed": "检查通过", "failed": "检查失败", "approved": "伙伴同意", "changes_requested": "伙伴要求修改"}
             for ref in evidence:
                 if (not isinstance(ref, dict) or not isinstance(ref.get("kind"), str)
                         or ref["kind"] not in labels or not isinstance(ref.get("quote"), str)):

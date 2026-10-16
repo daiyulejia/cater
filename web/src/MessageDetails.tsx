@@ -4,9 +4,9 @@ import type { HandoffEvidence } from './nativeHandoff'
 
 const sourceLabels = { artifact: '成果原文', tool_receipt: '历史工具回执', peer_review: '伙伴复核意见' }
 const statusLabels: Record<string, string> = { ok: '正常返回', error: '返回错误', completed: '已结束', succeeded: '执行成功',
-  failed: '执行失败', approved: '伙伴同意', changes_requested: '伙伴建议修改', timeout: '超时', unavailable: '不可用' }
+  passed: '检查通过', failed: '执行失败', approved: '伙伴同意', changes_requested: '伙伴建议修改', timeout: '超时', unavailable: '不可用' }
 
-const toolLabels: Record<string, string> = { workspace_read: '读取文件', workspace_write: '写入文件', workspace_run: '运行命令', workspace_list: '列出目录', workspace_search: '查找文件' }
+const toolLabels: Record<string, string> = { browser_check: '检查网页交互', workspace_read: '读取文件', workspace_write: '写入文件', workspace_run: '运行命令', workspace_list: '列出目录', workspace_search: '查找文件' }
 
 function SourceQuote({ source, name }: { source: HandoffEvidence; name?: (id: string) => string }) {
   return <li className="space-y-1">

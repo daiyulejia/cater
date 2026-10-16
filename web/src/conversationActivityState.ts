@@ -32,10 +32,41 @@ const object = (value: unknown): Record<string, unknown> => value !== null && ty
 const timestamp = (event?: TimedEvent) => event?.ts ? Date.parse(event.ts) : NaN
 const tools: Record<string, string> = {
   workspace_read: '读取文件', workspace_run: '运行命令', workspace_write: '写入文件', workspace_search: '查找文件',
-  workspace_list: '列出目录', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果',
+  workspace_list: '列出目录', browser_check: '浏览器检查', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果',
   read_receipts: '核对执行回执', read_messages: '补读历史消息', read_background: '读取来源材料', read_checkpoint: '读取工作检查点', read_delivery: '读取交付说明', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件',
   set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复',
   request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论',
+}
+
+export function nativeBrowserReceiptStatus(event: TeamEvent): string {
+  if (!isTeamHost(event)) return '检查回执来源待核对'
+  if (event.type === 'team.tool_started') return '已发起，等待回执'
+  const result = object(event.payload.result), report = object(result.browser_report), plan = object(result.browser_plan)
+  if (result.scope_current === false) return '历史回执，不能作为当前成果依据'
+  if (result.outcome === 'unavailable') return '检查不可用'
+  if (result.outcome === 'timeout') return '检查超时'
+  if (result.outcome === 'launch_error') return '检查启动失败'
+  const incomplete = [result, report, object(result.stdout), object(result.stderr)].some((value) => value.complete === false || value.truncated === true)
+  if (incomplete) return '回执不完整，结果待确认'
+  if (result.outcome === 'failed') return '检查未通过'
+  const artifacts = Array.isArray(result.checked_artifacts) ? result.checked_artifacts.map(object) : []
+  const planned = Array.isArray(plan.steps) ? plan.steps.map(object) : []
+  const steps = Array.isArray(report.steps) ? report.steps.map(object) : []
+  // A successful tool call is not evidence that the planned assertions passed.
+  const passed = result.status === 'ok' && result.scope_current === true && result.outcome === 'passed' && report.outcome === 'passed'
+    && !['error', 'failed', 'timeout', 'launch_error'].includes(String(event.payload.status))
+    && (result.exit_code === undefined || result.exit_code === 0) && result.artifacts_unchanged !== false
+    && artifacts.length > 0 && artifacts.every((item) => typeof item.seq === 'number' && Number.isSafeInteger(item.seq) && item.seq > 0
+      && typeof item.filename === 'string' && item.filename.trim() && typeof item.content_sha256 === 'string' && /^[a-f0-9]{64}$/i.test(item.content_sha256))
+    && typeof plan.entrypoint === 'string' && artifacts.some((item) => item.filename === plan.entrypoint)
+    && planned.length > 0 && planned.length <= 128 && planned.length === steps.length
+    && planned.every((step) => typeof step.label === 'string' && step.label.trim())
+    && planned.some((step) => ['assert_visible', 'assert_text', 'assert_js'].includes(String(step.action)))
+    && object(report.counts).page_errors === 0 && (report.page_errors === undefined || Array.isArray(report.page_errors) && report.page_errors.length === 0)
+    && steps.every((step, index) => step.index === index + 1 && step.status === 'passed' && step.action === planned[index].action
+      && ['click', 'press', 'click_at', 'fill', 'wait', 'evaluate', 'assert_visible', 'assert_text', 'assert_js'].includes(String(step.action))
+      && (!String(step.action).startsWith('assert_') || step.actual === true))
+  return passed ? '检查通过' : '回执不完整或不一致，结果待确认'
 }
 
 function receiptFor(start: TeamEvent, events: TeamEvent[]) {
@@ -46,7 +77,8 @@ function receiptFor(start: TeamEvent, events: TeamEvent[]) {
       event.payload[key] === undefined || start.payload[key] === undefined || event.payload[key] === start.payload[key]))
 }
 
-function toolOutcome(event: TeamEvent) {
+function toolOutcome(event: TeamEvent, name = event.payload.name) {
+  if (name === 'browser_check') return nativeBrowserReceiptStatus(event)
   const result = object(event.payload.result)
   if ([event.payload.status, result.status, result.outcome].some((status) =>
     ['error', 'failed', 'timeout', 'launch_error', 'blocked', 'cancelled'].includes(String(status)))
@@ -209,9 +241,9 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       : run?.status === 'waiting' ? '等待伙伴回复'
         : failed(run?.status) ? '本轮处理未完成，需核对过程'
           : successful(run?.status) ? '本轮消息处理已结束' : '执行结果待确认'
-    if (action && tool?.payload.name !== 'wait_for_reply' && !awaitingCustomer) text = `${action} · ${finished ? toolOutcome(finished) : '已发起，等待回执'}；${text}`
+    if (action && tool?.payload.name !== 'wait_for_reply' && !awaitingCustomer) text = `${action} · ${finished ? toolOutcome(finished, tool?.payload.name) : '已发起，等待回执'}；${text}`
     lines.push({ id: role, role, text: `${label(role)} · ${text}`, moving,
-      warning: failed(run?.status) || Boolean(toolBelongs && finished && toolOutcome(finished) !== '已完成') })
+      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过'].includes(toolOutcome(finished, tool?.payload.name))) })
   }
   const reported = new Set(events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'agent'
     && event.payload.kind === 'report' && (() => {

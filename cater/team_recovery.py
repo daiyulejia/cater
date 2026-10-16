@@ -182,18 +182,26 @@ class TeamRecovery:
         return source
 
     def reconcile_publication(self, task_id, started_seq, *, reason, invocation_stopped=False):
+        return self._reconcile_tool(task_id, started_seq, reason=reason, invocation_stopped=invocation_stopped,
+                                    names={"publish_artifact", "publish_workspace_file"})
+
+    def reconcile_browser_check(self, task_id, started_seq, *, reason, invocation_stopped=False):
+        return self._reconcile_tool(task_id, started_seq, reason=reason, invocation_stopped=invocation_stopped,
+                                    names={"browser_check"})
+
+    def _reconcile_tool(self, task_id, started_seq, *, reason, invocation_stopped, names):
         """Trusted local operator only; models receive no self-unlock tool."""
         if (type(started_seq) is not int or started_seq < 1 or invocation_stopped is not True
                 or not isinstance(reason, str) or not reason.strip() or len(reason) > 4000):
-            raise ValueError("需要发布调用序号、确认原执行已停止，并说明实际核对的成果与文件影响。")
+            raise ValueError("需要工具调用序号、确认原执行已停止，并说明实际核对的成果、进程与文件影响。")
         with activity_owner(self.rt.log.path, task_id, "simple-team") as owned:
             if not owned:
-                raise WorkConflict("原生团队仍有执行者，不能关闭发布操作的未知状态。")
+                raise WorkConflict("原生团队仍有执行者，不能关闭工具操作的未知状态。")
             with self.rt.log.atomic():
                 pending = next((r for r in self.team._pending_operations(task_id) if r["started_seq"] == started_seq
-                                and r["name"] in {"publish_artifact", "publish_workspace_file"} and r["run_ended"]), None)
+                                and r["name"] in names and r["run_ended"]), None)
                 if pending is None:
-                    raise WorkConflict("该发布调用不是本群已结束运行中待核对的操作。")
+                    raise WorkConflict("该工具调用不是本群已结束运行中待核对的操作。")
                 start = next(e for e in self.rt.log.read(task_id=task_id) if e.seq == started_seq)
                 return self.rt.log.emit(type="team.tool_reconciled", task_id=task_id, actor=Actor.human(), payload={
                     "started_seq": start.seq, "started_hash": start.hash, "call_id": start.payload["call_id"],

@@ -15,6 +15,7 @@ from .events import Actor
 from .room_dialogue import addressed_role
 from .team_recovery import RECOVERY_CONTRACT, TeamRecovery
 from .team_delivery import HandoffError, TeamDelivery, handoff_schema
+from .team_browser import BROWSER_CONTRACT, TeamBrowser, browser_schema
 from .usage import valid_token_count
 from .work import WorkConflict
 
@@ -24,7 +25,7 @@ MAX_ACTOR_TURNS = 32
 LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "set_objective", "request_questions",
                                "request_review", "record_review", "finish_work"})
 LOCAL_EVENT_CONTRACT = {"version": 1, "kind": "atomic_local_events", "receipt": "same_transaction"}
-EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", "publish_artifact", "publish_workspace_file"})
+EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", "publish_artifact", "publish_workspace_file", "browser_check"})
 
 
 class _RejectedLocalTool(Exception):
@@ -62,6 +63,7 @@ class TeamService:
         self.rt = runtime
         self.recovery = TeamRecovery(self)
         self.delivery = TeamDelivery(self)
+        self.browser = TeamBrowser(self)
 
     def available(self):
         leader = self.rt.organization.leader
@@ -268,6 +270,8 @@ class TeamService:
             tools.append(_tool("publish_workspace_file", "直接读取工作目录中已写好的真实UTF-8文件并发布，不必重复复述整份源码。",
                 {"path": string, "summary": string, "format": {"type": "string", "enum": ["code", "markdown", "text"]}},
                 ["path", "summary", "format"]))
+        if self.rt.browser_checks.command:
+            tools.append(browser_schema())
         return tools
 
     def _waiting_assignment(self, task_id, message, role):
@@ -346,7 +350,7 @@ class TeamService:
             reconciled = (isinstance(p.get("call_id"), str) and bool(p["call_id"].strip())
                 and isinstance(p.get("name"), str) and p["name"] in EXTERNAL_EFFECT_TOOLS and any(
                 (e.type == "workspace.tool_reconciled" and p["name"] in {"workspace_write", "workspace_run"}
-                 or e.type == "team.tool_reconciled" and p["name"] in {"publish_artifact", "publish_workspace_file"}
+                 or e.type == "team.tool_reconciled" and p["name"] in {"publish_artifact", "publish_workspace_file", "browser_check"}
                  and all(e.payload.get(k) == p.get(k) for k in ("run_id", "role", "name")))
                 and e.actor == Actor.human() and e.seq > start.seq
                 and type(e.payload.get("started_seq")) is int and e.payload["started_seq"] == start.seq
@@ -360,6 +364,12 @@ class TeamService:
                            result["error"].get("code") == "process_failed"
                            or isinstance(p.get("name"), str) and p["name"] in EXTERNAL_EFFECT_TOOLS
                            and result["error"].get("code") == "operation_failed"))
+            if (p.get("name") == "browser_check" and p.get("execution_contract") == BROWSER_CONTRACT
+                    and type(p["execution_contract"].get("version")) is int and result.get("invocation_stopped") is True
+                    and result.get("process_scope") in {"windows_job", "posix_process_group"}
+                    and result.get("stdout", {}).get("complete") is True and result.get("stderr", {}).get("complete") is True
+                    and result.get("complete") is not False and result.get("outcome") != "effects_unknown"):
+                unknown = False
             if finished and not unknown and start.seq not in workspace_pending:
                 continue
             ended = run is not None and any(e.type == "team.run_finished" and e.actor == HOST and e.seq > start.seq
@@ -482,6 +492,11 @@ class TeamService:
             return self.recovery.read(task_id, arguments)
         if name == "read_delivery":
             return self.delivery.read(task_id, arguments)
+        if name == "browser_check":
+            started = next(e for e in self.rt.log.read(task_id=task_id)
+                if e.type == "team.run_started" and e.actor == HOST and e.payload.get("run_id") == tool_start.payload["run_id"])
+            return self.browser.execute(task_id, arguments, started_seq=tool_start.seq,
+                current=lambda: self._current(task_id, started, role, tool_start.payload["revision"]))
         if name == "request_questions":
             event = self.rt.questionnaires.request(task_id, role, arguments, tool_start, assignment)
             return {"status": "ok", "question_seq": event.seq, "waiting_for_customer": True}
@@ -769,9 +784,11 @@ class TeamService:
                 "成果用publish_artifact保存完整正文；操作和验证依据来自实际工具回执。"
                 "已写入工作目录的文件优先用publish_workspace_file直接发布，避免复述整份源码。"
                 "店长读成果，用read_receipts核对真实工具回执、跟进修正，能够交付时用finish_work记录结果及验证边界。"
+                "工具列表提供browser_check时，可对已发布静态网页副本实际操作并断言；不是任意浏览器，也不是强制审批。"
+                "根据实际outcome、scope_current、checked_artifacts和失败步骤判断；不能把status=ok或旧版本通过当作当前业务已验证。"
                 "交付不只说完成：按任务需要在finish_work的handoff说明改了什么、为什么、影响、取舍、如何运行或复查，以及尚未验证的范围。"
                 "这是面向顾客的简明因果说明，不是私有思维链，也不要求顾客考试或逐步审批。简单交流无需填写完整模板。"
-                "handoff.evidence用source_seq和逐字quote关联本次文件正文、原生workspace工具回执的输出或当前复核反馈；先读取来源，不编造摘录。"
+                "handoff.evidence用source_seq和逐字quote关联本次文件正文、原生workspace工具回执输出、browser_check实际观测或当前复核反馈；先读取来源，不编造摘录。"
                 "伙伴判断不等于执行证据；历史命令输出不证明文件后来没变化。建议运行步骤不会被说明字段自动执行。"
                 "delivery_index是保存的交付索引，read_delivery可读取完整原因、文件版本与步骤；追问为什么或如何打开时读原交付再解释，不重新开工。"
                 "receipt_index是最近工具回执的轻量索引，不是结论；可按role、message_seq、name查完整结果，run_id不是角色名。"
@@ -831,6 +848,7 @@ class TeamService:
                                  "revision": revision,
                                  **({"execution_contract": dict(LOCAL_EVENT_CONTRACT)}
                                     if call.name in LOCAL_EVENT_TOOLS and not self.rt.log.db.in_transaction else {}),
+                                 **({"execution_contract": dict(BROWSER_CONTRACT)} if call.name == "browser_check" else {}),
                                  "arguments": self.rt.workspaces._public_arguments(call.name, call.arguments)})
                     schema = next(t["input_schema"] for t in tools if t["name"] == call.name)
                     result = self._invoke_tool(task_id, role, started, revision, call, schema,
