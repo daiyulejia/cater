@@ -31,6 +31,8 @@ EVENT_CATEGORIES = {
     "team.tool_started": "execution",
     "team.tool_finished": "execution",
     "team.artifact_saved": "outcome",
+    "team.review_requested": "review",
+    "team.review_recorded": "review",
     "planning.requested": "planning",
     "planning.started": "planning",
     "planning.finished": "planning",

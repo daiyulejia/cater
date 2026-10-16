@@ -16,6 +16,17 @@ export type TeamAssignment = {
   status?: string
 }
 
+export type TeamReview = {
+  root_seq: number
+  request_seq: number
+  author: string
+  reviewer: string
+  artifacts: { seq: number; filename: string; content_sha256: string }[]
+  status: 'pending' | 'changes_requested' | 'approved' | 'outdated' | 'stale'
+  feedback?: string
+  revision: number
+}
+
 export type TeamState = {
   enabled: boolean
   objective: string
@@ -23,6 +34,7 @@ export type TeamState = {
   pending_count: number
   runs: TeamRun[]
   assignments: TeamAssignment[]
+  reviews?: TeamReview[]
   checkpoint: string
   revision: number
 }

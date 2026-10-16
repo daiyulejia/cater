@@ -1,14 +1,41 @@
 import { lazy, Suspense } from 'react'
 import type { Artifact } from './Artifact'
 import { isTeamHost, teamRuns, teamRunStatus, teamStatus } from './team'
-import type { TeamEvent, TeamState } from './team'
+import type { TeamEvent, TeamReview, TeamState } from './team'
 
 const ArtifactPreview = lazy(() => import('./Artifact').then((module) => ({ default: module.ArtifactPreview })))
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const excerpt = (value: unknown, limit = 800): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（仅显示部分内容）' : '') : ''
 const toolNames: Record<string, string> = { workspace_run: '运行命令', workspace_read: '读取文件', workspace_write: '写入文件', workspace_search: '查找文件', workspace_list: '列出目录',
-  delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果', read_receipts: '核对执行回执', read_messages: '补读历史消息', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件', set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复', request_questions: '发送补充问题' }
+  delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果', read_receipts: '核对执行回执', read_messages: '补读历史消息', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件', set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复', request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论' }
+
+const reviewStatuses: Record<TeamReview['status'], string> = {
+  pending: '待复核', changes_requested: '待修复', approved: '已复核通过', outdated: '新版待复核', stale: '历史复核',
+}
+
+function TeamReviewStatus({ team, names }: { team: TeamState; names: Record<string, string> }) {
+  const reviews = team.reviews ?? []
+  if (!reviews.length) return null
+  const active = reviews.filter((review) => review.status !== 'approved' && review.status !== 'stale')
+  const closed = reviews.filter((review) => review.status === 'approved' || review.status === 'stale')
+  const rows = (items: TeamReview[]) => <ul className="mt-2 space-y-2">{items.map((review) => <li key={`${review.root_seq}:${review.request_seq}`}>
+    <p><strong>{reviewStatuses[review.status]}</strong> · @{names[review.author] ?? review.author} 修改 · @{names[review.reviewer] ?? review.reviewer} 复核</p>
+    <details>
+      <summary className="cursor-pointer">文件与反馈 · {review.artifacts.length} 份</summary>
+      <ul className="mt-1 space-y-1">{review.artifacts.map((artifact) => <li key={artifact.seq}>{artifact.filename} · 成果 #{artifact.seq}</li>)}</ul>
+      {review.feedback && <p className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap">{review.feedback}</p>}
+    </details>
+  </li>)}</ul>
+  return <section aria-label="修复与复核" className="border-t border-[#eaded1] pt-3">
+    <h3 className="font-semibold">修复与复核</h3>
+    {active.length > 0 && rows(active)}
+    {closed.length > 0 && <details className="mt-2">
+      <summary className="cursor-pointer font-semibold">已通过与历史 · {closed.length} 项</summary>
+      {rows(closed)}
+    </details>}
+  </section>
+}
 
 function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean }) {
   const detail = (value: unknown) => excerpt(value, full ? Number.MAX_SAFE_INTEGER : 800)
@@ -85,6 +112,7 @@ export function TeamProgressPanel({ team, events, names }: { team: TeamState; ev
     {team.checkpoint && team.checkpoint !== team.objective && (team.checkpoint.length > 180
       ? <details><summary className="cursor-pointer font-semibold">交付说明</summary><p className="mt-2 whitespace-pre-wrap">{team.checkpoint}</p></details>
       : <p className="whitespace-pre-wrap">{team.checkpoint}</p>)}
+    <TeamReviewStatus team={team} names={names} />
     {runs.length > 0 && <details><summary className="cursor-pointer font-semibold">消息处理 · {runs.length} 项</summary>
       <ul className="mt-2 space-y-2">{runs.map((run, index) => <li key={`${run.message_seq}:${run.role}:${index}`}>
         <p>@{names[run.role ?? ''] ?? run.role ?? '伙伴'} · {teamRunStatus(run.status)}{run.message_seq ? ` · 消息 #${run.message_seq}` : ''}</p>

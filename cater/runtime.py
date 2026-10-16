@@ -243,6 +243,8 @@ class Runtime:
         self.conversation = ConversationService(self)
         from .team import TeamService
         self.team = TeamService(self)
+        from .team_reviews import TeamReviews
+        self.team_reviews = TeamReviews(self)
         from .questionnaires import QuestionnaireService
         self.questionnaires = QuestionnaireService(self)
         self.consultations = ConsultationService(self)
