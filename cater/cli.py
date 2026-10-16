@@ -71,6 +71,7 @@ def open_runtime(args: argparse.Namespace) -> Runtime:
         roles_path=args.roles,
         browser_checker_path=getattr(args, "browser_checker", None),
         workspaces_path=getattr(args, "workspaces", None),
+        skills_path=getattr(args, "skills", None),
         driver_attempts=args.driver_attempts,
         circuit_breaker_threshold=args.circuit_breaker_threshold,
         audit_key=resolve_audit_key(args),
@@ -715,6 +716,7 @@ def cmd_web(args: argparse.Namespace) -> int:
         roles_path=args.roles,
         browser_checker_path=args.browser_checker,
         workspaces_path=args.workspaces,
+        skills_path=getattr(args, "skills", None),
         driver_attempts=args.driver_attempts,
         circuit_breaker_threshold=args.circuit_breaker_threshold,
         audit_key=resolve_audit_key(args),
@@ -748,6 +750,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--roles", help="role config JSON")
     parser.add_argument("--browser-checker", help="trusted optional browser checker config JSON")
     parser.add_argument("--workspaces", help="trusted host workspace and command configuration JSON")
+    parser.add_argument("--skills", help="trusted optional local skill configuration JSON")
     parser.add_argument("--driver-attempts", type=int, default=2,
                         help="legacy compatibility option; execution calls are never implicitly replayed")
     parser.add_argument("--circuit-breaker-threshold", type=int, default=2, help="failures before a driver circuit opens")

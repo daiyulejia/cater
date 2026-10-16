@@ -2,13 +2,13 @@ import type { Artifact } from './Artifact'
 import { isTeamHost, teamRuns, teamRunStatus, teamStatus } from './team'
 import type { TeamEvent, TeamReview, TeamState } from './team'
 import { NativeBrowserReceipt } from './browserReport'
-import { nativeBrowserReceiptStatus } from './conversationActivityState'
+import { nativeBrowserReceiptStatus, nativeSkillReceiptStatus } from './conversationActivityState'
 import { TeamArtifacts } from './TeamArtifacts'
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const excerpt = (value: unknown, limit = 800): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（仅显示部分内容）' : '') : ''
 const toolNames: Record<string, string> = { workspace_run: '运行命令', workspace_read: '读取文件', workspace_write: '写入文件', workspace_search: '查找文件', workspace_list: '列出目录',
-  browser_check: '浏览器检查', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果', read_background: '读取来源材料', read_receipts: '核对执行回执', read_messages: '补读历史消息', read_checkpoint: '读取工作检查点', read_delivery: '读取交付说明', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件', set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复', request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论' }
+  list_skills: '查看工作指引目录', read_skill: '阅读工作指引', browser_check: '浏览器检查', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果', read_background: '读取来源材料', read_receipts: '核对执行回执', read_messages: '补读历史消息', read_checkpoint: '读取工作检查点', read_delivery: '读取交付说明', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件', set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复', request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论' }
 
 const reviewStatuses: Record<TeamReview['status'], string> = {
   pending: '待复核', changes_requested: '待修复', approved: '已复核通过', outdated: '新版待复核', stale: '历史复核',
@@ -37,7 +37,35 @@ function TeamReviewStatus({ team, names }: { team: TeamState; names: Record<stri
   </section>
 }
 
+export function NativeSkillReceipt({ event }: { event: TeamEvent }) {
+  const status = nativeSkillReceiptStatus(event)
+  const result = record(event.payload.result), listing = (event.payload.name ?? event.payload.tool) === 'list_skills'
+  const readable = ['目录已读取', '目录已读取，配置不可用', '指引已读取'].includes(status)
+  if (!readable) return <p className="mt-1">{status}</p>
+  const skills = (listing ? result.skills : [result.skill]) as Record<string, unknown>[]
+  return <div className="mt-1 min-w-0 space-y-2 whitespace-pre-wrap [overflow-wrap:anywhere]">
+    <p>历史参考记录，不代表当前授权、实际工具执行或任务验收通过。</p>
+    {result.configuration_status === 'unavailable' && <p>自定义工作指引配置不可用，正常工作工具不受影响。</p>}
+    {listing && skills.length === 0 && <p>当前没有可提供的工作指引。</p>}
+    <ul aria-label="工作指引元数据" className="space-y-2">{skills.map((skill) => <li key={skill.id as string} className="min-w-0">
+      <p><strong>{excerpt(skill.title, 200)}</strong> · {skill.status === 'ready' ? '可供阅读' : '已失效，无法阅读'}</p>
+      <p>指引标识：{excerpt(skill.id, 200)}</p>
+      <p>用途：{excerpt(skill.description, 1200)}</p>
+      <p>来源：{skill.source === 'builtin' ? '内置' : '本地配置'}</p>
+      <p className="min-w-0 font-mono [overflow-wrap:anywhere]">版本 SHA-256：{excerpt(skill.sha256, 64) || '未提供'}</p>
+      {typeof skill.bytes === 'number' && <p>大小：{skill.bytes} 字节</p>}
+    </li>)}</ul>
+    <p>本页起点：{String(result.offset)} · {listing ? `目录共 ${result.total} 项` : `全文 ${result.total_chars} 字符`}</p>
+    <p>{result.has_more ? `还有后续${listing ? '目录' : '正文'} · 下一页起点 ${result.next_offset}，本页不代表全文。` : '已到末页。'}</p>
+    {!listing && <details key={`${event.seq}:${String(record(result.skill).sha256)}:${String(result.offset)}`}>
+      <summary className="cursor-pointer font-semibold">工作指引正文 · 本页纯文本</summary>
+      <pre className="mt-2 max-h-64 min-w-0 overflow-auto whitespace-pre-wrap font-mono text-[11px] [overflow-wrap:anywhere]">{result.content as string}</pre>
+    </details>}
+  </div>
+}
+
 function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean }) {
+  if (['list_skills', 'read_skill'].includes((event.payload.name ?? event.payload.tool) as string)) return <NativeSkillReceipt event={event} />
   if (event.payload.name === 'browser_check') return <NativeBrowserReceipt event={event} />
   const detail = (value: unknown) => excerpt(value, full ? Number.MAX_SAFE_INTEGER : 800)
   const p = event.payload
@@ -122,6 +150,7 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
       const role = typeof p.role === 'string' ? p.role : event.actor.id
       const status = p.status ?? result.status ?? result.outcome
       const label = name === 'browser_check' ? nativeBrowserReceiptStatus(finished ?? event)
+        : name === 'list_skills' || name === 'read_skill' ? nativeSkillReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } }, name)
         : !finished ? '已发起，等待回执'
         : result.complete === false || record(result.stdout).complete === false || record(result.stderr).complete === false ? '工具结果待确认'
         : [status, result.outcome].some((value) => ['error', 'failed', 'timeout', 'launch_error', 'blocked'].includes(String(value))) ? '工具未完成'

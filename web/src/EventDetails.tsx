@@ -1,6 +1,7 @@
 import { BrowserReport, NativeBrowserReceipt } from './browserReport'
 import { isTeamHost, isTeamRecovery } from './team'
-import { nativeBrowserReceiptStatus } from './conversationActivityState'
+import { nativeBrowserReceiptStatus, nativeSkillReceiptStatus } from './conversationActivityState'
+import { NativeSkillReceipt } from './TeamProgressPanel'
 
 export type DetailEvent = {
   seq: number
@@ -60,6 +61,9 @@ function text(value: unknown, limit = 1200): string {
 function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 }
+
+const skillTool = (event: DetailEvent) => ['team.tool_started', 'team.tool_finished'].includes(event.type)
+  && ['list_skills', 'read_skill'].includes((event.payload.name ?? event.payload.tool) as string)
 
 function strings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string' && Boolean(entry.trim())) : []
@@ -168,6 +172,14 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       break
     }
     case 'team.tool_started': case 'team.tool_finished':
+      if (skillTool(event)) {
+        status = nativeSkillReceiptStatus(event)
+        add('工具', (p.name ?? p.tool) === 'list_skills' ? '查看工作指引目录' : '阅读工作指引')
+        if (isTeamHost(event)) {
+          add('阅读成员', member(p.role)); number('关联消息', p.message_seq); number('发起事件', p.started_seq)
+        } else note = '来源未通过团队系统身份核对，不能作为工作指引读取依据。'
+        break
+      }
       if ((p.name ?? p.tool) === 'browser_check') {
         status = nativeBrowserReceiptStatus(event)
         add('工具', '浏览器检查')
@@ -378,6 +390,7 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
     </div>)}</dl>}
     {event.type === 'verification.completed' && event.payload.browser_report !== undefined && <BrowserReport report={event.payload.browser_report} />}
     {event.type === 'team.tool_finished' && (event.payload.name ?? event.payload.tool) === 'browser_check' && <NativeBrowserReceipt event={event} />}
+    {skillTool(event) && event.type === 'team.tool_finished' && <NativeSkillReceipt event={event} />}
     {note && <p className="text-[#728679]">{note}</p>}
     {event.type === 'collaboration.finished' && ['answered', 'declined'].includes(String(event.payload.status))
       && event.actor.kind === 'system' && event.actor.id === 'collaboration' && event.actor.role === 'collaboration'
@@ -387,9 +400,9 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
         {event.payload.evidence.filter((entry) => entry && Number.isInteger(entry.artifact_seq) && entry.artifact_seq > 0 && typeof entry.quote === 'string')
           .map((entry, index) => <blockquote key={index} className="mt-2 whitespace-pre-wrap">成果 #{entry.artifact_seq}：{entry.quote}</blockquote>)}
       </details>}
-    <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
+    {!skillTool(event) && <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
       <summary className="cursor-pointer text-[#728679]">开发者详情</summary>
       <pre tabIndex={0} aria-label="原始事件 JSON" className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(event, null, 2)}</pre>
-    </details>
+    </details>}
   </section>
 }

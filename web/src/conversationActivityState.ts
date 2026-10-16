@@ -36,6 +36,54 @@ const tools: Record<string, string> = {
   read_receipts: '核对执行回执', read_messages: '补读历史消息', read_background: '读取来源材料', read_checkpoint: '读取工作检查点', read_delivery: '读取交付说明', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件',
   set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复',
   request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论',
+  list_skills: '查看工作指引目录', read_skill: '阅读工作指引',
+}
+
+const skillCount = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+const skillText = (value: unknown): value is string => typeof value === 'string' && Boolean(value.trim())
+const skillHash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value)
+const skillMetadata = (value: unknown) => {
+  const item = object(value)
+  return skillText(item.id) && skillText(item.title) && skillText(item.description)
+    && (item.source === 'builtin' || item.source === 'configured') && (item.status === 'ready' || item.status === 'unavailable')
+    && Array.isArray(item.requires) && item.requires.every(skillText)
+    && (item.sha256 === undefined || skillHash(item.sha256)) && (item.bytes === undefined || skillCount(item.bytes))
+}
+
+export function nativeSkillReceiptStatus(event: TeamEvent, name = event.payload.name ?? event.payload.tool): string {
+  if (!isTeamHost(event)) return '指引回执来源待核对'
+  if (event.type === 'team.tool_started') return '已发起，等待回执'
+  const result = object(event.payload.result), args = object(event.payload.arguments)
+  if (result.status === 'error') {
+    if (!skillText(result.code) || !skillText(result.message)) return '指引结果待确认'
+    return ['skill_changed', 'skill_version_changed', 'version_changed', 'version_mismatch', 'sha256_mismatch'].includes(result.code)
+      ? '指引版本已变化，请重新核对目录' : '工作指引不可用'
+  }
+  if (result.status !== 'ok' || result.complete === false || result.truncated === true
+    || ![undefined, 'ok', 'completed', 'succeeded'].includes(event.payload.status as string | undefined)) return '指引结果待确认'
+  const listing = name === 'list_skills'
+  const items = listing ? result.skills : [result.skill]
+  if (!Array.isArray(items) || items.length > 20 || !items.every(skillMetadata)
+    || new Set(items.map(item => object(item).id)).size !== items.length) return '指引结果待确认'
+  const total = listing ? result.total : result.total_chars, offset = result.offset
+  if (!listing && (typeof result.content !== 'string' || result.content.length > 24000 || object(result.skill).status !== 'ready')) return '指引结果待确认'
+  const size = listing ? items.length : Array.from(result.content as string).length
+  if (!skillCount(total) || !skillCount(offset) || offset > total || (!listing && size > 12000)
+    || offset + size > total || typeof result.has_more !== 'boolean' || result.has_more !== (offset + size < total)
+    || (result.has_more ? size === 0 || result.next_offset !== offset + size
+      : result.next_offset !== undefined && result.next_offset !== null && result.next_offset !== offset + size)
+    || (args.offset !== undefined && args.offset !== offset)) return '指引结果待确认'
+  if (listing) {
+    if (result.configuration_status !== 'ok' && result.configuration_status !== 'unavailable') return '指引结果待确认'
+    return result.configuration_status === 'unavailable' ? '目录已读取，配置不可用' : '目录已读取'
+  }
+  const skill = object(result.skill)
+  if (args.skill_id !== undefined && args.skill_id !== skill.id) return '指引结果待确认'
+  if (args.expected_sha256 !== undefined) {
+    if (!skillHash(args.expected_sha256)) return '指引结果待确认'
+    if (!skillHash(skill.sha256) || args.expected_sha256.toLowerCase() !== skill.sha256.toLowerCase()) return '指引版本已变化，请重新核对目录'
+  }
+  return '指引已读取'
 }
 
 export function nativeBrowserReceiptStatus(event: TeamEvent): string {
@@ -79,6 +127,7 @@ function receiptFor(start: TeamEvent, events: TeamEvent[]) {
 
 function toolOutcome(event: TeamEvent, name = event.payload.name) {
   if (name === 'browser_check') return nativeBrowserReceiptStatus(event)
+  if (name === 'list_skills' || name === 'read_skill') return nativeSkillReceiptStatus(event, name)
   const result = object(event.payload.result)
   if ([event.payload.status, result.status, result.outcome].some((status) =>
     ['error', 'failed', 'timeout', 'launch_error', 'blocked', 'cancelled'].includes(String(status)))
@@ -220,7 +269,9 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   let anyOpenTool = false
   for (const role of roles) {
     const run = roleRuns.get(role), tool = latestTools.get(role)
-    const finished = tool ? receiptFor(tool, hosts) : undefined
+    const receipt = tool ? receiptFor(tool, hosts) : undefined
+    const finished = receipt && tool && ['list_skills', 'read_skill'].includes(String(tool.payload.name))
+      ? { ...receipt, payload: { ...tool.payload, ...receipt.payload } } : receipt
     const toolBelongs = tool && (!run?.start || tool.seq > run.start.seq
       && (run.start.payload.run_id === undefined || tool.payload.run_id === run.start.payload.run_id))
     const openTool = toolBelongs && !finished && (!run || active(run.status))
@@ -243,7 +294,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
           : successful(run?.status) ? '本轮消息处理已结束' : '执行结果待确认'
     if (action && tool?.payload.name !== 'wait_for_reply' && !awaitingCustomer) text = `${action} · ${finished ? toolOutcome(finished, tool?.payload.name) : '已发起，等待回执'}；${text}`
     lines.push({ id: role, role, text: `${label(role)} · ${text}`, moving,
-      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过'].includes(toolOutcome(finished, tool?.payload.name))) })
+      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取'].includes(toolOutcome(finished, tool?.payload.name))) })
   }
   const reported = new Set(events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'agent'
     && event.payload.kind === 'report' && (() => {

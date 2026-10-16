@@ -42,6 +42,7 @@ from .responses import load_response_object
 from .review_contract import receipt_context
 from .checkpoints import work_checkpoint
 from .execution_control import ExecutionControl
+from .skills import SkillLibrary
 
 
 MAX_TASK_GOAL_CHARS = 12_000
@@ -200,6 +201,7 @@ class Runtime:
         roles_path: str | Path | None = None,
         browser_checker_path: str | Path | None = None,
         workspaces_path: str | Path | None = None,
+        skills_path: str | Path | None = None,
         driver_attempts: int = 2,
         circuit_breaker_threshold: int = 2,
         audit_key: str | bytes | None = None,
@@ -233,6 +235,7 @@ class Runtime:
                                _execution_fingerprint(config, configured_drivers, self.browser_checks))
         from .workspaces import WorkspaceService
         self.workspaces = WorkspaceService(self, workspaces_path)
+        self.skills = SkillLibrary(skills_path)
         from .workspace_checks import WorkspaceChecks
         self.workspace_checks = WorkspaceChecks(self)
         self.work.workspace_configuration = self.workspaces.fingerprint
