@@ -206,15 +206,45 @@ def openai_history(system: str, prompt: str, history: list[dict]) -> list[dict]:
     return messages
 
 
+_TOOL_USAGE_COUNTS = (
+    "prompt_tokens", "completion_tokens", "total_tokens",
+    "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens",
+    "prompt_cache_hit_tokens", "prompt_cache_miss_tokens",
+)
+_TOOL_USAGE_DETAILS = {
+    "prompt_tokens_details": ("cached_tokens", "audio_tokens"),
+    "completion_tokens_details": (
+        "reasoning_tokens", "audio_tokens", "accepted_prediction_tokens", "rejected_prediction_tokens",
+    ),
+    "cache_creation": ("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"),
+}
+
+
+def safe_tool_usage(value: Any) -> dict:
+    """Return fresh, allowlisted token counts only; never infer missing usage."""
+    if not isinstance(value, dict):
+        return {}
+    counts = {key: value[key] for key in _TOOL_USAGE_COUNTS
+              if key in value and valid_token_count(value[key])}
+    for key, fields in _TOOL_USAGE_DETAILS.items():
+        details = value.get(key)
+        if isinstance(details, dict):
+            safe = {name: details[name] for name in fields
+                    if name in details and valid_token_count(details[name])}
+            if safe:
+                counts[key] = safe
+    return counts
+
+
 def _usage(data: dict, *, anthropic: bool, driver: str) -> tuple[int, dict]:
     usage = data.get("usage")
     keys = (("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
             if anthropic else ("prompt_tokens", "completion_tokens", "total_tokens"))
-    counts = {k: usage[k] for k in keys if k in usage and valid_token_count(usage[k])} if isinstance(usage, dict) else {}
+    counts = safe_tool_usage(usage)
     required = keys[:2] if anthropic else ("total_tokens",)
     reported = (all(k in counts for k in required)
                 and isinstance(usage, dict) and all(k not in usage or k in counts for k in keys))
-    tokens = (sum(counts.values()) if anthropic else counts.get("total_tokens", 0)) if reported else 0
+    tokens = (sum(counts[k] for k in keys if k in counts) if anthropic else counts.get("total_tokens", 0)) if reported else 0
     return tokens, {"driver": driver, "mode": "anthropic" if anthropic else "openai_compatible",
                     "token_usage": "reported" if reported else "unavailable", "usage": counts}
 
