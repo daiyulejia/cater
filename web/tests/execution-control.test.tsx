@@ -78,7 +78,11 @@ test('更多操作使用图标；暂停等待服务端确认，恢复只调用 c
   data.b = detail('b', 'paused', 2)
   await act(async () => pause.resolve(json(data.b)))
   expect(screen.getByRole('status', { name: '执行状态' }).textContent).toContain('已暂停后续执行；在途调用仍可能返回')
-  expect(screen.getByRole('status', { name: '执行状态' }).textContent).toContain('paused 的服务端原因')
+  expect(screen.getByRole('status', { name: '执行状态' }).textContent).not.toContain('paused 的服务端原因')
+  const reason = screen.getByText('paused 的服务端原因').closest('details')!
+  expect(reason.open).toBe(false)
+  fireEvent.click(within(reason).getByText('暂停说明'))
+  expect(reason.open).toBe(true)
   expect(input().value).toBe('继续原来的执行')
   expect((screen.getByRole('button', { name: '发送消息' }) as HTMLButtonElement).disabled).toBe(false)
   expect(within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /b任务.*已暂停/ })).toBeTruthy()
@@ -91,6 +95,7 @@ test('更多操作使用图标；暂停等待服务端确认，恢复只调用 c
   expect((screen.getByRole('button', { name: '发送消息' }) as HTMLButtonElement).disabled).toBe(false)
   await control('pause')
   expect(body(2).request_id).not.toBe(body(0).request_id)
+  expect(screen.getByText('paused 的服务端原因').closest('details')!.open).toBe(false)
 })
 
 test.each(['paused', 'cancelled'] as const)('%s 始终允许普通聊天及快捷键，由后端语义处理继续；取消不会恢复', async (state) => {
@@ -284,7 +289,11 @@ test.each([true, false])('详情摘要控制状态可以独立生效，顶层存
     summary: { ...next.summary, execution_control: { state: 'paused', seq: 5, reason: '最新摘要状态' } },
   }) : undefined
   await mount()
-  expect(screen.getByRole('status', { name: '执行状态' }).textContent).toContain('最新摘要状态')
+  expect(screen.getByRole('status', { name: '执行状态' }).textContent).toContain('已暂停后续执行')
+  const reason = screen.getByText('最新摘要状态').closest('details')!
+  expect(reason.open).toBe(false)
+  fireEvent.click(within(reason).getByText('暂停说明'))
+  expect(reason.open).toBe(true)
   menu()
   expect(screen.getByRole('button', { name: '恢复执行' })).toBeTruthy()
 })

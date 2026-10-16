@@ -29,6 +29,23 @@ function downloadName(item: Artifact): string {
 const sourceText = (source?: string) => source === 'local_demo' ? '演示样例' : source === 'external' ? '成员发布' : '来源未记录'
 const bodyError = (reason?: string) => ({ too_large: '正文太大，需要拆分后重新发布。', invalid_format: '正文格式不支持，摘要已保留。', invalid_encoding: '正文编码异常，摘要已保留。', invalid_content: '没有收到可阅读的正文。' }[reason ?? ''] ?? '没有收到可阅读的正文。')
 
+function ArtifactSummary({ item, reader = false }: { item: Artifact; reader?: boolean }) {
+  const text = typeof item.summary === 'string' ? item.summary : ''
+  const condensed = text.replace(/\s+/gu, ' ').trim()
+  const characters = Array.from(condensed), limit = reader ? 96 : 48
+  const shortened = characters.length > limit
+  const expandable = shortened || Boolean(condensed) && condensed !== text
+  const preview = shortened ? characters.slice(0, limit).join('') + '…' : condensed
+  const Description = reader ? Dialog.Description : 'p'
+  return <>
+    <Description className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-[#687e73]">{preview}</Description>
+    {expandable && <details key={item.seq} className="mt-1 text-[11px] leading-5 text-[#52766d]">
+      <summary className="cursor-pointer font-semibold">完整摘要</summary>
+      <p className="mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</p>
+    </details>}
+  </>
+}
+
 function LocalSaveStatus({ path, error, hasBody }: { path?: string; error?: string; hasBody: boolean }) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   if (error) return <p role="status" className="mt-2 break-words text-[11px] leading-5 text-amber-800">本机保存失败，{hasBody ? '正文仍可查看和下载' : '已发布内容仍保留'}。{error}</p>
@@ -67,10 +84,10 @@ export function ArtifactPreview({ item, publisher, showSummary = true }: { item:
     } catch { setDownloadError(true) }
   }
   return <div>
-    {showSummary && <><strong className="block text-xs text-[#294c40]">{item.title}</strong><p className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-[#687e73]">{item.summary}</p></>}
+    {showSummary && <><strong className="block text-xs text-[#294c40]">{item.title}</strong><ArtifactSummary item={item} /></>}
     <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2 text-[11px]">
       <span className={item.source === 'local_demo' ? 'text-[#a06b36]' : 'text-[#839087]'}>{sourceText(item.source)}</span>
-      {hasBody && <><span className="max-w-full break-all text-[#687e73]">{filename}</span><button onClick={download} className="artifact-tool" title={`下载 ${filename}`} aria-label={`下载 ${filename}`}><Download size={16} /></button></>}
+      {hasBody && <>{(!showSummary || item.title?.trim() !== filename) && <span className="max-w-full break-all text-[#687e73]">{filename}</span>}<button onClick={download} className="artifact-tool" title={`下载 ${filename}`} aria-label={`下载 ${filename}`}><Download size={16} /></button></>}
       {hasBody && <Dialog.Root onOpenChange={() => { setCopyState('idle'); setDownloadError(false) }}>
         <Dialog.Trigger asChild><button className="inline-flex items-center gap-1.5 font-semibold text-[#2e786b] hover:text-[#a95945]"><FileText size={14} /> 查看正文</button></Dialog.Trigger>
         <Dialog.Portal>
@@ -85,7 +102,7 @@ export function ArtifactPreview({ item, publisher, showSummary = true }: { item:
                   <Dialog.Close asChild><button className="artifact-tool" title="回到对话" aria-label="关闭成果正文"><X size={19} /></button></Dialog.Close>
                 </div>
               </div>
-              <Dialog.Description className="mt-2 break-words text-xs leading-5 text-[#728679]">{item.summary}</Dialog.Description>
+              <ArtifactSummary item={item} reader />
               <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[#9a8778]"><span className="break-all">{filename}</span><span>事件 #{item.seq}</span>{copyState !== 'idle' && <span role="status" className="text-[#377968]">{copyState === 'copied' ? '已复制' : '复制未完成'}</span>}{downloadError && <span role="alert" className="text-rose-700">下载未完成</span>}</div>
             </header>
             <article className="artifact-document min-h-0 flex-1 overflow-y-auto px-5 py-6 sm:px-8 sm:py-8">
@@ -101,7 +118,10 @@ export function ArtifactPreview({ item, publisher, showSummary = true }: { item:
       {source && <a href={source} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[#377d70]"><ExternalLink size={13} /> 打开来源</a>}
     </div>
     <LocalSaveStatus key={`${item.local_path ?? ''}:${item.local_save_error ?? ''}`} path={item.local_path} error={item.local_save_error} hasBody={hasBody} />
-    {item.uri && !source && <p className="mt-2 break-all text-[11px] leading-5 text-[#86968c]">资源引用：{item.uri}</p>}
+    {item.uri && !source && <details key={`${item.seq}:reference`} className="mt-2 text-[11px] leading-5 text-[#86968c]">
+      <summary className="cursor-pointer">资源引用</summary>
+      <p className="mt-1 max-h-24 overflow-y-auto break-all">{item.uri}</p>
+    </details>}
     {downloadError && <p role="alert" className="mt-2 text-xs text-rose-700">下载未完成，请重试。</p>}
     {item.content_error && <p className="mt-2 text-[11px] leading-5 text-[#a3704a]">{bodyError(item.content_error)}</p>}
   </div>

@@ -52,6 +52,24 @@ beforeEach(() => {
 const posts = () => request.mock.calls.filter(([, init]) => init.method && init.method !== 'GET')
 const input = () => screen.getByRole('textbox', { name: '向团队发送消息' }) as HTMLTextAreaElement
 
+test.each(['paused', 'cancelled'] as const)('进展模块失败时%s说明与聊天仍可用，不自动提交控制', async state => {
+  const original = request.getMockImplementation()!
+  request.mockImplementation((url: string, init: RequestInit = {}) => /^\/api\/tasks\/task_(alpha|beta)$/.test(url)
+    ? Promise.resolve(json({ ...detail(url.split('/')[3]), execution_control: { state, seq: 5, reason: '本次控制的原始说明' } }))
+    : original(url, init))
+  render(<App />)
+  await screen.findByText('这部分暂时打不开')
+  expect(screen.getByRole('status', { name: '执行状态' }).textContent).toContain(state === 'paused' ? '已暂停后续执行' : '已取消后续执行')
+  fireEvent.change(input(), { target: { value: '模块失效也保留的草稿' } })
+  const reason = screen.getByText('本次控制的原始说明').closest('details')!
+  expect(reason.open).toBe(false)
+  fireEvent.click(within(reason).getByText(state === 'paused' ? '暂停说明' : '取消说明'))
+  expect(reason.open).toBe(true)
+  expect(input().value).toBe('模块失效也保留的草稿')
+  expect((screen.getByRole('button', { name: '发送消息' }) as HTMLButtonElement).disabled).toBe(false)
+  expect(posts()).toHaveLength(0)
+})
+
 test.each(['bad_questions', 'wrong_summary', 'wrong_task'] as const)('轮询收到%s不污染已显示聊天和未发送草稿', async response => {
   await act(async () => { render(<App />) })
   await screen.findByText('已保存的店长答复')

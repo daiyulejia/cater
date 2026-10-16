@@ -804,7 +804,7 @@ test('工具回执优先按 started_seq 配对，展示真实 preview、退出�
   expect(stream().queryByText('不能作为店长交付结论')).toBeNull()
 })
 
-test('相同事件版本的轻量摘要刷新保留已核对消息计数和处理状态', async () => {
+test('相同事件版本的权威摘要刷新保留真实团队处理状态和草稿，不按消息数量暗示完成', async () => {
   const initial = detail([
     event(2, 'team.message_received', { text: '继续完善入口', kind: 'message' }, 'human', 'human'),
     event(3, 'team.run_started', { message_seq: 2, role: 'dev' }),
@@ -813,10 +813,26 @@ test('相同事件版本的轻量摘要刷新保留已核对消息计数和处�
   initial.summary = { id: 'team-task', goal: '团队接力', status: 'done', status_label: '已完成', version: 4, latest_seq: 4,
     conversation_count: 99, team: { enabled: true, status: 'running', revision: 1, pending_count: 0 } }
   const app = await mount(initial)
+  const input = screen.getByRole('textbox', { name: '向团队发送消息' }) as HTMLTextAreaElement
+  fireEvent.change(input, { target: { value: '继续核对交付的草稿' } })
+  const detailReads = app.fetchMock.mock.calls.filter(([url]) => url === '/api/tasks/team-task').length
+  const summaryReads = app.fetchMock.mock.calls.filter(([url]) => url === '/api/task-summaries').length
+  const refreshed = { ...initial.summary, conversation_count: 233 }
   const original = app.fetchMock.getMockImplementation()!
-  app.fetchMock.mockImplementation((url, init) => url === '/api/tasks/team-task' ? new Promise<Response>(() => {}) : original(url, init))
+  app.fetchMock.mockImplementation((url, init) => url === '/api/task-summaries' ? json({ tasks: [refreshed] })
+    : url === '/api/tasks/team-task' ? new Promise<Response>(() => {}) : original(url, init))
   await act(async () => fireEvent(document, new Event('visibilitychange')))
-  expect(within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /2 条对话.*消息处理完成，任务待交付/ })).toBeTruthy()
+  const selected = within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /团队接力.*消息处理完成，任务待交付/ })
+  expect(selected.getAttribute('aria-current')).toBe('page')
+  expect(within(selected).getByRole('img', { name: '有未发送内容' })).toBeTruthy()
+  expect(selected.textContent).not.toMatch(/条对话|对话待同步|店长确认可交付/)
+  expect(input.value).toBe('继续核对交付的草稿')
+  expect(stream().getByText('继续完善入口')).toBeTruthy()
+  expect(board().getByRole('region', { name: '团队进度' })).toBeTruthy()
+  expect(app.fetchMock.mock.calls.filter(([url]) => url === '/api/task-summaries')).toHaveLength(summaryReads + 1)
+  expect(app.fetchMock.mock.calls.filter(([url]) => url === '/api/tasks/team-task')).toHaveLength(detailReads + 1)
+  expect(app.fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0)
+  expect(app.fetchMock.mock.calls.some(([url]) => url === '/api/tasks')).toBe(false)
 })
 
 test('详情根级 team 可接入，演示 fallback 未开启 team 时沿用原工作项显示', async () => {

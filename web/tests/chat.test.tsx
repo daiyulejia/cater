@@ -130,7 +130,10 @@ test('店长规划结论出现在聊天中，计费回执不重复成一条发�
   expect(screen.queryByText('规划计费回执')).toBeNull()
   expect(screen.queryByText('交付计费回执')).toBeNull()
   expect(screen.getByText(/店长在整理安排/)).toBeTruthy()
-  expect(within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /乙任务.*4 条对话/ })).toBeTruthy()
+  const selected = within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /乙任务.*待开始/ })
+  expect(selected.getAttribute('aria-current')).toBe('page')
+  expect(selected.textContent).not.toMatch(/条对话|对话待同步/)
+  expect(screen.getByLabelText('聊天记录').querySelectorAll('article')).toHaveLength(4)
 })
 
 test('进度问答在聊天中显示，不冒充方向变更或再次排队', async () => {

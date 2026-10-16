@@ -172,11 +172,15 @@ export function TeamProgressPanel({ team, events, names, executionState = 'runni
     <p aria-label="团队执行状态" className="font-semibold">{executionState === 'paused' ? '已暂停后续执行' : executionState === 'cancelled' ? '已取消后续执行' : teamStatus({ ...team, runs })}</p>
     <ModelUsagePanel events={events} names={names} />
     {team.status === 'done' && <p>店长的交付结论，验证范围以交付说明与实际回执为准。</p>}
-    <p className="whitespace-pre-wrap">{team.objective}</p>
+    <details key={`objective:${team.revision}`}>
+      <summary className="cursor-pointer font-semibold">当前目标</summary>
+      <p className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap">{team.objective}</p>
+    </details>
     {team.pending_count > 0 && <p>待处理消息：{team.pending_count}</p>}
-    {team.checkpoint && team.checkpoint !== team.objective && (team.checkpoint.length > 180
-      ? <details><summary className="cursor-pointer font-semibold">交付说明</summary><p className="mt-2 whitespace-pre-wrap">{team.checkpoint}</p></details>
-      : <p className="whitespace-pre-wrap">{team.checkpoint}</p>)}
+    {team.checkpoint && team.checkpoint !== team.objective && <details key={`checkpoint:${team.revision}`}>
+      <summary className="cursor-pointer font-semibold">最近工作备注</summary>
+      <p className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap">{team.checkpoint}</p>
+    </details>}
     <TeamReviewStatus team={team} names={names} />
     {runs.length > 0 && <details><summary className="cursor-pointer font-semibold">消息处理 · {runs.length} 项</summary>
       <ul className="mt-2 space-y-2">{runs.map((run, index) => <li key={`${run.message_seq}:${run.role}:${index}`}>

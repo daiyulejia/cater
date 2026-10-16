@@ -23,7 +23,10 @@ export function ConversationActivity(props: ConversationActivityProps) {
     const timer = window.setTimeout(tick, Math.max(1, deadline - Date.now() + 1))
     return () => window.clearTimeout(timer)
   }, [deadline])
-  if (!view.visible) return null
+  const stopped = props.executionState === 'paused' || props.executionState === 'cancelled'
+  // Execution control is displayed by App even if this lazy panel cannot load.
+  if (!view.visible || stopped && !props.sending && !props.activity?.active && !props.syncError) return null
+  const notice = stopped && !props.syncError ? undefined : view.notice
   const canPause = props.activity?.active === true && props.executionState === 'running' && !props.controlBusy
   const buttonClass = 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[#52766d] hover:bg-[#edf4ef] focus-visible:outline-2 focus-visible:outline-[#d77a6b] disabled:opacity-40'
   return <section aria-label="当前工作进展" className="min-w-0 border-t border-[#eaded1] py-3 text-xs leading-5 text-[#52766d] [overflow-wrap:anywhere]">
@@ -32,7 +35,7 @@ export function ConversationActivity(props: ConversationActivityProps) {
       <div className="flex shrink-0 items-center gap-1">
         <button type="button" aria-label="查看过程" title={view.lines.length > lines.length ? `查看过程，另有 ${view.lines.length - lines.length} 项进展` : '查看过程'} className={buttonClass} onClick={props.onInspect}><ListTree size={16} aria-hidden="true" /></button>
         <button type="button" aria-label="刷新状态" title="刷新状态（仅查询）" className={buttonClass} onClick={props.onRefresh}><RefreshCw size={16} aria-hidden="true" /></button>
-        {!view.waitsForCustomer && <button type="button" aria-label="暂停后续执行" title="暂停后续执行；在途调用仍可能返回" className={buttonClass} disabled={!canPause}
+        {!view.waitsForCustomer && !stopped && <button type="button" aria-label="暂停后续执行" title="暂停后续执行；在途调用仍可能返回" className={buttonClass} disabled={!canPause}
           onClick={() => { if (canPause) props.onPause() }}><Pause size={16} aria-hidden="true" /></button>}
       </div>
     </div>
@@ -47,7 +50,7 @@ export function ConversationActivity(props: ConversationActivityProps) {
         <span className="min-w-0 flex-1">{line.text}</span>
         {line.moving && <LoaderCircle size={14} aria-label="有近期执行反馈" className="mt-1 shrink-0 motion-safe:animate-spin" />}
       </p>)}
-      {view.notice && <p className="flex items-start gap-2 text-[#b55f51]"><CircleAlert size={14} className="mt-1 shrink-0" aria-hidden="true" /><span className="min-w-0">{view.notice}</span></p>}
+      {notice && <p className="flex items-start gap-2 text-[#b55f51]"><CircleAlert size={14} className="mt-1 shrink-0" aria-hidden="true" /><span className="min-w-0">{notice}</span></p>}
     </div>}
   </section>
 }

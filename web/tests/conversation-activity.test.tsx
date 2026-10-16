@@ -335,14 +335,28 @@ test('等待、协作故障与无执行状态均有明确文案，不因 complet
   expect(text({ events: [human(), start(), end()], activity: { active: false, state: 'completed' } })).toContain('尚未确认答复')
 })
 
-test.each(['paused', 'cancelled'])('%s 保留聊天与在途语义，撤销动画且无计时器', (executionState) => {
+test.each(['paused', 'cancelled'])('%s 活跃时保留进展且不重复父级控制说明，没有动画或重复暂停按钮', (executionState) => {
   vi.useFakeTimers().setSystemTime(now)
   render(<ConversationActivity {...props({ events: [human(), start(), tool()], executionState, activity: { active: true, state: 'running' } })} />)
-  expect(screen.getByRole('status').textContent).toContain('在途调用仍可能返回')
-  expect(screen.getByRole('status').textContent).toContain('仍可直接聊天')
+  expect(conversationActivity(props({ executionState }), now).notice).toContain('在途调用仍可能返回')
+  expect(screen.getByRole('region', { name: '当前工作进展' }).textContent).not.toContain('在途调用仍可能返回')
   expect(screen.queryByLabelText('有近期执行反馈')).toBeNull()
   expect(vi.getTimerCount()).toBe(0)
-  fireEvent.click(screen.getByRole('button', { name: '暂停后续执行' }))
+  expect(screen.queryByRole('button', { name: '暂停后续执行' })).toBeNull()
+})
+
+test.each(['paused', 'cancelled'])('%s 闲置时把空间留给聊天，发送与同步失败仍显示反馈', (executionState) => {
+  const initial = props({ executionState, activity: { active: false, state: 'completed' } })
+  const view = render(<ConversationActivity {...initial} />)
+  expect(screen.queryByRole('region', { name: '当前工作进展' })).toBeNull()
+  view.rerender(<ConversationActivity {...initial} sending />)
+  expect(screen.getByRole('region', { name: '当前工作进展' }).textContent).toContain('消息正在发送')
+  view.rerender(<ConversationActivity {...initial} syncError="无法同步" />)
+  expect(screen.getByRole('region', { name: '当前工作进展' }).textContent).toContain('同步失败')
+  expect(screen.queryByLabelText('有近期执行反馈')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '刷新状态' }))
+  expect(initial.onRefresh).toHaveBeenCalledTimes(1)
+  expect(initial.onPause).not.toHaveBeenCalled()
 })
 
 test('按钮仅触发传入回调，暂停受 active、running、busy 限制', () => {
@@ -356,7 +370,8 @@ test('按钮仅触发传入回调，暂停受 active、running、busy 限制', (
   expect(initial.onPause).toHaveBeenCalledTimes(1)
   for (const extra of [{ controlBusy: true }, { executionState: 'paused' }, { activity: { active: false, state: 'running' } }]) {
     mounted.rerender(<ConversationActivity {...initial} {...extra} />)
-    fireEvent.click(screen.getByRole('button', { name: '暂停后续执行' }))
+    const pause = screen.queryByRole('button', { name: '暂停后续执行' })
+    if (pause) fireEvent.click(pause)
   }
   expect(initial.onPause).toHaveBeenCalledTimes(1)
   for (const button of screen.getAllByRole('button')) expect(button.title).toBeTruthy()

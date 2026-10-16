@@ -73,7 +73,7 @@ type OrgRole = { id: string; name: string; role: string; charter?: string }
 type DriverCoverage = { role_id: string; name: string; driver: string; mode: 'local_demo' | 'external' }
 type Organization = { leader: OrgRole; cabinet: OrgRole[]; workers: OrgRole[]; mode?: 'local_demo' | 'mixed_driver' | 'external_driver'; worker_drivers?: DriverCoverage[]; availability?: TeamAvailability }
 type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'; active: boolean; revision?: number; error?: string; follow_up?: { action?: string } }
-type TaskSummary = { id: string; goal: string; project_id?: string | null; status: string; status_label: string; conversation_count: number; latest_seq: number; version: number; evaluated_at?: number; activity?: Activity; execution_control?: ExecutionControl; team?: TeamSummary | null }
+type TaskSummary = { id: string; goal: string; project_id?: string | null; status: string; status_label: string; conversation_count?: number; latest_seq: number; version: number; evaluated_at?: number; activity?: Activity; execution_control?: ExecutionControl; team?: TeamSummary | null }
 type Task = {
   team?: TeamState | null
   work?: WorkState | null
@@ -121,8 +121,10 @@ function validateTaskDetail(value: TaskDetail, expectedId?: string): void {
       .some(items => items !== undefined && !Array.isArray(items))
     || (value.summary != null && (value.summary.id !== value.task.id || typeof value.summary.goal !== 'string'
       || typeof value.summary.status !== 'string' || typeof value.summary.status_label !== 'string'
-      || [value.summary.version, value.summary.latest_seq, value.summary.conversation_count]
+      || [value.summary.version, value.summary.latest_seq]
         .some(clock => !Number.isSafeInteger(clock) || clock < 0)
+      || typeof value.summary.conversation_count !== 'number'
+      || !Number.isSafeInteger(value.summary.conversation_count) || value.summary.conversation_count < 0
       || (value.summary.evaluated_at !== undefined && (!Number.isFinite(value.summary.evaluated_at) || value.summary.evaluated_at < 0))
       || (value.summary.activity?.revision !== undefined && (!Number.isSafeInteger(value.summary.activity.revision) || value.summary.activity.revision < 0))
       || (value.summary.team?.revision !== undefined && (!Number.isSafeInteger(value.summary.team.revision) || value.summary.team.revision < 0))))) {
@@ -1009,13 +1011,10 @@ function App() {
     const id = next.task.id
     const seq = next.events.at(-1)?.seq ?? 0
     const version = next.summary?.version ?? seq
-    const conversationCount = conversationFor(next.events, {}, null, next.questions, next.clarifications, next.conversation,
-      Boolean(team?.enabled), next.questionnaires).filter((item) => !item.notice).length
     const base = next.summary ?? { id, goal: next.task.goal, project_id: next.task.project_id,
       status: next.task.status, status_label: taskListStatus({ ...next.task, activity: next.activity }),
-      activity: next.activity, conversation_count: conversationCount, latest_seq: seq, version }
-    const item = team?.enabled ? { ...base, team, goal: next.task.goal, status: next.task.status, status_label: teamStatus(team),
-      conversation_count: conversationCount } : base
+      activity: next.activity, latest_seq: seq, version }
+    const item = team?.enabled ? { ...base, team, goal: next.task.goal, status: next.task.status, status_label: teamStatus(team) } : base
     const previous = versionsRef.current[id]
     const comparison = previous ? summaryOrder(item, previous.summary) : 1
     if (activate) chooseTask(id)
@@ -1066,7 +1065,7 @@ function App() {
               goal: task.goal, status: task.status, status_label: task.status_label }
               : item.team?.enabled && task.team?.enabled && item.latest_seq === task.latest_seq && item.team.revision === task.team.revision
                 && item.team.status === task.team.status && item.team.pending_count === task.team.pending_count
-                ? { ...item, team: { ...task.team, ...item.team }, conversation_count: task.conversation_count } : item
+                ? { ...item, team: { ...task.team, ...item.team } } : item
             return summaryOrder(merged, task) >= 0 ? merged : task
           }), ...received.values()]
         })
@@ -1528,15 +1527,20 @@ function App() {
                 {!task.team?.enabled && <button type="button" className="origin-tool" aria-label="提问" title={questionMode ? '取消提问，返回协作草稿' : '向当前对话提问'} aria-pressed={questionMode} disabled={loading} onClick={toggleQuestion}><CircleHelp size={17} aria-hidden="true" /></button>}
                 <button type="button" className="origin-tool" aria-label="基于此对话开新任务" title="基于此对话开新任务" aria-pressed={Boolean(derivation)} disabled={loading || Boolean(derivation)} onClick={beginDerivation}><GitFork size={17} aria-hidden="true" /></button>
                 <TaskControlMenu key={`control:${task.id}`} state={executionState} busy={controlBusy} disabled={loading} retry={sendErrors[controlKey] ? controlRequests[task.id]?.action : undefined} onAction={(action) => void controlTask(action)} />
-                {task.team?.enabled || task.work?.items.length ? <button ref={graphTriggerRef} id="task-graph-trigger" type="button" aria-haspopup="dialog" aria-expanded={graphOpen} onClick={openTaskGraph} className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-semibold text-[#34786e] hover:bg-[#e7f0ec]"><GitBranch size={15} />任务脉络</button> : null}
+                {task.team?.enabled || task.work?.items.length ? <button ref={graphTriggerRef} id="task-graph-trigger" type="button" aria-label="任务脉络" title="查看任务脉络" aria-haspopup="dialog" aria-expanded={graphOpen} onClick={openTaskGraph} className="origin-tool"><GitBranch size={17} aria-hidden="true" /></button> : null}
               </div>
             </div>
-            {!loading && (executionState !== 'running' || controlBusy) && <p role="status" aria-label="执行状态" className="shrink-0 break-words px-4 py-2 text-xs leading-5 text-[#52766d] sm:px-7">
+            {!loading && (executionState !== 'running' || controlBusy) && <div className="shrink-0 break-words px-4 py-2 text-xs leading-5 text-[#52766d] sm:px-7">
+              <p role="status" aria-label="执行状态">
               {executionState === 'paused' ? '已暂停后续执行；在途调用仍可能返回。仍可直接聊天。'
                 : executionState === 'cancelled' ? '已取消后续执行，不可恢复；在途调用仍可能返回。继续执行需新建任务，仍可直接聊天。' : ''}
-              {executionState !== 'running' && executionControl?.reason ? ` 原因：${executionControl.reason}` : ''}
               {controlBusy && controlRequests[task.id] ? ` ${controlLabels[controlRequests[task.id].action]}请求待确认。` : ''}
-            </p>}
+              </p>
+              {executionState !== 'running' && executionControl?.reason && <details key={`reason:${task.id}:${executionControl.seq}`} className="mt-1">
+                <summary className="cursor-pointer font-semibold">{executionState === 'paused' ? '暂停说明' : '取消说明'}</summary>
+                <p className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere]">{executionControl.reason}</p>
+              </details>}
+            </div>}
             {graphLoaded && (task.team?.enabled || task.work?.items.length) ? <AsyncPanel onFailure={() => setGraphOpen(false)} fallback={<p role="status" className="px-4 py-2 text-xs text-[#52766d]">正在打开任务脉络…</p>}><TaskGraph key={task.id} {...(task.team?.enabled ? { team: task.team, events: currentDetail?.events ?? [] } : { work: task.work! })} open={graphOpen} onOpenChange={setGraphOpen} returnFocusRef={graphTriggerRef} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></AsyncPanel> : null}
             <div className="relative flex min-h-0 flex-1 flex-col">
               <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>

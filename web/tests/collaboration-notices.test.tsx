@@ -90,7 +90,9 @@ test.each(['before', 'after'])('计划在店长回执 %s 时仅在原安排气�
   expect(stream().textContent).not.toContain('罐头 加入协作')
   await app.update(); count(2)
   expect(within(stream()).getAllByLabelText('协作通知')).toHaveLength(1)
-  expect(within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /2 条对话/ })).toBeTruthy()
+  const selected = within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /安排接力.*待开始/ })
+  expect(selected.getAttribute('aria-current')).toBe('page')
+  expect(selected.textContent).not.toMatch(/条对话|对话待同步/)
 })
 
 test('重规划只增量提示新 owner/reviewer，暂缓、离开后再加入及重复 owner 不重复加入', async () => {
@@ -127,7 +129,9 @@ test('没有店长消息的手动 plan 与独立 assigned 保留一条必要中�
     event(4, 'subtask.assigned', { id: 'next', owner: 'dev', status: 'assigned' }, 'store_manager')])
   await waitFor(() => expect(within(article(2)).getByLabelText('工作交接').textContent).toContain('接手：@米寇'))
   count(4)
-  expect(within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /1 条对话/ })).toBeTruthy()
+  const selected = within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /安排接力.*待开始/ })
+  expect(selected.getAttribute('aria-current')).toBe('page')
+  expect(selected.textContent).not.toMatch(/条对话|对话待同步/)
   expect(within(article(3)).getByLabelText('工作交接').textContent).toContain('接手：@罐头')
   expect(within(article(3)).getByLabelText('协作通知').textContent).toBe('罐头 加入协作')
   expect(within(article(4)).queryByLabelText('协作通知')).toBeNull()

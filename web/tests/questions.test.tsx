@@ -149,7 +149,9 @@ test('完成任务在原群 POST questions，保留点名，不调用 command �
   expect(screen.getByRole('heading', { name: '乙任务', level: 1 })).toBeTruthy()
   expect(questionInput().value).toBe('')
   expect(screen.getByText(answer)).toBeTruthy()
-  expect(within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /乙任务.*3 条对话.*已完成/ })).toBeTruthy()
+  const selected = within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /乙任务.*已完成/ })
+  expect(selected.getAttribute('aria-current')).toBe('page')
+  expect(selected.textContent).not.toMatch(/条对话|对话待同步/)
   toggle(); expect(normalInput().value).toBe('继续协作的草稿')
   await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送消息' })))
   expect(posts()[1][0]).toBe('/api/tasks/b/command')
@@ -325,7 +327,9 @@ test.each([
   expect(within(bubble as HTMLElement).getByText('提问对象：@米寇')).toBeTruthy()
   expect(within(bubble as HTMLElement).getByText('请结合来源复查。', { exact: true })).toBeTruthy()
   expect(screen.queryByText('历史版本 · 回答基于提问时的任务版本')).toBeNull()
-  expect(within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /乙任务.*3 条对话.*已完成/ })).toBeTruthy()
+  const selected = within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /乙任务.*已完成/ })
+  expect(selected.getAttribute('aria-current')).toBe('page')
+  expect(selected.textContent).not.toMatch(/条对话|对话待同步/)
 })
 
 test('旧详情没有 questions 字段仍显示两类消息及事件中的版本，后续刷新可标历史版', async () => {
@@ -348,14 +352,16 @@ test('旧详情没有 questions 字段仍显示两类消息及事件中的版本
   expect(posts()).toHaveLength(0)
 })
 
-test.each([['pending', '等待回答'], ['answering', '正在回答'], ['uncertain', '回答结果待确认']])('问题 %s 在原气泡显示状态，started 不增加计数或产生气泡', async (status, label) => {
+test.each([['pending', '等待回答'], ['answering', '正在回答'], ['uncertain', '回答结果待确认']])('问题 %s 在原气泡显示状态，started 不产生额外气泡或改变任务完成状态', async (status, label) => {
   const data = answered()
   handler = (url) => url === '/api/tasks/b' ? json({ ...data, events: data.events.slice(0, 3), questions: [{ ...data.questions[0], status }] }) : undefined
   await mount()
   expect(screen.getByLabelText('聊天记录').querySelectorAll('article')).toHaveLength(2)
   expect(screen.getByText(label).getAttribute('role')).toBe('status')
   expect(screen.queryByText(answer)).toBeNull()
-  expect(within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /乙任务.*2 条对话/ })).toBeTruthy()
+  const selected = within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /乙任务.*已完成/ })
+  expect(selected.getAttribute('aria-current')).toBe('page')
+  expect(selected.textContent).not.toMatch(/条对话|对话待同步/)
 })
 
 test('提问沿用点名候选和键盘选择，点名操作不触发提交', async () => {
@@ -405,7 +411,9 @@ test('202 返回排队中的标准详情后留在原群，保留版本引用且�
   expect(bubble.querySelector('details')?.textContent).toContain('提问时版本 · 截至事件 #1')
   expect(bubble.querySelector('details')?.textContent).not.toContain(JSON.stringify(captured.anchor))
   expect(screen.queryByText(answer)).toBeNull()
-  expect(within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /乙任务.*2 条对话.*已完成/ })).toBeTruthy()
+  const selected = within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /乙任务.*已完成/ })
+  expect(selected.getAttribute('aria-current')).toBe('page')
+  expect(selected.textContent).not.toMatch(/条对话|对话待同步/)
   write(questionInput(), question); await send()
   expect(bodies()[1].request_id).not.toBe(bodies()[0].request_id)
   expect(posts().map(([url]) => url)).toEqual(['/api/tasks/b/questions', '/api/tasks/b/questions'])

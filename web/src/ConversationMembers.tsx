@@ -26,9 +26,9 @@ export function ConversationMembers({ participants, members, portrait, onMention
   }}>
     <Dialog.Trigger asChild>
       <button ref={trigger} type="button" aria-label={`本次伙伴，${ids.length} 位`} title="查看本次伙伴" className="inline-flex min-h-11 max-w-full items-center gap-2 rounded-md px-2 text-[#45665c] hover:bg-[#fff0e8]">
-        <Cat size={17} aria-hidden="true" className="shrink-0 text-[#a8624a]" />
-        {preview.length > 0 && <span aria-hidden="true" className="flex shrink-0 -space-x-2">{preview.map((id) => <span key={id} className="flex size-8 shrink-0">{portrait(id, 'sm')}</span>)}</span>}
-        <span className="min-w-0 truncate text-xs font-semibold">本次伙伴 <span className="font-normal text-[#748b81]">· {ids.length}</span></span>
+        {preview.length === 0 && <Cat size={17} aria-hidden="true" className="shrink-0 text-[#a8624a]" />}
+        {preview.length > 0 && <span aria-hidden="true" className="flex shrink-0 -space-x-2">{preview.map((id, index) => <span key={id} className={`${index === 0 ? 'flex' : 'hidden sm:flex'} size-8 shrink-0`}>{portrait(id, 'sm')}</span>)}</span>}
+        <span className="min-w-0 truncate text-xs font-semibold"><span className="hidden sm:inline">本次</span>伙伴 <span className="font-normal text-[#748b81]">· {ids.length}</span></span>
         <ChevronRight size={14} aria-hidden="true" className="shrink-0 text-[#748b81]" />
       </button>
     </Dialog.Trigger>

@@ -62,10 +62,12 @@ test('另一窗口新增、改标题和撤销完成更新列表，保留选择�
   stream.scrollTop = 100; fireEvent.scroll(stream)
   rows = [summary('甲', 5, 'done', 7), summary('乙', 5), summary('丙', 5)]
   await tick()
-  expect(nav().getByRole('button', { name: /甲任务.*7 条对话.*已交付/ })).toBeTruthy()
+  expect(nav().getByRole('button', { name: /甲任务.*已交付/ })).toBeTruthy()
+  expect(screen.getByRole('navigation', { name: '任务列表' }).textContent).not.toMatch(/条对话|对话待同步/)
   expect(nav().getByRole('button', { name: /丙任务/ })).toBeTruthy()
   expect(nav().getByRole('button', { name: /乙任务/ }).getAttribute('aria-current')).toBe('page')
   expect(input().value).toBe('乙的未发送内容')
+  expect(within(nav().getByRole('button', { name: /乙任务/ })).getByRole('img', { name: '有未发送内容' })).toBeTruthy()
   expect(screen.getByText('乙聊天 #1')).toBeTruthy()
   expect(stream.scrollTop).toBe(100)
   fireEvent.click(within(screen.getByRole('group', { name: '任务状态筛选' })).getByRole('button', { name: '已完成' }))
@@ -75,7 +77,8 @@ test('另一窗口新增、改标题和撤销完成更新列表，保留选择�
   expect(nav().queryByRole('button', { name: /甲/ })).toBeNull()
   expect(input().value).toBe('乙的未发送内容')
   fireEvent.click(within(screen.getByRole('group', { name: '任务状态筛选' })).getByRole('button', { name: '全部' }))
-  expect(nav().getByRole('button', { name: /甲的新要求.*9 条对话.*需要重新核对/ })).toBeTruthy()
+  expect(nav().getByRole('button', { name: /甲的新要求.*需要重新核对/ })).toBeTruthy()
+  expect(screen.getByRole('navigation', { name: '任务列表' }).textContent).not.toMatch(/条对话|对话待同步/)
   expect((screen.getByRole('searchbox') as HTMLInputElement).value).toBe('甲')
   expect(fetchMock.mock.calls.some(([url]) => url === '/api/tasks')).toBe(false)
   expect(fetchMock.mock.calls.some(([url]) => url === '/api/tasks/甲')).toBe(false)
@@ -117,7 +120,7 @@ test('新对话已有草稿时远端新任务只进入列表；切任务仍恢�
   await act(async () => select('甲')); expect(input().value).toBe('甲草稿')
 })
 
-test('旧摘要不能覆盖新发送详情的标题、状态与计数', async () => {
+test('旧摘要不能覆盖新发送详情的标题、状态与后续草稿', async () => {
   await mount()
   const old = deferred<Response>()
   handler = (url) => {
@@ -130,10 +133,16 @@ test('旧摘要不能覆盖新发送详情的标题、状态与计数', async ()
   }
   await tick(); write('补充要求')
   await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送消息' })))
+  write('下一条尚未发送的要求')
   await act(async () => old.resolve(json({ tasks: [summary('甲', 2), summary('乙', 2), summary('丙', 2)] }, '"old"')))
-  expect(nav().getByRole('button', { name: /乙最新要求.*4 条对话.*需要重新核对/ })).toBeTruthy()
+  const selected = nav().getByRole('button', { name: /乙最新要求.*需要重新核对/ })
+  expect(selected.getAttribute('aria-current')).toBe('page')
+  expect(within(selected).getByRole('img', { name: '有未发送内容' })).toBeTruthy()
+  expect(selected.textContent).not.toMatch(/条对话|对话待同步/)
+  expect(input().value).toBe('下一条尚未发送的要求')
   expect(nav().getByRole('button', { name: /丙任务/ })).toBeTruthy()
   expect(screen.getByText('乙聊天 #9')).toBeTruthy()
+  expect(fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1)
 })
 
 test('相同事件版本的旧详情不覆盖较晚发送后的活动状态', async () => {
