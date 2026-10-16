@@ -28,5 +28,5 @@ function Find-Python {
 
 $python = Find-Python
 Write-Host "Using Python: $python"
-& $python scripts/check.py
+& $python (Join-Path $PSScriptRoot "check.py") @args
 exit $LASTEXITCODE

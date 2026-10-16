@@ -37,14 +37,37 @@ jobs:
         run: npm test
 
   runtime:
-    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    name: ${{ matrix.os }} / Python ${{ matrix.python }} / ${{ matrix.selection }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
-        python: ['3.11', '3.13']
+        include:
+          - os: ubuntu-latest
+            python: '3.11'
+            selection: full
+            args: ''
+          - os: ubuntu-latest
+            python: '3.13'
+            selection: full
+            args: ''
+          - os: windows-latest
+            python: '3.11'
+            selection: shard-1-of-2
+            args: '--shard 1/2'
+          - os: windows-latest
+            python: '3.11'
+            selection: shard-2-of-2
+            args: '--shard 2/2'
+          - os: windows-latest
+            python: '3.13'
+            selection: shard-1-of-2
+            args: '--shard 1/2'
+          - os: windows-latest
+            python: '3.13'
+            selection: shard-2-of-2
+            args: '--shard 2/2'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -53,7 +76,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Run standard-library test suite
-        run: python scripts/check.py
+        run: python scripts/check.py ${{ matrix.args }}
       - name: Check whitespace
         run: git diff --check
 

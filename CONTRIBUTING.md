@@ -26,6 +26,8 @@ On Windows, if `python` is the Microsoft Store placeholder:
 .\scripts\check.ps1
 ```
 
+For a deterministic module shard, use `python scripts/check.py --shard 1/2` and `--shard 2/2`. `--list-tests` prints selected IDs without running cases, but still imports modules for discovery. Both wrappers forward these options. Default execution remains the complete original suite. Discovery errors, empty selections and custom suite hooks that cannot safely be sharded fail explicitly. CI keeps Linux full runs and both Windows shards for Python 3.11/3.13; a shard alone is not full validation. The runner reports up to ten slowest tests, excluding discovery and module/class fixtures.
+
 ## Release Checks
 
 Before distributing a wheel, follow [clean builds and installed-package checks](docs/releases.zh-CN.md). The public `python scripts/build_release.py` entry uses a fresh working-tree snapshot and checks the installed package without model calls. Build tools are development-only; the runtime still has no third-party Python dependencies.
@@ -61,6 +63,8 @@ python scripts/check.py
 ```powershell
 .\scripts\check.ps1
 ```
+
+测试可用 `python scripts/check.py --shard 1/2` 和 `--shard 2/2` 按模块确定性分片；`--list-tests` 只列出所选 ID，不执行测试用例，但仍会导入模块完成发现。Python/PowerShell 入口均转发这些参数；默认仍执行完整原始测试树。发现错误、空分片或无法安全拆分的自定义测试套件会明确失败。CI 保留 Linux 全量和 Windows 两片的 Python 3.11/3.13 检查，单片通过不等于完整验证。执行后最多列出十项慢测试，耗时不含发现和模块/类级夹具。
 
 ## 发布检查
 
