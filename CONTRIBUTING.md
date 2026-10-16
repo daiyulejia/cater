@@ -26,6 +26,10 @@ On Windows, if `python` is the Microsoft Store placeholder:
 .\scripts\check.ps1
 ```
 
+## Release Checks
+
+Before distributing a wheel, follow [clean builds and installed-package checks](docs/releases.zh-CN.md). The public `python scripts/build_release.py` entry uses a fresh working-tree snapshot and checks the installed package without model calls. Build tools are development-only; the runtime still has no third-party Python dependencies.
+
 ## Commit Notes
 
 Use meaningful commits. A good commit explains:
@@ -57,6 +61,10 @@ python scripts/check.py
 ```powershell
 .\scripts\check.ps1
 ```
+
+## 发布检查
+
+分发 wheel 前，按 [干净构建与安装验证](docs/releases.zh-CN.md) 执行 `python scripts/build_release.py`。它从当前工作区建立新快照并验证安装副本，不调用模型。构建工具只用于开发，核心运行时仍保持零第三方 Python 依赖。
 
 ## 提交说明
 

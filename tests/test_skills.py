@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from cater.skills import MAX_SKILL_BYTES, SkillLibrary
 
@@ -198,11 +199,31 @@ class SkillLibraryTests(unittest.TestCase):
             self.assertEqual(response["status"], "ok")
             self.assertTrue(response["content"].startswith("# "))
             self.assertNotIn(response["content"], json.dumps(index, ensure_ascii=False))
-        config = files("cater.packs").joinpath("skills", "catalog.json").read_text(encoding="utf-8")
+        config = files("cater.packs").joinpath("skills").joinpath("catalog.json").read_text(encoding="utf-8")
         self.assertEqual(len(json.loads(config)["skills"]), 5)
         pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn('"packs/skills/*.json"', pyproject)
         self.assertIn('"packs/skills/*.md"', pyproject)
+
+    def test_builtin_resources_support_single_child_namespace_joinpath(self):
+        root = files("cater.packs")
+
+        class SingleChildRoot:
+            def joinpath(self, child):
+                return root.joinpath(child)
+
+        scope = {**self.scope, "tools": {"workspace_read", "workspace_search", "workspace_run",
+                                        "browser_check", "request_review", "read_artifact", "finish_work"}}
+        with patch("cater.skills.files", return_value=SingleChildRoot()):
+            library = SkillLibrary()
+            index = library.index(**scope)
+            self.assertEqual(index["configuration_status"], "ok")
+            self.assertEqual(len(index["skills"]), 5)
+            for entry in index["skills"]:
+                self.assertEqual(entry["status"], "ready")
+                result = library.read({"skill_id": entry["id"], "expected_sha256": entry["sha256"]}, **scope)
+                self.assertEqual(result["status"], "ok")
+                self.assertTrue(result["content"].startswith("# "))
 
 
 if __name__ == "__main__":

@@ -97,7 +97,7 @@ class SkillLibrary:
     @staticmethod
     def _read(row):
         if row["source"] == "builtin":
-            resource = files("cater.packs").joinpath("skills", row["path"])
+            resource = files("cater.packs").joinpath("skills").joinpath(row["path"])
             with resource.open("rb") as stream:
                 body = stream.read(MAX_SKILL_BYTES + 1)
         else:

@@ -60,6 +60,7 @@ The guides below are primarily in Chinese.
 - [Optional automated browser checks](docs/browser-checks.zh-CN.md)
 - [Project workspaces and host tools](docs/workspaces.zh-CN.md)
 - [Frontend development and remote access](web/README.md)
+- [Clean builds and installed-package checks](docs/releases.zh-CN.md)
 - [Contributing](CONTRIBUTING.md)
 
 Run the local checks from the repository root:

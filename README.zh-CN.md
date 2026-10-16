@@ -55,6 +55,7 @@ API 密钥放在环境变量中，不要写进角色卡、聊天或提交到仓�
 - [可选自动浏览器检查](docs/browser-checks.zh-CN.md)
 - [工程工作目录与工具](docs/workspaces.zh-CN.md)
 - [前端开发与远程访问](web/README.md)
+- [干净构建与安装验证](docs/releases.zh-CN.md)
 - [贡献指南](CONTRIBUTING.md)
 
 在仓库根目录运行本地检查：

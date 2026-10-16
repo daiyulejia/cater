@@ -39,7 +39,7 @@ jobs:
   runtime:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -56,6 +56,38 @@ jobs:
         run: python scripts/check.py
       - name: Check whitespace
         run: git diff --check
+
+  package:
+    name: Installed package / ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Prepare development build tools
+        run: python -m pip install "setuptools>=77.0.3"
+      - name: Build and verify a clean installed package without model calls
+        run: python scripts/build_release.py
+      - name: Show retained package receipts on failure
+        if: failure()
+        shell: python
+        run: |
+          from pathlib import Path
+          import sys
+          sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+          for name in ("release", "toolchain", "build", "install", "smoke"):
+              for path in sorted(Path("dist/releases").glob(f"*/{name}.json")):
+                  print(f"--- {path.as_posix()} ---")
+                  print(path.read_text(encoding="utf-8")[:20000])
 
   workroom:
     name: Conversation UI
