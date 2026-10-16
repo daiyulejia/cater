@@ -7,6 +7,7 @@ import { Check, Copy, Download, ExternalLink, FileText, HardDrive, X } from 'luc
 export type Artifact = {
   seq: number; title: string; summary: string; kind?: string; uri?: string; message_seq?: number
   actor?: string; source?: string; content?: string; format?: string; filename?: string; content_error?: string
+  content_sha256?: string
   local_path?: string; local_save_error?: string
 }
 

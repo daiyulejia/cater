@@ -263,7 +263,9 @@ class TeamService:
                 _tool("set_objective", "采用顾客当前目标或更换实现方向。记录成功后再安排相应工作；普通追问不用更换目标。",
                       {"goal": string}, ["goal"]),
                 _tool("finish_work", "店长确认当前工作可以交付，说明实际验证与尚未验证的范围；不等同于宿主证明正确。",
-                      {"summary": string, "verification": string, "handoff": handoff_schema()}, ["summary", "verification"]),
+                      {"summary": string, "verification": string, "handoff": handoff_schema(),
+                       "artifact_seqs": {"type": "array", "maxItems": 128, "items": {"type": "integer", "minimum": 1},
+                           "description": "可选：明确选择本次交付的文件事件序号，包括需要沿用的旧文件；空数组表示无文件。不填时只收本轮目标内每个文件名的最新发布，不自动带上旧目标文件。"}}, ["summary", "verification"]),
             ]
         if workspace is not None:
             tools += workspace.schemas()
@@ -703,10 +705,24 @@ class TeamService:
             if open_authors:
                 return {"status": "error", "code": "author_pending", "assignments": open_authors,
                         "message": "成果作者的委托尚未正式交回，可能仍在处理复核意见。请收回最终成果与复核结论；不要在作者收尾时结束目标。"}
+            boundary = max((e.seq for e in self.rt.log.read(task_id=task_id) if e.actor == HOST
+                            and e.type in {"team.started", "team.objective_updated"}), default=0)
+            artifacts = self.rt.task(task_id).deliverables
+            selected = [a for a in artifacts if a["seq"] > boundary and a.get("filename") and a.get("content_sha256")]
+            if "artifact_seqs" in arguments:
+                seqs = arguments["artifact_seqs"]
+                by_seq = {a["seq"]: a for a in artifacts if a.get("filename") and a.get("content_sha256")}
+                if (not isinstance(seqs, list) or len(seqs) > 128
+                        or any(type(seq) is not int or seq not in by_seq for seq in seqs) or len(set(seqs)) != len(seqs)):
+                    return {"status": "error", "code": "invalid_delivery_files", "message": "请选择本群完整文件的有效序号，不重复；可以明确选择沿用的旧版本，也可以交付无文件结果。"}
+                selected = [by_seq[seq] for seq in seqs]
+                if len({a["filename"] for a in selected}) != len(selected):
+                    return {"status": "error", "code": "invalid_delivery_files", "message": "同一文件名只选择一个交付版本。"}
             payload = {"summary": _text(arguments["summary"]), "verification": _text(arguments["verification"]),
-                       "run_id": tool_start.payload["run_id"], "artifacts": list({a["filename"]: {
-                           k: a[k] for k in ("seq", "filename", "content_sha256")} for a in self.rt.task(task_id).deliverables
-                           if a.get("filename") and a.get("content_sha256")}.values())}
+                       "run_id": tool_start.payload["run_id"], "objective_seq": boundary,
+                       "artifact_selection": "explicit" if "artifact_seqs" in arguments else "current_objective",
+                       "artifacts": list({a["filename"]: {k: a[k] for k in ("seq", "filename", "content_sha256")}
+                                          for a in selected}.values())}
             if "handoff" in arguments:
                 try:
                     payload["handoff"] = self.delivery.normalize(task_id, arguments["handoff"],
@@ -784,6 +800,7 @@ class TeamService:
                 "成果用publish_artifact保存完整正文；操作和验证依据来自实际工具回执。"
                 "已写入工作目录的文件优先用publish_workspace_file直接发布，避免复述整份源码。"
                 "店长读成果，用read_receipts核对真实工具回执、跟进修正，能够交付时用finish_work记录结果及验证边界。"
+                "finish_work默认只包含本轮目标内最新发布；需沿用旧文件或筛选整包时用artifact_seqs明确选择全部所需文件，不省略未改动的本地依赖。"
                 "工具列表提供browser_check时，可对已发布静态网页副本实际操作并断言；不是任意浏览器，也不是强制审批。"
                 "根据实际outcome、scope_current、checked_artifacts和失败步骤判断；不能把status=ok或旧版本通过当作当前业务已验证。"
                 "交付不只说完成：按任务需要在finish_work的handoff说明改了什么、为什么、影响、取舍、如何运行或复查，以及尚未验证的范围。"
@@ -966,19 +983,42 @@ class TeamService:
                 pass
         return {"task_id": task_id, "team": self.view(task_id)}
 
-    def archive(self, task_id):
+    def archive(self, task_id, expected_delivery_seq=None):
+        import hashlib
+
+        if expected_delivery_seq is not None and (type(expected_delivery_seq) is not int or expected_delivery_seq <= 0):
+            raise ValueError("交付版本需要正整数。")
+        current = self.view(task_id)
+        if expected_delivery_seq is not None and (current["status"] != "done" or current["revision"] != expected_delivery_seq):
+            raise ValueError("交付版本已变化，请刷新后重试下载。")
         delivery = None
-        files = {a["filename"]: a for a in self.rt.task(task_id).deliverables
+        artifacts = self.rt.task(task_id).deliverables
+        files = {a["filename"]: a for a in artifacts
                  if a.get("filename") and isinstance(a.get("content"), str)}
-        if self.view(task_id)["status"] == "done":
+        if current["status"] == "done":
             delivery = next((e for e in reversed(self.rt.log.read(task_id=task_id))
-                             if e.actor == HOST and e.type == "team.objective_completed"), None)
+                             if e.actor == HOST and e.type == "team.objective_completed" and e.seq == current["revision"]), None)
+            if expected_delivery_seq is not None and (delivery is None or "artifacts" not in delivery.payload):
+                raise ValueError("交付文件清单缺失，无法核对指定版本。")
             if delivery is not None and "artifacts" in delivery.payload:
-                by_seq = {a["seq"]: a for a in self.rt.task(task_id).deliverables}
+                refs = delivery.payload["artifacts"]
+                if not isinstance(refs, list):
+                    raise ValueError("交付文件清单无效。")
+                by_seq = {a["seq"]: a for a in artifacts}
+                boundary = max((e.seq for e in self.rt.log.read(task_id=task_id) if e.actor == HOST and e.seq < delivery.seq
+                                and e.type in {"team.started", "team.objective_updated"}), default=0)
                 frozen = {}
-                for ref in delivery.payload["artifacts"]:
+                for ref in refs:
+                    if (not isinstance(ref, dict) or type(ref.get("seq")) is not int or not 0 < ref["seq"] < delivery.seq
+                            or not isinstance(ref.get("filename"), str) or not ref["filename"] or ref["filename"] in frozen):
+                        raise ValueError("交付文件引用无效或重复。")
+                    if (expected_delivery_seq is not None and ref["seq"] <= boundary
+                            and not (delivery.payload.get("artifact_selection") == "explicit" and delivery.payload.get("objective_seq") == boundary)):
+                        raise ValueError("旧目标文件没有明确沿用记录，当前交付范围待核对。")
                     artifact = by_seq.get(ref["seq"])
-                    if artifact is None or any(artifact.get(k) != ref[k] for k in ("filename", "content_sha256")):
+                    if (artifact is None or not isinstance(artifact.get("content"), str)
+                            or any(artifact.get(k) != ref.get(k) for k in ("filename", "content_sha256"))
+                            or hashlib.sha256(artifact["content"].encode("utf-8")).hexdigest() != ref.get("content_sha256")):
                         raise ValueError("交付引用不一致，未下载其他版本替代已验收文件。")
                     frozen[ref["filename"]] = artifact
                 files = frozen
@@ -988,7 +1028,7 @@ class TeamService:
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
             for name, artifact in files.items():
                 archive.writestr(name, artifact["content"].encode("utf-8"))
-            archive.writestr("__cater__/manifest.json", json.dumps({"objective": self.view(task_id)["objective"],
+            archive.writestr("__cater__/manifest.json", json.dumps({"objective": current["objective"],
                 "files": [{"filename": name, "seq": a["seq"], "sha256": a["content_sha256"]} for name, a in files.items()]},
                 ensure_ascii=False, indent=2))
             explanation = self.delivery.markdown(delivery) if delivery is not None else None

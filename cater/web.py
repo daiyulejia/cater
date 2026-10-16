@@ -1350,12 +1350,29 @@ def make_handler(
                 if task_id.endswith("/delivery"):
                     task_id = task_id.removesuffix("/delivery")
                     with self._runtime() as rt:
-                        if rt.task(task_id) is None:
-                            return self._not_found()
-                        try:
-                            raw = rt.team.archive(task_id) if _team_enabled(rt, task_id) else rt.delivery.archive(task_id)
-                        except ValueError as exc:
-                            return self._conflict(str(exc))
+                        with _read_snapshot(rt):
+                            if rt.task(task_id) is None:
+                                return self._not_found()
+                            values = parse_qs(parsed.query, keep_blank_values=True).get("delivery_seq")
+                            expected_delivery_seq = None
+                            native = _team_enabled(rt, task_id)
+                            if values is not None:
+                                if len(values) != 1 or not values[0].isascii() or not values[0].isdecimal():
+                                    return self._bad_request("delivery_seq需要单个正整数。")
+                                try:
+                                    expected_delivery_seq = int(values[0])
+                                except ValueError:
+                                    return self._bad_request("delivery_seq需要单个正整数。")
+                                if expected_delivery_seq <= 0 or not native:
+                                    return self._bad_request("delivery_seq需要正整数且仅支持原生团队交付。")
+                            try:
+                                if native:
+                                    raw = (rt.team.archive(task_id, expected_delivery_seq=expected_delivery_seq)
+                                           if values is not None else rt.team.archive(task_id))
+                                else:
+                                    raw = rt.delivery.archive(task_id)
+                            except ValueError as exc:
+                                return self._conflict(str(exc))
                         self.send_response(HTTPStatus.OK)
                         self.send_header("Content-Type", "application/zip")
                         self.send_header("Content-Disposition", 'attachment; filename="cater-delivery.zip"')

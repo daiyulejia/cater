@@ -53,6 +53,7 @@ const TeamWorkboard = lazy(() => import('./TeamProgressPanel').then((module) => 
 const ConversationActivity = lazy(() => import('./ConversationActivity').then((module) => ({ default: module.ConversationActivity })))
 const ChatMarkdown = lazy(() => import('./ChatMarkdown').then((module) => ({ default: module.ChatMarkdown })))
 const MessageDetails = lazy(() => import('./MessageDetails').then((module) => ({ default: module.MessageDetails })))
+const WelcomeView = lazy(() => import('./WelcomeView').then((module) => ({ default: module.WelcomeView })))
 
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
 type Message = { seq: number; actor: string; role: string; type: string; claim?: string; text?: string; stance?: string; target?: string; reply_to?: number }
@@ -1102,12 +1103,18 @@ function App() {
     return Object.fromEntries(members.map((member) => [member.id, member]))
   }, [organization, roles])
   const currentDetail = detail?.task.id === selectedId ? detail : null
-  const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization, currentDetail.questions, currentDetail.clarifications, currentDetail.conversation, Boolean(currentDetail.task.team?.enabled), currentDetail.questionnaires) : [], [currentDetail, identities, organization])
-  const visibleConversation = useMemo(() => chatFilter === 'all' ? conversation : conversation.filter((item) => item.category === chatFilter), [chatFilter, conversation])
   const selectedSummary = tasks.find((item) => item.id === selectedId)
-  const task: Task | undefined = selectedId ? currentDetail?.task ?? (selectedSummary
+  const syncingObjective = Boolean(selectedSummary?.team?.enabled && currentDetail?.task.team?.enabled
+    && selectedSummary.team.revision > currentDetail.task.team.revision)
+  const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization, currentDetail.questions, currentDetail.clarifications, currentDetail.conversation, Boolean(currentDetail.task.team?.enabled), currentDetail.questionnaires)
+    .map(item => syncingObjective && item.evidence.type === 'team.objective_completed' ? { ...item, historicalDelivery: true } : item) : [], [currentDetail, identities, organization, syncingObjective])
+  const visibleConversation = useMemo(() => chatFilter === 'all' ? conversation : conversation.filter((item) => item.category === chatFilter), [chatFilter, conversation])
+  const baseTask: Task | undefined = selectedId ? currentDetail?.task ?? (selectedSummary
     ? { ...selectedSummary, team: selectedSummary.team ? { objective: selectedSummary.goal, assignments: [], checkpoint: '', runs: [], ...selectedSummary.team } : undefined,
       acceptance: [], messages: [], assignments: [], deliverables: [] } : undefined) : undefined
+  const task = syncingObjective && baseTask?.team && selectedSummary?.team ? { ...baseTask, goal: selectedSummary.goal,
+    status: selectedSummary.status, team: { ...baseTask.team, ...selectedSummary.team, objective: selectedSummary.goal,
+      runs: selectedSummary.team.runs ?? [], reviews: [], checkpoint: '新目标已收到，详细记录正在同步。' } } : baseTask
   const loading = selectedId !== null && currentDetail === null
   const workspaceActive = task?.team?.enabled ? hasActiveTeamMessages(task.team)
     : Boolean(currentDetail?.activity?.active || task?.activity?.active || task?.work?.items.some((item) =>
@@ -1489,7 +1496,7 @@ function App() {
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
         {task && <WorkboardPanel taskId={task.id} open={showMobileBoard} onOpenChange={setShowMobileBoard}>
-          {currentDetail ? <>{!task.team?.enabled && <><WorkItems work={task.work} names={names} /><DeliveryPanel key={task.id} taskId={task.id} delivery={task.work?.delivery} names={names} accessToken={accessToken} /><VerificationBoard items={task.verifications ?? []} /></>}<Workboard task={task} detail={currentDetail} names={names} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />{Boolean(currentDetail.organization_memory?.length) && <details className="mt-5 border-t border-[#dce8e1] pt-4"><summary className="cursor-pointer text-xs font-semibold text-[#52766d]">猫咖记忆 · {currentDetail.organization_memory?.length} 项</summary><div className="mt-3"><MemoryBoard items={currentDetail.organization_memory ?? []} names={names} /></div></details>}</> : <p className="text-xs leading-6 text-[#74897d]">正在读取这件事的成果与过程。</p>}
+          {currentDetail ? <>{!task.team?.enabled && <><WorkItems work={task.work} names={names} /><DeliveryPanel key={task.id} taskId={task.id} delivery={task.work?.delivery} names={names} accessToken={accessToken} /><VerificationBoard items={task.verifications ?? []} /></>}<Workboard task={task} detail={currentDetail} names={names} accessToken={accessToken} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />{Boolean(currentDetail.organization_memory?.length) && <details className="mt-5 border-t border-[#dce8e1] pt-4"><summary className="cursor-pointer text-xs font-semibold text-[#52766d]">猫咖记忆 · {currentDetail.organization_memory?.length} 项</summary><div className="mt-3"><MemoryBoard items={currentDetail.organization_memory ?? []} names={names} /></div></details>}</> : <p className="text-xs leading-6 text-[#74897d]">正在读取这件事的成果与过程。</p>}
         </WorkboardPanel>}
       </main>
     </div>
@@ -1630,8 +1637,8 @@ function VerificationBoard({ items }: { items: Verification[] }) {
   return <section className="mb-5 border-b border-[#eaded1] pb-5"><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">本机检查</h2><span className="text-xs text-stone-400">显式运行 · {items.length} 次</span></div><div className="space-y-3">{[...items].reverse().slice(0, 3).map((item) => <div key={item.seq} className={`border-l-2 pl-3 py-1 ${item.outcome === 'passed' ? 'border-emerald-600' : 'border-rose-600'}`}><strong className="text-xs text-stone-800">{item.outcome === 'passed' ? '命令通过' : item.outcome === 'timeout' ? '执行超时' : item.outcome === 'launch_error' ? '无法启动' : item.outcome === 'unavailable' ? '检查工具不可用' : '命令失败'}</strong><p className="mt-1 break-all font-mono text-[11px] leading-5 text-stone-600">{item.command.join(' ')}</p><p className="mt-1 text-[11px] text-stone-500">事件 #{item.seq}{item.for_event ? ` · 关联自报 #${item.for_event}` : ''} · 退出码 {item.exit_code ?? '无'}</p>{item.outcome === 'unavailable' && <p className="mt-1 text-[11px] text-amber-700">工具不可用，不能据此认定成果错误。</p>}{item.git?.dirty && <p className="mt-1 text-[11px] text-amber-700">工作区有未提交改动，未绑定具体文件内容</p>}</div>)}</div><p className="mt-2 text-[11px] leading-5 text-stone-500">单条命令通过，不代表诊断或整项任务已证实。</p></section>
 }
 
-function Workboard({ task, detail, names, driverCoverage, showEvidence, onToggleEvidence }: { task: Task; detail: TaskDetail | null; names: Record<string, string>; driverCoverage?: DriverCoverage[]; showEvidence: boolean; onToggleEvidence: () => void }) {
-  if (task.team?.enabled) return <Suspense fallback={<p role="status" className="text-xs text-[#52766d]">正在读取团队进度…</p>}><TeamWorkboard team={task.team} taskId={task.id} artifacts={task.deliverables ?? []} events={detail?.events ?? []} names={names} /></Suspense>
+function Workboard({ task, detail, names, accessToken, driverCoverage, showEvidence, onToggleEvidence }: { task: Task; detail: TaskDetail | null; names: Record<string, string>; accessToken?: string; driverCoverage?: DriverCoverage[]; showEvidence: boolean; onToggleEvidence: () => void }) {
+  if (task.team?.enabled) return <Suspense fallback={<p role="status" className="text-xs text-[#52766d]">正在读取团队进度…</p>}><TeamWorkboard team={task.team} taskId={task.id} artifacts={task.deliverables ?? []} events={detail?.events ?? []} names={names} accessToken={accessToken} /></Suspense>
   const assignments = [...task.assignments].reverse().filter((item, index, all) => all.findIndex((other) => other.owner === item.owner) === index).filter((item) => item.status === undefined || item.status === 'assigned')
   const participants = assignments.length
     ? assignments.map((item) => item.owner)
@@ -1645,14 +1652,7 @@ function Workboard({ task, detail, names, driverCoverage, showEvidence, onToggle
 }
 
 function EmptyConversation({ onChoose }: { onChoose: (value: string) => void }) {
-  const examples = ['帮我梳理一页活动说明', '帮我复盘一个难定位的 Bug', '聊聊一个新产品想法']
-  return <div className="welcome-view flex-1 overflow-y-auto">
-    <div className="welcome-scene"><img src={cafeWelcome} alt="月亮、三角、米寇和罐头在温暖的猫咖里" /></div>
-    <div className="welcome-content mx-auto max-w-2xl px-5 pb-6 pt-5 sm:px-8">
-      <div className="flex items-start gap-3"><Portrait id="store_manager" size="lg" /><div className="min-w-0"><span className="text-[11px] font-bold text-[#2a8075]">店长</span><h1 className="mt-1 text-xl font-bold leading-snug text-[#23433b] sm:text-2xl">欢迎来猫咖，今天想聊什么？</h1><p className="mt-2 text-[13px] leading-6 text-[#5e796e]">先说说你心里那件事。月亮、罐头、米寇和三角都在。</p></div></div>
-      <div className="mt-5 flex gap-2 overflow-x-auto pb-2 sm:flex-wrap" aria-label="任务示例">{examples.map((example) => <button key={example} onClick={() => { onChoose(example); document.getElementById('new-task')?.focus() }} className="example-prompt shrink-0 border border-[#c9ddd5] bg-white px-3 py-2 text-left text-xs font-medium text-[#356d61] shadow-sm">{example}</button>)}</div>
-    </div>
-  </div>
+  return <Suspense fallback={<p role="status" className="p-5 text-sm text-[#52766d]">正在打开猫咖…</p>}><WelcomeView onChoose={onChoose} portrait={<Portrait id="store_manager" size="lg" />} /></Suspense>
 }
 
 export default App

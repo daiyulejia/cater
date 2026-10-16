@@ -1,11 +1,9 @@
-import { lazy, Suspense } from 'react'
 import type { Artifact } from './Artifact'
 import { isTeamHost, teamRuns, teamRunStatus, teamStatus } from './team'
 import type { TeamEvent, TeamReview, TeamState } from './team'
 import { NativeBrowserReceipt } from './browserReport'
 import { nativeBrowserReceiptStatus } from './conversationActivityState'
-
-const ArtifactPreview = lazy(() => import('./Artifact').then((module) => ({ default: module.ArtifactPreview })))
+import { TeamArtifacts } from './TeamArtifacts'
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const excerpt = (value: unknown, limit = 800): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（仅显示部分内容）' : '') : ''
@@ -169,14 +167,12 @@ export function TeamProgressPanel({ team, events, names }: { team: TeamState; ev
   </section>
 }
 
-export function TeamWorkboard({ team, taskId, artifacts, events, names }: {
-  team: TeamState; taskId: string; artifacts: Artifact[]; events: TeamEvent[]; names: Record<string, string>
+export function TeamWorkboard({ team, taskId, artifacts, events, names, accessToken }: {
+  team: TeamState; taskId: string; artifacts: Artifact[]; events: TeamEvent[]; names: Record<string, string>; accessToken?: string
 }) {
   return <div className="space-y-5">
     <TeamProgressPanel team={team} events={events} names={names} />
-    <section className="border-t border-[#eaded1] pt-4"><h2 className="mb-3 text-sm font-semibold">已发布成果</h2>
-      {artifacts.length ? <Suspense fallback={<p role="status" className="text-xs text-[#52766d]">正在读取成果…</p>}>{[...artifacts].reverse().map((item) => <div key={item.seq} className="mb-3 border-l-2 border-emerald-600 py-1 pl-3"><ArtifactPreview item={item} publisher={names[item.actor ?? ''] ?? item.actor ?? '伙伴'} /></div>)}</Suspense> : <p className="text-xs text-[#728679]">尚未发布成果。</p>}
-    </section>
+    <TeamArtifacts team={team} taskId={taskId} artifacts={artifacts} events={events} names={names} accessToken={accessToken} />
     <details className="border-t border-[#eaded1] pt-4 text-xs text-[#52766d]"><summary className="cursor-pointer font-semibold">过程证据 · {events.length} 条记录</summary><a className="mt-2 inline-block underline" href={`/tasks/${encodeURIComponent(taskId)}`}>打开完整审计回放</a></details>
   </div>
 }
