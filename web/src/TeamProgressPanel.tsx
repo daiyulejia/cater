@@ -155,6 +155,8 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
         : name === 'list_skills' || name === 'read_skill' ? nativeSkillReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } }, name)
         : !finished ? '已发起，等待回执'
         : result.complete === false || record(result.stdout).complete === false || record(result.stderr).complete === false ? '工具结果待确认'
+        : ['publish_artifact', 'publish_workspace_file'].includes(name) && result.outcome === 'not_started'
+          ? result.status === 'error' && result.complete === true ? '未开始发布' : '工具结果待确认'
         : [status, result.outcome].some((value) => ['error', 'failed', 'timeout', 'launch_error', 'blocked'].includes(String(value))) ? '工具未完成'
         : ['ok', 'done', 'completed', 'succeeded', 'passed', 'success'].includes(String(status)) ? '工具已完成' : '工具结果待确认'
       return <li key={event.seq}>

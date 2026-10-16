@@ -9,7 +9,7 @@ import zipfile
 from contextlib import nullcontext
 from dataclasses import asdict
 
-from .artifacts import normalize_deliverables, safe_filename
+from .artifacts import MAX_CONTENT_BYTES, normalize_deliverables, safe_filename
 from .activity_owner import activity_owner
 from .events import Actor
 from .drivers import tool_failure_diagnostics
@@ -47,6 +47,11 @@ def _text(value, label="内容", limit=32000):
 def _tool(name, description, properties, required):
     return {"name": name, "description": description, "input_schema": {
         "type": "object", "properties": properties, "required": required, "additionalProperties": False}}
+
+
+def _publication_rejected(code, message, **details):
+    return {"status": "error", "code": code, "complete": True, "outcome": "not_started",
+            "message": message, **details}
 
 
 def _reported_messages(messages):
@@ -638,14 +643,28 @@ class TeamService:
                 raise WorkConflict("当前工作目录或读取权限已变化。")
             source = workspace.execute("workspace_read", {"path": arguments["path"], "limit": 65536})
             if source.get("status") != "ok" or source.get("truncated"):
-                raise ValueError("没有读到完整UTF-8文件，不能发布部分源码。")
+                if type(source.get("bytes")) is int and source["bytes"] > MAX_CONTENT_BYTES:
+                    return _publication_rejected("source_file_too_large", f"源文件超过单份成果容量（{MAX_CONTENT_BYTES}个UTF-8字节），未开始发布；请按工程需要拆分文件，不发布节选。",
+                        max_content_bytes=MAX_CONTENT_BYTES)
+                return _publication_rejected("source_file_unavailable", "没有读到完整UTF-8源文件，未开始发布。请核对相对路径、读取权限和文件内容后修正，不发布节选。")
             filename = source["path"].rsplit("/", 1)[-1]
             return self._execute(task_id, role, "publish_artifact", {"filename": filename, "content": source["content"],
                 "summary": arguments["summary"], "format": arguments["format"]}, workspace, binding, tool_start, assignment)
         if name == "publish_artifact":
-            payload, = normalize_deliverables([{**arguments, "title": arguments["filename"]}])
+            from .artifact_store import ArtifactStoreError, _name
+
+            # Validation precedes the durable publication; failures after emit remain unknown.
+            prepared = normalize_deliverables([{**arguments, "title": arguments["filename"]}])
+            payload = prepared[0] if prepared else {}
+            if payload.get("content_error") == "too_large":
+                return _publication_rejected("artifact_too_large", f"正文超过单份成果容量（{MAX_CONTENT_BYTES}个UTF-8字节），未开始发布；请按工程需要拆分文件，不发布节选。",
+                    max_content_bytes=MAX_CONTENT_BYTES)
             if not payload.get("content_sha256") or "filename" not in payload:
-                raise ValueError("需要有效文件名和完整成果正文。")
+                return _publication_rejected("invalid_artifact", "文件名、完整正文、摘要或格式无效，未开始发布。请提供非空UTF-8正文、有效文件名、非空摘要和code/markdown/text格式。")
+            try:
+                _name(payload["filename"])
+            except ArtifactStoreError:
+                return _publication_rejected("invalid_artifact_filename", "文件名不符合可落盘的便携命名要求，未开始发布。请使用普通文件名，避免保留设备名、控制字符或特殊路径。")
             unknown_publications = [r for r in self._pending_operations(task_id)
                 if r["started_seq"] != tool_start.seq and r["name"] in {"publish_artifact", "publish_workspace_file"}]
             for pending in unknown_publications:
