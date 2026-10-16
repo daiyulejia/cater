@@ -7,7 +7,7 @@ import gc
 import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import shutil
 import subprocess
 import sys
@@ -352,7 +352,8 @@ class ProgressChildTests(unittest.TestCase):
 
     def assert_evidence(self, result, phase, *, status=0, case=None):
         self.assertEqual(result.returncode, status, result.stderr)
-        evidence = notices(result.stdout)
+        notice_lines = [line for line in result.stdout.splitlines() if line.startswith(PREFIX)]
+        evidence = notices("\n".join(notice_lines))
         self.assertGreaterEqual(len(evidence), 1, result.stdout)
         self.assertLessEqual(len(evidence), 8)
         self.assertTrue(all(item["phase"] == phase for item in evidence), evidence)
@@ -373,11 +374,61 @@ class ProgressChildTests(unittest.TestCase):
             self.assertLessEqual(len(item["stack"]), 8)
             for frame in item["stack"]:
                 self.assertEqual(set(frame), {"file", "function", "line"})
-                self.assertNotIn("/", frame["file"])
-                self.assertNotIn("\\", frame["file"])
+            metadata = [item["phase"], item["case"]]
+            metadata.extend(value for frame in item["stack"] for value in (frame["file"], frame["function"]))
+            for value in metadata:
+                if value is not None:
+                    self.assertNotIn("/", value)
+                    self.assertNotIn("\\", value)
         self.assertTrue(any(item["stalled"] for item in evidence), evidence)
-        for private in (str(self.root), "ENV_MUST_NOT_APPEAR", "LOCAL_MUST_NOT_APPEAR", "SOURCE_MUST_NOT_APPEAR"):
-            self.assertNotIn(private, result.stdout)
+        # Ordinary failure annotations retain tracebacks; watchdog notices expose metadata only.
+        for text in ("\n".join(notice_lines), json.dumps(evidence, ensure_ascii=False)):
+            for private in (str(self.root), "PRIVATE", "ENV_MUST_NOT_APPEAR",
+                            "LOCAL_MUST_NOT_APPEAR", "SOURCE_MUST_NOT_APPEAR"):
+                self.assertNotIn(private, text)
+
+    def failure_annotation_evidence(self, *, file="test_block.py", function="test_fail"):
+        payload = {"phase": "case", "case": "test_block.Case.test_fail", "elapsed_seconds": .04,
+                   "since_progress_seconds": .04, "stack": [{"file": file, "function": function, "line": 8}],
+                   "stalled": True, "completed_cases": 0, "selected_total": 1}
+        detail = ('Traceback (most recent call last):\n'
+                  f'  File "{self.root / "tests" / "test_block.py"}", line 8, in test_fail\n'
+                  'AssertionError: PRIVATE_FAILURE\n')
+        output = io.StringIO()
+        result = runner.AnnotatedResult(io.StringIO(), True, 2)
+        with patch.dict(os.environ, {"GITHUB_ACTIONS": "true"}), redirect_stdout(output):
+            result.annotate(SimpleNamespace(id=lambda: payload["case"]), detail)
+        stdout = PREFIX + runner.escape_annotation(json.dumps(payload)) + "\n" + output.getvalue() + "COMPLETE\n"
+        return SimpleNamespace(returncode=1, stdout=stdout, stderr="FAILED (failures=1)")
+
+    def test_evidence_distinguishes_failure_tracebacks_from_clean_notices(self):
+        for root in (PurePosixPath("/tmp/ci-stall-posix-private"), PureWindowsPath("C:/ci-stall-private")):
+            with self.subTest(root=str(root)), patch.object(self, "root", root):
+                result = self.failure_annotation_evidence()
+                self.assertIn(str(root / "tests" / "test_block.py"), result.stdout)
+                self.assertIn("AssertionError: PRIVATE_FAILURE", result.stdout)
+                self.assert_evidence(result, "case", status=1, case="test_block.Case.test_fail")
+
+    def test_evidence_rejects_notice_paths_including_json_escaped_paths(self):
+        for path in ("/opt/unrelated/project/test_block.py", "D:\\unrelated\\project\\test_block.py", str(self.root)):
+            for field in ("file", "function"):
+                for escaped in (False, True):
+                    with self.subTest(path=path, field=field, escaped=escaped):
+                        result = self.failure_annotation_evidence(**{field: path})
+                        if escaped:
+                            result.stdout = result.stdout.replace("/", r"\u002f").replace(r"\\", r"\u005c")
+                        with self.assertRaises(AssertionError):
+                            self.assert_evidence(result, "case", status=1, case="test_block.Case.test_fail")
+
+    def test_evidence_rejects_notice_secrets_including_json_escaped_secrets(self):
+        for secret in ("PRIVATE_FAILURE", "ENV_MUST_NOT_APPEAR", "LOCAL_MUST_NOT_APPEAR", "SOURCE_MUST_NOT_APPEAR"):
+            for escaped in (False, True):
+                with self.subTest(secret=secret, escaped=escaped):
+                    result = self.failure_annotation_evidence(function=secret)
+                    if escaped:
+                        result.stdout = result.stdout.replace(secret, "\\u%04x" % ord(secret[0]) + secret[1:])
+                    with self.assertRaises(AssertionError):
+                        self.assert_evidence(result, "case", status=1, case="test_block.Case.test_fail")
 
     def test_real_discovery_import_and_load_tests_stalls(self):
         case = "class Case(unittest.TestCase):\n    def test_ok(self): pass\n"
@@ -410,10 +461,16 @@ class ProgressChildTests(unittest.TestCase):
         source = ("import time, unittest\nclass Case(unittest.TestCase):\n"
                   "    def test_fail(self):\n        print('EXECUTED', flush=True)\n"
                   "        private_local = 'LOCAL_MUST_NOT_APPEAR'\n"
-                  "        time.sleep(.4) # SOURCE_MUST_NOT_APPEAR\n        self.fail('offline failure')\n")
+                  "        time.sleep(.4) # SOURCE_MUST_NOT_APPEAR\n        self.fail('offline failure PRIVATE_FAILURE')\n")
         result = self.child(source)
         self.assert_evidence(result, "case", status=1, case="test_block.Case.test_fail")
         self.assertEqual(result.stdout.count("EXECUTED"), 1)
+        errors = [line for line in result.stdout.splitlines() if line.startswith("::error title=")]
+        self.assertEqual(len(errors), 1)
+        self.assertTrue(errors[0].startswith("::error title=test_block.Case.test_fail::"))
+        self.assertIn("Traceback (most recent call last):", errors[0])
+        self.assertIn("test_block.py", errors[0])
+        self.assertIn("AssertionError: offline failure PRIVATE_FAILURE", errors[0])
         self.assertIn("FAILED (failures=1)", result.stderr)
 
     def test_real_keyboard_interrupt_in_discovery_and_case_joins_worker(self):
