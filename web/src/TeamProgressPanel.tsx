@@ -10,24 +10,25 @@ const excerpt = (value: unknown, limit = 800): string => typeof value === 'strin
 const toolNames: Record<string, string> = { workspace_run: '运行命令', workspace_read: '读取文件', workspace_write: '写入文件', workspace_search: '查找文件', workspace_list: '列出目录',
   delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果', read_receipts: '核对执行回执', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件', set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复' }
 
-function ToolReceipt({ event }: { event: TeamEvent }) {
+function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean }) {
+  const detail = (value: unknown) => excerpt(value, full ? Number.MAX_SAFE_INTEGER : 800)
   const p = event.payload
   const args = record(p.arguments)
   const result = record(p.result)
   const stdout = record(result.stdout), stderr = record(result.stderr)
-  const output = [excerpt(result.content), excerpt(stdout.preview ?? stdout.excerpt ?? result.stdout), excerpt(stderr.preview ?? stderr.excerpt ?? result.stderr)].filter(Boolean).join('\n')
+  const output = [detail(result.content), detail(stdout.preview ?? stdout.excerpt ?? result.stdout), detail(stderr.preview ?? stderr.excerpt ?? result.stderr)].filter(Boolean).join('\n')
   const rawCommand = args.command ?? result.command
   const command = Array.isArray(rawCommand) ? rawCommand.filter((part): part is string => typeof part === 'string').join(' ') : rawCommand
-  const reason = excerpt(p.reason ?? result.reason ?? result.message ?? record(result.error).message ?? result.error)
+  const reason = detail(p.reason ?? result.reason ?? result.message ?? record(result.error).message ?? result.error)
   return <div className="mt-1 space-y-1 whitespace-pre-wrap [overflow-wrap:anywhere]">
-    {excerpt(args.path ?? result.path ?? command) && <p className="font-mono">{excerpt(args.path ?? result.path ?? command)}</p>}
-    {excerpt(args.query) && <p>查找：{excerpt(args.query)}</p>}
-    {excerpt(p.summary ?? result.summary) && <p>{excerpt(p.summary ?? result.summary)}</p>}
-    {excerpt(result.filename) && <p>成果文件：{excerpt(result.filename)}</p>}
+    {detail(args.path ?? result.path ?? command) && <p className="font-mono">{detail(args.path ?? result.path ?? command)}</p>}
+    {detail(args.query) && <p>查找：{detail(args.query)}</p>}
+    {detail(p.summary ?? result.summary) && <p>{detail(p.summary ?? result.summary)}</p>}
+    {detail(result.filename) && <p>成果文件：{detail(result.filename)}</p>}
     {typeof result.artifact_seq === 'number' && <p>成果记录：#{result.artifact_seq}</p>}
     {typeof result.message_seq === 'number' && <p>已投递消息 #{result.message_seq}</p>}
-    {excerpt(result.goal) && <p>当前目标：{excerpt(result.goal)}</p>}
-    {excerpt(result.note) && <p>{excerpt(result.note)}</p>}
+    {detail(result.goal) && <p>当前目标：{detail(result.goal)}</p>}
+    {detail(result.note) && <p>{detail(result.note)}</p>}
     {result.waiting === true && <p>已进入等待，收到新消息后继续。</p>}
     {typeof result.exit_code === 'number' && <p>退出码：{result.exit_code}</p>}
     {typeof result.bytes === 'number' && <p>已返回 {result.bytes} 字节</p>}
@@ -39,7 +40,7 @@ function ToolReceipt({ event }: { event: TeamEvent }) {
   </div>
 }
 
-export function TeamToolProgress({ events, names }: { events: TeamEvent[]; names: Record<string, string> }) {
+export function TeamToolProgress({ events, names, full = false }: { events: TeamEvent[]; names: Record<string, string>; full?: boolean }) {
   const receipts = events.filter((event) => isTeamHost(event) && (event.type === 'team.tool_started' || event.type === 'team.tool_finished'))
   const starts = receipts.filter((event) => event.type === 'team.tool_started')
   const finishFor = (start: TeamEvent) => receipts.find((event) => event.type === 'team.tool_finished' && event.seq > start.seq
@@ -66,7 +67,7 @@ export function TeamToolProgress({ events, names }: { events: TeamEvent[]; names
         : ['ok', 'done', 'completed', 'succeeded', 'passed', 'success'].includes(String(status)) ? '工具已完成' : '工具结果待确认'
       return <li key={event.seq}>
         <p><strong>{toolNames[name] ?? name}</strong> · {label} · @{names[role] ?? role}</p>
-        <ToolReceipt event={{ ...event, payload: { ...event.payload, ...p } }} />
+        <ToolReceipt event={{ ...event, payload: { ...event.payload, ...p } }} full={full} />
       </li>
     })}</ol>
   </details>

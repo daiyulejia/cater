@@ -141,14 +141,19 @@ class SimpleTeamTests(unittest.TestCase):
         created, = self.events("task.created")
         self.assertEqual(created.payload["goal"], "制作 doc 转 PDF 工具")
 
-    def test_direct_worker_chat_reports_to_manager_and_can_answer_after_completion(self):
+    def test_direct_worker_chat_answers_without_waking_manager_after_completion(self):
         self.rt.log.emit(type="team.objective_completed", task_id=self.task, actor=HOST,
                          payload={"summary": "旧任务完成", "verification": "记录"})
         name = self.rt._role_by_id(self.worker).name
         self.driver.steps = {self.worker: [turn("可以，我解释一下上次的实现。")], self.manager: [turn("我也看到了这次沟通。") ]}
         self.rt.team.receive(self.task, f"@{name} 解释一下", request_id="direct-worker-chat")
         self.run_ok()
-        self.assertEqual(len(self.driver.calls), 2)
+        self.assertEqual(len(self.driver.calls), 1)
+        self.assertEqual(self.events("team.message_received")[-1].actor.kind, "human")
+        reply, = self.events("msg.said")
+        self.assertEqual(reply.payload["audience"], "customer")
+        self.assertEqual(reply.payload["recipient"], "human")
+        self.assertNotIn("delivery_seq", reply.payload)
         self.assertEqual(self.rt.task(self.task).status, "done")
 
     def test_paused_group_can_answer_but_has_no_execution_tools(self):

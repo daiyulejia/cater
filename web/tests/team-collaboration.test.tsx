@@ -3,7 +3,7 @@ import { beforeEach, expect, test, vi } from 'vitest'
 import App from '../src/App'
 import type { TaskDetail } from '../src/App'
 import type { TeamState } from '../src/team'
-import { teamMessageEchoes, teamStatus } from '../src/team'
+import { teamDeliveries, teamMessageAudience, teamMessageEchoes, teamStatus } from '../src/team'
 
 type EventRecord = TaskDetail['events'][number]
 const event = (seq: number, type: string, payload: Record<string, unknown> = {}, id = 'team', kind = 'system'): EventRecord => ({
@@ -79,6 +79,300 @@ test('不同请求发送相同原话仍保留两条用户消息', async () => {
     event(3, 'team.message_received', { text: '继续', kind: 'message', request_id: 'b' }, 'human', 'human'),
   ]))
   expect(stream().getAllByText('继续')).toHaveLength(2)
+})
+
+test.each([true, false])('人类直接点名猫的回答保持可见，兼容旧来源推导（audience=%s）', async (explicit) => {
+  await mount(detail([
+    event(2, 'team.message_received', { text: '@米寇 登录态怎么保存？', recipient: 'dev', kind: 'message' }, 'human', 'human'),
+    event(3, 'msg.said', { text: '登录态保存在服务端。', phase: 'team', reply_to: 2,
+      ...(explicit ? { audience: 'customer', recipient: 'human' } : {}) }, 'dev', 'agent'),
+  ]))
+  const answer = stream().getByText('登录态保存在服务端。')
+  expect(answer.closest('details.team-collaboration')).toBeNull()
+  expect(answer.closest('[data-actor="dev"]')).toBeTruthy()
+  expect(stream().queryByText(/团队协作 ·/)).toBeNull()
+  expect(stream().queryByText('店长最终交付')).toBeNull()
+})
+
+test('连续内部消息折叠为团队协作，展开保留完整发言、收件人、交接和工具过程，失败与对客回复打断分组', async () => {
+  const fullMessage = '内部实现说明'.repeat(150)
+  const fullReceipt = '真实读取回执'.repeat(160)
+  await mount(detail([
+    event(2, 'team.message_received', { text: '补齐登录入口并交回店长', recipient: 'dev', kind: 'assignment' }, 'store_manager', 'agent'),
+    event(3, 'team.run_started', { message_seq: 2, role: 'dev', run_id: 'implementation' }),
+    event(4, 'team.tool_started', { role: 'dev', name: 'workspace_read', run_id: 'implementation', arguments: { path: 'web/src/App.tsx' } }),
+    event(5, 'team.tool_finished', { role: 'dev', name: 'workspace_read', run_id: 'implementation', started_seq: 4, result: { status: 'ok', content: fullReceipt } }),
+    event(6, 'msg.said', { text: fullMessage, phase: 'team', reply_to: 2, run_id: 'implementation', audience: 'team', recipient: 'store_manager' }, 'dev', 'agent'),
+    event(7, 'team.message_received', { text: '请核对入口', recipient: 'test', kind: 'report', visible: true }, 'dev', 'agent'),
+    event(8, 'team.run_finished', { role: 'test', status: 'failed', reason: '检查调用失败' }),
+    event(9, 'msg.said', { text: '伙伴检查暂未完成，我会继续跟进。', phase: 'team', audience: 'customer', recipient: 'human' }, 'store_manager', 'agent'),
+    event(10, 'msg.said', { text: '已补充检查入口', phase: 'team', audience: 'team', recipient: 'dev' }, 'test', 'agent'),
+  ]))
+  const summary = stream().getByText('团队协作 · 3 条')
+  const group = summary.closest('details')!
+  expect(group.open).toBe(false)
+  expect(stream().getByText('检查调用失败').closest('details.team-collaboration')).toBeNull()
+  expect(stream().getByText('伙伴检查暂未完成，我会继续跟进。').closest('details.team-collaboration')).toBeNull()
+  expect(stream().getByText('团队协作 · 1 条').closest('details')?.open).toBe(false)
+  fireEvent.click(summary)
+  expect(group.open).toBe(true)
+  expect(within(group).getByText(fullMessage)).toBeTruthy()
+  const reply = within(group).getByText(fullMessage).closest('article')!
+  expect(within(reply).getByText('收件人：')).toBeTruthy()
+  expect(within(reply).getByText('@店长')).toBeTruthy()
+  expect(within(group).getByText('@店长 → @米寇 · 工作交接')).toBeTruthy()
+  fireEvent.click(within(group).getByText('这次接力的工作'))
+  expect(within(group).getByText('补齐登录入口并交回店长')).toBeTruthy()
+  const tools = await within(group).findByText('工具过程 · 1 项')
+  fireEvent.click(tools)
+  expect(within(group).getByText(fullReceipt)).toBeTruthy()
+  expect(within(group).getByText('web/src/App.tsx')).toBeTruthy()
+  fireEvent.click(summary)
+  expect(group.open).toBe(false)
+})
+
+test.each([{ phase: 'team', source: 'team' }, { phase: 'team' }, { source: 'team' }])
+('native 发布文件归入连续团队过程，成果板与成果筛选保留入口：%j', async (origin) => {
+  const payload = { title: 'test_summary.py', filename: 'test_summary.py', summary: '补齐摘要测试',
+    content: 'def test_summary():\n    assert True\n', format: 'code', kind: 'file', ...origin }
+  const initial = detail([
+    event(2, 'msg.said', { phase: 'team', audience: 'team', recipient: 'store_manager', text: '开始补齐测试' }, 'dev', 'agent'),
+    event(3, 'deliverable.published', payload, 'dev', 'agent'),
+    event(4, 'msg.said', { phase: 'team', audience: 'team', recipient: 'store_manager', text: '测试文件已发布，交回店长核对' }, 'dev', 'agent'),
+    event(5, 'team.objective_completed', { summary: '测试和说明已交付', run_id: 'delivery-run' }),
+  ])
+  initial.task.deliverables = [{ ...payload, seq: 3, actor: 'dev' }]
+  await mount(initial)
+  const group = stream().getByText('团队协作 · 3 条').closest('details')!
+  expect(group.open).toBe(false)
+  expect(within(group).getByText('· 阶段成果')).toBeTruthy()
+  expect(stream().queryByText('· 发布成果')).toBeNull()
+  expect(stream().getAllByText('· 店长最终交付')).toHaveLength(1)
+  expect(stream().getByText('测试和说明已交付').closest('details.team-collaboration')).toBeNull()
+  expect(await board().findByRole('button', { name: '下载 test_summary.py' })).toBeTruthy()
+  fireEvent.click(board().getByRole('button', { name: '查看正文' }))
+  expect(within(await screen.findByRole('dialog')).getByText('def test_summary(): assert True')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '关闭成果正文' }))
+  fireEvent.click(within(screen.getByRole('group', { name: '对话筛选' })).getByRole('button', { name: '成果', exact: true }))
+  const filteredGroup = stream().getByText('团队协作 · 1 条').closest('details')!
+  fireEvent.click(within(filteredGroup).getByText('团队协作 · 1 条'))
+  expect(filteredGroup.open).toBe(true)
+  expect(within(filteredGroup).getByText('· 阶段成果')).toBeTruthy()
+  expect(within(filteredGroup).getByRole('button', { name: '查看正文' })).toBeTruthy()
+})
+
+test.each([{}, { phase: 'legacy', source: 'external' }, { phase: 'teamish', source: 'unknown' }])
+('来源不明的历史发布成果保持可见：%j', async (origin) => {
+  await mount(detail([event(2, 'deliverable.published', { title: '旧成果', summary: '旧文件摘要', ...origin }, 'dev', 'agent')]))
+  const publication = stream().getByText('· 发布成果')
+  expect(publication.closest('details.team-collaboration')).toBeNull()
+  expect(stream().queryByText('· 阶段成果')).toBeNull()
+  expect(stream().queryByText('· 店长最终交付')).toBeNull()
+})
+
+test('可信完成先以店长身份呈现，后续引用替换成一份最终交付，验证留在 details，普通 done 问答不合并', async () => {
+  const completion = event(4, 'team.objective_completed', { summary: '工具登记的完成摘要', verification: '实际运行了两项入口检查。', run_id: 'delivery-run' })
+  const app = await mount(detail([completion], teamState({ status: 'done' })))
+  const original = stream().getByText('工具登记的完成摘要')
+  expect(original.closest('[data-actor="store_manager"]')).toBeTruthy()
+  expect(original.closest('article')?.querySelector('[role="img"][aria-label="店长"]')).toBeTruthy()
+  expect(stream().getAllByText('· 店长最终交付')).toHaveLength(1)
+  const preparing = event(5, 'msg.said', { text: '我再整理说明', phase: 'team', audience: 'customer', recipient: 'human', delivery_seq: 4, run_id: 'delivery-run' }, 'store_manager', 'agent')
+  await app.update(detail([completion, preparing], teamState({ status: 'done' })))
+  await waitFor(() => expect(stream().getByText('我再整理说明')).toBeTruthy())
+  expect(stream().getAllByText('· 店长最终交付')).toHaveLength(1)
+  await app.update(detail([
+    completion, preparing,
+    event(6, 'team.tool_started', { name: 'workspace_read', role: 'store_manager', run_id: 'delivery-run', arguments: { path: 'README.md' } }),
+    event(7, 'team.tool_finished', { name: 'workspace_read', role: 'store_manager', run_id: 'delivery-run', started_seq: 6, result: { status: 'ok', content: '操作说明依据' } }),
+    event(8, 'msg.said', { text: '入口和说明均已交付，可从登录页开始。', phase: 'team', audience: 'customer', recipient: 'human', delivery_seq: 4, run_id: 'delivery-run' }, 'store_manager', 'agent'),
+    event(9, 'msg.said', { text: '可以，下一步我会解释登录流程。', phase: 'team', audience: 'customer', recipient: 'human', run_id: 'question-run' }, 'store_manager', 'agent'),
+  ], teamState({ status: 'done' })))
+  await waitFor(() => expect(stream().queryByText('工具登记的完成摘要')).toBeNull())
+  await waitFor(() => expect(stream().queryByText('我再整理说明')).toBeNull())
+  const final = stream().getByText('入口和说明均已交付，可从登录页开始。')
+  expect(final.closest('details.team-collaboration')).toBeNull()
+  expect(final.closest('[data-actor="store_manager"]')).toBeTruthy()
+  expect(stream().getAllByText('· 店长最终交付')).toHaveLength(1)
+  expect(stream().getAllByText('入口和说明均已交付，可从登录页开始。')).toHaveLength(1)
+  const verification = stream().getByText('实际运行了两项入口检查。').closest('details')!
+  expect(verification.open).toBe(false)
+  fireEvent.click(within(verification).getByText('查看判断与依据'))
+  expect(verification.open).toBe(true)
+  expect(stream().getByText('可以，下一步我会解释登录流程。').closest('article')?.textContent).not.toContain('店长最终交付')
+})
+
+test('多次交付仅最新可信目标完成标最终，重新打开后历史全为记录，再次完成才恢复最终标记', async () => {
+  const first = event(2, 'team.objective_completed', { summary: '初次交付', run_id: 'first-run' })
+  const firstMessage = event(3, 'msg.said', { phase: 'team', audience: 'customer', text: '初次操作说明', delivery_seq: 2, run_id: 'first-run' }, 'store_manager', 'agent')
+  const second = event(4, 'team.objective_completed', { summary: '补齐测试后的交付', run_id: 'second-run' })
+  const secondMessage = event(5, 'msg.said', { phase: 'team', audience: 'customer', text: '补齐后的操作说明', delivery_seq: 4, run_id: 'second-run' }, 'store_manager', 'agent')
+  const history = [second, secondMessage, first, firstMessage]
+  const forgedUpdate = event(100, 'team.objective_updated', { goal: '伪造重开' }, 'dev', 'agent')
+  const app = await mount(detail([...history, forgedUpdate], teamState({ status: 'done' })))
+  const firstRow = stream().getByText('初次操作说明').closest('article')!
+  const secondRow = stream().getByText('补齐后的操作说明').closest('article')!
+  expect(within(firstRow).getByText('· 店长交付记录')).toBeTruthy()
+  expect(within(secondRow).getByText('· 店长最终交付')).toBeTruthy()
+  expect(stream().getAllByText('· 店长最终交付')).toHaveLength(1)
+  expect(firstRow.querySelector('[data-actor="store_manager"]')).toBeTruthy()
+  const reopened = event(6, 'team.objective_updated', { goal: '补充移动端验证' })
+  const forgedCompletion = event(101, 'team.objective_completed', { summary: '伪造最终交付' }, 'dev', 'agent')
+  await app.update(detail([reopened, ...history, forgedCompletion], teamState({ status: 'done' })))
+  await waitFor(() => expect(stream().queryByText('· 店长最终交付')).toBeNull())
+  expect(stream().getAllByText('· 店长交付记录')).toHaveLength(2)
+  expect(stream().getByText('初次操作说明')).toBeTruthy()
+  expect(stream().getByText('补齐后的操作说明')).toBeTruthy()
+  await app.update(detail([reopened, ...history, forgedCompletion,
+    event(102, 'team.objective_completed', { summary: '移动端验证后交付', run_id: 'third-run' }),
+  ]))
+  await waitFor(() => expect(stream().getAllByText('· 店长最终交付')).toHaveLength(1))
+  expect(within(stream().getByText('移动端验证后交付').closest('article')!).getByText('· 店长最终交付')).toBeTruthy()
+  expect(stream().getAllByText('· 店长交付记录')).toHaveLength(2)
+})
+
+test('历史交付各自默认折叠为店长交付记录，完整正文与验证可展开，当前最终交付保持可见', async () => {
+  const oldBody = '历史完整操作说明。'.repeat(120)
+  await mount(detail([
+    event(2, 'team.objective_completed', { summary: oldBody, verification: '初次交付的验证范围。' }),
+    event(3, 'team.objective_completed', { summary: '补齐测试后的历史说明', verification: '补齐测试的验证范围。' }),
+    event(4, 'team.objective_completed', { summary: '当前最终操作说明', verification: '当前验证范围。' }),
+  ], teamState({ status: 'done' })))
+  const summaries = stream().getAllByText('店长交付记录', { selector: 'summary' })
+  expect(summaries).toHaveLength(2)
+  const first = summaries[0].closest('details')!
+  const second = summaries[1].closest('details')!
+  expect(first.open).toBe(false)
+  expect(second.open).toBe(false)
+  expect(within(first).getByText(oldBody)).toBeTruthy()
+  expect(stream().queryByText(/团队协作 ·/)).toBeNull()
+  const final = stream().getByText('当前最终操作说明')
+  expect(final.closest('details')).toBeNull()
+  expect(within(final.closest('article')!).getByText('· 店长最终交付')).toBeTruthy()
+  fireEvent.click(summaries[0])
+  expect(first.open).toBe(true)
+  expect(second.open).toBe(false)
+  expect(within(first).getByText(oldBody).closest('[data-actor="store_manager"]')).toBeTruthy()
+  const verification = within(first).getByText('初次交付的验证范围。').closest('details')!
+  expect(verification.open).toBe(false)
+  fireEvent.click(within(verification).getByText('查看判断与依据'))
+  expect(verification.open).toBe(true)
+  expect(within(first).getByText('初次交付的验证范围。')).toBeTruthy()
+  fireEvent.click(summaries[0])
+  expect(first.open).toBe(false)
+  expect(final.closest('details')).toBeNull()
+})
+
+test.each(['nonleader', 'spoofed speaker', 'untrusted completion', 'missing completion', 'future completion', 'another run', 'new objective',
+  'other run reference', 'missing completion run', 'missing message run', 'missing both runs', 'empty run', 'numeric run'])
+('正式交付拒绝不可信引用：%s', (invalid) => {
+  const completion = event(4, 'team.objective_completed', { summary: '可信摘要', run_id: 'leader-run' })
+  const said = event(6, 'msg.said', { phase: 'team', text: '自称最终交付', delivery_seq: 4, run_id: 'leader-run' }, 'store_manager', 'agent')
+  const events = [completion, said]
+  if (invalid === 'nonleader') said.actor.id = 'dev'
+  if (invalid === 'spoofed speaker') { said.actor.id = 'dev'; said.payload.speaker = 'store_manager' }
+  if (invalid === 'untrusted completion') completion.actor.kind = 'agent'
+  if (invalid === 'missing completion') said.payload.delivery_seq = 99
+  if (invalid === 'future completion') completion.seq = 7
+  if (invalid === 'another run') events.push(event(5, 'team.run_started', { role: 'store_manager', run_id: 'leader-run' }))
+  if (invalid === 'new objective') events.push(event(5, 'team.objective_updated', { goal: '继续补充' }))
+  if (invalid === 'other run reference') {
+    said.payload.run_id = 'another-leader-run'
+    events.push(event(3, 'team.run_started', { role: 'store_manager', run_id: 'another-leader-run' }))
+  }
+  if (invalid === 'missing completion run' || invalid === 'missing both runs') delete completion.payload.run_id
+  if (invalid === 'missing message run' || invalid === 'missing both runs') delete said.payload.run_id
+  if (invalid === 'empty run') { completion.payload.run_id = ' '; said.payload.run_id = ' ' }
+  if (invalid === 'numeric run') { completion.payload.run_id = 123; said.payload.run_id = 123 }
+  expect(teamDeliveries(events, 'store_manager')).toEqual({ messages: new Map(), consumed: new Set() })
+})
+
+test('迁移前真实形状 completion 无 run_id 时，以可信店长 run 关联并只显示最后一份交付正文', async () => {
+  const completion = event(6, 'team.objective_completed', { summary: '登记的交付摘要', verification: '已执行真实测试。' })
+  const first = event(7, 'msg.said', { phase: 'team', text: '我再整理操作说明', audience: 'customer', recipient: 'human', reply_to: 2, delivery_seq: 6, run_id: 'legacy-run' }, 'store_manager', 'agent')
+  const final = event(10, 'msg.said', { ...first.payload, text: '最终操作说明：运行测试后打开入口。' }, 'store_manager', 'agent')
+  const events = [
+    event(2, 'team.message_received', { kind: 'message', recipient: 'store_manager', text: '补齐测试与说明' }, 'human', 'human'),
+    event(3, 'team.run_started', { message_seq: 2, role: 'store_manager', run_id: 'legacy-run' }),
+    event(4, 'team.run_started', { message_seq: 1, role: 'dev', run_id: 'worker-run' }),
+    event(5, 'team.run_finished', { message_seq: 1, role: 'dev', run_id: 'worker-run', status: 'completed' }),
+    completion, first,
+    event(8, 'team.tool_started', { name: 'workspace_read', role: 'store_manager', run_id: 'legacy-run', arguments: { path: 'README.md' } }),
+    event(9, 'team.tool_finished', { started_seq: 8, name: 'workspace_read', role: 'store_manager', run_id: 'legacy-run', result: { status: 'ok', content: '真实操作说明' } }),
+    final,
+    event(11, 'team.run_finished', { message_seq: 2, role: 'store_manager', run_id: 'legacy-run', status: 'completed' }),
+  ]
+  expect(teamDeliveries([...events].reverse(), 'store_manager')).toEqual({ messages: new Map([[6, final]]), consumed: new Set([7, 10]) })
+  await mount(detail(events, teamState({ status: 'done' })))
+  expect(stream().queryByText('登记的交付摘要')).toBeNull()
+  expect(stream().queryByText('我再整理操作说明')).toBeNull()
+  expect(stream().getAllByText(final.payload.text as string)).toHaveLength(1)
+  expect(stream().getAllByText('· 店长最终交付')).toHaveLength(1)
+  expect(stream().getByText(final.payload.text as string).closest('[data-actor="store_manager"]')).toBeTruthy()
+  expect(Object.hasOwn(completion.payload, 'run_id')).toBe(false)
+})
+
+test.each(['missing start', 'unknown run', 'untrusted start', 'wrong start role', 'late start', 'finished before completion',
+  'another leader started', 'another leader finished', 'explicit different completion run', 'invalid completion run'])
+('旧 completion 的 run 关联拒绝证据不完整或冲突：%s', (invalid) => {
+  const start = event(3, 'team.run_started', { role: 'store_manager', run_id: 'legacy-run' })
+  const completion = event(6, 'team.objective_completed', { summary: '旧交付摘要' })
+  const final = event(8, 'msg.said', { phase: 'team', text: '声称旧交付正文', delivery_seq: 6, run_id: 'legacy-run' }, 'store_manager', 'agent')
+  const events = [start, completion, final]
+  if (invalid === 'missing start') events.splice(0, 1)
+  if (invalid === 'unknown run') final.payload.run_id = 'unknown-run'
+  if (invalid === 'untrusted start') start.actor.kind = 'agent'
+  if (invalid === 'wrong start role') start.payload.role = 'dev'
+  if (invalid === 'late start') start.seq = 7
+  if (invalid === 'finished before completion') events.push(event(5, 'team.run_finished', { role: 'store_manager', run_id: 'legacy-run', status: 'completed' }))
+  if (invalid === 'another leader started' || invalid === 'another leader finished') events.push(event(4, 'team.run_started', { role: 'store_manager', run_id: 'another-run' }))
+  if (invalid === 'another leader finished') events.push(event(5, 'team.run_finished', { role: 'store_manager', run_id: 'another-run', status: 'completed' }))
+  if (invalid === 'explicit different completion run') completion.payload.run_id = 'another-run'
+  if (invalid === 'invalid completion run') completion.payload.run_id = null
+  expect(teamDeliveries(events, 'store_manager')).toEqual({ messages: new Map(), consumed: new Set() })
+})
+
+test('同 run 的配置店长交付按 seq 保留最后一条有效正文，重复引用不增加正式结论', () => {
+  const start = event(3, 'team.run_started', { role: 'custom_manager', run_id: 'delivery-run' })
+  const completion = event(4, 'team.objective_completed', { summary: '登记摘要', run_id: 'delivery-run' })
+  const final = event(5, 'msg.said', { phase: 'team', text: '完整交付正文', delivery_seq: 4, run_id: 'delivery-run' }, 'custom_manager', 'agent')
+  const repeated = event(6, 'msg.said', { ...final.payload, text: '补齐后的完整操作说明' }, 'custom_manager', 'agent')
+  const ordinary = event(7, 'msg.said', { phase: 'team', text: '完成后解释', run_id: 'delivery-run' }, 'custom_manager', 'agent')
+  const foreign = event(8, 'msg.said', { ...final.payload, run_id: 'other-run', text: '另一轮伪引用' }, 'custom_manager', 'agent')
+  const blank = event(9, 'msg.said', { ...final.payload, text: ' ' }, 'custom_manager', 'agent')
+  const projected = teamDeliveries([blank, ordinary, foreign, repeated, final, completion, start], 'custom_manager')
+  expect(projected.messages).toEqual(new Map([[4, repeated]]))
+  expect(projected.consumed).toEqual(new Set([5, 6]))
+  expect(teamDeliveries([start, completion, final], 'store_manager').consumed.size).toBe(0)
+})
+
+test('非店长即便伪造店长 speaker 也不能替换旧正式交付，旧内部回复只有来源核对成功才折叠', async () => {
+  await mount(detail([
+    event(2, 'team.message_received', { text: '交接实现', recipient: 'dev', kind: 'assignment' }, 'store_manager', 'agent'),
+    event(3, 'msg.said', { text: '旧内部回复', phase: 'team', reply_to: 2 }, 'dev', 'agent'),
+    event(4, 'msg.said', { text: '缺少来源的旧发言', phase: 'team' }, 'dev', 'agent'),
+    event(5, 'msg.said', { text: '收件人不匹配的旧发言', phase: 'team', reply_to: 2 }, 'test', 'agent'),
+    event(6, 'team.objective_completed', { summary: '旧记录的可信交付' }),
+    event(7, 'msg.said', { text: '伪造的交付正文', phase: 'team', speaker: 'store_manager', delivery_seq: 6 }, 'dev', 'agent'),
+    event(8, 'msg.said', { text: '缺少可信 run 关联的店长回复', phase: 'team', delivery_seq: 6, run_id: 'unknown-run' }, 'store_manager', 'agent'),
+  ]))
+  expect(stream().getByText('旧内部回复').closest('details.team-collaboration')).toBeTruthy()
+  for (const text of ['缺少来源的旧发言', '收件人不匹配的旧发言']) expect(stream().getByText(text).closest('details.team-collaboration')).toBeNull()
+  const official = stream().getByText('旧记录的可信交付').closest('article')!
+  expect(within(official).getByText('· 店长最终交付')).toBeTruthy()
+  expect(stream().getByText('伪造的交付正文').closest('article')?.textContent).not.toContain('店长最终交付')
+  expect(stream().getByText('缺少可信 run 关联的店长回复').closest('article')?.textContent).not.toContain('店长最终交付')
+})
+
+test.each(['missing', 'wrong type', 'wrong recipient', 'system source', 'future source'])('旧消息无有效来源时不推断内部：%s', (invalid) => {
+  const source = event(2, 'team.message_received', { recipient: 'dev' }, 'store_manager', 'agent')
+  const said = event(3, 'msg.said', { phase: 'team', reply_to: 2 }, 'dev', 'agent')
+  if (invalid === 'missing') said.payload.reply_to = 1
+  if (invalid === 'wrong type') source.type = 'msg.said'
+  if (invalid === 'wrong recipient') source.payload.recipient = 'test'
+  if (invalid === 'system source') source.actor.kind = 'system'
+  if (invalid === 'future source') source.seq = 4
+  expect(teamMessageAudience(said, new Map([[source.seq, source]]))).toEqual({})
 })
 
 test('模型调用失败在聊天中明确提示，不只留在折叠审计里', async () => {

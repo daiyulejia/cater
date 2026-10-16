@@ -33,7 +33,7 @@ import { controlLabels, executionLabel } from './executionControl'
 import type { ControlAction, ExecutionControl } from './executionControl'
 import { clearCreationRecovery, CREATION_RECOVERY_TTL, loadCreationRecovery, readAccessToken, saveCreationRecovery } from './creationRecovery'
 import type { CreationAttempt } from './creationRecovery'
-import { hasActiveTeamMessages, isTeamHost, resolveTeam, teamMessageEchoes, teamRunStatus, teamStatus } from './team'
+import { groupTeamConversation, hasActiveTeamMessages, isTeamHost, resolveTeam, teamDeliveries, teamMessageAudience, teamMessageEchoes, teamRunStatus, teamSpeaker, teamStatus } from './team'
 import type { TeamState, TeamSummary } from './team'
 
 const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
@@ -46,6 +46,7 @@ const ClarificationCard = lazy(() => import('./ClarificationCard').then((module)
 const QuestionDetails = lazy(() => import('./QuestionDetails').then((module) => ({ default: module.QuestionDetails })))
 const LazyArtifactPreview = lazy(() => import('./Artifact').then((module) => ({ default: module.ArtifactPreview })))
 const TeamWorkboard = lazy(() => import('./TeamProgressPanel').then((module) => ({ default: module.TeamWorkboard })))
+const TeamToolProgress = lazy(() => import('./TeamProgressPanel').then((module) => ({ default: module.TeamToolProgress })))
 const ChatMarkdown = lazy(() => import('./ChatMarkdown').then((module) => ({ default: module.ChatMarkdown })))
 
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
@@ -83,7 +84,7 @@ type Question = QuestionResult & { seq: number; status: string; question: string
 type ConversationReceipt = { seq: number; status: string }
 export type TaskDetail = { task: Task; team?: TeamState | null; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string } | null; activity?: Activity; execution_control?: ExecutionControl; workspace?: WorkspaceBinding }
 type DerivationSource = { id: string; goal: string }
-type ChatItem = { id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event; retryStatus?: 'waiting' | 'succeeded' | 'failed' | 'cancelled'; auditEvents?: Event[]; auditName?: (id: string) => string }
+type ChatItem = { internal?: boolean; historicalDelivery?: boolean; id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event; retryStatus?: 'waiting' | 'succeeded' | 'failed' | 'cancelled'; auditEvents?: Event[]; auditName?: (id: string) => string }
 
 const accessToken = readAccessToken()
 
@@ -225,6 +226,10 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
   const humanRequests = new Set(humanMessages.map((event) => event.payload.request_id).filter((id) => typeof id === 'string' && id))
   const shownRequests = new Set<string>()
   const teamEchoes = teamMessageEchoes(events)
+  const leader = organization?.leader.id ?? 'store_manager'
+  const deliveries = teamDeliveries(events, leader)
+  const latestTeamObjective = events.filter((event) => isTeamHost(event)
+    && ['team.objective_updated', 'team.objective_completed'].includes(event.type)).sort((a, b) => b.seq - a.seq)[0]
   const hasAutonomousDecision = events.some((event) => event.type === 'agent.decided' || event.type === 'supreme.decided')
   const hasFinishedActivity = events.some((event) => event.type === 'activity.completed' || event.type === 'activity.failed')
   const questionRows = new Map(questions.map((question) => [question.seq, question]))
@@ -295,6 +300,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       }
       const item = message(undefined, payload.text, actor.kind === 'human' ? 'human' : 'agent', 'collaboration')
       item.systemActor = false
+      item.internal = teamEnabled && teamMessageAudience(event, bySeq).audience === 'team'
       item.targets = typeof payload.recipient === 'string' ? [displayName(payload.recipient)] : []
       if (actor.kind === 'agent' && payload.kind === 'assignment') {
         item.notice = true
@@ -318,21 +324,35 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
     if (event.type === 'team.objective_updated' || event.type === 'team.objective_completed') {
       if (!isTeamHost(event)) return []
       const complete = event.type === 'team.objective_completed'
-      const item = message(complete ? '店长交付结论' : '任务目标已更新', typeof payload[complete ? 'summary' : 'goal'] === 'string' ? String(payload[complete ? 'summary' : 'goal']) : '', 'system', complete ? 'deliverable' : 'collaboration')
-      item.systemActor = true
-      if (complete && typeof payload.verification === 'string') item.details = [payload.verification]
+      const final = complete ? deliveries.messages.get(event.seq) : undefined
+      const title = complete ? event.seq === latestTeamObjective?.seq ? '店长最终交付' : '店长交付记录' : '任务目标已更新'
+      const item = message(title, final ? String(final.payload.text) : typeof payload[complete ? 'summary' : 'goal'] === 'string' ? String(payload[complete ? 'summary' : 'goal']) : '', complete ? 'agent' : 'system', complete ? 'deliverable' : 'collaboration')
+      item.systemActor = !complete
+      if (complete) {
+        item.historicalDelivery = event.seq !== latestTeamObjective?.seq
+        item.actor = leader
+        item.display = displayName(leader)
+        item.role = publicIdentity(leader, organization)
+        item.targets = []
+        item.replyTo = undefined
+        if (typeof payload.verification === 'string') item.details = [payload.verification]
+        if (final) item.auditEvents = [event, final]
+      }
       return [item]
     }
     if (event.type === 'task.created' && initialHuman?.payload.text === payload.goal) return []
     if (['conversation.received', 'human.commanded'].includes(event.type) && humanRequests.has(payload.request_id)) return []
     if (event.type === 'msg.said' && payload.phase === 'team') {
-      if (teamEchoes.has(event.seq)) return []
-      const speaker = typeof payload.speaker === 'string' ? payload.speaker : typeof payload.speaker_id === 'string' ? payload.speaker_id : actor.id
+      if (teamEchoes.has(event.seq) || deliveries.consumed.has(event.seq)) return []
+      const speaker = teamSpeaker(event)
+      const audience = teamMessageAudience(event, bySeq)
       const item = message(undefined, typeof payload.text === 'string' ? payload.text : '', 'agent')
       item.actor = speaker
       item.display = displayName(speaker)
       item.role = publicIdentity(speaker, organization)
       item.systemActor = false
+      item.internal = teamEnabled && audience.audience === 'team'
+      if (audience.recipient) item.targets = [displayName(audience.recipient)]
       return item.text ? [item] : []
     }
     if (retryRecords.has(event.seq)) return []
@@ -624,7 +644,12 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
         ...verification.map((item) => `验证计划：${item}`),
       ])]
     }
-    if (event.type === 'deliverable.published') return [message('发布成果', `${String(payload.title ?? '未命名成果')}\n${String(payload.summary ?? '')}`, 'agent', 'deliverable')]
+    if (event.type === 'deliverable.published') {
+      const internal = payload.phase === 'team' || payload.source === 'team'
+      const item = message(internal ? '阶段成果' : '发布成果', `${String(payload.title ?? '未命名成果')}\n${String(payload.summary ?? '')}`, 'agent', 'deliverable')
+      item.internal = internal
+      return [item]
+    }
     if (event.type === 'handoff.published') {
       const changed = Array.isArray(payload.changed) ? payload.changed.filter((item): item is string => typeof item === 'string') : []
       const verification = Array.isArray(payload.verification) ? payload.verification.filter((item): item is string => typeof item === 'string') : []
@@ -1403,7 +1428,7 @@ function App() {
             </p>}
             {graphLoaded && task.work?.items.length ? <Suspense fallback={<p role="status" className="px-4 py-2 text-xs text-[#52766d]">正在打开任务脉络…</p>}><TaskGraph key={task.id} work={task.work} open={graphOpen} onOpenChange={setGraphOpen} returnFocusRef={graphTriggerRef} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></Suspense> : null}
             <div className="relative flex min-h-0 flex-1 flex-col">
-              <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>{loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : visibleConversation.length ? visibleConversation.map((item) => <ChatBubble key={`${task.id}:${item.id}`} item={item} artifact={(task.deliverables ?? []).find((artifact) => artifact.seq === item.evidence.seq)} taskId={task.id} controls={clarificationControls} />) : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
+              <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>{loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : visibleConversation.length ? <ChatConversation key={task.id} items={visibleConversation} artifacts={task.deliverables ?? []} taskId={task.id} controls={clarificationControls} events={currentDetail?.events ?? []} names={names} /> : <p className="py-10 text-center text-sm text-[#8ba09a]">这一栏暂时还没有新消息。</p>}</div>
               {!loading && unread > 0 && <button onClick={jumpToLatest} className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-md border border-[#d9b9a5] bg-[#fff7eb] px-3 py-2 text-xs font-semibold text-[#915340] shadow-md" title="返回最新消息"><ArrowDown size={15} /> 查看新消息 · {unread}</button>}
             </div>
             {derivation ? <DerivationDraftBar goal={derivation.goal} onCancel={cancelDerivation} /> : legacyQuestionMode ? <QuestionComposerBar onCancel={toggleQuestion} /> : rulesControl}
@@ -1512,6 +1537,33 @@ function untrustedArtifact(event: Event): Artifact {
   return item
 }
 
+function ChatConversation({ items, artifacts, taskId, controls, events, names }: {
+  items: ChatItem[]; artifacts: Artifact[]; taskId: string; controls: ClarificationControls; events: Event[]; names: Record<string, string>
+}) {
+  const renderChatBubble = (item: ChatItem) => <ChatBubble key={item.id} item={item} artifact={artifacts.find((artifact) => artifact.seq === item.evidence.seq)} taskId={taskId} controls={controls} />
+  return groupTeamConversation(items).map((group) => {
+    const item = group.items[0]
+    if (item.historicalDelivery) return <details key={`delivery:${item.id}`} className="delivery-history min-w-0 border-l-2 border-[#dce8e1] pl-3">
+      <summary className="cursor-pointer text-xs font-semibold leading-5 text-[#52766d]">店长交付记录</summary>
+      <div className="mt-4">{renderChatBubble(item)}</div>
+    </details>
+    if (!group.internal) return renderChatBubble(group.items[0])
+    const sources = new Set(group.items.filter((item) => item.evidence.type === 'team.message_received').map((item) => item.id))
+    const runs = new Set([
+      ...group.items.map((item) => item.evidence.payload.run_id).filter((id): id is string => typeof id === 'string'),
+      ...events.filter((event) => isTeamHost(event) && event.type === 'team.run_started'
+        && typeof event.payload.message_seq === 'number' && sources.has(event.payload.message_seq)).map((event) => event.payload.run_id),
+    ])
+    const tools = events.filter((event) => typeof event.payload.run_id === 'string' && runs.has(event.payload.run_id))
+    return <details key={`team:${group.items[0].id}`} className="team-collaboration">
+      <summary>团队协作 · {group.items.length} 条</summary>
+      <div className="mt-4 space-y-4">{group.items.map(renderChatBubble)}
+        <Suspense fallback={null}><TeamToolProgress events={tools} names={names} full /></Suspense>
+      </div>
+    </details>
+  })
+}
+
 function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; artifact?: Artifact; taskId: string; controls: ClarificationControls }) {
   if (item.notice) return <article className="collaboration-notice">
     {item.text && <p>{item.text}</p>}
@@ -1531,7 +1583,7 @@ function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; arti
       {item.progress && <Suspense fallback={null}><WorkProgressPanel events={item.progress} claim={item.id} name={item.display} /></Suspense>}
       {item.progress && <WorkspaceToolProgress events={item.progress} claim={item.id} name={item.display} />}
       {item.evidence.type === 'deliverable.published' && <ArtifactPreview item={artifact ?? untrustedArtifact(item.evidence)} publisher={item.display} showSummary={false} />}
-      {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
+      {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.internal && item.targets.length > 0 && <span>收件人：</span>}{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
       {item.details?.length ? <details className={`mt-3 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#dfeae5] text-[#52766d]'}`}><summary className="cursor-pointer font-semibold">查看判断与依据</summary><ul className="mt-2 space-y-1.5 leading-5">{item.details.map((detail, index) => <li key={`${item.id}-${index}`}>{detail}</li>)}</ul></details> : null}
       <AuditTrail item={item} />
     </div>

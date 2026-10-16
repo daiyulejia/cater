@@ -38,6 +38,66 @@ export type TeamEvent = {
 
 export const isTeamHost = (event: TeamEvent) => event.actor.id === 'team' && event.actor.kind === 'system' && event.actor.role === 'team'
 
+export const teamSpeaker = (event: TeamEvent): string => typeof event.payload.speaker === 'string' ? event.payload.speaker
+  : typeof event.payload.speaker_id === 'string' ? event.payload.speaker_id : event.actor.id
+
+export type TeamAudience = { audience?: 'team' | 'customer'; recipient?: string }
+
+export function teamMessageAudience(event: TeamEvent, bySeq: ReadonlyMap<number, TeamEvent>): TeamAudience {
+  const p = event.payload
+  if (event.type === 'team.message_received') return event.actor.kind === 'agent'
+    ? { audience: 'team', recipient: typeof p.recipient === 'string' ? p.recipient : undefined } : {}
+  if (event.type !== 'msg.said' || p.phase !== 'team') return {}
+  if (p.audience === 'team' || p.audience === 'customer') return {
+    audience: p.audience, recipient: typeof p.recipient === 'string' ? p.recipient : undefined,
+  }
+  const source = typeof p.reply_to === 'number' ? bySeq.get(p.reply_to) : undefined
+  if (!source || source.seq >= event.seq || source.type !== 'team.message_received' || source.payload.recipient !== teamSpeaker(event)) return {}
+  if (source.actor.kind === 'human') return { audience: 'customer', recipient: source.actor.id }
+  if (source.actor.kind === 'agent') return { audience: 'team', recipient: source.actor.id }
+  return {}
+}
+
+export function teamDeliveries<T extends TeamEvent>(events: T[], leader: string): { messages: Map<number, T>; consumed: Set<number> } {
+  const bySeq = new Map(events.map((event) => [event.seq, event]))
+  const messages = new Map<number, T>(), consumed = new Set<number>()
+  for (const event of [...events].sort((a, b) => a.seq - b.seq)) {
+    if (event.type !== 'msg.said' || event.payload.phase !== 'team' || teamSpeaker(event) !== leader
+      || !((event.actor.kind === 'agent' && event.actor.id === leader) || isTeamHost(event))
+      || typeof event.payload.text !== 'string' || !event.payload.text.trim()) continue
+    const completion = typeof event.payload.delivery_seq === 'number' ? bySeq.get(event.payload.delivery_seq) : undefined
+    if (!completion || !isTeamHost(completion) || completion.type !== 'team.objective_completed' || completion.seq >= event.seq) continue
+    const run = event.payload.run_id
+    if (typeof run !== 'string' || !run.trim()) continue
+    const start = events.find((entry) => isTeamHost(entry) && entry.type === 'team.run_started'
+      && entry.payload.run_id === run)
+    if (Object.hasOwn(completion.payload, 'run_id')) {
+      if (completion.payload.run_id !== run) continue
+    } else {
+      // Legacy completions need an unambiguous, still-open leader run as evidence.
+      if (!start || start.payload.role !== leader || start.seq >= completion.seq
+        || events.some((entry) => isTeamHost(entry) && entry.seq < completion.seq
+          && ((entry.type === 'team.run_finished' && entry.payload.run_id === run)
+            || (entry.type === 'team.run_started' && entry.payload.role === leader && entry.seq > start.seq && entry.payload.run_id !== run)))) continue
+    }
+    if ((start && (start.payload.role !== leader || start.seq >= completion.seq))
+      || events.some((entry) => isTeamHost(entry) && entry.type === 'team.objective_updated' && entry.seq > completion.seq && entry.seq < event.seq)) continue
+    messages.set(completion.seq, event)
+    consumed.add(event.seq)
+  }
+  return { messages, consumed }
+}
+
+export function groupTeamConversation<T extends { internal?: boolean }>(items: T[]): { internal: boolean; items: T[] }[] {
+  const groups: { internal: boolean; items: T[] }[] = []
+  for (const item of items) {
+    const last = groups.at(-1)
+    if (item.internal && last?.internal) last.items.push(item)
+    else groups.push({ internal: Boolean(item.internal), items: [item] })
+  }
+  return groups
+}
+
 export const hasActiveTeamMessages = (team: TeamSummary) => team.pending_count > 0 || Boolean(team.runs?.some((run) =>
   (run.revision === undefined || run.revision === team.revision) && ['running', 'started'].includes(run.status ?? '')))
 

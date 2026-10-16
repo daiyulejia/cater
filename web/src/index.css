@@ -124,6 +124,8 @@ input:focus-visible { outline: 2px solid #247e71; outline-offset: 2px; }
 .handoff-line { margin-top: 10px; border-top: 1px solid #e5ddd5; padding-top: 8px; color: #526f65; font-size: 12px; line-height: 20px; overflow-wrap: anywhere; }
 .collaboration-notice { padding-left: 12px; color: #718078; font-size: 11px; line-height: 18px; overflow-wrap: anywhere; }
 .collaboration-notice .handoff-line { margin: 0 0 4px; border: 0; padding: 0; }
+.team-collaboration { min-width: 0; border-left: 2px solid #dce8e1; padding-left: 12px; }
+.team-collaboration > summary { cursor: pointer; color: #52766d; font-size: 12px; line-height: 20px; font-weight: 600; overflow-wrap: anywhere; }
 .collaboration-joined { margin-top: 6px; color: #718078; font-size: 11px; line-height: 18px; overflow-wrap: anywhere; }
 .question-outdated { font-weight: 600; color: #a56049; }
 .question-details { margin-top: 12px; border-top: 1px solid color-mix(in oklab, currentColor 20%, transparent); padding-top: 8px; font-size: 12px; line-height: 16px; }

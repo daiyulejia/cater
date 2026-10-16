@@ -286,7 +286,12 @@ class TeamService:
                 self.rt.log.emit(type="team.objective_updated", task_id=task_id, actor=HOST, payload={"goal": goal})
             return {"status": "ok", "goal": goal}
         if name == "finish_work":
-            payload = {"summary": _text(arguments["summary"]), "verification": _text(arguments["verification"])}
+            current_work = self.view(task_id)
+            if current_work["status"] == "done":
+                return {"status": "ok", "delivery_seq": current_work["revision"],
+                        "note": "当前目标已有交付结论，不重复登记；普通补充可直接回复，确需新工作请先采用新目标。"}
+            payload = {"summary": _text(arguments["summary"]), "verification": _text(arguments["verification"]),
+                       "run_id": tool_start.payload["run_id"]}
             self.rt.log.emit(type="team.objective_completed", task_id=task_id, actor=HOST, payload=payload)
             return {"status": "ok", "note": "已记录店长交付结论，实际验证范围按原文保留。"}
         if name == "read_artifact":
@@ -371,6 +376,10 @@ class TeamService:
                 "需要帮助、选方案或复核时直接联系合适伙伴。复核发现问题就具体反馈并安排修正，而不是等顾客催。"
                 "每位伙伴既能接活，也能交代下一份工作；你的输出可以成为下一位的输入，不必每步经过店长。"
                 "需要下一位接着做时实际调用delegate或send_message，写清成果引用、具体要求与验证期待，只在聊天里说已交接不会投递。"
+                "默认由店长作为顾客的整体对接人和最终交付负责人，伙伴向委托人交流具体工作，不分别向顾客宣布整体完成。"
+                "顾客直接@你时你直接回答；涉及整体目标或工作安排变化时主动同步店长，普通问答无需店长再附和。"
+                "仅收到告知、停止旧方案或等待顾客确认的消息时，不把共享目标当作新的开工委托；先理解对方到底让你做什么。"
+                "顾客要求先讨论方案、等确认时，应等待实际确认再实施；店长通知伙伴等待而不是让伙伴先做出成品。"
                 "active_assignment若非空是你仍负责的原委托，收到子回报、进展或问题答复后结合它继续工作并向原委托人回报。"
                 "open_assignments列出你尚未交还的委托，收到新消息也不要遗忘它们；完成其中一份时可用send_message的reply_to明确交回原委托。"
                 "成果用publish_artifact保存完整正文；操作和验证依据来自实际工具回执。"
@@ -399,9 +408,18 @@ class TeamService:
                 self._current(task_id, started, role, revision)
                 if turn.text.strip():
                     final = turn.text
+                    completed = next((e for e in reversed(self.rt.log.read(task_id=task_id))
+                        if e.seq > started.seq and e.type == "team.objective_completed" and e.actor == HOST), None)
+                    current_work = self.view(task_id)
+                    delivery = (completed.seq if completed and role.id == self.rt.organization.leader.id
+                                and current_work["status"] == "done" and current_work["revision"] == completed.seq else None)
+                    customer_facing = message.actor.kind == "human" or delivery is not None
                     self.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
                         payload={"text": turn.text, "claim": turn.text[:180], "phase": "team",
-                                 "run_id": started.payload["run_id"], "reply_to": message.seq})
+                                 "run_id": started.payload["run_id"], "reply_to": message.seq,
+                                 "audience": "customer" if customer_facing else "team",
+                                 "recipient": "human" if customer_facing else message.actor.id,
+                                 **({"delivery_seq": delivery} if delivery is not None else {})})
                 if not turn.calls:
                     break
                 history.append(turn.message)
@@ -455,8 +473,16 @@ class TeamService:
         already_reported = assignment is not None and any(e.actor.id == role.id
             and e.payload.get("kind") == "report" and e.payload.get("reply_to") == assignment.seq
             for e in self._messages(task_id))
-        if (role.id == self.rt.organization.leader.id and self.view(task_id)["status"] == "done"
-                and status in {"completed", "waiting"}):
+        if assignment is not None and status in {"completed", "waiting"} and final.strip():
+            already_reported |= any(e.seq > started.seq and e.actor.id == role.id
+                and e.payload.get("visible") is True and e.payload.get("kind") == "message"
+                and e.payload.get("recipient") == assignment.actor.id
+                and e.payload.get("parent_assignment_seq") == assignment.seq
+                and e.payload.get("text") == final.strip()
+                for e in self._messages(task_id))
+        current_work = self.view(task_id)
+        if (current_work["status"] == "done" or current_work["revision"] != revision
+                or assignment is not None and assignment.payload.get("revision") != current_work["revision"]):
             already_reported = True
         if status == "waiting" and assignment is not None and not already_reported:
             artifacts = [a for a in self.rt.task(task_id).deliverables if a["seq"] > started.seq and a.get("actor") == role.id]
@@ -465,11 +491,9 @@ class TeamService:
             text += (final or "我已处理这轮消息，现在等待后续信息或安排。")
             if assignment.payload["kind"] == "assignment" or published:
                 self._send(task_id, role, assignment.actor.id, text, "progress", reply_to=assignment.seq)
-        if status != "waiting" and not already_reported and (assignment is not None or (message.actor == Actor.human()
-                and role.id != self.rt.organization.leader.id)):
-            recipient = assignment.actor.id if assignment else self.rt.organization.leader.id
-            self._send(task_id, role, recipient, reason or final or "委托已处理，请查看本轮成果和工具记录。", "report",
-                       reply_to=assignment.seq if assignment else message.seq)
+        if status != "waiting" and not already_reported and assignment is not None:
+            self._send(task_id, role, assignment.actor.id, reason or final or "委托已处理，请查看本轮成果和工具记录。", "report",
+                       reply_to=assignment.seq)
 
     def run(self, task_id):
         with activity_owner(self.rt.log.path, task_id, "simple-team") as owned:
