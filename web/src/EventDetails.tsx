@@ -168,7 +168,7 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
     }
     case 'team.tool_started': case 'team.tool_finished':
       status = event.type === 'team.tool_started' ? '等待工具回执' : label(p.status ?? record(p.result).status, { ok: '工具已完成', completed: '工具已完成', succeeded: '工具已完成', error: '工具未完成', failed: '工具未完成' }, '工具结果待确认')
-      add('工具', (p.name ?? p.tool) === 'read_checkpoint' ? '读取工作检查点' : p.name ?? p.tool); add('执行成员', member(p.role)); add('摘要', p.summary ?? record(p.result).summary)
+      add('工具', (p.name ?? p.tool) === 'read_checkpoint' ? '读取工作检查点' : (p.name ?? p.tool) === 'read_delivery' ? '读取交付说明' : p.name ?? p.tool); add('执行成员', member(p.role)); add('摘要', p.summary ?? record(p.result).summary)
       number('关联消息', p.message_seq); number('发起事件', p.started_seq); number('退出码', record(p.result).exit_code)
       add('原因', p.reason ?? record(record(p.result).error).message)
       note = '工具回执仅说明这次操作的结果。'

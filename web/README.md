@@ -25,6 +25,15 @@ pnpm --dir web lint
 
 测试会模拟延迟响应，检查任务切换、草稿归属、重复发送、后台刷新和阅读历史时的新消息提示。GitHub 自动检查也会运行这些测试和前端构建。
 
+真实浏览器布局回归单独启用，复用仓库已固定版本的可选工具，不要求普通前端测试隐式安装浏览器。先在 `tools/browser-check/` 执行 `npm ci --ignore-scripts --no-audit --no-fund` 和 `npm run install:browser`，然后在 PowerShell 中执行：
+
+```powershell
+$env:CATER_WEB_BROWSER_TESTS = '1'
+pnpm --dir web exec vitest run --maxWorkers=2
+```
+
+未启用时仅跳过该浏览器布局用例，其余交互与构建预算检查照常执行。CI 会安装固定浏览器工具及 Linux 运行依赖并显式启用，覆盖手机与桌面的真实布局；无需模型 API 或生产数据库。
+
 手动检查慢加载状态时，可在仓库根目录运行 `python tests/fixtures/workroom_latency.py`，访问 `http://127.0.0.1:8774/`。这个专用验证服务使用独立的 `.cater/qa/workroom.db`，故意延迟响应，结束检查后关闭即可。
 
 然后回到仓库根目录，正常启动 Cater：

@@ -30,6 +30,7 @@ test('production chunks stay within loading budgets with complete acyclic import
     .filter((id) => /[/\\]react(?:-dom)?[^/\\]*\.development\.js$|[/\\]jsx-dev-runtime\.js$/.test(id))
   expect(developmentModules, 'production output must not include React development runtimes').toEqual([])
   expect(entries).toHaveLength(1)
+  console.info(`Production entry: ${Buffer.byteLength(entries[0].code)} / 150000 bytes (in-memory build)`)
   for (const chunk of chunks) {
     const budget = chunk.isEntry ? 150_000 : 500_000
     expect(Buffer.byteLength(chunk.code), `${chunk.fileName}: ${budget} byte budget`).toBeLessThanOrEqual(budget)
@@ -58,7 +59,7 @@ test('production chunks stay within loading budgets with complete acyclic import
   const graph = chunks.find((chunk) => chunk.fileName.includes('TaskGraph-'))
   expect(graph, 'the graph view must be loaded through a dynamic import').toBeDefined()
   expect(entries[0].dynamicImports).toContain(graph!.fileName)
-  for (const name of ['ClarificationCard', 'QuestionDetails', 'Artifact']) {
+  for (const name of ['ClarificationCard', 'QuestionDetails', 'Artifact', 'MessageDetails']) {
     const component = chunks.find((chunk) => chunk.fileName.includes(`${name}-`))
     expect(component, `${name} must load on demand`).toBeDefined()
     expect(visited.has(component!.fileName), `${name} must not be statically reachable from the entry`).toBe(false)

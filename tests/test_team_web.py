@@ -640,7 +640,7 @@ class TeamWebTests(unittest.TestCase):
         self.assertIn("team_message_seq", detail["activity"])
         self.assertEqual(self.run_current(task)["state"], "completed")
         self.assertEqual(len(self.driver.calls), before + 1)
-        self.assertEqual({tool["name"] for tool in self.driver.calls[-1]["tools"]}, {"read_artifact", "read_receipts", "read_messages", "read_checkpoint", "wait_for_reply"})
+        self.assertEqual({tool["name"] for tool in self.driver.calls[-1]["tools"]}, {"read_artifact", "read_receipts", "read_messages", "read_checkpoint", "read_delivery", "wait_for_reply"})
         with self.factory() as rt:
             self.assertEqual(rt.execution_control.view(task), control)
             self.assertEqual(rt.team.view(task)["pending_count"], 1)
@@ -658,7 +658,7 @@ class TeamWebTests(unittest.TestCase):
         with patch("cater.workspace_tools.WorkspaceExecutor.execute", side_effect=AssertionError("write executed")) as execute:
             self.run_current(task)
         execute.assert_not_called()
-        self.assertEqual({tool["name"] for tool in self.driver.calls[-1]["tools"]}, {"read_artifact", "read_receipts", "read_messages", "read_checkpoint", "wait_for_reply"})
+        self.assertEqual({tool["name"] for tool in self.driver.calls[-1]["tools"]}, {"read_artifact", "read_receipts", "read_messages", "read_checkpoint", "read_delivery", "wait_for_reply"})
         self.assertFalse((self.root / "project" / "must-not-exist.txt").exists())
         with self.factory() as rt:
             self.assertEqual(rt.execution_control.view(task)["state"], "paused")
@@ -710,7 +710,7 @@ class TeamWebTests(unittest.TestCase):
         with self.factory() as rt:
             self.assertEqual(rt.execution_control.view(task)["state"], "paused")
             self.assertEqual(rt.team.view(task)["pending_count"], 0)
-        self.assertEqual({tool["name"] for tool in self.driver.calls[-1]["tools"]}, {"read_artifact", "read_receipts", "read_messages", "read_checkpoint", "wait_for_reply"})
+        self.assertEqual({tool["name"] for tool in self.driver.calls[-1]["tools"]}, {"read_artifact", "read_receipts", "read_messages", "read_checkpoint", "read_delivery", "wait_for_reply"})
 
     def test_old_workspace_uncertainty_blocks_team_write_but_allows_chat(self):
         task = self.create(workspace_id="source")["task"]["id"]

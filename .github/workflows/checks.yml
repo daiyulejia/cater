@@ -39,7 +39,7 @@ jobs:
   runtime:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -60,7 +60,7 @@ jobs:
   workroom:
     name: Conversation UI
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: web
@@ -76,8 +76,16 @@ jobs:
         run: npm install --global pnpm@11.25.0
       - name: Install frontend development dependencies
         run: pnpm install --frozen-lockfile
+      - name: Install pinned UI browser regression runtime
+        working-directory: tools/browser-check
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Install Chromium and Linux browser dependencies
+        working-directory: tools/browser-check
+        run: npx --no-install playwright install --with-deps chromium
       - name: Check conversation interactions
-        run: pnpm test
+        env:
+          CATER_WEB_BROWSER_TESTS: '1'
+        run: pnpm exec vitest run --maxWorkers=2
       - name: Lint and build workroom
         run: |
           pnpm lint

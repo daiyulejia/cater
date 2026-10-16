@@ -36,7 +36,7 @@ def build_review(
     native_tasks = _native_chat_tasks(events, member_ids)
     lenses = [
         _product_lens(tasks),
-        _design_lens(tasks, events),
+        _design_lens(tasks, events, member_ids),
         _distribution_lens(tasks, native_tasks),
         _collaboration_lens(tasks),
         _cost_lens(tasks),
@@ -127,12 +127,66 @@ def _product_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     return _lens("product", "ok", "Tasks have visible agent progress.", "Keep the next user action obvious.")
 
 
-def _design_lens(tasks: list[TaskSnapshot], events: list[Event]) -> dict[str, str]:
+def _design_lens(
+    tasks: list[TaskSnapshot], events: list[Event], member_ids: frozenset[str] = frozenset(),
+) -> dict[str, str]:
     if not events:
         return _lens("design", "needs_attention", "There is no replayable process yet.", "Create a task so the process can be inspected.")
-    missing_brief = [task.id for task in tasks if task.messages and not task.brief]
+    native_tasks = _native_chat_tasks(events, member_ids)
+    by_task: dict[str, list[Event]] = {}
+    for event in events:
+        if event.task_id:
+            by_task.setdefault(event.task_id, []).append(event)
+    missing_brief = [
+        task.id for task in tasks if task.messages and not task.brief
+        and (task.id not in native_tasks or any(message.get("phase") != "team" for message in task.messages))
+    ]
+    findings, actions = [], []
     if missing_brief:
-        return _lens("design", "watch", "Some agent work lacks a generated brief.", "Run or export the task to preserve a readable process summary.")
+        findings.append("Some agent work lacks a generated brief.")
+        actions.append("Run or export the task to preserve a readable process summary.")
+    native_issues, readable, historical = [], 0, 0
+    for task in tasks:
+        timeline = by_task.get(task.id, [])
+        if not any(event.type in {"team.started", "team.objective_updated", "team.objective_completed"}
+                   for event in timeline):
+            continue
+        # Completion belongs to the latest trusted objective, even if its goal text is unchanged.
+        boundary = max((event.seq for event in timeline if event.actor == Actor.system("team")
+                        and event.type in {"team.started", "team.objective_updated"}), default=0)
+        completions = [event for event in timeline
+                       if event.type == "team.objective_completed" and event.actor == Actor.system("team")]
+        historical += sum(event.seq <= boundary for event in completions)
+        completion = next((event for event in reversed(completions) if event.seq > boundary), None)
+        # Reuse native routing trust rules, also requiring readable text before the delivery.
+        process = [event for event in timeline if (completion is None or event.seq < completion.seq)
+                   and (event.type != "team.message_received"
+                        or isinstance(event.payload.get("text"), str) and event.payload["text"].strip())]
+        issues = []
+        if task.id not in _native_chat_tasks(process, member_ids):
+            issues.append("no valid routed native message supports this process or delivery")
+        if completion is None or task.status != "done":
+            issues.append("the current native objective has no trusted completed outcome")
+        if completion is not None:
+            missing = [key for key in ("summary", "verification")
+                       if not isinstance(completion.payload.get(key), str) or not completion.payload[key].strip()]
+            if missing:
+                issues.append("the current native completion lacks non-empty text for " + ", ".join(missing))
+        if issues:
+            native_issues.append(f"Task {task.id}: " + "; ".join(issues) + ".")
+        else:
+            readable += 1
+    if native_issues:
+        findings.extend(native_issues)
+        actions.append("Inspect the current native objective's routed messages and trusted completion; preserve a readable summary and actual verification scope when work finishes.")
+    if readable:
+        findings.append(f"{readable} native task(s) have routed chat timelines and trusted current-objective delivery summary and verification text.")
+    if historical:
+        findings.append(f"{historical} earlier completion record(s) remain historical; they do not complete the current objective.")
+    if native_issues or readable:
+        actions.append("Inspect the recorded verification scope; process readability does not prove model correctness or user understanding.")
+    if findings:
+        return _lens("design", "watch" if missing_brief or native_issues else "ok", " ".join(findings), " ".join(actions))
     return _lens("design", "ok", "The process has timeline and brief data.", "Keep replay views compact and scannable.")
 
 

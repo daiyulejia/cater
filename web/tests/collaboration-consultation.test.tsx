@@ -67,7 +67,7 @@ test.each(['answered', 'declined'])('%s呈现实际角色回复，引用默认�
   expect(visibleText(reply)).toContain('月亮')
   expect(visibleText(reply)).toContain('棋盘边缘保留足够对比。')
   expect(visibleText(reply)).toContain('@米寇')
-  const details = within(reply).getByText('查看判断与依据').closest('details')!
+  const details = (await within(reply).findByText('查看判断与依据')).closest('details')!
   expect(details.open).toBe(false)
   expect(visibleText(reply)).not.toContain('成果 #20')
   fireEvent.click(details.querySelector('summary')!)

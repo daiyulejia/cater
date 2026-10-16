@@ -14,6 +14,7 @@ from .activity_owner import activity_owner
 from .events import Actor
 from .room_dialogue import addressed_role
 from .team_recovery import RECOVERY_CONTRACT, TeamRecovery
+from .team_delivery import HandoffError, TeamDelivery, handoff_schema
 from .usage import valid_token_count
 from .work import WorkConflict
 
@@ -60,6 +61,7 @@ class TeamService:
     def __init__(self, runtime):
         self.rt = runtime
         self.recovery = TeamRecovery(self)
+        self.delivery = TeamDelivery(self)
 
     def available(self):
         leader = self.rt.organization.leader
@@ -222,6 +224,8 @@ class TeamService:
             _tool("read_checkpoint", "读取从持久事件重建的当前目标及未交还工作，按原委托序号分页。中断后先核对成果和回执，再决定如何继续；检查点不是重放授权。",
                   {"after_seq": {"type": "integer", "minimum": 0},
                    "limit": {"type": "integer", "minimum": 1, "maximum": 50}}, []),
+            _tool("read_delivery", "读取本群保存的交付说明、文件版本、原因与运行复查步骤。默认最近一次，也可指定delivery_seq；historical表示过去版本，不是当前目标已完成。如何打开、为什么这样做等追问先读原说明，不必重新分工。",
+                  {"delivery_seq": {"type": "integer", "minimum": 1}}, []),
             _tool("read_artifact", "读取本群已发布成果的完整正文。", {"artifact_seq": {"type": "integer"}}, ["artifact_seq"]),
             _tool("request_review", "提交当前真实成果给一位独立伙伴复核，本轮等待结果。修复后先发布新版，再用原review_seq交回同一复核者，不能只说修好了。复核发现的问题必须闭环，店长不会越过未完成复核交付。",
                   {"reviewer": recipient, "artifact_seqs": {"type": "array", "minItems": 1, "maxItems": 20,
@@ -257,7 +261,7 @@ class TeamService:
                 _tool("set_objective", "采用顾客当前目标或更换实现方向。记录成功后再安排相应工作；普通追问不用更换目标。",
                       {"goal": string}, ["goal"]),
                 _tool("finish_work", "店长确认当前工作可以交付，说明实际验证与尚未验证的范围；不等同于宿主证明正确。",
-                      {"summary": string, "verification": string}, ["summary", "verification"]),
+                      {"summary": string, "verification": string, "handoff": handoff_schema()}, ["summary", "verification"]),
             ]
         if workspace is not None:
             tools += workspace.schemas()
@@ -425,6 +429,7 @@ class TeamService:
             "active_assignment": {"seq": assignment.seq, "sender": assignment.actor.id, **assignment.payload} if assignment else None,
             "open_assignments": open_assignments, "outgoing_work": outgoing,
             "work_checkpoint": self.recovery.checkpoint(task_id),
+            "delivery_index": self.delivery.index(task_id),
             "reviews": current_work["reviews"],
             "notifications": [{"seq": e.seq, "sender": e.actor.id, "sender_name": name(e.actor.id), **e.payload}
                               for e in notifications[-20:]], "notifications_truncated": len(notifications) > 20,
@@ -475,6 +480,8 @@ class TeamService:
                 return {"status": "error", "message": str(exc)}
         if name == "read_checkpoint":
             return self.recovery.read(task_id, arguments)
+        if name == "read_delivery":
+            return self.delivery.read(task_id, arguments)
         if name == "request_questions":
             event = self.rt.questionnaires.request(task_id, role, arguments, tool_start, assignment)
             return {"status": "ok", "question_seq": event.seq, "waiting_for_customer": True}
@@ -685,6 +692,12 @@ class TeamService:
                        "run_id": tool_start.payload["run_id"], "artifacts": list({a["filename"]: {
                            k: a[k] for k in ("seq", "filename", "content_sha256")} for a in self.rt.task(task_id).deliverables
                            if a.get("filename") and a.get("content_sha256")}.values())}
+            if "handoff" in arguments:
+                try:
+                    payload["handoff"] = self.delivery.normalize(task_id, arguments["handoff"],
+                        artifacts=payload["artifacts"], revision=current_work["revision"])
+                except HandoffError as exc:
+                    return {"status": "error", "code": "invalid_handoff", "message": str(exc)}
             self.rt.log.emit(type="team.objective_completed", task_id=task_id, actor=HOST, payload=payload)
             return {"status": "ok", "note": "已记录店长交付结论，实际验证范围按原文保留。"}
 
@@ -719,7 +732,7 @@ class TeamService:
                 workspace = WorkspaceExecutor(self.rt.workspaces.config[binding["workspace_id"]]["policy"])
             tools = self._schemas(role, workspace, has_background=self.rt.conversation_background(task_id) is not None)
             if self.rt.execution_control.view(task_id)["state"] != "running":
-                tools = [t for t in tools if t["name"] in {"read_artifact", "read_receipts", "read_messages", "read_background", "read_checkpoint", "wait_for_reply"}]
+                tools = [t for t in tools if t["name"] in {"read_artifact", "read_receipts", "read_messages", "read_background", "read_checkpoint", "read_delivery", "wait_for_reply"}]
             instructions = (
                 f"你当前唯一身份是{role.name}（角色ID：{role.id}）。message是发给你的本轮输入，sender才是发件人。"
                 "历史中他人的第一人称、自称和称呼不改变你的身份；不代替其他角色宣布他们的行动。"
@@ -756,6 +769,11 @@ class TeamService:
                 "成果用publish_artifact保存完整正文；操作和验证依据来自实际工具回执。"
                 "已写入工作目录的文件优先用publish_workspace_file直接发布，避免复述整份源码。"
                 "店长读成果，用read_receipts核对真实工具回执、跟进修正，能够交付时用finish_work记录结果及验证边界。"
+                "交付不只说完成：按任务需要在finish_work的handoff说明改了什么、为什么、影响、取舍、如何运行或复查，以及尚未验证的范围。"
+                "这是面向顾客的简明因果说明，不是私有思维链，也不要求顾客考试或逐步审批。简单交流无需填写完整模板。"
+                "handoff.evidence用source_seq和逐字quote关联本次文件正文、原生workspace工具回执的输出或当前复核反馈；先读取来源，不编造摘录。"
+                "伙伴判断不等于执行证据；历史命令输出不证明文件后来没变化。建议运行步骤不会被说明字段自动执行。"
+                "delivery_index是保存的交付索引，read_delivery可读取完整原因、文件版本与步骤；追问为什么或如何打开时读原交付再解释，不重新开工。"
                 "receipt_index是最近工具回执的轻量索引，不是结论；可按role、message_seq、name查完整结果，run_id不是角色名。"
                 "pending_operations列出没有可信结算的操作；可用read_receipts的include_pending读取详情。"
                 "not_committed仅表示该版本契约下的本地事件未提交，不是外部命令或计费未发生；unknown需核对实际影响，不重放旧操作。"
@@ -931,6 +949,7 @@ class TeamService:
         return {"task_id": task_id, "team": self.view(task_id)}
 
     def archive(self, task_id):
+        delivery = None
         files = {a["filename"]: a for a in self.rt.task(task_id).deliverables
                  if a.get("filename") and isinstance(a.get("content"), str)}
         if self.view(task_id)["status"] == "done":
@@ -954,4 +973,7 @@ class TeamService:
             archive.writestr("__cater__/manifest.json", json.dumps({"objective": self.view(task_id)["objective"],
                 "files": [{"filename": name, "seq": a["seq"], "sha256": a["content_sha256"]} for name, a in files.items()]},
                 ensure_ascii=False, indent=2))
+            explanation = self.delivery.markdown(delivery) if delivery is not None else None
+            if explanation is not None:
+                archive.writestr("__cater__/交付说明.md", explanation.encode("utf-8"))
         return output.getvalue()

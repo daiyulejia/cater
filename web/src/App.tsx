@@ -52,6 +52,7 @@ const LazyArtifactPreview = lazy(() => import('./Artifact').then((module) => ({ 
 const TeamWorkboard = lazy(() => import('./TeamProgressPanel').then((module) => ({ default: module.TeamWorkboard })))
 const ConversationActivity = lazy(() => import('./ConversationActivity').then((module) => ({ default: module.ConversationActivity })))
 const ChatMarkdown = lazy(() => import('./ChatMarkdown').then((module) => ({ default: module.ChatMarkdown })))
+const MessageDetails = lazy(() => import('./MessageDetails').then((module) => ({ default: module.MessageDetails })))
 
 type Assignment = { id: string; owner: string; role: string; lane: string; objective: string; acceptance?: string; deliverable?: string; status: string }
 type Message = { seq: number; actor: string; role: string; type: string; claim?: string; text?: string; stance?: string; target?: string; reply_to?: number }
@@ -356,6 +357,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
         item.historicalDelivery = event.seq !== latestTeamObjective?.seq
         item.actor = leader
         item.display = displayName(leader)
+        item.auditName = displayName
         item.role = publicIdentity(leader, organization)
         item.targets = []
         item.replyTo = undefined
@@ -1599,7 +1601,7 @@ function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; arti
   const human = item.kind === 'human'
   return <article className={`flex items-start gap-3 ${human ? 'justify-end' : ''}`}>
     {!human && <Portrait id={item.actor} />}
-    <div className={`message-bubble max-w-[min(86%,700px)] px-4 py-3 ${item.questionnaire ? 'w-full min-w-0' : ''} ${human ? 'is-human text-white' : 'is-agent'}`} data-actor={item.actor}>
+    <div className={`message-bubble min-w-0 max-w-[min(86%,700px)] px-4 py-3 ${item.questionnaire ? 'w-full' : ''} ${human ? 'is-human text-white' : 'is-agent'}`} data-actor={item.actor}>
       <div className={`mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${human ? 'text-[#fff0e8]' : 'text-[#6e8981]'}`}><strong className={human ? 'text-white' : 'text-[#28433d]'}>{human ? '你' : item.display}</strong><span>{item.role}</span>{item.title && <span className={`text-[11px] font-semibold ${human ? 'text-[#fff4d9]' : 'text-[#a56049]'}`}>· {item.title}</span>}</div>
       {human ? <p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>
         : <Suspense fallback={<p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>}><ChatMarkdown text={item.text} /></Suspense>}
@@ -1608,7 +1610,7 @@ function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; arti
       {item.progress && <WorkspaceToolProgress events={item.progress} claim={item.id} name={item.display} />}
       {item.evidence.type === 'deliverable.published' && <ArtifactPreview item={artifact ?? untrustedArtifact(item.evidence)} publisher={item.display} showSummary={false} />}
       {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.internal && item.targets.length > 0 && <span>收件人：</span>}{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
-      {item.details?.length ? <details className={`mt-3 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#dfeae5] text-[#52766d]'}`}><summary className="cursor-pointer font-semibold">查看判断与依据</summary><ul className="mt-2 space-y-1.5 leading-5">{item.details.map((detail, index) => <li key={`${item.id}-${index}`}>{detail}</li>)}</ul></details> : null}
+      {(item.details?.length || item.evidence.type === 'team.objective_completed') ? <Suspense fallback={null}><MessageDetails item={item} /></Suspense> : null}
       <AuditTrail item={item} />
     </div>
   </article>

@@ -20,6 +20,7 @@ async function mount(events: FixtureEvent[]) {
     throw new Error(`Unexpected request ${url}`)
   }))
   await act(async () => { render(<App />) })
+  await act(async () => { await vi.dynamicImportSettled() })
   return screen.getByLabelText('聊天记录')
 }
 

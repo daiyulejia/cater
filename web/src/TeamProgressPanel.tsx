@@ -8,7 +8,7 @@ const ArtifactPreview = lazy(() => import('./Artifact').then((module) => ({ defa
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const excerpt = (value: unknown, limit = 800): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（仅显示部分内容）' : '') : ''
 const toolNames: Record<string, string> = { workspace_run: '运行命令', workspace_read: '读取文件', workspace_write: '写入文件', workspace_search: '查找文件', workspace_list: '列出目录',
-  delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果', read_background: '读取来源材料', read_receipts: '核对执行回执', read_messages: '补读历史消息', read_checkpoint: '读取工作检查点', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件', set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复', request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论' }
+  delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果', read_background: '读取来源材料', read_receipts: '核对执行回执', read_messages: '补读历史消息', read_checkpoint: '读取工作检查点', read_delivery: '读取交付说明', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件', set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复', request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论' }
 
 const reviewStatuses: Record<TeamReview['status'], string> = {
   pending: '待复核', changes_requested: '待修复', approved: '已复核通过', outdated: '新版待复核', stale: '历史复核',
@@ -53,6 +53,12 @@ function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean
   const source = record(result.source)
   const checkpoint = record(result.checkpoint)
   return <div className="mt-1 space-y-1 whitespace-pre-wrap [overflow-wrap:anywhere]">
+    {p.name === 'read_delivery' && <>
+      {typeof record(result.delivery).summary === 'string' && <p>交付摘要：{detail(record(result.delivery).summary)}</p>}
+      {typeof record(result.delivery).seq === 'number' && <p>交付记录 #{String(record(result.delivery).seq)}</p>}
+      {typeof record(result.delivery).verification === 'string' && <p>验证范围：{detail(record(result.delivery).verification)}</p>}
+      {result.historical === true && <p>这是历史交付，不代表当前目标已完成。</p>}
+    </>}
     {p.name === 'read_checkpoint' && <>
       <p>只读核对持久事件中的工作事实，不读取私有思考，也不代表恢复成功或验收通过。</p>
       {detail(checkpoint.objective) && <p>当前目标：{detail(checkpoint.objective)}</p>}
