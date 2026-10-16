@@ -2,6 +2,7 @@ import { BrowserReport, NativeBrowserReceipt } from './browserReport'
 import { isTeamHost, isTeamRecovery } from './team'
 import { nativeBrowserReceiptStatus, nativeSkillReceiptStatus } from './conversationActivityState'
 import { NativeSkillReceipt } from './TeamProgressPanel'
+import { usageSummary } from './modelUsage'
 
 export type DetailEvent = {
   seq: number
@@ -166,9 +167,21 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       note = '这是店长记录的交付结论，实际验证范围按原文保留。'
       break
     case 'team.model_called': {
-      const usage = record(p.usage)
-      add('调用成员', member(p.role)); number('用量', p.tokens ?? usage.total_tokens, ' token')
-      number('输入用量', usage.input_tokens ?? usage.prompt_tokens, ' token'); number('输出用量', usage.output_tokens ?? usage.completion_tokens, ' token')
+      const call = usageSummary([event]).calls[0]
+      if (!call) {
+        status = '用量来源待核对'
+        note = '来源未通过团队系统身份核对，不能作为用量依据。'
+        break
+      }
+      status = { reported: '用量已报告', estimated: '估算用量', unavailable: '用量未报告', unspecified: '用量来源未注明' }[call.source]
+      add('调用成员', member(call.role))
+      if (call.tokens !== null) number(call.source === 'reported' ? '已报告用量' : call.source === 'estimated' ? '估算值' : '未注明来源的记录值', call.tokens, ' token')
+      number(call.inputKind === 'uncached' ? '输入（不含缓存）' : '输入（含缓存）', call.input, ' token')
+      number('输出用量', call.output, ' token'); number('缓存读取', call.cacheRead, ' token')
+      number('缓存写入', call.cacheWrite, ' token'); number('推理细项', call.reasoning, ' token')
+      number('提示正文字节', call.requestSizes.prompt); number('历史 JSON 字节', call.requestSizes.history)
+      number('工具定义 JSON 字节', call.requestSizes.tools)
+      note = '缓存和推理细项不重复叠加到总量；未报告不等于未消耗。字节不是 token，实际费用以服务商账单为准。'
       break
     }
     case 'team.tool_started': case 'team.tool_finished':

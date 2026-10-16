@@ -25,6 +25,16 @@ const stream = () => within(screen.getByLabelText('聊天记录'))
 const board = () => within(screen.getByRole('complementary', { name: '成果与过程' }))
 beforeEach(() => window.sessionStorage.clear())
 
+test.each(['paused', 'cancelled'] as const)('App将%s执行控制传到有待处理消息的团队工作板', async (state) => {
+  const current = detail([event(2, 'task.execution_controlled', { action: state === 'paused' ? 'pause' : 'cancel' }, 'human', 'human')],
+    teamState({ pending_count: 2 }))
+  current.execution_control = { state, seq: 2, reason: 'Execution is not running' }
+  await mount(current)
+  expect(board().getByLabelText('团队执行状态').textContent).toBe(state === 'paused' ? '已暂停后续执行' : '已取消后续执行')
+  expect(board().getByText('待处理消息：2')).toBeTruthy()
+  expect(board().queryByText('正在处理消息')).toBeNull()
+})
+
 const recoveryMessage = () => event(4, 'team.message_received', { kind: 'recovery', recipient: 'store_manager',
   recovery_of: 2, recovery_hash: 'original-start-hash', interrupted_seq: 3, revision: 1, scope: { revision: 1 }, text: '先核对持久事实，再决定如何继续' })
 

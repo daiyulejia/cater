@@ -4,6 +4,8 @@ import type { TeamEvent, TeamReview, TeamState } from './team'
 import { NativeBrowserReceipt } from './browserReport'
 import { nativeBrowserReceiptStatus, nativeSkillReceiptStatus } from './conversationActivityState'
 import { TeamArtifacts } from './TeamArtifacts'
+import { ModelUsagePanel } from './ModelUsagePanel'
+import type { ExecutionControl } from './executionControl'
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const excerpt = (value: unknown, limit = 800): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（仅显示部分内容）' : '') : ''
@@ -163,12 +165,12 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
   </details>
 }
 
-export function TeamProgressPanel({ team, events, names }: { team: TeamState; events: TeamEvent[]; names: Record<string, string> }) {
+export function TeamProgressPanel({ team, events, names, executionState = 'running' }: { team: TeamState; events: TeamEvent[]; names: Record<string, string>; executionState?: ExecutionControl['state'] }) {
   const runs = teamRuns(team, events)
-  const calls = events.filter((event) => isTeamHost(event) && event.type === 'team.model_called')
   return <section aria-label="团队进度" className="mb-5 space-y-3 text-xs leading-5 text-[#52766d] [overflow-wrap:anywhere]">
     <h2 className="text-sm font-semibold text-[#294a40]">团队进度</h2>
-    <p className="font-semibold">{teamStatus({ ...team, runs })}</p>
+    <p aria-label="团队执行状态" className="font-semibold">{executionState === 'paused' ? '已暂停后续执行' : executionState === 'cancelled' ? '已取消后续执行' : teamStatus({ ...team, runs })}</p>
+    <ModelUsagePanel events={events} names={names} />
     {team.status === 'done' && <p>店长的交付结论，验证范围以交付说明与实际回执为准。</p>}
     <p className="whitespace-pre-wrap">{team.objective}</p>
     {team.pending_count > 0 && <p>待处理消息：{team.pending_count}</p>}
@@ -182,25 +184,15 @@ export function TeamProgressPanel({ team, events, names }: { team: TeamState; ev
         {run.reason && <p className="whitespace-pre-wrap">{run.reason}</p>}
       </li>)}</ul>
     </details>}
-    {calls.length > 0 && <details><summary className="cursor-pointer font-semibold">模型用量 · {calls.length} 次调用</summary>
-      <ul className="mt-2 space-y-1">{calls.map((call) => {
-        const p = call.payload, usage = record(p.usage)
-        const tokens = p.token_usage === 'unavailable' ? undefined : p.tokens ?? usage.total_tokens
-        const input = usage.input_tokens ?? usage.prompt_tokens, output = usage.output_tokens ?? usage.completion_tokens
-        const role = typeof p.role === 'string' ? p.role : call.actor.id
-        return <li key={call.seq}>@{names[role] ?? role}{typeof tokens === 'number' ? ` · ${tokens} token` : typeof input === 'number' || typeof output === 'number'
-          ? `${typeof input === 'number' ? ` · 输入 ${input} token` : ''}${typeof output === 'number' ? ` · 输出 ${output} token` : ''}` : ' · 用量未报告'}</li>
-      })}</ul>
-    </details>}
     <TeamToolProgress events={events} names={names} />
   </section>
 }
 
-export function TeamWorkboard({ team, taskId, artifacts, events, names, accessToken }: {
-  team: TeamState; taskId: string; artifacts: Artifact[]; events: TeamEvent[]; names: Record<string, string>; accessToken?: string
+export function TeamWorkboard({ team, taskId, artifacts, events, names, accessToken, executionState }: {
+  team: TeamState; taskId: string; artifacts: Artifact[]; events: TeamEvent[]; names: Record<string, string>; accessToken?: string; executionState?: ExecutionControl['state']
 }) {
   return <div className="space-y-5">
-    <TeamProgressPanel team={team} events={events} names={names} />
+    <TeamProgressPanel team={team} events={events} names={names} executionState={executionState} />
     <TeamArtifacts team={team} taskId={taskId} artifacts={artifacts} events={events} names={names} accessToken={accessToken} />
     <details className="border-t border-[#eaded1] pt-4 text-xs text-[#52766d]"><summary className="cursor-pointer font-semibold">过程证据 · {events.length} 条记录</summary><a className="mt-2 inline-block underline" href={`/tasks/${encodeURIComponent(taskId)}`}>打开完整审计回放</a></details>
   </div>
