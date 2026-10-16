@@ -33,9 +33,9 @@ const timestamp = (event?: TimedEvent) => event?.ts ? Date.parse(event.ts) : NaN
 const tools: Record<string, string> = {
   workspace_read: '读取文件', workspace_run: '运行命令', workspace_write: '写入文件', workspace_search: '查找文件',
   workspace_list: '列出目录', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果',
-  read_receipts: '核对执行回执', read_messages: '补读历史消息', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件',
+  read_receipts: '核对执行回执', read_messages: '补读历史消息', read_background: '读取来源材料', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件',
   set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复',
-  request_questions: '发送补充问题',
+  request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论',
 }
 
 function receiptFor(start: TeamEvent, events: TeamEvent[]) {

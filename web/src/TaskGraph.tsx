@@ -2,13 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode, RefObject } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import {
-  Background, BackgroundVariant, Handle, MarkerType, Panel, Position,
-  ReactFlow, ReactFlowProvider, useReactFlow,
+  Background, BackgroundVariant, Handle, MarkerType, Position,
+  ReactFlow, ReactFlowProvider,
 } from '@xyflow/react'
-import type { AriaLabelConfig, Edge, Node, NodeProps } from '@xyflow/react'
-import { CheckCircle2, Circle, CircleAlert, Clock3, List, Maximize, Network, X, ZoomIn, ZoomOut } from 'lucide-react'
+import type { Edge, Node, NodeProps } from '@xyflow/react'
+import { CheckCircle2, Circle, CircleAlert, Clock3, List, Network, X } from 'lucide-react'
 import type { WorkState } from './WorkItems'
 import { layoutTaskGraph } from './taskGraphLayout'
+import { TeamGraphBody } from './TeamGraphBody'
+import { GraphControls } from './TaskGraphControls'
+import { ariaLabels, fitOptions } from './taskGraphConfig'
+import type { TeamEvent, TeamState } from './team'
 import '@xyflow/react/dist/style.css'
 import './TaskGraph.css'
 
@@ -18,7 +22,8 @@ type GraphWorkProps = {
   actorText: (id: string) => string
   portrait?: (id: string, size: 'sm' | 'md') => ReactNode
 }
-export type TaskGraphProps = GraphWorkProps & {
+type GraphTeamProps = Omit<GraphWorkProps, 'work'> & { team: TeamState; events: TeamEvent[] }
+export type TaskGraphProps = ((GraphWorkProps & { team?: never; events?: never }) | (GraphTeamProps & { work?: never })) & {
   open: boolean; onOpenChange: (open: boolean) => void
   returnFocusRef?: RefObject<HTMLElement | null>
 }
@@ -62,24 +67,6 @@ function WorkNode({ data }: NodeProps<TaskNode>) {
   </>
 }
 const nodeTypes = { work: WorkNode }
-const ariaLabels: Partial<AriaLabelConfig> = {
-  'node.a11yDescription.default': '工作项', 'node.a11yDescription.keyboardDisabled': '工作项',
-  'node.a11yDescription.ariaLiveMessage': () => '工作项位置', 'edge.a11yDescription.default': '前置依赖',
-  'controls.ariaLabel': '图谱视图', 'controls.zoomIn.ariaLabel': '放大图谱', 'controls.zoomOut.ariaLabel': '缩小图谱',
-  'controls.fitView.ariaLabel': '适应全部任务', 'controls.interactive.ariaLabel': '图谱只读',
-  'minimap.ariaLabel': '任务缩略图', 'handle.ariaLabel': '依赖连接点',
-}
-const fitOptions = { padding: 0.16, minZoom: 0.15, maxZoom: 1, duration: 0 }
-
-function GraphControls() {
-  const flow = useReactFlow()
-  return <Panel position="top-left" className="task-graph-controls" aria-label="图谱视图">
-    <button type="button" title="放大图谱" aria-label="放大图谱" onClick={() => void flow.zoomIn({ duration: 0 })}><ZoomIn size={18} /></button>
-    <button type="button" title="缩小图谱" aria-label="缩小图谱" onClick={() => void flow.zoomOut({ duration: 0 })}><ZoomOut size={18} /></button>
-    <button type="button" title="适应全部任务" aria-label="适应全部任务" onClick={() => void flow.fitView(fitOptions)}><Maximize size={18} /></button>
-  </Panel>
-}
-
 function ItemDetails({ item, work, actorText, portrait, choose, headingRef }: GraphWorkProps & {
   item: WorkItem; choose: (id: string) => void; headingRef: { current: HTMLHeadingElement | null }
 }) {
@@ -208,10 +195,11 @@ function GraphBody(props: GraphWorkProps) {
 
 export function TaskGraph({ open, onOpenChange, returnFocusRef, ...props }: TaskGraphProps) {
   const openingFocus = useRef<HTMLElement | null>(null)
+  const count = props.team ? props.events.length : props.work.items.length
   useEffect(() => {
-    if (open && !props.work.items.length) onOpenChange(false)
-  }, [open, props.work.items.length, onOpenChange])
-  if (!props.work.items.length) return null
+    if (open && !props.team && !count) onOpenChange(false)
+  }, [open, count, props.team, onOpenChange])
+  if (!props.team && !count) return null
   return <Dialog.Root open={open} onOpenChange={onOpenChange}>
     <Dialog.Portal><Dialog.Overlay className="task-graph-overlay" /><Dialog.Content className="task-graph-dialog"
       onOpenAutoFocus={() => { openingFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null }}
@@ -220,10 +208,10 @@ export function TaskGraph({ open, onOpenChange, returnFocusRef, ...props }: Task
         const target = returnFocusRef?.current ?? openingFocus.current
         if (target?.isConnected) target.focus()
       }}>
-      <header className="task-graph-header"><div><Dialog.Title>任务脉络</Dialog.Title><Dialog.Description className="task-graph-sr-only">当前任务 · {props.work.items.length} 个工作项</Dialog.Description></div>
+      <header className="task-graph-header"><div><Dialog.Title>任务脉络</Dialog.Title><Dialog.Description className="task-graph-sr-only">{props.team ? '当前团队的只读消息与复核关系' : `当前任务 · ${count} 个工作项`}</Dialog.Description></div>
         <Dialog.Close asChild><button type="button" className="task-graph-close" aria-label="关闭任务脉络" title="关闭任务脉络"><X size={20} /></button></Dialog.Close>
       </header>
-      <ReactFlowProvider><GraphBody {...props} /></ReactFlowProvider>
+      <ReactFlowProvider>{props.team ? <TeamGraphBody {...props} /> : <GraphBody {...props} />}</ReactFlowProvider>
     </Dialog.Content></Dialog.Portal>
   </Dialog.Root>
 }

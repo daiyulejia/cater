@@ -1,9 +1,10 @@
 import { useRef, useState } from 'react'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import TaskGraph from '../src/TaskGraph'
 import { layoutTaskGraph } from '../src/taskGraphLayout'
 import type { WorkState } from '../src/WorkItems'
+import type { TeamEvent, TeamState } from '../src/team'
 
 const actorText = (id: string) => ({ dev: '米寇', test: '三角' }[id] ?? id)
 const item = (id: string, depends_on: string[] = [], status = 'planned'): WorkState['items'][number] => ({
@@ -13,6 +14,7 @@ const work = (): WorkState => ({ plan_seq: 4, stage_accepted: false, scope_curre
 
 // Real React Flow, with only browser layout primitives substituted for jsdom.
 beforeEach(() => {
+  Object.defineProperty(SVGElement.prototype, 'getBBox', { configurable: true, value: () => new DOMRect(0, 0, 60, 18) })
   const dimensions = (element: HTMLElement) => element.classList.contains('react-flow__handle') ? [6, 6]
     : element.classList.contains('react-flow__node') ? [248, 160] : [880, 560]
   vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockImplementation(function () { return dimensions(this)[0] })
@@ -47,6 +49,7 @@ beforeEach(() => {
     disconnect() { this.targets.clear() }
   })
 })
+afterEach(() => { delete (SVGElement.prototype as SVGElement & { getBBox?: () => DOMRect }).getBBox })
 
 function Controlled({ value }: { value: WorkState }) {
   const [open, setOpen] = useState(false)
@@ -70,6 +73,63 @@ async function openGraph(value = work()) {
 const details = () => screen.getByRole('complementary', { name: '工作项详情' })
 const nodeButton = (ordinal: number) => screen.getByRole('button', { name: new RegExp(`^工作 ${ordinal}：`) })
 const viewport = () => document.querySelector<HTMLElement>('.react-flow__viewport')!
+
+const nativeTeam: TeamState = { enabled: true, objective: '真实接力', status: 'running', pending_count: 0, runs: [], assignments: [], checkpoint: '', revision: 1 }
+const nativeEvents: TeamEvent[] = [
+  { seq: 2, type: 'team.message_received', actor: { id: 'dev', kind: 'agent' }, payload: { kind: 'assignment', recipient: 'test', text: '检查移动端' } },
+  { seq: 3, type: 'team.message_received', actor: { id: 'test', kind: 'agent' }, payload: { kind: 'report', recipient: 'dev', text: '发现换行问题\n请修复', reply_to: 2 } },
+]
+
+describe('native collaboration graph', () => {
+  it('renders only real events and named relations in read-only React Flow with list, details and zoom', async () => {
+    const view = render(<TaskGraph team={nativeTeam} events={nativeEvents} open actorText={actorText} onOpenChange={vi.fn()} />)
+    await waitFor(() => expect(document.querySelectorAll('.react-flow__edge')).toHaveLength(1))
+    expect(document.querySelectorAll('.react-flow__node')).toHaveLength(2)
+    expect(document.querySelector('.react-flow__edge')?.getAttribute('aria-label')).toContain('回报')
+    expect(screen.queryByRole('region', { name: '当前任务依赖图' })).toBeNull()
+    expect(document.querySelector('.react-flow__node.draggable, .react-flow__handle.connectable')).toBeNull()
+    expect(screen.getByText('委托 · 回报 · 复核')).toBeTruthy()
+    expect(screen.getByTitle('连线表示委托、回报与复核关系，不代表严格任务依赖。')).toBeTruthy()
+    expect(screen.queryByText('连线表示委托、回报与复核关系，不代表严格任务依赖。')).toBeNull()
+    const initial = viewport().style.transform
+    fireEvent.click(screen.getByRole('button', { name: '放大图谱' }))
+    await waitFor(() => expect(viewport().style.transform).not.toBe(initial))
+    fireEvent.click(screen.getByRole('button', { name: '缩小图谱' }))
+    fireEvent.click(screen.getByRole('button', { name: '适应全部任务' }))
+    fireEvent.click(screen.getByRole('button', { name: /^回报 #3：/ }))
+    const panel = screen.getByRole('complementary', { name: '协作记录详情' })
+    expect(within(panel).getByRole('heading', { name: '回报 #3' })).toBeTruthy()
+    expect(within(panel).getByText('发现换行问题 请修复')).toBeTruthy()
+    expect(within(panel).getByRole('button', { name: '回报 · 委托 #2' })).toBeTruthy()
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Delete' })
+    expect(document.querySelectorAll('.react-flow__node')).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: '协作列表' }))
+    expect(document.querySelector('.task-graph-canvas')?.hasAttribute('hidden')).toBe(true)
+    const list = screen.getByRole('list', { name: '当前团队协作列表' })
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2)
+    fireEvent.click(within(list).getAllByRole('button')[0])
+    expect(within(panel).getByRole('heading', { name: '委托 #2' })).toBeTruthy()
+    view.rerender(<TaskGraph team={{ ...nativeTeam, runs: [{ message_seq: 2, role: 'test', status: 'failed', reason: '模型中断' }] }} events={nativeEvents} open actorText={actorText} onOpenChange={vi.fn()} />)
+    expect(within(panel).getByText('模型中断')).toBeTruthy()
+    expect(within(panel).getByRole('heading', { name: '委托 #2' })).toBeTruthy()
+  })
+
+  it('supports mobile selection and focus without forcing a legacy plan, including empty real history', async () => {
+    const scrollIntoView = vi.fn()
+    vi.spyOn(window, 'matchMedia').mockReturnValue({ matches: true } as MediaQueryList)
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { callback(0); return 1 })
+    Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scrollIntoView })
+    const view = render(<TaskGraph team={nativeTeam} events={nativeEvents} open actorText={actorText} onOpenChange={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /^回报 #3：/ }))
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'start', behavior: 'instant' })
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: '回报 #3' }))
+    view.rerender(<TaskGraph team={nativeTeam} events={[]} open actorText={actorText} onOpenChange={vi.fn()} />)
+    expect(screen.getByRole('dialog', { name: '任务脉络' })).toBeTruthy()
+    expect(screen.getByText('尚无协作消息或复核记录。')).toBeTruthy()
+    expect(document.querySelectorAll('.react-flow__node')).toHaveLength(0)
+    delete (HTMLElement.prototype as Partial<HTMLElement>).scrollIntoView
+  })
+})
 
 describe('current work topology', () => {
   it('lays out branch, merge and independent work deterministically without extra nodes or edges', () => {

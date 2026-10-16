@@ -28,6 +28,8 @@
 .task-graph-owner > *:first-child:not(strong) { flex: none; }
 .task-graph-owner strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .task-graph-objective { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow-wrap: anywhere; width: 100%; font-size: 13px; font-weight: 600; line-height: 1.65; }
+.task-graph-team-status { width: 100%; font-size: 11px; overflow-wrap: anywhere; }
+.task-graph-record-text { white-space: pre-wrap; }
 .task-graph-status { display: inline-flex; align-items: center; flex: none; gap: 5px; font-size: 11px; color: #62786a; }
 .task-graph-status svg { flex: none; }
 .task-graph-status[data-status="accepted"], .task-graph-status[data-status="ready"] { color: #287263; }

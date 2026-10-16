@@ -25,6 +25,29 @@ const stream = () => within(screen.getByLabelText('聊天记录'))
 const board = () => within(screen.getByRole('complementary', { name: '成果与过程' }))
 beforeEach(() => window.sessionStorage.clear())
 
+test('原生聊天复用脉络入口且不创建旧计划，打开关闭后保留草稿并恢复焦点', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  const { fetchMock } = await mount(detail([
+    event(2, 'team.message_received', { text: '检查实际入口', recipient: 'dev', kind: 'assignment' }, 'store_manager', 'agent'),
+    event(3, 'team.message_received', { text: '入口已检查', recipient: 'store_manager', kind: 'report', reply_to: 2 }, 'dev', 'agent'),
+  ]))
+  const input = screen.getByRole('textbox', { name: '向团队发送消息' })
+  fireEvent.change(input, { target: { value: '保留当前草稿' } })
+  const trigger = screen.getByRole('button', { name: '任务脉络' })
+  trigger.focus()
+  fireEvent.click(trigger)
+  const dialog = await screen.findByRole('dialog', { name: '任务脉络' })
+  expect(within(dialog).getByRole('region', { name: '当前团队协作图' })).toBeTruthy()
+  expect(dialog.textContent).not.toContain('旧命令行进度')
+  fireEvent.click(within(dialog).getByRole('button', { name: '协作列表' }))
+  expect(within(dialog).getByRole('list', { name: '当前团队协作列表' })).toBeTruthy()
+  fireEvent.keyDown(dialog, { key: 'Escape' })
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: '任务脉络' })).toBeNull())
+  await waitFor(() => expect(document.activeElement).toBe(trigger))
+  expect((input as HTMLTextAreaElement).value).toBe('保留当前草稿')
+  expect(fetchMock.mock.calls.some(([, init]) => init.method === 'POST')).toBe(false)
+})
+
 test('仅知会的进展留在可展开协作记录，不冒充待执行工作或再次公开答复', async () => {
   await mount(detail([event(2, 'team.objective_completed', { summary: '已经交付' }),
     event(3, 'team.message_received', { text: '资料已归档，仅供知悉', recipient: 'store_manager', kind: 'notification', visible: true }, 'dev', 'agent')],
@@ -631,7 +654,7 @@ test('team.enabled 隐藏旧工作检查门闩、旧计划和 checkpoint，仅�
   expect(board().getByText('继续完善入口与交付说明')).toBeTruthy()
   expect(board().getByText(/消息处理失败.*消息 #2/)).toBeTruthy()
   expect(screen.queryByRole('region', { name: '工作项与验收' })).toBeNull()
-  expect(screen.queryByRole('button', { name: '任务脉络' })).toBeNull()
+  expect(screen.getByRole('button', { name: '任务脉络' })).toBeTruthy()
   for (const text of ['旧进度卡住', '旧计划已经下发', '旧检查门闩', '旧命令行进度', '等待实际检查', '此任务尚无工作项与验收记录']) expect(screen.queryByText(text)).toBeNull()
   expect(stream().queryByText('消息处理失败')).toBeNull()
 })

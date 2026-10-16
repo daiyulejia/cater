@@ -26,6 +26,12 @@ const tool = (seq = 3, extra = {}) => event(seq, 'team.tool_started', { role: 'd
 const receipt = (extra = {}) => event(4, 'team.tool_finished', { role: 'dev', run_id: 'run', name: 'workspace_read', started_seq: 3,
   result: { status: 'ok' }, ...extra })
 
+test('来源材料的进行中读取在现有进展条显示中文工具名', () => {
+  const output = text({ events: [human(), start(), tool(3, { name: 'read_background' })] })
+  expect(output).toContain('读取来源材料')
+  expect(output).not.toContain('read_background')
+})
+
 test('结构化提问表达等待顾客而非失联，直接聊天后不继续催旧问题', () => {
   const question = event(3, 'team.questions_requested', { role_id: 'dev', message_seq: 1, title: '补充背景' })
   const events = [human(), start(), question, end(4, 'waiting')]

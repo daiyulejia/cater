@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { expect, test } from 'vitest'
-import { TeamProgressPanel } from '../src/TeamProgressPanel'
+import { TeamProgressPanel, TeamToolProgress } from '../src/TeamProgressPanel'
 import type { TeamEvent, TeamReview, TeamState } from '../src/team'
 
 const names = { author: '月亮', reviewer: '罐头' }
@@ -14,6 +14,24 @@ const review = (status: TeamReview['status'], overrides: Partial<TeamReview> = {
   status, revision: state.revision, ...overrides,
 })
 const panel = (team: TeamState, events: TeamEvent[] = []) => <TeamProgressPanel team={team} events={events} names={names} />
+
+test.each([['index', '材料索引'], ['goal', '来源目标'], ['source', '来源对话'], ['artifact', '来源成果']])('来源材料读取 %s 显示中文范围和分页边界', (section, label) => {
+  const actor = { id: 'team', kind: 'system', role: 'team' }
+  render(<TeamToolProgress names={names} events={[
+    { seq: 1, type: 'team.tool_started', actor, payload: { role: 'author', name: 'read_background', arguments: { section, artifact_seq: 8, source_id: 'source:3' } } },
+    { seq: 2, type: 'team.tool_finished', actor, payload: { role: 'author', name: 'read_background', started_seq: 1,
+      result: { status: 'ok', section, offset: 0, next_offset: 20, has_more: true, total_chars: 80, entries: section === 'index' ? [{ id: 'source:3' }] : undefined,
+        source: { filename: '说明.txt', seq: 8 }, content: '历史正文片段' } } },
+  ]} />)
+  expect(screen.getByText('读取来源材料')).toBeTruthy()
+  expect(screen.getByText(`读取范围：${label} · 创建时冻结的历史参考`)).toBeTruthy()
+  expect(screen.getByText('还有后续材料 · 下一页起点 20，本页不代表全文。')).toBeTruthy()
+  expect(screen.getByText('历史正文片段')).toBeTruthy()
+  expect(screen.queryByText('read_background')).toBeNull()
+  if (section === 'index') expect(screen.getByText('返回 1 项来源材料索引')).toBeTruthy()
+  if (section === 'artifact') expect(screen.getByText('来源成果：#8')).toBeTruthy()
+  if (section === 'source') expect(screen.getByText('来源引用：source:3')).toBeTruthy()
+})
 
 test.each([
   ['pending', '待复核'], ['changes_requested', '待修复'], ['approved', '已复核通过'],
