@@ -50,6 +50,40 @@ test('结构化提问表达等待顾客而非失联，直接聊天后不继续�
   expect(state.lines.find((line) => line.role === 'test')?.text ?? '').not.toContain('等待你的补充')
 })
 
+test('同角色替代问题已回答后不再催旧问题，其他角色的新问题仍独立等待', () => {
+  const events = [human(), start(),
+    event(3, 'team.questions_requested', { role_id: 'dev', message_seq: 1, title: '旧问题' }), end(4, 'waiting'),
+    event(5, 'team.message_received', { recipient: 'dev', kind: 'message', revision: 0 }, { id: 'manager', kind: 'agent', role: 'manager' }),
+    start(6, 5, 'dev', 0, 'replacement'),
+    event(7, 'team.questions_requested', { role_id: 'dev', message_seq: 5, title: '替代问题' }), end(8, 'waiting', 5, 'dev', 'replacement')]
+  const input = props({ events })
+  const mounted = render(<ConversationActivity {...input} />)
+  expect(conversationActivity(input, now).waitsForCustomer).toBe(true)
+  expect(screen.getByRole('region', { name: '当前工作进展' }).textContent).toContain('待你补充')
+  const answered = [...events,
+    event(9, 'team.message_received', { recipient: 'dev', kind: 'message', questionnaire: { question_seq: 7 } }, { id: 'human', kind: 'human', role: 'human' }),
+    start(10, 9), end(11, 'completed', 9), reply(12, 9)]
+  const view = conversationActivity(props({ events: answered }), now)
+  expect(view.waitsForCustomer).toBe(false)
+  expect(view.message).toContain('已回应最新消息')
+  expect(view.lines.some((line) => line.text.includes('等待你的补充'))).toBe(false)
+  mounted.rerender(<ConversationActivity {...props({ events: answered })} />)
+  expect(screen.getByRole('region', { name: '当前工作进展' }).textContent).not.toContain('待你补充')
+  const parallel = event(13, 'team.questions_requested', { role_id: 'test', title: '测试的问题' })
+  const parallelView = conversationActivity(props({ events: [...answered, parallel] }), now)
+  expect(parallelView.waitsForCustomer).toBe(true)
+  expect(parallelView.lines.find((line) => line.role === 'test')?.text).toContain('等待你的补充')
+  expect(parallelView.lines.find((line) => line.role === 'dev')?.text).not.toContain('等待你的补充')
+})
+
+test('非宿主的同角色新问题不能使真实待答问题失效', () => {
+  const events = [human(), start(), event(3, 'team.questions_requested', { role_id: 'dev' }), end(4, 'waiting'),
+    event(5, 'team.questions_requested', { role_id: 'dev' }, { id: 'dev', kind: 'agent', role: 'dev' }),
+    event(6, 'team.message_received', { recipient: 'dev', questionnaire: { question_seq: 5 } }, { id: 'human', kind: 'human', role: 'human' }),
+    start(7, 6), end(8, 'completed', 6)]
+  expect(conversationActivity(props({ events }), now).waitsForCustomer).toBe(true)
+})
+
 test('发送与收到分别表达，同轮原位更新，直接 @ 成员不添加店长', () => {
   vi.useFakeTimers().setSystemTime(now)
   const initial = props({ sending: true })
@@ -98,6 +132,34 @@ test('整体 done 仍显示后续顾客问题，所有答复完成后隐藏', ()
   expect(conversationActivity(props({ team: completedTeam, events: answered }), now).visible).toBe(false)
   const mounted = render(<ConversationActivity {...props({ team: completedTeam, events: answered })} />)
   expect(mounted.container.childElementCount).toBe(0)
+})
+
+test.each(['progress', undefined])('交付后的追问只有过程发言时仍等待答复，正式回复才隐藏进展（类型=%s）', (responseKind) => {
+  const completedTeam = { ...team, revision: 5, status: 'done' }
+  const progress = { ...reply(8, 6), payload: { ...reply(8, 6).payload, response_kind: responseKind } }
+  const events = [event(5, 'team.objective_completed'), human(6), start(7, 6, 'dev', 5), progress,
+    tool(9, { message_seq: 6, revision: 5 }),
+    event(10, 'team.tool_finished', { role: 'dev', run_id: 'run', name: 'workspace_read', started_seq: 9, result: { status: 'ok' } }),
+    tool(11, { message_seq: 6, revision: 5, name: 'wait_for_reply' }),
+    event(12, 'team.tool_finished', { role: 'dev', run_id: 'run', name: 'wait_for_reply', started_seq: 11, result: { status: 'ok', waiting: true } }),
+    end(13, 'waiting', 6)]
+  const input = props({ team: completedTeam, events, activity: { active: false, state: 'completed' } })
+  const view = conversationActivity(input, now)
+  expect(view.visible).toBe(true)
+  expect(view.message).toContain('最新消息尚待答复')
+  expect(view.message).not.toContain('已回应')
+  const mounted = render(<ConversationActivity {...input} />)
+  expect(screen.getByRole('region', { name: '当前工作进展' }).textContent).toContain('等待伙伴回复')
+  const answered = [...events.filter((event) => event.seq < 11),
+    { ...reply(11, 6), payload: { ...reply(11, 6).payload, response_kind: 'reply' } }, end(12, 'completed', 6)]
+  expect(conversationActivity({ ...input, events: answered }, now).visible).toBe(false)
+  mounted.rerender(<ConversationActivity {...input} events={answered} />)
+  expect(screen.queryByRole('region', { name: '当前工作进展' })).toBeNull()
+})
+
+test('明确答复即使后续调用工具也仍算已回应', () => {
+  const answer = { ...reply(3), payload: { ...reply(3).payload, response_kind: 'reply' } }
+  expect(text({ events: [human(), start(), answer, tool(4)] })).toContain('已回应最新消息')
 })
 
 test('交付后新追问排队时，不把上一次成员答复完成误显示为本轮进展', () => {

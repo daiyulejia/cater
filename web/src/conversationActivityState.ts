@@ -1,4 +1,4 @@
-import { isTeamHost, teamMessageAudience, teamSpeaker } from './team'
+import { isTeamHost, teamMessageAudience, teamProgressMessages, teamSpeaker } from './team'
 import type { TeamEvent, TeamRun, TeamState } from './team'
 
 type TimedEvent = TeamEvent & { ts?: string }
@@ -33,7 +33,7 @@ const timestamp = (event?: TimedEvent) => event?.ts ? Date.parse(event.ts) : NaN
 const tools: Record<string, string> = {
   workspace_read: '读取文件', workspace_run: '运行命令', workspace_write: '写入文件', workspace_search: '查找文件',
   workspace_list: '列出目录', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果',
-  read_receipts: '核对执行回执', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件',
+  read_receipts: '核对执行回执', read_messages: '补读历史消息', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件',
   set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复',
   request_questions: '发送补充问题',
 }
@@ -61,6 +61,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   const { team, names, leaderId, activity, executionState, syncError, sending, controlBusy } = input
   const events = [...input.events].sort((a, b) => a.seq - b.seq)
   const bySeq = new Map(events.map((event) => [event.seq, event]))
+  const progress = teamProgressMessages(events)
   const hosts = events.filter(isTeamHost)
   const update = hosts.filter((event) => event.type === 'team.objective_updated').at(-1)
   const completion = hosts.filter((event) => event.type === 'team.objective_completed').at(-1)
@@ -80,7 +81,8 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       event.type === 'team.message_received' && event.actor.kind === 'human'
       && (typeof object(event.payload.questionnaire).question_seq !== 'number'
         || object(event.payload.questionnaire).question_seq === question.seq)
-      || isTeamHost(event) && ['team.objective_updated', 'team.objective_completed'].includes(event.type)))) pendingQuestions.set(role, question)
+      || isTeamHost(event) && (['team.objective_updated', 'team.objective_completed'].includes(event.type)
+        || event.type === 'team.questions_requested' && event.payload.role_id === role)))) pendingQuestions.set(role, question)
   }
   const finishFor = (start: TeamEvent) => hosts.find((event) => event.type === 'team.run_finished' && event.seq > start.seq
     && event.payload.message_seq === start.payload.message_seq && event.payload.role === start.payload.role
@@ -125,7 +127,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   const recipient = currentHuman ? string(currentHuman.payload.recipient) ?? leaderId : undefined
   const customerRun = currentHuman ? runs.get(key(currentHuman.seq, recipient)) : undefined
   const answer = currentHuman && events.findLast((event) => {
-    if (event.seq <= currentHuman.seq || event.type !== 'msg.said' || event.payload.reply_to !== currentHuman.seq
+    if (event.seq <= currentHuman.seq || event.type !== 'msg.said' || progress.has(event.seq) || event.payload.reply_to !== currentHuman.seq
       || teamSpeaker(event) !== recipient || typeof event.payload.text !== 'string' || !event.payload.text.trim()
       || !((event.actor.kind === 'agent' && event.actor.id === recipient) || isTeamHost(event))) return false
     const audience = teamMessageAudience(event, bySeq)
@@ -213,7 +215,8 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       const source = bySeq.get(Number(event.payload.reply_to))
       return source && source.seq < event.seq && event.actor.id === source.payload.recipient && event.payload.recipient === source.actor.id
     })()).map((event) => event.payload.reply_to))
-  const received = events.filter((event) => event.type === 'team.message_received' && ['agent', 'human'].includes(event.actor.kind ?? ''))
+  const received = events.filter((event) => event.type === 'team.message_received' && event.payload.kind !== 'notification'
+    && ['agent', 'human'].includes(event.actor.kind ?? ''))
   const knownPending = received.filter((event) => !reported.has(event.seq)
     && !hosts.some((start) => start.type === 'team.run_started' && start.payload.message_seq === event.seq)
     && !team.runs.some((run) => run.message_seq === event.seq))

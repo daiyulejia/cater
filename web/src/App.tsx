@@ -297,7 +297,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       || event.type.startsWith('delivery.') || event.type === 'task.decomposed' || event.type === 'subtask.assigned'
       || (event.type === 'brief.generated' && payload.reason === 'work_checkpoint'))) return []
     if (event.type === 'team.message_received') {
-      if (actor.kind !== 'human' && (actor.kind !== 'agent' || (!['assignment', 'message'].includes(String(payload.kind))
+      if (actor.kind !== 'human' && (actor.kind !== 'agent' || (!['assignment', 'message', 'notification'].includes(String(payload.kind))
         && !(payload.kind === 'report' && payload.visible === true)))) return []
       if (typeof payload.text !== 'string' || !payload.text.trim()) return []
       if (actor.kind === 'human' && typeof payload.request_id === 'string' && payload.request_id) {
@@ -308,9 +308,9 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       item.systemActor = false
       item.internal = teamEnabled && teamMessageAudience(event, bySeq).audience === 'team'
       item.targets = typeof payload.recipient === 'string' ? [displayName(payload.recipient)] : []
-      if (actor.kind === 'agent' && payload.kind === 'assignment') {
+      if (actor.kind === 'agent' && ['assignment', 'notification'].includes(String(payload.kind))) {
         item.notice = true
-        item.text = `@${displayName(actor.id)} → ${item.targets.length ? `@${item.targets[0]}` : '伙伴'} · 工作交接`
+        item.text = `@${displayName(actor.id)} → ${item.targets.length ? `@${item.targets[0]}` : '伙伴'} · ${payload.kind === 'notification' ? '进展知会' : '工作交接'}`
         item.details = [payload.text]
         item.targets = []
       } else if (actor.kind === 'human') {
@@ -1584,7 +1584,7 @@ function untrustedArtifact(event: Event): Artifact {
 function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; artifact?: Artifact; taskId: string; controls: ChatControls }) {
   if (item.notice) return <article className="collaboration-notice">
     {item.text && <p>{item.text}</p>}
-    {item.details?.length ? <details><summary>这次接力的工作</summary>{item.details.map((detail, index) => <p key={index}>{detail}</p>)}</details> : null}
+    {item.details?.length ? <details><summary>{item.evidence.payload.kind === 'notification' ? '这条知会的内容' : '这次接力的工作'}</summary>{item.details.map((detail, index) => <p key={index}>{detail}</p>)}</details> : null}
     <MessageContext item={item} taskId={taskId} controls={controls} />
     <AuditTrail item={item} />
   </article>

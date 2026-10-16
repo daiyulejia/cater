@@ -25,6 +25,17 @@ const stream = () => within(screen.getByLabelText('聊天记录'))
 const board = () => within(screen.getByRole('complementary', { name: '成果与过程' }))
 beforeEach(() => window.sessionStorage.clear())
 
+test('仅知会的进展留在可展开协作记录，不冒充待执行工作或再次公开答复', async () => {
+  await mount(detail([event(2, 'team.objective_completed', { summary: '已经交付' }),
+    event(3, 'team.message_received', { text: '资料已归档，仅供知悉', recipient: 'store_manager', kind: 'notification', visible: true }, 'dev', 'agent')],
+    teamState({ revision: 2, status: 'done' })))
+  const note = stream().getByText('@米寇 → @店长 · 进展知会')
+  expect(note.closest('details.team-collaboration')?.open).toBe(false)
+  expect(stream().getByText('资料已归档，仅供知悉').closest('details')?.open).toBe(false)
+  expect(screen.queryByRole('region', { name: '当前工作进展' })).toBeNull()
+  expect(stream().queryByText(/后台有.*等待处理/)).toBeNull()
+})
+
 test('已交付后的追问仍显示消息在处理，不把旧交付当成本轮答复', () => {
   expect(teamStatus(teamState({ status: 'done', pending_count: 1 }))).toBe('正在处理后续消息')
   expect(teamStatus(teamState({ status: 'done', runs: [{ role: 'dev', revision: 1, status: 'running' }] }))).toBe('正在处理后续消息')
@@ -492,6 +503,36 @@ test.each(['message', 'report'])('只有同轮工具明确关联的显式 %s 全
   expect(stream().getAllByText('需要确认入口范围')).toHaveLength(3)
   expect(stream().getByText('需要确认入口范围。')).toBeTruthy()
   expect(screen.getByLabelText('聊天记录').querySelectorAll('article')).toHaveLength(5)
+})
+
+test.each([
+  ['message', true], ['message', false], ['notification', true], ['notification', false],
+] as const)('同轮内部 %s 不吞掉同文对客答复（显式受众=%s）', async (kind, explicit) => {
+  const text = '双击 index.html 就能打开。'
+  const answer = event(7, 'msg.said', { text, phase: 'team', run_id: 'direct-reply', reply_to: 2,
+    response_kind: 'reply', ...(explicit ? { audience: 'customer', recipient: 'human' } : {}) }, 'dev', 'agent')
+  const events = [event(2, 'team.message_received', { text: '@米寇 怎么打开？', recipient: 'dev', kind: 'message' }, 'human', 'human'),
+    event(3, 'team.run_started', { role: 'dev', message_seq: 2, run_id: 'direct-reply', revision: 1 }),
+    event(4, 'team.tool_started', { name: 'send_message', role: 'dev', run_id: 'direct-reply', message_seq: 2,
+      arguments: { recipient: 'store_manager', text, ...(kind === 'notification' ? { notify_only: true } : {}) } }),
+    event(5, 'team.message_received', { text, recipient: 'store_manager', kind, visible: true, revision: 1 }, 'dev', 'agent'),
+    event(6, 'team.tool_finished', { role: 'dev', name: 'send_message', started_seq: 4, result: { status: 'ok', message_seq: 5 } }),
+    answer, event(8, 'team.run_finished', { role: 'dev', message_seq: 2, run_id: 'direct-reply', status: 'completed' })]
+  expect(teamMessageEchoes(events).has(answer.seq)).toBe(false)
+  await mount(detail(events))
+  const copies = stream().getAllByText(text)
+  expect(copies).toHaveLength(2)
+  expect(copies.filter((copy) => !copy.closest('details.team-collaboration'))).toHaveLength(1)
+  expect(copies.find((copy) => !copy.closest('details.team-collaboration'))?.closest('[data-actor="dev"]')).toBeTruthy()
+})
+
+test.each(['message', 'report', 'notification'])('内部 %s 回声只合并同收件人，同文发给另一伙伴仍保留', (kind) => {
+  const start = event(2, 'team.tool_started', { name: 'send_message', role: 'dev', run_id: 'echo' })
+  const sent = event(3, 'team.message_received', { text: '入口已核对', recipient: 'store_manager', kind, visible: true }, 'dev', 'agent')
+  const receipt = event(4, 'team.tool_finished', { role: 'dev', started_seq: 2, result: { status: 'ok', message_seq: 3 } })
+  const same = event(5, 'msg.said', { text: '入口已核对', phase: 'team', run_id: 'echo', audience: 'team', recipient: 'store_manager' }, 'dev', 'agent')
+  const other = event(6, 'msg.said', { ...same.payload, recipient: 'test' }, 'dev', 'agent')
+  expect(teamMessageEchoes([start, sent, receipt, same, other])).toEqual(new Set([5]))
 })
 
 test('report 仅在 visible 严格为 true 时公开，隐藏的自动回报不会去掉公开发言', async () => {

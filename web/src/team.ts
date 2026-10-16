@@ -174,12 +174,19 @@ export function teamMessageEchoes(events: TeamEvent[]): Set<number> {
     const message = typeof result.message_seq === 'number' ? bySeq.get(result.message_seq) : undefined
     if (!start || !isTeamHost(start) || start.type !== 'team.tool_started' || start.payload.name !== 'send_message'
       || typeof start.payload.run_id !== 'string' || !message || message.type !== 'team.message_received'
-      || message.actor.kind !== 'agent' || (message.payload.kind !== 'message'
+      || message.actor.kind !== 'agent' || (!['message', 'notification'].includes(String(message.payload.kind))
         && !(message.payload.kind === 'report' && message.payload.visible === true)) || start.payload.role !== message.actor.id
       || p.role !== message.actor.id || result.status !== 'ok') return []
-    return [{ run: start.payload.run_id, actor: message.actor.id, text: message.payload.text }]
+    return [{ run: start.payload.run_id, actor: message.actor.id, text: message.payload.text,
+      recipient: teamMessageAudience(message, bySeq).recipient }]
   })
-  return new Set(events.filter((event) => event.type === 'msg.said' && event.payload.phase === 'team' && sent.some((message) =>
-    message.run === event.payload.run_id && message.actor === (event.payload.speaker ?? event.payload.speaker_id ?? event.actor.id)
-    && typeof message.text === 'string' && message.text === event.payload.text)).map((event) => event.seq))
+  return new Set(events.filter((event) => {
+    if (event.type !== 'msg.said' || event.payload.phase !== 'team') return false
+    const audience = teamMessageAudience(event, bySeq)
+    if (audience.audience === 'customer') return false
+    const recipient = audience.recipient ?? (typeof event.payload.recipient === 'string' ? event.payload.recipient : undefined)
+    return sent.some((message) => message.run === event.payload.run_id && message.actor === teamSpeaker(event)
+      && (recipient === undefined || recipient === message.recipient)
+      && typeof message.text === 'string' && message.text === event.payload.text)
+  }).map((event) => event.seq))
 }
