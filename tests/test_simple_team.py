@@ -171,6 +171,9 @@ class SimpleTeamTests(unittest.TestCase):
         self.rt.team.run(self.task)
         self.assertEqual(self.rt.team.view(self.task)["runs"][0]["status"], "failed")
         self.assertNotIn("secret-should-not-leak", json.dumps([e.payload for e in self.rt.log.read()]))
+        lens = next(row for row in self.rt.review(self.task)["lenses"] if row["id"] == "reliability")
+        self.assertEqual(lens["status"], "watch")
+        self.assertIn("1 failed or interrupted native chat run(s)", lens["finding"])
         self.rt.team.receive(self.task, "第二次", request_id="next-turn-second")
         self.run_ok_after_failure()
 
@@ -187,6 +190,9 @@ class SimpleTeamTests(unittest.TestCase):
         self.run_ok()
         self.assertEqual(len(self.driver.calls), 1)
         self.assertEqual(self.driver.calls[0]["context"]["message"]["text"], "现在如何")
+        lens = next(row for row in self.rt.review(self.task)["lenses"] if row["id"] == "reliability")
+        self.assertEqual(lens["status"], "watch")
+        self.assertIn("1 failed or interrupted native chat run(s)", lens["finding"])
 
     def test_real_workspace_tools_can_write_and_run_without_old_work_contract(self):
         config = self.root / "workspaces.json"

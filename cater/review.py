@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .assignments import latest_assignments_by_owner
-from .events import ChainReport, Event
+from .events import Actor, ChainReport, Event
 from .fold import TaskSnapshot
 
 
@@ -339,7 +339,28 @@ def _reliability_lens(tasks: list[TaskSnapshot], events: list[Event]) -> dict[st
                      f"Unresolved results: {uncertain_work} work/check item(s), {uncertain_delivery} delivery review(s), "
                      f"{uncertain_planning} planning call(s). Missing driver.failed events do not establish recovery.",
                      "Inspect the recorded attempt and reconcile its outcome before replaying; do not infer success from a valid audit chain.")
+    # Native chat failures use run receipts, not legacy driver.failed events.
+    task_ids = {task.id for task in tasks}
+    team_starts, team_finishes = {}, {}
+    for event in events:
+        if event.task_id not in task_ids or event.actor != Actor.system("team"):
+            continue
+        key = (event.task_id, event.payload.get("message_seq"))
+        if event.type == "team.run_started":
+            team_starts[key] = event
+        elif event.type == "team.run_finished":
+            start = team_starts.get(key)
+            if (start and start.seq < event.seq and start.payload.get("role") == event.payload.get("role")
+                    and ("run_id" not in event.payload or event.payload["run_id"] == start.payload.get("run_id"))):
+                team_finishes[key] = event
+    native_failures = sum(event.payload.get("status") in {"failed", "interrupted"}
+                          for event in team_finishes.values())
     failures = sum(len(task.driver_failures) for task in tasks)
+    if native_failures:
+        return _lens("reliability", "watch",
+                     f"{native_failures} failed or interrupted native chat run(s), {failures} legacy driver failure(s) recorded. "
+                     "These are historical receipts, not proof that current work is blocked or recovered.",
+                     "Inspect the affected run, later handoffs and real tool results before replaying; do not automatically repeat unknown effects.")
     if failures:
         return _lens("reliability", "watch", f"{failures} contained driver failure(s) recorded.", "Review circuit breaker thresholds and recovery controls.")
     if any(task.messages for task in tasks):

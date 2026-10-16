@@ -6,10 +6,83 @@ from cater.events import Actor
 from cater.fold import TaskSnapshot
 from cater.review import _next_steps, _reliability_lens
 from cater.runtime import Runtime
+from cater.team import HOST
 from test_work import item
 
 
 class ReviewReliabilityTests(unittest.TestCase):
+    def test_native_failed_runs_do_not_require_legacy_driver_failure_events(self):
+        with Runtime(":memory:") as rt:
+            task = rt.create_task("检查原生消息调用失败")
+            start = rt.log.emit(type="team.run_started", task_id=task, actor=HOST,
+                                payload={"message_seq": 1, "role": "dev", "run_id": "native-run"})
+            rt.log.emit(type="team.run_finished", task_id=task, actor=HOST,
+                        payload={**start.payload, "status": "failed", "reason": "调用未完成"})
+            self.assertEqual(rt.task(task).driver_failures, [])
+            review = rt.review(task)
+            lens = next(row for row in review["lenses"] if row["id"] == "reliability")
+            self.assertEqual(lens["status"], "watch")
+            self.assertIn("1 failed or interrupted native chat run(s)", lens["finding"])
+            self.assertIn("historical receipts", lens["finding"])
+            self.assertIn(lens["action"], review["next_actions"])
+
+    def test_native_interruption_without_run_id_retains_legacy_recovery_receipt(self):
+        with Runtime(":memory:") as rt:
+            task = rt.create_task("检查进程退出记录")
+            rt.log.emit(type="team.run_started", task_id=task, actor=HOST,
+                        payload={"message_seq": 1, "role": "dev", "run_id": "native-run"})
+            rt.log.emit(type="team.run_finished", task_id=task, actor=HOST,
+                        payload={"message_seq": 1, "role": "dev", "status": "interrupted"})
+            self.assertEqual(_reliability_lens([rt.task(task)], rt.log.read())["status"], "watch")
+
+    def test_native_running_waiting_and_completed_runs_are_not_failures(self):
+        for status in (None, "waiting", "completed"):
+            with self.subTest(status=status), Runtime(":memory:") as rt:
+                task = rt.create_task("正常消息状态")
+                start = rt.log.emit(type="team.run_started", task_id=task, actor=HOST,
+                                    payload={"message_seq": 1, "role": "dev", "run_id": "native-run"})
+                if status is not None:
+                    rt.log.emit(type="team.run_finished", task_id=task, actor=HOST,
+                                payload={**start.payload, "status": status})
+                self.assertEqual(_reliability_lens([rt.task(task)], rt.log.read())["status"], "ok")
+
+    def test_unbound_native_finish_cannot_report_a_failure_or_overwrite_one(self):
+        for invalid in ("actor", "role", "run", "task", "missing-start"):
+            with self.subTest(invalid=invalid), Runtime(":memory:") as rt:
+                task = rt.create_task("核对消息回执关联")
+                start = rt.log.emit(type="team.run_started", task_id=task, actor=HOST,
+                                    payload={"message_seq": 1, "role": "dev", "run_id": "native-run"})
+                bad = {**start.payload, "status": "failed"}
+                if invalid == "role":
+                    bad["role"] = "test"
+                elif invalid == "run":
+                    bad["run_id"] = "other-run"
+                elif invalid == "missing-start":
+                    bad["message_seq"] = 999
+                other = rt.create_task("其他群") if invalid == "task" else task
+                actor = Actor.agent("team", "team") if invalid == "actor" else HOST
+                rt.log.emit(type="team.run_finished", task_id=other, actor=actor, payload=bad)
+                self.assertEqual(_reliability_lens([rt.task(task)], rt.log.read())["status"], "ok")
+                rt.log.emit(type="team.run_finished", task_id=task, actor=HOST,
+                            payload={**start.payload, "status": "failed"})
+                rt.log.emit(type="team.run_finished", task_id=other, actor=actor,
+                            payload={**bad, "status": "completed"})
+                self.assertEqual(_reliability_lens([rt.task(task)], rt.log.read())["status"], "watch")
+
+    def test_native_failure_stays_historical_after_other_work_completes(self):
+        with Runtime(":memory:") as rt:
+            task = rt.create_task("完成不抹除调用历史")
+            start = rt.log.emit(type="team.run_started", task_id=task, actor=HOST,
+                                payload={"message_seq": 1, "role": "dev", "run_id": "native-run"})
+            rt.log.emit(type="team.run_finished", task_id=task, actor=HOST,
+                        payload={**start.payload, "status": "failed"})
+            rt.log.emit(type="team.objective_completed", task_id=task, actor=HOST,
+                        payload={"summary": "后续已处理", "verification": "原失败保留"})
+            lens = _reliability_lens([rt.task(task)], rt.log.read())
+            self.assertEqual(rt.task(task).status, "done")
+            self.assertEqual(lens["status"], "watch")
+            self.assertIn("not proof", lens["finding"])
+
     def test_uncertain_work_without_driver_failure_cannot_be_reported_healthy(self):
         with Runtime(":memory:") as rt:
             task = rt.create_task("核对丢失的执行结果")
