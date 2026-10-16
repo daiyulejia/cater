@@ -26,6 +26,30 @@ const tool = (seq = 3, extra = {}) => event(seq, 'team.tool_started', { role: 'd
 const receipt = (extra = {}) => event(4, 'team.tool_finished', { role: 'dev', run_id: 'run', name: 'workspace_read', started_seq: 3,
   result: { status: 'ok' }, ...extra })
 
+test('结构化提问表达等待顾客而非失联，直接聊天后不继续催旧问题', () => {
+  const question = event(3, 'team.questions_requested', { role_id: 'dev', message_seq: 1, title: '补充背景' })
+  const events = [human(), start(), question, end(4, 'waiting')]
+  const view = conversationActivity(props({ events }), now)
+  expect(view.message).toContain('在等你的补充')
+  expect(view.lines.find((line) => line.role === 'dev')?.text).toBe('开发 · 等待你的补充')
+  expect(view.lines.find((line) => line.role === 'dev')?.moving).toBe(false)
+  expect(view.waitsForCustomer).toBe(true)
+  render(<ConversationActivity {...props({ events })} />)
+  const compact = screen.getByRole('region', { name: '当前工作进展' })
+  expect(compact.textContent).toContain('待你补充')
+  expect(compact.textContent).not.toContain('等待你的补充')
+  expect(text({ events })).not.toMatch(/暂无执行|等待伙伴回复|尚未确认答复/)
+  expect(text({ events: [...events, human(5)] })).not.toContain('在等你的补充')
+  expect(text({ events: [...events, event(5, 'team.objective_updated', { goal: '新方向' })] })).not.toContain('等待你的补充')
+  const fake = { ...question, actor: { id: 'dev', kind: 'agent', role: 'dev' } }
+  expect(text({ events: [human(), start(), fake, end(4, 'waiting')] })).not.toContain('在等你的补充')
+  const parallel = event(5, 'team.questions_requested', { role_id: 'test', message_seq: 1 })
+  const answered = event(6, 'team.message_received', { recipient: 'test', questionnaire: { question_seq: 5 } }, { id: 'human', kind: 'human', role: 'human' })
+  const state = conversationActivity(props({ events: [...events, parallel, answered] }), now)
+  expect(state.lines.find((line) => line.role === 'dev')?.text).toContain('等待你的补充')
+  expect(state.lines.find((line) => line.role === 'test')?.text ?? '').not.toContain('等待你的补充')
+})
+
 test('发送与收到分别表达，同轮原位更新，直接 @ 成员不添加店长', () => {
   vi.useFakeTimers().setSystemTime(now)
   const initial = props({ sending: true })

@@ -23,6 +23,7 @@ import { consultationMatches, conversationParticipants } from './participants'
 import type { WorkState } from './WorkItems'
 import type { TeamAvailability } from './TeamDirectory'
 import type { Clarification, ClarificationControls, ClarificationStore } from './ClarificationCard'
+import type { Questionnaire, QuestionnaireControls, QuestionnaireStore } from './QuestionnaireCard'
 import type { QuestionBasis, QuestionContext } from './QuestionDetails'
 import { collaborationProjection, workTransfers } from './collaborationProjection'
 import type { WorkAssignment } from './collaborationProjection'
@@ -44,6 +45,8 @@ const BrowserReport = lazy(() => import('./browserReport').then((module) => ({ d
 const WorkProgressPanel = lazy(() => import('./WorkProgressPanel').then((module) => ({ default: module.WorkProgressPanel })))
 const WorkAssignments = lazy(() => import('./WorkProgressPanel').then((module) => ({ default: module.WorkAssignments })))
 const ClarificationCard = lazy(() => import('./ClarificationCard').then((module) => ({ default: module.ClarificationCard })))
+const QuestionnaireCard = lazy(() => import('./QuestionnaireCard').then((module) => ({ default: module.QuestionnaireCard })))
+type ChatControls = ClarificationControls & { questionnaire: QuestionnaireControls }
 const QuestionDetails = lazy(() => import('./QuestionDetails').then((module) => ({ default: module.QuestionDetails })))
 const LazyArtifactPreview = lazy(() => import('./Artifact').then((module) => ({ default: module.ArtifactPreview })))
 const TeamWorkboard = lazy(() => import('./TeamProgressPanel').then((module) => ({ default: module.TeamWorkboard })))
@@ -83,9 +86,9 @@ type Event = { seq: number; ts?: string; type: string; category: string; actor: 
 type QuestionResult = { question_seq?: number; answer?: string; evidence?: { source_seq: number; quote: string }[]; limits?: string[]; reason?: string; speaker_id?: string; driver?: string; tokens?: number; token_usage?: string }
 type Question = QuestionResult & { seq: number; status: string; question: string; role_id: string; basis: QuestionBasis; outdated: boolean }
 type ConversationReceipt = { seq: number; status: string }
-export type TaskDetail = { task: Task; team?: TeamState | null; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string } | null; activity?: Activity; execution_control?: ExecutionControl; workspace?: WorkspaceBinding }
+export type TaskDetail = { task: Task; team?: TeamState | null; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; questionnaires?: Questionnaire[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string } | null; activity?: Activity; execution_control?: ExecutionControl; workspace?: WorkspaceBinding }
 type DerivationSource = { id: string; goal: string }
-export type ChatItem = { internal?: boolean; historicalDelivery?: boolean; id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event; retryStatus?: 'waiting' | 'succeeded' | 'failed' | 'cancelled'; auditEvents?: Event[]; auditName?: (id: string) => string }
+export type ChatItem = { internal?: boolean; historicalDelivery?: boolean; id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; questionnaire?: Questionnaire; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event; retryStatus?: 'waiting' | 'succeeded' | 'failed' | 'cancelled'; auditEvents?: Event[]; auditName?: (id: string) => string }
 
 const accessToken = readAccessToken()
 
@@ -221,7 +224,7 @@ function isDriverGateway(event: Event): boolean {
   return event.actor.kind === 'system' && event.actor.id === 'driver_gateway' && event.actor.role === 'driver_gateway'
 }
 
-function conversationFor(events: Event[], identities: Record<string, OrgRole>, organization: Organization | null, questions: Question[] = [], clarifications: Clarification[] = [], receipts: ConversationReceipt[] = [], teamEnabled = false): ChatItem[] {
+function conversationFor(events: Event[], identities: Record<string, OrgRole>, organization: Organization | null, questions: Question[] = [], clarifications: Clarification[] = [], receipts: ConversationReceipt[] = [], teamEnabled = false, questionnaires: Questionnaire[] = []): ChatItem[] {
   const humanMessages = events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'human')
   const initialHuman = humanMessages[0]
   const humanRequests = new Set(humanMessages.map((event) => event.payload.request_id).filter((id) => typeof id === 'string' && id))
@@ -241,6 +244,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
   const consultationRequests = new Map(events.filter((event) => event.type === 'collaboration.requested').map((event) => [event.seq, event]))
   const explainedMessages = new Set(events.filter((event) => event.type === 'conversation.finished').map((event) => event.payload.question_seq))
   const clarificationRows = new Map(clarifications.map((question) => [question.seq, question]))
+  const questionnaireRows = new Map(questionnaires.map((question) => [question.seq, question]))
   const collaboration = collaborationProjection(events, organization?.leader.id ?? 'store_manager')
   const transfers = workTransfers(events)
   const displayName = (id: string) => identities[id]?.name ?? actorText(id)
@@ -313,6 +317,17 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
         const run = events.filter((entry) => isTeamHost(entry) && ['team.run_started', 'team.run_finished'].includes(entry.type) && entry.payload.message_seq === event.seq).at(-1)
         if (run) item.details = [teamRunStatus(typeof run.payload.status === 'string' ? run.payload.status : run.type === 'team.run_started' ? 'running' : undefined)]
       }
+      return [item]
+    }
+    if (event.type === 'team.questions_requested' && isTeamHost(event)) {
+      const row = questionnaireRows.get(event.seq)
+      if (!row) return []
+      const item = message('补充信息', '', 'agent', 'collaboration')
+      item.actor = row.role_id
+      item.display = displayName(row.role_id)
+      item.role = publicIdentity(row.role_id, organization)
+      item.systemActor = false
+      item.questionnaire = row
       return [item]
     }
     if (event.type === 'team.run_finished' && isTeamHost(event) && payload.status === 'failed') {
@@ -762,6 +777,7 @@ function App() {
   const controlsRef = useRef<Record<string, ExecutionControl>>({})
   const [executionControls, setExecutionControls] = useState<Record<string, ExecutionControl>>({})
   const [clarificationStore] = useState<ClarificationStore>(() => new Map())
+  const [questionnaireStore] = useState<QuestionnaireStore>(() => new Map())
   const derivationRef = useRef<DerivationSource | null>(null)
   const derivationRequests = useRef<Record<string, { text: string; requestId: string }>>({})
   const focusComposerRef = useRef(false)
@@ -922,9 +938,9 @@ function App() {
     const version = next.summary?.version ?? seq
     const base = next.summary ?? { id, goal: next.task.goal, project_id: next.task.project_id,
       status: next.task.status, status_label: taskListStatus({ ...next.task, activity: next.activity }),
-      activity: next.activity, conversation_count: conversationFor(next.events, {}, null, next.questions, next.clarifications, next.conversation, Boolean(team?.enabled)).filter((item) => !item.notice).length, latest_seq: seq, version }
+      activity: next.activity, conversation_count: conversationFor(next.events, {}, null, next.questions, next.clarifications, next.conversation, Boolean(team?.enabled), next.questionnaires).filter((item) => !item.notice).length, latest_seq: seq, version }
     const item = team?.enabled ? { ...base, team, goal: next.task.goal, status: next.task.status, status_label: teamStatus(team),
-      conversation_count: conversationFor(next.events, {}, null, next.questions, next.clarifications, next.conversation, true).filter((item) => !item.notice).length } : base
+      conversation_count: conversationFor(next.events, {}, null, next.questions, next.clarifications, next.conversation, true, next.questionnaires).filter((item) => !item.notice).length } : base
     const previous = versionsRef.current[id]
     const comparison = previous ? summaryOrder(item, previous.summary) : 1
     if (comparison < 0 || (comparison === 0 && previous && order < previous.order)) return
@@ -1077,7 +1093,7 @@ function App() {
     return Object.fromEntries(members.map((member) => [member.id, member]))
   }, [organization, roles])
   const currentDetail = detail?.task.id === selectedId ? detail : null
-  const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization, currentDetail.questions, currentDetail.clarifications, currentDetail.conversation, Boolean(currentDetail.task.team?.enabled)) : [], [currentDetail, identities, organization])
+  const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization, currentDetail.questions, currentDetail.clarifications, currentDetail.conversation, Boolean(currentDetail.task.team?.enabled), currentDetail.questionnaires) : [], [currentDetail, identities, organization])
   const visibleConversation = useMemo(() => chatFilter === 'all' ? conversation : conversation.filter((item) => item.category === chatFilter), [chatFilter, conversation])
   const selectedSummary = tasks.find((item) => item.id === selectedId)
   const task: Task | undefined = selectedId ? currentDetail?.task ?? (selectedSummary
@@ -1096,8 +1112,25 @@ function App() {
   const clarificationBlockedReason = executionState === 'cancelled' ? '任务已取消，继续执行需新建任务。仍可直接聊天。'
     : executionState === 'paused' ? '任务已暂停，提交澄清前需恢复执行。仍可直接聊天。' : '正在确认执行控制请求，请稍候再提交澄清。仍可直接聊天。'
   const visibleError = sendErrors[controlKey] || sendErrors[composerKey] || error || taskListError
-  const clarificationControls: ClarificationControls = {
+  const revealQuestion = useCallback((element: HTMLFormElement) => {
+    const stream = streamRef.current
+    if (stream && stream.contains(element) && followRef.current) {
+      const bubble = element.closest('[data-actor]') ?? element
+      stream.scrollTop += bubble.getBoundingClientRect().top - stream.getBoundingClientRect().top - 12
+    }
+  }, [])
+  const clarificationControls: ChatControls = {
     store: clarificationStore, createRequestId: creationRequestId,
+    questionnaire: {
+      store: questionnaireStore, createRequestId: creationRequestId, onReady: revealQuestion,
+      disabledReason: clarificationBlocked ? clarificationBlockedReason : undefined,
+      submit: async (id, reply) => {
+        if (selectedRef.current !== id || !currentDetail?.questionnaires?.some((question) => question.seq === reply.question_seq && question.status === 'pending')) throw new Error('请读取当前对话的最新问题后再回答。')
+        if (pendingRef.current.has(`$control:${id}`) || (controlsRef.current[id]?.state ?? 'running') !== 'running') throw new Error(clarificationBlockedReason)
+        const { next, order } = await requestDetail(`/api/tasks/${encodeURIComponent(id)}/questionnaires`, { method: 'POST', body: JSON.stringify(reply) })
+        acceptDetail(next, order)
+      },
+    },
     disabledReason: clarificationBlocked ? clarificationBlockedReason : undefined,
     submit: async (id, reply) => {
       if (selectedRef.current !== id || !currentDetail?.clarifications?.some((question) => question.seq === reply.question_seq && question.status === 'pending')) throw new Error('请读取当前对话的最新问题后再回答。')
@@ -1467,7 +1500,7 @@ function TaskComposer({ members, draft, isSending, disabled, workspaceControl, o
   return <div className="composer-shell p-3 sm:p-4"><div className="composer-box mx-auto flex max-w-3xl gap-2 p-2"><MentionInput id="new-task" value={draft} label="发起任务对话" placeholder="和店长说说，今天想做什么？" members={members} onChange={onDraftChange} onSubmit={onCreate} portrait={(id) => <Portrait id={id} size="sm" />} /><div className="flex shrink-0 items-center gap-1 self-end">{workspaceControl}<button disabled={disabled || isSending || !draft.trim()} onClick={onCreate} className="send-button grid size-10 shrink-0 place-items-center self-end text-white disabled:bg-[#d4ddd8]" title={isSending ? '正在发送新任务' : '发送新任务'} aria-label="发送新任务" aria-busy={isSending}>{isSending ? <LoaderCircle size={20} className="motion-safe:animate-spin" /> : <PawPrint size={20} fill="currentColor" strokeWidth={1.8} />}</button></div></div></div>
 }
 
-function MessageContext({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ClarificationControls }) {
+function MessageContext({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ChatControls }) {
   return <>
     {item.handoff && <div className="handoff-line" aria-label="工作交接">
       {item.assignments?.length ? <Suspense fallback={null}><WorkAssignments items={item.assignments} /></Suspense> : <>
@@ -1477,6 +1510,7 @@ function MessageContext({ item, taskId, controls }: { item: ChatItem; taskId: st
     </div>}
     {item.joined?.length ? <p className="collaboration-joined" aria-label="协作通知">{item.joined.join('、')} 加入协作</p> : null}
     {item.question && <Suspense fallback={<p className="question-progress">正在读取提问详情…</p>}><QuestionDetails question={item.question} human={item.kind === 'human'} /></Suspense>}
+    {item.questionnaire && <Suspense fallback={<p role="status" className="question-progress">正在读取补充问题…</p>}><QuestionnaireCard taskId={taskId} questionnaire={item.questionnaire} controls={controls.questionnaire} /></Suspense>}
     {item.evidence.type === 'clarification.requested' && <>
       <p className="mt-2 text-xs text-teal-700">@你</p>
       {item.clarification ? <Suspense fallback={<p role="status" className="question-progress">正在读取补充问题…</p>}><ClarificationCard taskId={taskId} question={item.clarification} controls={controls} /></Suspense> : <p className="question-progress">此条历史问题暂无可提交状态</p>}
@@ -1508,7 +1542,7 @@ function browserCheckDetails(planValue: unknown): string[] {
   return details
 }
 
-function SystemRecord({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ClarificationControls }) {
+function SystemRecord({ item, taskId, controls }: { item: ChatItem; taskId: string; controls: ChatControls }) {
   const checking = item.evidence.type === 'verification.completed'
   const passed = checking && item.evidence.payload.outcome === 'passed'
   const planning = ['verification.planning_started', 'verification.planned'].includes(item.evidence.type)
@@ -1547,7 +1581,7 @@ function untrustedArtifact(event: Event): Artifact {
   return item
 }
 
-function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; artifact?: Artifact; taskId: string; controls: ClarificationControls }) {
+function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; artifact?: Artifact; taskId: string; controls: ChatControls }) {
   if (item.notice) return <article className="collaboration-notice">
     {item.text && <p>{item.text}</p>}
     {item.details?.length ? <details><summary>这次接力的工作</summary>{item.details.map((detail, index) => <p key={index}>{detail}</p>)}</details> : null}
@@ -1558,7 +1592,7 @@ function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; arti
   const human = item.kind === 'human'
   return <article className={`flex items-start gap-3 ${human ? 'justify-end' : ''}`}>
     {!human && <Portrait id={item.actor} />}
-    <div className={`message-bubble max-w-[min(86%,700px)] px-4 py-3 ${human ? 'is-human text-white' : 'is-agent'}`} data-actor={item.actor}>
+    <div className={`message-bubble max-w-[min(86%,700px)] px-4 py-3 ${item.questionnaire ? 'w-full min-w-0' : ''} ${human ? 'is-human text-white' : 'is-agent'}`} data-actor={item.actor}>
       <div className={`mb-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${human ? 'text-[#fff0e8]' : 'text-[#6e8981]'}`}><strong className={human ? 'text-white' : 'text-[#28433d]'}>{human ? '你' : item.display}</strong><span>{item.role}</span>{item.title && <span className={`text-[11px] font-semibold ${human ? 'text-[#fff4d9]' : 'text-[#a56049]'}`}>· {item.title}</span>}</div>
       {human ? <p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>
         : <Suspense fallback={<p className="whitespace-pre-wrap break-words text-[13px] leading-[1.75] sm:text-sm">{item.text}</p>}><ChatMarkdown text={item.text} /></Suspense>}

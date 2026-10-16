@@ -745,6 +745,52 @@ class TeamWebTests(unittest.TestCase):
         self.assertEqual(task.status, "done")
         self.assertEqual(task.work["delivery"]["status"], "accepted")
 
+    def test_questionnaire_batch_posts_one_message_and_dispatches_idempotently(self):
+        from test_questionnaires import proposal, answers
+        from test_simple_team import turn
+        detail = self.create()
+        task = detail["task"]["id"]
+        self.driver.turns = [turn("先补充几件事", ("request_questions", proposal()))]
+        self.run_current(task)
+        detail = self.request(f"/api/tasks/{task}")
+        question, = detail["questionnaires"]
+        self.assertEqual(question["status"], "pending")
+        before_calls = len(self.driver.calls)
+        self.start.reset_mock()
+        reply = {"question_seq": question["seq"], "answers": answers(), "request_id": "web-batch-response"}
+        answered = self.request(f"/api/tasks/{task}/questionnaires", reply, expected=202)
+        self.assertEqual(answered["questionnaires"][0]["status"], "answered")
+        self.start.assert_called_once()
+        before = self.events(task)
+        self.request(f"/api/tasks/{task}/questionnaires", reply, expected=202)
+        self.assertEqual(self.events(task), before)
+        self.start.assert_called_once()
+        self.assertEqual(len(self.driver.calls), before_calls)
+        self.run_current(task)
+        self.assertEqual(len(self.driver.calls), before_calls + 1)
+        context = json.loads(self.driver.calls[-1]["prompt"].rsplit("\n", 1)[1])
+        self.assertEqual(context["message"]["questionnaire"]["answers"], answers())
+        self.assertTrue(any("request_questions" == tool["name"] for tool in self.driver.calls[-1]["tools"]))
+
+    def test_questionnaire_invalid_stale_and_extra_fields_do_not_dispatch(self):
+        from test_questionnaires import proposal, answers
+        from test_simple_team import turn
+        task = self.create()["task"]["id"]
+        self.driver.turns = [turn("", ("request_questions", proposal()))]
+        self.run_current(task)
+        question = self.request(f"/api/tasks/{task}")["questionnaires"][0]
+        reply = {"question_seq": question["seq"], "answers": answers(), "request_id": "web-invalid-answer"}
+        self.start.reset_mock()
+        before = self.events(task)
+        for invalid in ({**reply, "role_id": "dev"}, {**reply, "answers": []}, {**reply, "question_seq": True}):
+            self.request(f"/api/tasks/{task}/questionnaires", invalid, expected=400)
+            self.assertEqual(self.events(task), before)
+        self.start.assert_not_called()
+        with self.factory() as rt:
+            rt.team.receive(task, "我直接补充背景，不用之前的问题了", request_id="replace-question")
+        self.request(f"/api/tasks/{task}/questionnaires", reply, expected=409)
+        self.start.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

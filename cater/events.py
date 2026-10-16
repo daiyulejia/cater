@@ -22,6 +22,7 @@ GENESIS_HASH = "0" * 64
 EVENT_CATEGORIES = {
     "team.started": "lifecycle",
     "team.message_received": "dialogue",
+    "team.questions_requested": "dialogue",
     "team.run_started": "lifecycle",
     "team.run_finished": "lifecycle",
     "team.objective_updated": "planning",

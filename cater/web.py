@@ -1482,6 +1482,15 @@ def make_handler(
                                 option_index=data.get("option_index"), answer=data.get("answer"))
                             if created:
                                 background_action = "run"
+                        elif action == "questionnaires":
+                            if set(data) != {"question_seq", "answers", "request_id"}:
+                                return self._bad_request("整组补充只接收问题编号、回答和请求标识。")
+                            if not _team_enabled(rt, task_id):
+                                return self._conflict("当前对话未启用消息协作。")
+                            message, _ = rt.questionnaires.respond(task_id, **data)
+                            # Dispatch even on retry: the prior response may have been saved before a process exit.
+                            activities.continue_team(task_id, message)
+                            return self._send_json(self._task_payload(task_id, activities), status=HTTPStatus.ACCEPTED)
                         elif action == "derive":
                             if set(data) - {"goal", "acceptance", "request_id", "run", "background", "collaboration"}:
                                 return self._bad_request("来源背景与项目由服务器确定，不能由请求替换。")
@@ -2543,6 +2552,7 @@ def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | N
         "questions": rt.questions.view(task_id),
         "conversation": rt.conversation.view(task_id),
         "clarifications": rt.clarifications.view(task_id),
+        "questionnaires": rt.questionnaires.view(task_id),
         "decision_ladder": [] if team and team.get("enabled") else decision_ladder(events),
         "organization_path": [] if team and team.get("enabled") else organization_path(task, events),
         "review": None if team and team.get("enabled") else rt.review(task_id),

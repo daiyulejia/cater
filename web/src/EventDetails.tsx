@@ -11,7 +11,7 @@ export type EventDetailsProps = { event: DetailEvent; actorName?: (id: string) =
 type Field = { label: string; value: string }
 
 const titles: Record<string, string> = {
-  'team.message_received': '团队收到消息', 'team.run_started': '开始处理消息', 'team.run_finished': '消息处理结果',
+  'team.message_received': '团队收到消息', 'team.questions_requested': '等待顾客补充', 'team.run_started': '开始处理消息', 'team.run_finished': '消息处理结果',
   'team.objective_updated': '团队目标已更新', 'team.objective_completed': '店长交付结论',
   'team.model_called': '团队模型用量', 'team.tool_started': '团队工具已发起', 'team.tool_finished': '团队工具回执',
   'task.created': '任务已创建', 'task.started': '任务已启动', 'task.interpreted': '任务理解',

@@ -21,6 +21,7 @@ export type ConversationActivityView = {
   lines: Line[]
   notice?: string
   nextCheckAt?: number
+  waitsForCustomer?: boolean
 }
 
 const active = (status?: string) => status === 'running' || status === 'started'
@@ -34,6 +35,7 @@ const tools: Record<string, string> = {
   workspace_list: '列出目录', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果',
   read_receipts: '核对执行回执', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件',
   set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复',
+  request_questions: '发送补充问题',
 }
 
 function receiptFor(start: TeamEvent, events: TeamEvent[]) {
@@ -71,6 +73,15 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   const label = (role: string) => names[role] ?? role
   const humans = events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'human')
   const latestHuman = humans.at(-1)
+  const pendingQuestions = new Map<string, TeamEvent>()
+  for (const question of hosts.filter((event) => event.type === 'team.questions_requested')) {
+    const role = string(question.payload.role_id)
+    if (role && !events.some((event) => event.seq > question.seq && (
+      event.type === 'team.message_received' && event.actor.kind === 'human'
+      && (typeof object(event.payload.questionnaire).question_seq !== 'number'
+        || object(event.payload.questionnaire).question_seq === question.seq)
+      || isTeamHost(event) && ['team.objective_updated', 'team.objective_completed'].includes(event.type)))) pendingQuestions.set(role, question)
+  }
   const finishFor = (start: TeamEvent) => hosts.find((event) => event.type === 'team.run_finished' && event.seq > start.seq
     && event.payload.message_seq === start.payload.message_seq && event.payload.role === start.payload.role
     && (event.payload.run_id === undefined || start.payload.run_id === undefined || event.payload.run_id === start.payload.run_id))
@@ -125,9 +136,10 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   const deliveredResponse = Boolean(done && deliveredAt !== undefined && currentHuman && currentHuman.seq < deliveredAt
     && recipient === leaderId && (humanStarts.some((start) => adoptingRuns.has(string(start.payload.run_id) ?? ''))
       || !update && currentHuman === humans[0]))
-  const responded = Boolean(answer || deliveredResponse)
+  const customerQuestion = recipient ? pendingQuestions.get(recipient) : undefined
+  const responded = Boolean(answer || deliveredResponse || customerQuestion)
   let message = sending ? '消息正在发送，尚未确认收到' : currentHuman
-    ? deliveredResponse ? `${label(recipient!)}已确认本次交付` : answer ? `${label(recipient!)}已回应最新消息`
+    ? customerQuestion ? `${label(recipient!)}在等你的补充` : deliveredResponse ? `${label(recipient!)}已确认本次交付` : answer ? `${label(recipient!)}已回应最新消息`
       : active(customerRun?.status) ? `${label(recipient!)}正在处理最新消息`
         : failed(customerRun?.status) ? `最新消息答复待确认 · ${label(recipient!)}本轮处理未完成`
           : customerRun?.status === 'waiting' ? `最新消息尚待答复 · ${label(recipient!)}等待伙伴回复`
@@ -167,7 +179,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   })
   const latestTools = new Map<string, TeamEvent>()
   for (const tool of currentTools) latestTools.set(String(tool.payload.role), tool)
-  const roles = new Set([...roleRuns.keys(), ...latestTools.keys()])
+  const roles = new Set([...roleRuns.keys(), ...latestTools.keys(), ...pendingQuestions.keys()])
   let anyOpenTool = false
   for (const role of roles) {
     const run = roleRuns.get(role), tool = latestTools.get(role)
@@ -184,14 +196,15 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       ...hosts.filter((event) => event.type === 'team.model_called' && event.payload.role === role && run?.start
         && typeof run.start.payload.run_id === 'string' && event.payload.run_id === run.start.payload.run_id)]
       .filter((event): event is TeamEvent => Boolean(event)).sort((a, b) => a.seq - b.seq)
-    const moving = running && freshness(records)
+    const awaitingCustomer = pendingQuestions.has(role) && !running
+    const moving = !awaitingCustomer && running && freshness(records)
     const action = toolBelongs ? tools[string(tool.payload.name) ?? ''] ?? '工具调用' : undefined
     const handling = bySeq.get(run?.message_seq ?? -1)?.actor.kind === 'human' ? '正在处理消息' : '正在处理工作'
-    let text = running ? moving ? handling : '暂无新反馈，执行状态待确认'
+    let text = awaitingCustomer ? '等待你的补充' : running ? moving ? handling : '暂无新反馈，执行状态待确认'
       : run?.status === 'waiting' ? '等待伙伴回复'
         : failed(run?.status) ? '本轮处理未完成，需核对过程'
           : successful(run?.status) ? '本轮消息处理已结束' : '执行结果待确认'
-    if (action && tool?.payload.name !== 'wait_for_reply') text = `${action} · ${finished ? toolOutcome(finished) : '已发起，等待回执'}；${text}`
+    if (action && tool?.payload.name !== 'wait_for_reply' && !awaitingCustomer) text = `${action} · ${finished ? toolOutcome(finished) : '已发起，等待回执'}；${text}`
     lines.push({ id: role, role, text: `${label(role)} · ${text}`, moving,
       warning: failed(run?.status) || Boolean(toolBelongs && finished && toolOutcome(finished) !== '已完成') })
   }
@@ -218,7 +231,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   if (!anyRunning && !pending && !activity?.active) {
     if (activity?.state === 'failed' && !done) lines.push({ id: 'failure', text: '后台协作异常，尚未确认交付；需查看过程核对', warning: true })
     else if (['failed', 'blocked'].includes(team.status) && !done) lines.push({ id: 'failure', text: '后台工作需要跟进，尚未确认交付', warning: true })
-    else if (!done) lines.push({ id: 'delivery', text: '当前暂无执行，尚未确认交付' })
+    else if (!done && !pendingQuestions.size) lines.push({ id: 'delivery', text: '当前暂无执行，尚未确认交付' })
   }
   const notice = syncError ? '同步失败，状态待确认；可刷新核对。'
     : executionState === 'paused' ? '已暂停后续执行；在途调用仍可能返回。仍可直接聊天。'
@@ -227,6 +240,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
           : executionState !== 'running' ? '执行控制状态待确认。仍可直接聊天。' : undefined
   if (!sending && currentHuman && !responded && active(customerRun?.status) && !lines.find((line) => line.role === recipient)?.moving)
     message = `最新消息已收到 · ${label(recipient!)}暂无新反馈，答复待确认`
-  return { visible: team.enabled && Boolean(sending || currentHuman && !responded || !done || anyRunning || pending || activity?.active || fault || notice),
-    message, messageRole: sending ? undefined : recipient, lines, notice, nextCheckAt }
+  return { visible: team.enabled && Boolean(sending || currentHuman && !responded || !done || anyRunning || pending || pendingQuestions.size || activity?.active || fault || notice),
+    message, messageRole: sending ? undefined : recipient, lines, notice, nextCheckAt,
+    waitsForCustomer: Boolean(pendingQuestions.size && !sending && !anyRunning && !pending && !activity?.active && !fault && !notice) }
 }

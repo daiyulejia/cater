@@ -243,6 +243,8 @@ class Runtime:
         self.conversation = ConversationService(self)
         from .team import TeamService
         self.team = TeamService(self)
+        from .questionnaires import QuestionnaireService
+        self.questionnaires = QuestionnaireService(self)
         self.consultations = ConsultationService(self)
         self.driver_attempts = max(1, driver_attempts)
         self.circuit_breaker_threshold = max(1, circuit_breaker_threshold)

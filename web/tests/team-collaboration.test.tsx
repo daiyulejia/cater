@@ -71,6 +71,14 @@ async function mount(initial: TaskDetail) {
     if (url === '/api/task-summaries') return json({ tasks: [current.summary ?? { id: 'team-task', goal: '团队接力', status: 'done', status_label: '已完成',
       version: 1, latest_seq: 1, conversation_count: 1 }] })
     if (url === '/api/tasks/team-task') return json(current)
+    if (url === '/api/tasks/team-task/questionnaires' && init.method === 'POST') {
+      const body = JSON.parse(String(init.body))
+      current = { ...current, questionnaires: current.questionnaires?.map((question) => question.seq === body.question_seq
+        ? { ...question, status: 'answered', response: { answers: body.answers } } : question),
+        events: [...current.events, event((current.events.at(-1)?.seq ?? 0) + 1, 'team.message_received',
+          { text: '我的补充：在职，转行。', recipient: 'store_manager', kind: 'message', request_id: body.request_id }, 'human', 'human')] }
+      return json(current)
+    }
     if (url === '/api/tasks/team-task/command' && init.method === 'POST') {
       const body = JSON.parse(String(init.body))
       current = { ...current, events: [...current.events, event((current.events.at(-1)?.seq ?? 0) + 1, 'team.message_received',
@@ -90,6 +98,38 @@ async function mount(initial: TaskDetail) {
     await act(async () => fireEvent(document, new Event('visibilitychange')))
   } }
 }
+
+test('原生问题卡直接在聊天展示，一组回答只提交一次并保留普通聊天草稿', async () => {
+  const question = { seq: 3, role_id: 'store_manager', title: '先了解你的背景', status: 'pending' as const, questions: [
+    { id: 'stage', question: '目前什么阶段？', selection: 'single' as const, options: [
+      { id: 'working', label: '在职', recommended: true }, { id: 'student', label: '在读' }] },
+    { id: 'goals', question: '希望解决什么？', selection: 'multiple' as const, options: [
+      { id: 'change', label: '转行' }, { id: 'plan', label: '行动计划' }] },
+  ] }
+  const initial = { ...detail([event(2, 'team.message_received', { text: '职业规划', recipient: 'store_manager', kind: 'message' }, 'human', 'human'),
+    event(3, 'team.questions_requested', { role_id: 'store_manager', title: question.title })]), questionnaires: [question] }
+  const { fetchMock } = await mount(initial)
+  const card = await screen.findByRole('form', { name: `补充信息：${question.title}` })
+  expect(card.closest('[data-actor="store_manager"]')).toBeTruthy()
+  expect(card.closest('details.team-collaboration')).toBeNull()
+  expect((within(card).getByRole('radio', { name: /在职/ }) as HTMLInputElement).checked).toBe(false)
+  fireEvent.change(screen.getByRole('textbox', { name: '向团队发送消息' }), { target: { value: '普通聊天草稿' } })
+  fireEvent.click(within(card).getByRole('radio', { name: /在职/ }))
+  fireEvent.click(within(card).getByRole('checkbox', { name: /转行/ }))
+  fireEvent.click(within(card).getByRole('checkbox', { name: /行动计划/ }))
+  expect(fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0)
+  await act(async () => { fireEvent.submit(card) })
+  const posts = fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')
+  expect(posts).toHaveLength(1)
+  expect(posts[0][0]).toBe('/api/tasks/team-task/questionnaires')
+  expect(JSON.parse(String(posts[0][1].body))).toEqual({ question_seq: 3, request_id: expect.any(String), answers: [
+    { question_id: 'stage', option_ids: ['working'], text: '', skipped: false },
+    { question_id: 'goals', option_ids: ['change', 'plan'], text: '', skipped: false },
+  ] })
+  await screen.findByText('我的补充：在职，转行。')
+  expect(screen.queryByRole('form', { name: `补充信息：${question.title}` })).toBeNull()
+  expect((screen.getByRole('textbox', { name: '向团队发送消息' }) as HTMLTextAreaElement).value).toBe('普通聊天草稿')
+})
 
 test('团队用户消息保留一份，角色公开发言使用 speaker，内部报告不重复公开回复', async () => {
   await mount(detail([
