@@ -39,8 +39,8 @@ import { hasActiveTeamMessages, isTeamHost, isTeamRecovery, resolveTeam, teamDel
 import type { TeamState, TeamSummary } from './team'
 import { AsyncPanel } from './AsyncPanel'
 import { ReloadContext } from './pageReloadContext'
-import { loadPageRecovery } from './pageRecovery'
-import type { PageDraftSnapshot } from './pageRecovery'
+import { loadPageRecovery, openNavigationMemory } from './pageRecovery'
+import type { NavigationMemory, PageDraftSnapshot } from './pageRecovery'
 import { reloadBlocker, reloadPage } from './pageReload'
 
 const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
@@ -853,6 +853,8 @@ function App() {
   const seenRef = useRef({ view: '', latest: 0, count: 0 })
   const selectedRef = useRef<string | null>(null)
   const navigationRef = useRef(0)
+  const navigationMemory = useRef<NavigationMemory | null>(null)
+  const initialSelection = useRef<string | null | undefined>(undefined)
   const pendingRef = useRef(new Set<string>())
   const versionsRef = useRef<Record<string, { summary: TaskSummary; order: number }>>({})
   const detailOrderRef = useRef(0)
@@ -875,6 +877,8 @@ function App() {
   const setDraft = (value: string | ((current: string) => string)) => {
     const next = typeof value === 'function' ? value(draft) : value
     navigationRef.current += 1
+    const notice = navigationMemory.current?.remember(null)
+    if (notice) setRecoveryNotice(current => current.includes(notice) ? current : [current, notice].filter(Boolean).join(' '))
     if (next !== draft) {
       if (creationRequest.current) clearCreationRecovery(creationRequest.current.requestId)
       creationRequest.current = null
@@ -906,7 +910,7 @@ function App() {
     setNewWorkspaceId(workspaceId)
   }
 
-  const chooseTask = useCallback((id: string | null) => {
+  const chooseTask = useCallback((id: string | null, remember = true) => {
     questionModeRef.current = false
     setQuestionMode(false)
     derivationRef.current = null
@@ -921,6 +925,8 @@ function App() {
     setChatFilter('all')
     setShowMobileBoard(false)
     setGraphOpen(false)
+    const notice = remember ? navigationMemory.current?.remember(id) : ''
+    if (notice) setRecoveryNotice(current => current.includes(notice) ? current : [current, notice].filter(Boolean).join(' '))
   }, [])
 
   useEffect(() => {
@@ -938,8 +944,19 @@ function App() {
   useEffect(() => {
     let cancelled = false
     const navigation = navigationRef.current
-    void loadPageRecovery(creationSessionToken, () => !cancelled).then(page => {
+    void openNavigationMemory(creationSessionToken, () => !cancelled).then(async memory => {
       if (cancelled) return
+      navigationMemory.current = memory
+      // Consume the explicit snapshot only after navigation setup, without another pending hash before application.
+      const page = await loadPageRecovery(creationSessionToken, () => !cancelled && readAccessToken() === creationSessionToken)
+      if (cancelled || readAccessToken() !== creationSessionToken) return
+      if (navigationRef.current === navigation) {
+        initialSelection.current = memory.selectedId
+        if (!page.snapshot && memory.notice) setRecoveryNotice(current => [current, memory.notice].filter(Boolean).join(' '))
+      } else {
+        const notice = memory.remember(selectedRef.current)
+        if (notice) setRecoveryNotice(current => [current, notice].filter(Boolean).join(' '))
+      }
       if (page.notice) setRecoveryNotice(current => [current, page.notice].filter(Boolean).join(' '))
       if (page.snapshot) {
         const saved = page.snapshot
@@ -961,7 +978,7 @@ function App() {
       }
       setPageReady(true)
     })
-    return () => { cancelled = true }
+    return () => { cancelled = true; navigationMemory.current = null }
   }, [creationSessionToken, chooseTask])
 
   const restoreCreation = async () => {
@@ -1069,7 +1086,14 @@ function App() {
             return summaryOrder(merged, task) >= 0 ? merged : task
           }), ...received.values()]
         })
-        if (!initialized && navigationRef.current === 0) chooseTask(next.tasks.at(-1)?.id ?? null)
+        if (!initialized && navigationRef.current === 0) {
+          const current = navigationMemory.current?.isCurrent() ?? false
+          const saved = current ? initialSelection.current : null
+          const missing = saved !== undefined && saved !== null && !next.tasks.some(task => task.id === saved)
+          chooseTask(missing ? null : saved === undefined ? next.tasks.at(-1)?.id ?? null : saved, current && !missing)
+          if (!current) setRecoveryNotice(previous => [previous, '对话位置记录已变化或无法访问，请从任务列表选择。'].filter(Boolean).join(' '))
+          if (missing) setRecoveryNotice(current => [current, '上次的对话当前不可用，请从任务列表选择；未启动新任务。'].filter(Boolean).join(' '))
+        }
         initialized = true
       } catch (err) {
         if (!cancelled && !signal.aborted && !initialized) setTaskListError(userFacingError(err, '暂时无法读取任务。'))

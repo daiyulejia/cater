@@ -2,6 +2,14 @@ import { accountBinding, readAccessToken } from './creationRecovery'
 
 export const PAGE_RECOVERY_KEY = 'cater.page_recovery.v1'
 export const PAGE_RECOVERY_TTL = 60 * 60 * 1000
+export const NAVIGATION_MEMORY_KEY = 'cater.navigation.v1'
+
+export type NavigationMemory = {
+  selectedId?: string | null
+  notice: string
+  isCurrent: () => boolean
+  remember: (selectedId: string | null) => string
+}
 
 export type PageDraftSnapshot = {
   drafts: Record<string, string>
@@ -22,6 +30,8 @@ const invalid = '页面草稿恢复记录已失效，请核对当前草稿后继
 const unavailable = '无法访问页面草稿存储，未能保存或恢复草稿，请保留当前页面。'
 const changed = '页面、账号或恢复记录已变化，未保存旧草稿，请核对后重试。'
 const oversized = '页面草稿超出恢复容量，无法保存，请先保留当前草稿。'
+const navigationUnavailable = '暂时无法保留对话位置；当前页面仍可使用，刷新后请从任务列表选择。'
+const navigationInvalid = '上次对话位置已失效或不适用当前连接，请从任务列表选择。'
 const reservedIds = new Set(['prototype', ...Object.getOwnPropertyNames(Object.prototype)])
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -115,6 +125,49 @@ function fresh(createdAt: unknown): createdAt is number {
   const now = Date.now()
   return typeof createdAt === 'number' && Number.isSafeInteger(createdAt)
     && createdAt >= 0 && createdAt <= now && now - createdAt < PAGE_RECOVERY_TTL
+}
+
+export async function openNavigationMemory(token: string, current: () => boolean = () => true): Promise<NavigationMemory> {
+  const disabled = (): NavigationMemory => ({ selectedId: null, notice: navigationUnavailable, isCurrent: () => false, remember: () => navigationUnavailable })
+  try {
+    if (!current()) return disabled()
+    const storage = window.sessionStorage
+    const raw = storage.getItem(NAVIGATION_MEMORY_KEY)
+    const account = await accountBinding(token)
+    if (!current() || window.sessionStorage !== storage || readAccessToken() !== token
+      || storage.getItem(NAVIGATION_MEMORY_KEY) !== raw) return disabled()
+    let expected = raw
+    const isCurrent = () => {
+      try {
+        return current() && window.sessionStorage === storage && readAccessToken() === token
+          && storage.getItem(NAVIGATION_MEMORY_KEY) === expected
+      } catch { return false }
+    }
+    // Binding is prepared once; a selection write completes before the next user event.
+    const remember = (selectedId: string | null): string => {
+      if (!current()) return ''
+      try {
+        if (!isCurrent() || selectedId !== null && !id(selectedId)) return navigationUnavailable
+        const value = JSON.stringify({ version: 1, account, selectedId })
+        storage.setItem(NAVIGATION_MEMORY_KEY, value)
+        if (storage.getItem(NAVIGATION_MEMORY_KEY) !== value) return navigationUnavailable
+        expected = value
+        return ''
+      } catch { return navigationUnavailable }
+    }
+    if (raw === null) return { notice: '', isCurrent, remember }
+    let record: unknown
+    try { record = raw.length <= 512 ? JSON.parse(raw) : null } catch { record = null }
+    if (!object(record) || !fields(record, ['version', 'account', 'selectedId']) || record.version !== 1
+      || record.account !== account || record.selectedId !== null && !id(record.selectedId)) {
+      if (isCurrent()) {
+        storage.removeItem(NAVIGATION_MEMORY_KEY)
+        expected = null
+      }
+      return { selectedId: null, notice: navigationInvalid, isCurrent, remember }
+    }
+    return { selectedId: record.selectedId as string | null, notice: '', isCurrent, remember }
+  } catch { return disabled() }
 }
 
 export async function loadPageRecovery(token: string, current: () => boolean = () => true): Promise<{ snapshot: PageDraftSnapshot | null; notice: string }> {
