@@ -30,6 +30,7 @@ EVENT_CATEGORIES = {
     "team.model_called": "driver",
     "team.tool_started": "execution",
     "team.tool_finished": "execution",
+    "team.tool_reconciled": "execution",
     "team.artifact_saved": "outcome",
     "team.review_requested": "review",
     "team.review_recorded": "review",

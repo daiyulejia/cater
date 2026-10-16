@@ -9,10 +9,11 @@ import zipfile
 from contextlib import nullcontext
 from dataclasses import asdict
 
-from .artifacts import normalize_deliverables
+from .artifacts import normalize_deliverables, safe_filename
 from .activity_owner import activity_owner
 from .events import Actor
 from .room_dialogue import addressed_role
+from .team_recovery import RECOVERY_CONTRACT, TeamRecovery
 from .usage import valid_token_count
 from .work import WorkConflict
 
@@ -58,6 +59,7 @@ def _reported_messages(messages):
 class TeamService:
     def __init__(self, runtime):
         self.rt = runtime
+        self.recovery = TeamRecovery(self)
 
     def available(self):
         leader = self.rt.organization.leader
@@ -98,9 +100,13 @@ class TeamService:
             return self.rt.log.emit(type="team.message_received", actor=Actor.human(), task_id=task_id,
                 payload={"text": text, "recipient": recipient, "kind": "message", "request_id": request_id})
 
-    def _messages(self, task_id):
-        return [e for e in self.rt.log.iter_events(task_id=task_id, event_types=("team.message_received",))
-                if e.actor == Actor.human() or e.actor.id in {r.id for r in [self.rt.organization.leader, *self.rt.roles]}]
+    def _messages(self, task_id, *, events=None):
+        events = events if events is not None else self.rt.log.read(task_id=task_id)
+        by_seq = {e.seq: e for e in events}
+        members = {r.id for r in [self.rt.organization.leader, *self.rt.roles]}
+        return [e for e in events if e.type == "team.message_received"
+                and (e.actor == Actor.human() or e.actor.kind == "agent" and e.actor.id in members
+                     or self.recovery.is_message(e, events, by_seq=by_seq))]
 
     def view(self, task_id):
         events = self.rt.log.read(task_id=task_id)
@@ -130,7 +136,8 @@ class TeamService:
         messages = self._messages(task_id)
         reported = _reported_messages(messages)
         pending = [e for e in messages if e.payload.get("kind") != "notification"
-                   and e.seq not in starts and e.seq not in reported]
+                   and e.seq not in starts and e.seq not in reported
+                   and (e.payload.get("kind") != "recovery" or self.recovery.current(task_id, e))]
         runs = [{"message_seq": seq, "role": e.payload["role"], "run_id": e.payload.get("run_id"), "revision": e.payload.get("revision", 0),
                  "reason": finishes[seq].payload.get("reason", "") if seq in finishes else "",
                  "status": finishes[seq].payload["status"] if seq in finishes else "running"}
@@ -147,7 +154,8 @@ class TeamService:
                 "pending_count": len(pending), "runs": runs, "assignments": assignments, "checkpoint": checkpoint,
                 "reviews": self.rt.team_reviews.view(task_id)}
 
-    def _send(self, task_id, sender, recipient, text, kind, *, reply_to=None, parent_assignment_seq=None, visible=False, review_seq=None):
+    def _send(self, task_id, sender, recipient, text, kind, *, reply_to=None, parent_assignment_seq=None, visible=False, review_seq=None,
+              continue_assignment_seq=None):
         self._role(recipient)
         if recipient == sender.id:
             raise ValueError("请向另一位伙伴投递消息。")
@@ -155,9 +163,11 @@ class TeamService:
             actor=Actor.agent(sender.id, sender.role), payload={"recipient": recipient, "text": _text(text),
                 "kind": kind, "reply_to": reply_to, "revision": self.view(task_id)["revision"],
                 "parent_assignment_seq": parent_assignment_seq, **({"visible": True} if visible else {}),
+                **({"continue_assignment_seq": continue_assignment_seq} if continue_assignment_seq is not None else {}),
                 **({"review_seq": review_seq} if review_seq is not None else {})})
 
     def _claim(self, task_id):
+        durable = not self.rt.log.db.in_transaction
         with self.rt.log.atomic():
             events = self.rt.log.read(task_id=task_id)
             starts = {e.payload["message_seq"]: e for e in events if e.type == "team.run_started" and e.actor == HOST}
@@ -169,16 +179,18 @@ class TeamService:
             pending = [e for e in messages if e.payload.get("kind") != "notification"
                        and e.seq not in starts and e.seq not in reported
                        and e.payload["recipient"] not in busy
+                       and (e.payload.get("kind") != "recovery" or self.recovery.current(task_id, e))
                        and (running or e.actor == Actor.human())]
             if not pending:
                 return None
             # A new customer message is read before the next delegated job.
-            message = min(pending, key=lambda e: (e.actor.kind != "human", e.seq))
+            message = min(pending, key=lambda e: (0 if e.actor.kind == "human" else 1 if e.payload.get("kind") == "recovery" else 2, e.seq))
             role = self._role(message.payload["recipient"])
             started = self.rt.log.emit(type="team.run_started", task_id=task_id, actor=HOST,
                 payload={"message_seq": message.seq, "role": role.id, "run_id": uuid.uuid4().hex,
                          "revision": self.view(task_id)["revision"],
-                         "control_seq": self.rt.execution_control.view(task_id)["seq"]})
+                         "control_seq": self.rt.execution_control.view(task_id)["seq"],
+                         **({"recovery_contract": dict(RECOVERY_CONTRACT), "recovery_scope": self.recovery.scope(task_id)} if durable else {})})
             return message, role, started
 
     def _schemas(self, role, workspace, *, has_background=False):
@@ -204,7 +216,12 @@ class TeamService:
                   {"recipient": recipient, "instruction": string}, ["recipient", "instruction"]),
             _tool("send_message", "向伙伴交代工作或提问会唤起对方并承接结果。回答问题或交还已有委托时，reply_to填对方原消息序号，避免误派新活。只是同步进展、不要求对方回复或执行时设置notify_only=true，保留记录供对方下一轮阅读，不唤醒对方；notify_only不能和reply_to同时使用。",
                   {"recipient": recipient, "text": string, "reply_to": {"type": "integer"},
+                   "continue_assignment_seq": {"type": "integer", "minimum": 1,
+                       "description": "继续你先前发出的未交还委托时填原序号，说明核实后的下一步，不重新派一份相同工作；不能与reply_to或notify_only同用。"},
                    "notify_only": {"type": "boolean"}}, ["recipient", "text"]),
+            _tool("read_checkpoint", "读取从持久事件重建的当前目标及未交还工作，按原委托序号分页。中断后先核对成果和回执，再决定如何继续；检查点不是重放授权。",
+                  {"after_seq": {"type": "integer", "minimum": 0},
+                   "limit": {"type": "integer", "minimum": 1, "maximum": 50}}, []),
             _tool("read_artifact", "读取本群已发布成果的完整正文。", {"artifact_seq": {"type": "integer"}}, ["artifact_seq"]),
             _tool("request_review", "提交当前真实成果给一位独立伙伴复核，本轮等待结果。修复后先发布新版，再用原review_seq交回同一复核者，不能只说修好了。复核发现的问题必须闭环，店长不会越过未完成复核交付。",
                   {"reviewer": recipient, "artifact_seqs": {"type": "array", "minItems": 1, "maxItems": 20,
@@ -250,6 +267,12 @@ class TeamService:
         return tools
 
     def _waiting_assignment(self, task_id, message, role):
+        if message.payload.get("kind") == "continuation":
+            return next((e for e in self._messages(task_id) if e.seq == message.payload.get("continue_assignment_seq")
+                         and e.actor == message.actor and e.payload.get("recipient") == role.id
+                         and e.payload.get("kind") in {"assignment", "message"}
+                         and e.payload.get("revision") == self.view(task_id)["revision"]
+                         and e.seq not in _reported_messages(self._messages(task_id))), None)
         response = message.payload.get("questionnaire") if message.actor == Actor.human() else None
         if message.actor == Actor.human():
             question = next((e for e in reversed(self.rt.log.read(task_id=task_id))
@@ -317,8 +340,11 @@ class TeamService:
                 and ("call_id" not in e.payload or e.payload["call_id"] == p["call_id"])
                 and isinstance(e.payload.get("result"), dict) and e.payload["result"].get("status") in ("ok", "error")), None)
             reconciled = (isinstance(p.get("call_id"), str) and bool(p["call_id"].strip())
-                and isinstance(p.get("name"), str) and p["name"] in {"workspace_write", "workspace_run"} and any(
-                e.type == "workspace.tool_reconciled" and e.actor == Actor.human() and e.seq > start.seq
+                and isinstance(p.get("name"), str) and p["name"] in EXTERNAL_EFFECT_TOOLS and any(
+                (e.type == "workspace.tool_reconciled" and p["name"] in {"workspace_write", "workspace_run"}
+                 or e.type == "team.tool_reconciled" and p["name"] in {"publish_artifact", "publish_workspace_file"}
+                 and all(e.payload.get(k) == p.get(k) for k in ("run_id", "role", "name")))
+                and e.actor == Actor.human() and e.seq > start.seq
                 and type(e.payload.get("started_seq")) is int and e.payload["started_seq"] == start.seq
                 and e.payload.get("started_hash") == start.hash and e.payload.get("call_id") == p.get("call_id")
                 and e.payload.get("invocation_stopped") is True for e in events))
@@ -398,6 +424,7 @@ class TeamService:
         return {"you": asdict(role), "members": [asdict(r) for r in [self.rt.organization.leader, *self.rt.roles]],
             "active_assignment": {"seq": assignment.seq, "sender": assignment.actor.id, **assignment.payload} if assignment else None,
             "open_assignments": open_assignments, "outgoing_work": outgoing,
+            "work_checkpoint": self.recovery.checkpoint(task_id),
             "reviews": current_work["reviews"],
             "notifications": [{"seq": e.seq, "sender": e.actor.id, "sender_name": name(e.actor.id), **e.payload}
                               for e in notifications[-20:]], "notifications_truncated": len(notifications) > 20,
@@ -419,6 +446,15 @@ class TeamService:
         if any(e.actor == Actor.human() and e.seq > started.payload["message_seq"]
                and e.payload["recipient"] == role.id for e in self._messages(task_id)):
             raise WorkConflict("收到顾客的新消息，先理解新的上下文；已有操作未重放。")
+        source = next((e for e in self._messages(task_id) if e.seq == started.payload["message_seq"]), None)
+        if source is not None and source.payload.get("kind") == "continuation" and self._waiting_assignment(task_id, source, role) is None:
+            own_return = any(r.get("run_id") == started.payload["run_id"] and r.get("name") == "send_message"
+                and r.get("result", {}).get("status") == "ok" and any(
+                    e.seq == r["result"].get("message_seq") and e.payload.get("kind") == "report"
+                    and e.payload.get("reply_to") == source.payload.get("continue_assignment_seq")
+                    for e in self._messages(task_id)) for r in self._receipts(task_id))
+            if not own_return:
+                raise WorkConflict("原委托已经交回或失效，未将旧接续当作新的独立工作。")
         if role.id != self.rt.organization.leader.id:
             view = self.view(task_id)
             if view["revision"] != revision:
@@ -437,6 +473,8 @@ class TeamService:
                 return read_background(self.rt.conversation_background(task_id), arguments)
             except ValueError as exc:
                 return {"status": "error", "message": str(exc)}
+        if name == "read_checkpoint":
+            return self.recovery.read(task_id, arguments)
         if name == "request_questions":
             event = self.rt.questionnaires.request(task_id, role, arguments, tool_start, assignment)
             return {"status": "ok", "question_seq": event.seq, "waiting_for_customer": True}
@@ -451,16 +489,22 @@ class TeamService:
         if name == "send_message":
             reply_to = arguments.get("reply_to")
             notify_only = arguments.get("notify_only", False)
+            continuing = arguments.get("continue_assignment_seq")
             if type(notify_only) is not bool or notify_only and reply_to is not None:
                 raise ValueError("知会消息不能同时作为委托回报；notify_only需要布尔值。")
+            if "continue_assignment_seq" in arguments:
+                if reply_to is not None or notify_only:
+                    raise ValueError("接续原委托不能同时作为回报或知会。")
+                self.recovery.continuation(task_id, role, arguments["recipient"], continuing)
             if reply_to is not None:
                 original = next((e for e in self._messages(task_id) if e.seq == reply_to), None)
                 if (type(reply_to) is not int or original is None or original.actor.id != arguments["recipient"]
                         or original.payload.get("recipient") != role.id or original.payload.get("kind") not in {"assignment", "message"}):
                     raise ValueError("回报需要关联本群发给你的请求或委托；知会和进展不是待回答的工作。")
             e = self._send(task_id, role, arguments["recipient"], arguments["text"],
-                           "notification" if notify_only else "report" if reply_to is not None else "message",
-                           reply_to=reply_to, parent_assignment_seq=assignment.seq if assignment else None, visible=True)
+                           "continuation" if continuing is not None else "notification" if notify_only else "report" if reply_to is not None else "message",
+                           reply_to=reply_to, parent_assignment_seq=assignment.seq if assignment else None, visible=True,
+                           continue_assignment_seq=continuing)
             return {"status": "ok", "message_seq": e.seq, **({"notified_only": True} if notify_only else {})}
         if name == "set_objective":
             goal = _text(arguments["goal"], "目标", 12000)
@@ -528,6 +572,16 @@ class TeamService:
             payload, = normalize_deliverables([{**arguments, "title": arguments["filename"]}])
             if not payload.get("content_sha256") or "filename" not in payload:
                 raise ValueError("需要有效文件名和完整成果正文。")
+            unknown_publications = [r for r in self._pending_operations(task_id)
+                if r["started_seq"] != tool_start.seq and r["name"] in {"publish_artifact", "publish_workspace_file"}]
+            for pending in unknown_publications:
+                args = pending.get("arguments") or {}
+                target = (args.get("filename") if pending["name"] == "publish_artifact" else args.get("path")) if isinstance(args, dict) else None
+                if pending["name"] == "publish_workspace_file" and isinstance(target, str):
+                    target = target.replace("\\", "/").rsplit("/", 1)[-1]
+                target = safe_filename(target)
+                if target is None or target.casefold() == payload["filename"].casefold():
+                    raise WorkConflict("同名成果有发布影响待核对，不能重复发布或落盘；先核对原操作与实际文件。")
             e = self.rt.log.emit(type="deliverable.published", actor=Actor.agent(role.id, role.role), task_id=task_id,
                                  payload={**payload, "source": "team", "phase": "team"})
             result = {"status": "ok", "artifact_seq": e.seq, "filename": payload["filename"]}
@@ -587,6 +641,17 @@ class TeamService:
                 return {"status": "ok", "delivery_seq": current_work["revision"],
                         "note": "当前目标已有交付结论，不重复登记；普通补充可直接回复，确需新工作请先采用新目标。"}
             self.rt.team_reviews._guard(task_id, role, tool_start)
+            unknown = self.rt.workspaces.pending(task_id=task_id)
+            unknown_seqs = {e.seq for e in unknown}
+            unknown_seqs.update(r["started_seq"] for r in self._pending_operations(task_id)
+                                if r["name"] in EXTERNAL_EFFECT_TOOLS)
+            if unknown_seqs:
+                return {"status": "error", "code": "operation_pending", "started_seqs": sorted(unknown_seqs),
+                        "message": "工作目录仍有未结算或影响待核对的操作，不能将未知结果作为最终交付。请先核对实际文件、进程和工具回执。"}
+            unfinished = [r for r in self.recovery.assignments(task_id) if r["requires_return"]]
+            if unfinished:
+                return {"status": "error", "code": "work_pending", "assignments": unfinished,
+                        "message": "仍有中断或失败后未正式交回的工作。请核对现状并接续原委托，收回结果后再交付。"}
             reviews = self.rt.team_reviews.blockers(task_id)
             if reviews:
                 return {"status": "error", "code": "review_pending", "reviews": reviews,
@@ -633,6 +698,8 @@ class TeamService:
             if (message.actor == Actor.human() and isinstance(message.payload.get("questionnaire"), dict)
                     and message.payload.get("revision") != revision):
                 raise WorkConflict("这份补充对应的目标已变化，旧回答不会启动旧方案操作。")
+            if message.payload.get("kind") == "recovery" and not self.recovery.current(task_id, message):
+                raise WorkConflict("恢复通知对应的目标、控制或工作目录已变化，不再启动旧工作。")
             if message.actor.kind == "agent" and (
                     message.payload.get("revision") != revision
                     or self.view(task_id)["status"] == "done"):
@@ -652,7 +719,7 @@ class TeamService:
                 workspace = WorkspaceExecutor(self.rt.workspaces.config[binding["workspace_id"]]["policy"])
             tools = self._schemas(role, workspace, has_background=self.rt.conversation_background(task_id) is not None)
             if self.rt.execution_control.view(task_id)["state"] != "running":
-                tools = [t for t in tools if t["name"] in {"read_artifact", "read_receipts", "read_messages", "read_background", "wait_for_reply"}]
+                tools = [t for t in tools if t["name"] in {"read_artifact", "read_receipts", "read_messages", "read_background", "read_checkpoint", "wait_for_reply"}]
             instructions = (
                 f"你当前唯一身份是{role.name}（角色ID：{role.id}）。message是发给你的本轮输入，sender才是发件人。"
                 "历史中他人的第一人称、自称和称呼不改变你的身份；不代替其他角色宣布他们的行动。"
@@ -682,6 +749,10 @@ class TeamService:
                 "顾客要求先讨论方案、等确认时，应等待实际确认再实施；店长通知伙伴等待而不是让伙伴先做出成品。"
                 "active_assignment若非空是你仍负责的原委托，收到子回报、进展或问题答复后结合它继续工作并向原委托人回报。"
                 "open_assignments列出你尚未交还的委托，收到新消息也不要遗忘它们；完成其中一份时可用send_message的reply_to明确交回原委托。"
+                "work_checkpoint是从持久事件重建的当前未关闭工作索引；read_checkpoint可分页读取完整原委托。"
+                "宿主发来的recovery是进程中断后的核对通知，不是新顾客需求；先读实际成果和回执，判断哪些已发生、哪些尚未完成。"
+                "继续自己原先发出的工作时，用send_message.continue_assignment_seq关联原委托并交代核对后的下一步；不重复delegate相同工作。"
+                "continuation只是原委托的补充输入，接收者仍完成原委托并向原委托人回报，不把它当成另一份独立工作。"
                 "成果用publish_artifact保存完整正文；操作和验证依据来自实际工具回执。"
                 "已写入工作目录的文件优先用publish_workspace_file直接发布，避免复述整份源码。"
                 "店长读成果，用read_receipts核对真实工具回执、跟进修正，能够交付时用finish_work记录结果及验证边界。"
@@ -773,6 +844,11 @@ class TeamService:
                 failure["status_code"] = code
                 if code == 429:
                     reason = f"{role.name}本轮模型请求被服务商限流（HTTP 429），不是工作已完成；已有成果和操作记录保留。"
+        with self.rt.log.atomic():
+            self._finish_message(task_id, message, role, started, revision, assignment,
+                                 status=status, reason=reason, final=final, failure=failure, awaiting_customer=awaiting_customer)
+
+    def _finish_message(self, task_id, message, role, started, revision, assignment, *, status, reason, final, failure, awaiting_customer):
         self.rt.log.emit(type="team.run_finished", task_id=task_id, actor=HOST,
             payload={"message_seq": message.seq, "role": role.id, "run_id": started.payload["run_id"],
                      "status": status, "reason": reason, **failure})
@@ -806,23 +882,21 @@ class TeamService:
             if not notified_parent and (assignment.payload["kind"] == "assignment" or published):
                 self._send(task_id, role, assignment.actor.id, text, "progress", reply_to=assignment.seq)
         if status != "waiting" and not already_reported and assignment is not None:
-            self._send(task_id, role, assignment.actor.id, reason or final or "委托已处理，请查看本轮成果和工具记录。", "report",
+            self._send(task_id, role, assignment.actor.id, reason or final or "委托已处理，请查看本轮成果和工具记录。",
+                       "report" if status == "completed" else "progress",
                        reply_to=assignment.seq)
 
     def run(self, task_id):
+        if self.rt.log.db.in_transaction:
+            raise WorkConflict("原生模型执行不能处于外层数据库事务中；开始记录必须先持久化。")
         with activity_owner(self.rt.log.path, task_id, "simple-team") as owned:
             if not owned:
-                return {"task_id": task_id, "team": self.view(task_id)}
+                return {"task_id": task_id, "team": self.view(task_id), "consumer_owned": False}
             self._retire_interrupted(task_id)
             return self._drain(task_id)
 
     def _retire_interrupted(self, task_id):
-        # The kernel lock proves no live team consumer owns these prior runs.
-        for row in self.view(task_id)["runs"]:
-            if row["status"] == "running":
-                self.rt.log.emit(type="team.run_finished", task_id=task_id, actor=HOST,
-                    payload={**row, "status": "interrupted",
-                             "reason": "上次执行进程已结束，保留已有操作记录，未重放旧模型请求。"})
+        self.recovery.retire(task_id)
 
     def _drain(self, task_id):
         active = []

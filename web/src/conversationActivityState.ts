@@ -1,4 +1,4 @@
-import { isTeamHost, teamMessageAudience, teamProgressMessages, teamSpeaker } from './team'
+import { isTeamHost, isTeamRecovery, teamMessageAudience, teamProgressMessages, teamSpeaker } from './team'
 import type { TeamEvent, TeamRun, TeamState } from './team'
 
 type TimedEvent = TeamEvent & { ts?: string }
@@ -33,7 +33,7 @@ const timestamp = (event?: TimedEvent) => event?.ts ? Date.parse(event.ts) : NaN
 const tools: Record<string, string> = {
   workspace_read: '读取文件', workspace_run: '运行命令', workspace_write: '写入文件', workspace_search: '查找文件',
   workspace_list: '列出目录', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果',
-  read_receipts: '核对执行回执', read_messages: '补读历史消息', read_background: '读取来源材料', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件',
+  read_receipts: '核对执行回执', read_messages: '补读历史消息', read_background: '读取来源材料', read_checkpoint: '读取工作检查点', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件',
   set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复',
   request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论',
 }
@@ -72,13 +72,14 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   const revisions = new Set([floor])
   if (done) revisions.add(completed ? completion.seq : team.revision)
   const label = (role: string) => names[role] ?? role
-  const humans = events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'human')
+  const humans = events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'human'
+    && !['recovery', 'continuation'].includes(String(event.payload.kind)))
   const latestHuman = humans.at(-1)
   const pendingQuestions = new Map<string, TeamEvent>()
   for (const question of hosts.filter((event) => event.type === 'team.questions_requested')) {
     const role = string(question.payload.role_id)
     if (role && !events.some((event) => event.seq > question.seq && (
-      event.type === 'team.message_received' && event.actor.kind === 'human'
+      humans.includes(event)
       && (typeof object(event.payload.questionnaire).question_seq !== 'number'
         || object(event.payload.questionnaire).question_seq === question.seq)
       || isTeamHost(event) && (['team.objective_updated', 'team.objective_completed'].includes(event.type)
@@ -92,7 +93,9 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   const adoptingRuns = new Set(hosts.filter((event) => event.type === 'team.tool_started' && event.payload.name === 'set_objective'
     && event.payload.role === leaderId && update && event.seq < update.seq
     && (receiptFor(event, hosts)?.seq ?? 0) > update.seq).map((event) => event.payload.run_id).filter((id) => typeof id === 'string'))
-  const currentSource = (source?: TeamEvent) => Boolean(source && (source.seq >= floor
+  const currentSource = (source?: TeamEvent) => Boolean(source
+    && (source.payload.kind !== 'recovery' || isTeamRecovery(source))
+    && (source.payload.kind !== 'continuation' || source.actor.kind === 'agent') && (source.seq >= floor
     && (source.actor.kind === 'human' || source.payload.revision === undefined || revisions.has(Number(source.payload.revision)))))
   const humanStarts = latestHuman ? hosts.filter((event) => event.type === 'team.run_started'
     && event.payload.message_seq === latestHuman.seq && event.payload.role === (latestHuman.payload.recipient ?? leaderId)) : []
@@ -216,7 +219,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       return source && source.seq < event.seq && event.actor.id === source.payload.recipient && event.payload.recipient === source.actor.id
     })()).map((event) => event.payload.reply_to))
   const received = events.filter((event) => event.type === 'team.message_received' && event.payload.kind !== 'notification'
-    && ['agent', 'human'].includes(event.actor.kind ?? ''))
+    && event.payload.kind !== 'recovery' && (event.actor.kind === 'agent' || humans.includes(event)))
   const knownPending = received.filter((event) => !reported.has(event.seq)
     && !hosts.some((start) => start.type === 'team.run_started' && start.payload.message_seq === event.seq)
     && !team.runs.some((run) => run.message_seq === event.seq))

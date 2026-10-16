@@ -26,6 +26,39 @@ const tool = (seq = 3, extra = {}) => event(seq, 'team.tool_started', { role: 'd
 const receipt = (extra = {}) => event(4, 'team.tool_finished', { role: 'dev', run_id: 'run', name: 'workspace_read', started_seq: 3,
   result: { status: 'ok' }, ...extra })
 
+test('恢复通知等待处理及检查点读取保留工作语义，不作为顾客请求或交付依据', () => {
+  const recovery = event(4, 'team.message_received', { kind: 'recovery', recipient: 'manager', text: '先核对事实', recovery_of: 2,
+    interrupted_seq: 3, revision: 0, recovery_hash: 'hash', scope: { revision: 0 } })
+  const interrupted = [human(1, 'manager'), start(2, 1, 'manager'), end(3, 'interrupted', 1, 'manager'), recovery]
+  const pending = conversationActivity(props({ events: interrupted, team: { ...team, pending_count: 1 } }), now)
+  expect(pending.message).toContain('本轮处理未完成')
+  expect(pending.lines.some(line => line.text === '后台有 1 条消息等待处理')).toBe(true)
+  expect(pending.nextCheckAt).toBeUndefined()
+  const events = [...interrupted, start(5, 4, 'manager'), tool(6, { message_seq: 4, role: 'manager', name: 'read_checkpoint' })]
+  const content = text({ events })
+  expect(content).toContain('读取工作检查点 · 已发起，等待回执')
+  expect(content).toContain('正在处理工作')
+  expect(content).not.toMatch(/read_checkpoint|已回应最新消息|已确认本次交付|恢复成功/)
+  const retired = conversationActivity(props({ events: interrupted, team: { ...team, pending_count: 0 } }), now)
+  expect(retired.lines.some(line => line.text.includes('条消息等待处理'))).toBe(false)
+})
+
+test.each([{ id: 'team', kind: 'agent', role: 'team' }, { id: 'team', kind: 'human', role: 'team' },
+  { id: 'other', kind: 'system', role: 'team' }, { id: 'team', kind: 'system', role: 'other' }])('伪造恢复来源不改变活动状态：%j', actor => {
+  const forged = event(5, 'team.message_received', { kind: 'recovery', recipient: 'manager', revision: 0 }, actor)
+  expect(conversationActivity(props({ events: [forged] }), now)).toEqual(conversationActivity(props(), now))
+})
+
+test('接续作为内部待处理工作，不覆盖顾客等待和原委托的中断事实', () => {
+  const source = event(2, 'team.message_received', { kind: 'assignment', recipient: 'test', revision: 0 }, { id: 'manager', kind: 'agent', role: 'manager' })
+  const continued = event(5, 'team.message_received', { kind: 'continuation', recipient: 'test', continue_assignment_seq: 2, visible: true, revision: 0 }, source.actor)
+  const events = [human(), source, start(3, 2, 'test'), end(4, 'interrupted', 2, 'test'), continued]
+  expect(text({ events })).toContain('等待开发答复')
+  expect(text({ events })).toContain('后台有 1 条消息等待处理')
+  expect(text({ events })).not.toMatch(/已确认|已回应|交付完成/)
+  expect(text({ events: [...events, start(6, 5, 'test'), tool(7, { role: 'test', message_seq: 5, name: 'read_checkpoint' })] })).toContain('读取工作检查点')
+})
+
 test('来源材料的进行中读取在现有进展条显示中文工具名', () => {
   const output = text({ events: [human(), start(), tool(3, { name: 'read_background' })] })
   expect(output).toContain('读取来源材料')

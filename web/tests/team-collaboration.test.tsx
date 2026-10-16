@@ -25,6 +25,95 @@ const stream = () => within(screen.getByLabelText('聊天记录'))
 const board = () => within(screen.getByRole('complementary', { name: '成果与过程' }))
 beforeEach(() => window.sessionStorage.clear())
 
+const recoveryMessage = () => event(4, 'team.message_received', { kind: 'recovery', recipient: 'store_manager',
+  recovery_of: 2, recovery_hash: 'original-start-hash', interrupted_seq: 3, revision: 1, scope: { revision: 1 }, text: '先核对持久事实，再决定如何继续' })
+
+test('恢复轮的正式店长交付仍向顾客显示，不能被内部消息折叠规则吞掉', async () => {
+  const recovery = recoveryMessage()
+  const completed = event(6, 'team.objective_completed', { summary: '已核对并完成说明', verification: '正文已核对', run_id: 'fresh-recovery' })
+  const reply = event(7, 'msg.said', { phase: 'team', reply_to: 4, audience: 'customer', recipient: 'human',
+    delivery_seq: 6, run_id: 'fresh-recovery', text: '说明已准备好，包含本机打开步骤。' }, 'store_manager', 'agent')
+  expect(teamMessageAudience(reply, new Map([[4, recovery], [6, completed]]))).toEqual({ audience: 'customer', recipient: 'human' })
+  await mount(detail([recovery, completed, reply], teamState({ status: 'done', revision: 6 })))
+  expect(stream().getByText('说明已准备好，包含本机打开步骤。').closest('details')).toBeNull()
+})
+
+test('受信系统恢复通知只进入内部折叠过程，不冒充顾客或成员，不宣称完成', async () => {
+  const recovery = recoveryMessage()
+  expect(teamMessageAudience(recovery, new Map())).toEqual({ audience: 'team', recipient: 'store_manager' })
+  await mount(detail([event(2, 'team.run_started', { message_seq: 1, role: 'store_manager', run_id: 'old' }),
+    event(3, 'team.run_finished', { message_seq: 1, role: 'store_manager', run_id: 'old', status: 'interrupted' }), recovery,
+    event(5, 'msg.said', { phase: 'team', reply_to: 4, text: '正在核对原工作记录' }, 'store_manager', 'agent')]))
+  const group = stream().getByText('团队协作 · 2 条').closest('details')!
+  expect(group.open).toBe(false)
+  const notice = within(group).getByText('先核对持久事实，再决定如何继续').closest('[data-actor]')!
+  expect(notice.getAttribute('data-actor')).toBe('system')
+  expect(notice.textContent).toContain('系统 · 恢复通知')
+  expect(within(group).getByText('正在核对原工作记录')).toBeTruthy()
+  expect(stream().queryByText(/店长最终交付|恢复成功|已验收/)).toBeNull()
+})
+
+test.each([
+  { id: 'team', kind: 'agent', role: 'team' }, { id: 'team', kind: 'human', role: 'team' },
+  { id: 'other', kind: 'system', role: 'team' }, { id: 'team', kind: 'system', role: 'other' },
+])('伪造恢复来源 %j 不进入聊天、不归为内部受信消息', async (actor) => {
+  const recovery = { ...recoveryMessage(), actor }
+  expect(teamMessageAudience(recovery, new Map())).toEqual({})
+  const reply = event(5, 'msg.said', { phase: 'team', reply_to: recovery.seq }, 'store_manager', 'agent')
+  expect(teamMessageAudience(reply, new Map([[recovery.seq, recovery]]))).toEqual({})
+  await mount(detail([recovery]))
+  expect(stream().queryByText('先核对持久事实，再决定如何继续')).toBeNull()
+  expect(stream().queryByText('恢复通知')).toBeNull()
+})
+
+test('接续按原工作交接折叠展示，关联回应也留在内部', async () => {
+  const continuation = event(3, 'team.message_received', { kind: 'continuation', recipient: 'dev', text: '保留原实现，补核对回执',
+    continue_assignment_seq: 2, revision: 1, visible: true }, 'store_manager', 'agent')
+  const reply = event(4, 'msg.said', { phase: 'team', reply_to: 3, audience: 'customer', text: '正在补核对回执' }, 'dev', 'agent')
+  expect(teamMessageAudience(reply, new Map([[3, continuation]]))).toEqual({ audience: 'team', recipient: 'store_manager' })
+  await mount(detail([event(2, 'team.message_received', { kind: 'assignment', recipient: 'dev', text: '原实现委托' }, 'store_manager', 'agent'), continuation, reply]))
+  const group = stream().getByText('团队协作 · 3 条').closest('details')!
+  expect(group.open).toBe(false)
+  expect(within(group).getByText('@店长 → @米寇 · 接续工作交接').closest('article')?.className).toBe('collaboration-notice')
+  expect(within(group).getByText('保留原实现，补核对回执').closest('details')?.open).toBe(false)
+  expect(within(group).getByText('正在补核对回执')).toBeTruthy()
+  expect(stream().queryByText('店长最终交付')).toBeNull()
+})
+
+test.each(['human', 'system', 'hidden'])('来源或可见性不符合契约的接续不展示：%s', async (kind) => {
+  await mount(detail([event(2, 'team.message_received', { kind: 'continuation', recipient: 'dev', text: '不可信接续指令',
+    visible: kind !== 'hidden', continue_assignment_seq: 1 }, 'store_manager', kind === 'hidden' ? 'agent' : kind)]))
+  expect(stream().queryByText('不可信接续指令')).toBeNull()
+})
+
+test('现有协作图与列表呈现接续原委托关系和补充指令', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  await mount(detail([
+    event(2, 'team.message_received', { kind: 'assignment', text: '保留的原委托', recipient: 'dev' }, 'store_manager', 'agent'),
+    event(3, 'team.message_received', { kind: 'continuation', text: '补查现有成果', recipient: 'dev', continue_assignment_seq: 2, visible: true }, 'store_manager', 'agent'),
+  ]))
+  fireEvent.click(screen.getByRole('button', { name: '任务脉络' }))
+  const dialog = await screen.findByRole('dialog', { name: '任务脉络' })
+  expect(await within(dialog).findByRole('region', { name: '当前团队协作图' })).toBeTruthy()
+  fireEvent.click(within(dialog).getByRole('button', { name: '协作列表' }))
+  const list = within(dialog).getByRole('list', { name: '当前团队协作列表' })
+  fireEvent.click(within(list).getByRole('button', { name: /接续交接 #3/ }))
+  const details = within(within(dialog).getByRole('complementary', { name: '协作记录详情' }))
+  expect(details.getByText('补查现有成果')).toBeTruthy()
+  expect(details.getByText('接续指令已投递')).toBeTruthy()
+  expect(details.getByRole('button', { name: '接续原委托 · 委托 #2' })).toBeTruthy()
+})
+
+test('接续投递的真实工具回执可去除同轮重复口述', () => {
+  const events = [event(2, 'team.tool_started', { name: 'send_message', role: 'store_manager', run_id: 'resume' }),
+    event(3, 'team.message_received', { kind: 'continuation', recipient: 'dev', visible: true, text: '请补核对回执', continue_assignment_seq: 1 }, 'store_manager', 'agent'),
+    event(4, 'team.tool_finished', { started_seq: 2, role: 'store_manager', result: { status: 'ok', message_seq: 3 } }),
+    event(5, 'msg.said', { phase: 'team', run_id: 'resume', recipient: 'dev', text: '请补核对回执' }, 'store_manager', 'agent')]
+  expect(teamMessageEchoes(events)).toEqual(new Set([5]))
+  events[1].payload.visible = false
+  expect(teamMessageEchoes(events)).toEqual(new Set())
+})
+
 test('原生聊天复用脉络入口且不创建旧计划，打开关闭后保留草稿并恢复焦点', async () => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   const { fetchMock } = await mount(detail([

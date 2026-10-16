@@ -298,7 +298,22 @@ class ActivityRunner:
                 _LOGGER.exception("Cannot recover task activation for %s at %s", event.task_id, event.seq)
         for task_id in sorted(task_ids):
             self.answer_conversations(task_id)
+        self._recover_native_teams()
         return recovered
+
+    def _recover_native_teams(self) -> None:
+        with self._runtime_factory() as runtime:
+            task_ids = {e.task_id for e in runtime.log.iter_events(event_types=("team.started",))
+                        if e.actor == EventActor.system("team") and e.task_id}
+        for task_id in sorted(task_ids):
+            try:
+                with self._runtime_factory() as runtime:
+                    messages = runtime.team.recovery.prepare(task_id)
+                # One consumer drains the whole inbox; do not create an activity per lost role.
+                if messages:
+                    self.continue_team(task_id, messages[0])
+            except Exception:
+                _LOGGER.exception("Cannot prepare native team recovery for %s", task_id)
 
     def _recover_pending_questions(self) -> None:
         """Wake pending question queues without replaying started/uncertain calls.
@@ -374,7 +389,12 @@ class ActivityRunner:
                 # Re-read after ownership: a worker may have finished since the scan.
                 if self._activity_terminal(runtime, task_id, activity_id) is not None:
                     return None
-                if not self._restore_unstarted_activation(task_id, queued):
+                restored = self._restore_unstarted_activation(task_id, queued)
+                if not restored:
+                    restored = self._restore_unclaimed_recovery(task_id, queued)
+                if restored is None:
+                    return None
+                if not restored:
                     failure = self._control_failure(runtime, task_id, {**queued.payload, "queued_seq": queued.seq})
                     return self._record_failure(task_id, activity_id, str(queued.payload.get("action") or "run"),
                         **(failure or {"error_type": "InterruptedActivity",
@@ -382,6 +402,30 @@ class ActivityRunner:
         # The worker acquires the same lock before inspecting or executing this queue.
         self._start(task_id, self._activities[task_id])
         return None
+
+    def _restore_unclaimed_recovery(self, task_id: str, queued: Event) -> bool | None:
+        if queued.payload.get("action") != "run" or "team_message_seq" not in queued.payload:
+            return False
+        with self._runtime_factory() as runtime:
+            with activity_owner(runtime.log.path, task_id, "simple-team") as owned:
+                if not owned:
+                    return None
+                try:
+                    source = self._team_message(runtime, task_id, queued.payload)
+                except WorkConflict:
+                    return False
+                if (source is None or not runtime.team.recovery.is_message(source)
+                        or not runtime.team.recovery.current(task_id, source)
+                        or any(e.actor == EventActor.system("team") and e.payload.get("message_seq") == source.seq
+                               for e in runtime.log.iter_events(task_id=task_id, event_types=("team.run_started",)))):
+                    return False
+                binding = {**queued.payload, "queued_seq": queued.seq}
+                if self._control_failure(runtime, task_id, binding):
+                    return False
+                self._activities[task_id] = {"id": queued.payload["activity_id"], **queued.payload,
+                    "queued_seq": queued.seq, "queued_at": queued.ts, "state": "queued"}
+                self._revision += 1
+                return True
 
     def _restore_unstarted_activation(self, task_id: str, queued: Event) -> bool:
         """Only the versioned activation protocol proves no execution has started."""
@@ -525,8 +569,8 @@ class ActivityRunner:
         if type(seq) is int and _team_enabled(runtime, task_id):
             source = next((event for event in runtime.log.iter_events(task_id=task_id,
                 event_types=("team.message_received",)) if event.seq == seq), None)
-            if (source is not None and source.actor == EventActor.human()
-                    and source.payload.get("kind") == "message"):
+            if source is not None and ((source.actor == EventActor.human()
+                    and source.payload.get("kind") == "message") or runtime.team.recovery.is_message(source)):
                 return source
         raise WorkConflict("team chat requires a recorded customer message for this task")
 
@@ -812,9 +856,12 @@ class ActivityRunner:
                 runtime._active_activity_id = activity_id
                 if action == "run":
                     if "expected_scope" in binding:
-                        runtime.collaborate(task_id, expected_scope=binding["expected_scope"])
+                        result = runtime.collaborate(task_id, expected_scope=binding["expected_scope"])
                     else:
-                        runtime.collaborate(task_id)
+                        result = runtime.collaborate(task_id)
+                    if isinstance(result, dict) and result.get("consumer_owned") is False:
+                        # Observation is not completion. Preserve the durable queue for its live owner or recovery.
+                        return
                 elif action == "battle":
                     if "expected_scope" in binding:
                         runtime.battle(task_id, expected_scope=binding["expected_scope"])
@@ -839,8 +886,11 @@ class ActivityRunner:
     def _control_failure(runtime: Runtime, task_id: str, binding: dict[str, Any] | None = None) -> dict[str, Any] | None:
         control = runtime.execution_control.view(task_id)
         message = ActivityRunner._team_message(runtime, task_id, binding)
-        if message is not None and control["state"] == "paused":
+        if message is not None and message.actor == EventActor.human() and control["state"] == "paused":
             return None
+        if (message is not None and message.payload.get("kind") == "recovery"
+                and message.payload["scope"]["control_seq"] != control["seq"]):
+            return {"error_type": "ExecutionScopeChanged", "message": "恢复通知对应的执行控制已变化，未重启旧工作。"}
         authorization_seq = (binding or {}).get("resume_seq",
             (binding or {}).get("conversation_seq", (binding or {}).get("activation_seq", (binding or {}).get("queued_seq"))))
         if control["state"] == "running" and authorization_seq is not None:

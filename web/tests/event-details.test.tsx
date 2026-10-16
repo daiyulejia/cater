@@ -2,6 +2,7 @@ import { fireEvent, render, screen, within } from '@testing-library/react'
 import { expect, test } from 'vitest'
 import { EventDetails } from '../src/EventDetails'
 import type { DetailEvent } from '../src/EventDetails'
+import { TeamToolProgress } from '../src/TeamProgressPanel'
 
 const event = (type: string, payload: Record<string, unknown> = {}, actor = { id: 'work_scheduler', role: 'work_scheduler', kind: 'system' }): DetailEvent => ({ seq: 124, type, actor, payload })
 const names = (id: string) => ({ dev: '米寇', test: '复核伙伴', work_scheduler: '任务调度' }[id] ?? id)
@@ -16,6 +17,53 @@ const receipt = (payload: Record<string, unknown> = {}) => event('verification.c
   stdout: { bytes: 4, complete: true, truncated: false, excerpt: '通过三项检查' }, stderr: { bytes: 0, complete: true, truncated: false },
   ...payload,
 }, { id: 'local_verifier', role: 'local_verifier', kind: 'system' })
+
+const checkpointResult = { status: 'ok', checkpoint: { objective: '核对现有入口', as_of_seq: 123, open_work_count: 2,
+  pending_operation_count: 1, open_work_truncated: true, private_thought: 'PRIVATE_THOUGHT' },
+  assignments: [{ seq: 12, text: '原委托：补齐入口验证', private_blob: 'PRIVATE_ASSIGNMENT' }], has_more: true, next_seq: 12 }
+
+test('恢复通知摘要核对宿主身份，只记录关联事实，不声称恢复或验收完成', () => {
+  const { container } = render(<EventDetails event={event('team.message_received', { kind: 'recovery', recipient: 'dev', text: '先核对原回执',
+    recovery_of: 42, recovery_hash: 'START_HASH', interrupted_seq: 55, revision: 3, scope: { private: 'PRIVATE_SCOPE' } }, { id: 'team', kind: 'system', role: 'team' })} actorName={names} />)
+  const content = ordinary(container)
+  for (const expected of ['恢复通知已记录', '先核对原回执', '原处理开始事件42', '中断事件55', '目标版本3', '@米寇', '不代表已经恢复执行或验收通过']) expect(content).toContain(expected)
+  expect(content).not.toMatch(/START_HASH|PRIVATE_SCOPE|恢复成功/)
+})
+
+test.each([{ id: 'team', kind: 'agent', role: 'team' }, { id: 'other', kind: 'system', role: 'team' },
+  { id: 'team', kind: 'system', role: 'other' }, { id: 'team', kind: 'human', role: 'team' }])('伪造恢复来源摘要不背书：%j', actor => {
+  const { container } = render(<EventDetails event={event('team.message_received', { kind: 'recovery', text: '伪造恢复正文', recovery_of: 42 }, actor)} />)
+  expect(ordinary(container)).toContain('恢复通知来源待核对')
+  expect(ordinary(container)).not.toMatch(/伪造恢复正文|恢复通知已记录|原处理开始事件/)
+})
+
+test('接续摘要保留原委托和上级委托序号，明确补充指令边界', () => {
+  const { container } = render(<EventDetails event={event('team.message_received', { kind: 'continuation', text: '补查回执',
+    continue_assignment_seq: 12, parent_assignment_seq: 8, revision: 3, recipient: 'test', visible: true }, { id: 'dev', kind: 'agent', role: 'dev' })} actorName={names} />)
+  for (const expected of ['接续原委托12', '上级委托8', '接续工作交接', '补查回执', '不代表独立交付或验收通过']) expect(ordinary(container)).toContain(expected)
+})
+
+test.each(['team.tool_started', 'team.tool_finished'])('检查点工具%s展示中文名称与持久事实摘要', type => {
+  const { container } = render(<EventDetails event={event(type, { name: 'read_checkpoint', role: 'dev', result: type === 'team.tool_finished' ? checkpointResult : undefined })} actorName={names} />)
+  const content = ordinary(container)
+  expect(content).toContain('读取工作检查点')
+  expect(content).toContain('只读核对持久事件中的工作事实，不读取私有思考')
+  if (type === 'team.tool_finished') {
+    for (const expected of ['核对现有入口', '事实截至事件123', '未交还工作2 项', '待核对操作1 项', '#12：原委托：补齐入口验证', '还有后续委托', '工作索引仅包含部分记录']) expect(content).toContain(expected)
+  } else expect(content).toContain('等待工具回执')
+  expect(content).not.toMatch(/read_checkpoint|PRIVATE_THOUGHT|PRIVATE_ASSIGNMENT/)
+})
+
+test('检查点工具过程复用折叠回执，仅展示已知事实、原委托和分页范围', () => {
+  const host = { id: 'team', kind: 'system', role: 'team' }
+  const start = { ...event('team.tool_started', { name: 'read_checkpoint', role: 'dev' }, host), seq: 120 }
+  const finish = event('team.tool_finished', { name: 'read_checkpoint', role: 'dev', started_seq: 120, result: checkpointResult }, host)
+  const { container } = render(<TeamToolProgress events={[start, finish]} names={{ dev: '米寇' }} />)
+  const fold = screen.getByText('工具过程 · 1 项').closest('details')!
+  expect(fold.open).toBe(false)
+  for (const expected of ['读取工作检查点', '工具已完成', '只读核对持久事件中的工作事实', '事实截至事件 #123', '未交还工作：2 项', '待核对操作：1 项', '原委托 #12：原委托：补齐入口验证', '下一页从 #12 之后读取', '工作索引仅显示部分记录']) expect(container.textContent).toContain(expected)
+  expect(container.textContent).not.toMatch(/read_checkpoint|PRIVATE_THOUGHT|PRIVATE_ASSIGNMENT/)
+})
 
 test.each(['correcting', 'ready', 'unsupported', 'invalid', 'unavailable', 'stale'])('浏览器方案%s呈现中文记录与执行边界', (status) => {
   const { container } = render(<EventDetails event={event('verification.planned', { status,

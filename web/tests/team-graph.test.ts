@@ -12,6 +12,37 @@ const decision = (seq: number, reviewSeq: number, root: number, verdict = 'appro
   { review_seq: reviewSeq, root_seq: root, reviewer: 'test', verdict, feedback: `验证反馈 ${seq}` })
 const relations = (events: TeamEvent[], team = state) => projectTeamGraph(team, events).edges.map(edge => [edge.source, edge.target, edge.label])
 
+test.each(['assignment', 'message'])('接续关联同一发件人和接收者的原%s，仍是交接而非交付', (kind) => {
+  const events = [message(2, 'manager', 'dev'), message(3, 'dev', 'test', kind, { parent_assignment_seq: 2 }),
+    message(4, 'dev', 'test', 'continuation', { continue_assignment_seq: 3, parent_assignment_seq: 2, visible: true }),
+    message(5, 'test', 'dev', 'report', { reply_to: 3 })]
+  const graph = projectTeamGraph(state, events)
+  expect(relations(events)).toEqual([['event-2', 'event-3', kind === 'assignment' ? '子委托' : '协作消息'],
+    ['event-3', 'event-4', '接续原委托'], ['event-2', 'event-4', '接续交接'], ['event-3', 'event-5', '回报']])
+  expect(graph.nodes.find(node => node.seq === 4)).toMatchObject({ kind: 'continuation', status: '接续指令已投递' })
+  expect(graph.nodes.find(node => node.seq === 3)?.status).toBe('已收到回报')
+  expect(graph.nodes.some(node => /交付|通过/.test(node.status))).toBe(false)
+  expect(projectTeamGraph(state, [...events].reverse())).toEqual(graph)
+})
+
+test.each(['missing', 'future', 'self', 'sender', 'recipient', 'role', 'human-source', 'report-source', 'continuation-source'])('接续不伪造无效原委托关联：%s', (invalid) => {
+  const source = message(invalid === 'future' ? 6 : 2, invalid === 'human-source' ? 'human' : 'manager', 'dev',
+    invalid === 'report-source' ? 'report' : invalid === 'continuation-source' ? 'continuation' : 'assignment', { visible: true })
+  const continued = message(4, invalid === 'sender' ? 'other' : 'manager', invalid === 'recipient' ? 'test' : 'dev', 'continuation',
+    { continue_assignment_seq: invalid === 'missing' ? 999 : invalid === 'future' ? 6 : invalid === 'self' ? 4 : 2, visible: true })
+  if (invalid === 'role') continued.actor.role = 'other'
+  const graph = projectTeamGraph(state, [source, continued])
+  expect(graph.edges).toEqual([])
+  expect(graph.nodes.find(node => node.seq === 4)?.status).toBe('原委托关联待核对')
+})
+
+test('图中不把系统恢复通知或伪造恢复变成成员委托，接续须来自可见 agent 消息', () => {
+  const events = [event(2, 'team.message_received', { kind: 'recovery', text: '核对记录', recipient: 'manager' }),
+    message(3, 'human', 'manager', 'recovery'), message(4, 'team', 'manager', 'recovery'),
+    message(5, 'human', 'dev', 'continuation', { visible: true }), message(6, 'manager', 'dev', 'continuation', { visible: false })]
+  expect(projectTeamGraph(state, events)).toEqual({ nodes: [], edges: [] })
+})
+
 test('委托、子委托、逐级回报仅使用真实消息与准确参与者，不推导严格依赖', () => {
   const events = [message(2, 'manager', 'dev'), message(3, 'dev', 'test', 'assignment', { parent_assignment_seq: 2 }),
     message(4, 'test', 'dev', 'report', { reply_to: 3 }), message(5, 'dev', 'manager', 'report', { reply_to: 2 })]

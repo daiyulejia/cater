@@ -50,6 +50,18 @@ export type TeamEvent = {
 
 export const isTeamHost = (event: TeamEvent) => event.actor.id === 'team' && event.actor.kind === 'system' && event.actor.role === 'team'
 
+export const isTeamRecovery = (event: TeamEvent) => event.type === 'team.message_received' && event.payload.kind === 'recovery' && isTeamHost(event)
+
+export function teamContinuationSource(event: TeamEvent, bySeq: ReadonlyMap<number, TeamEvent>): TeamEvent | undefined {
+  if (event.type !== 'team.message_received' || event.actor.kind !== 'agent' || event.payload.kind !== 'continuation') return undefined
+  const seq = event.payload.continue_assignment_seq
+  const source = typeof seq === 'number' ? bySeq.get(seq) : undefined
+  return source && source.seq < event.seq && source.type === 'team.message_received' && source.actor.kind === 'agent'
+    && source.actor.id === event.actor.id && source.actor.role === event.actor.role
+    && source.payload.recipient === event.payload.recipient && typeof source.payload.recipient === 'string'
+    && ['assignment', 'message'].includes(String(source.payload.kind)) ? source : undefined
+}
+
 export const teamSpeaker = (event: TeamEvent): string => typeof event.payload.speaker === 'string' ? event.payload.speaker
   : typeof event.payload.speaker_id === 'string' ? event.payload.speaker_id : event.actor.id
 
@@ -57,14 +69,22 @@ export type TeamAudience = { audience?: 'team' | 'customer'; recipient?: string 
 
 export function teamMessageAudience(event: TeamEvent, bySeq: ReadonlyMap<number, TeamEvent>): TeamAudience {
   const p = event.payload
-  if (event.type === 'team.message_received') return event.actor.kind === 'agent'
+  if (event.type === 'team.message_received') return (isTeamRecovery(event) || event.actor.kind === 'agent' && p.kind !== 'recovery')
     ? { audience: 'team', recipient: typeof p.recipient === 'string' ? p.recipient : undefined } : {}
   if (event.type !== 'msg.said' || p.phase !== 'team') return {}
+  const source = typeof p.reply_to === 'number' ? bySeq.get(p.reply_to) : undefined
+  const delivery = typeof p.delivery_seq === 'number' ? bySeq.get(p.delivery_seq) : undefined
+  const delivered = delivery && isTeamHost(delivery) && delivery.type === 'team.objective_completed'
+    && delivery.seq < event.seq && delivery.payload.run_id === p.run_id
+  if (source && source.seq < event.seq && source.payload.recipient === teamSpeaker(event)
+    && !delivered
+    && (isTeamRecovery(source) || source.type === 'team.message_received' && source.actor.kind === 'agent' && source.payload.kind === 'continuation'))
+    return { audience: 'team', recipient: source.actor.id }
   if (p.audience === 'team' || p.audience === 'customer') return {
     audience: p.audience, recipient: typeof p.recipient === 'string' ? p.recipient : undefined,
   }
-  const source = typeof p.reply_to === 'number' ? bySeq.get(p.reply_to) : undefined
   if (!source || source.seq >= event.seq || source.type !== 'team.message_received' || source.payload.recipient !== teamSpeaker(event)) return {}
+  if (source.payload.kind === 'recovery' || source.payload.kind === 'continuation' && source.actor.kind !== 'agent') return {}
   if (source.actor.kind === 'human') return { audience: 'customer', recipient: source.actor.id }
   if (source.actor.kind === 'agent') return { audience: 'team', recipient: source.actor.id }
   return {}
@@ -187,7 +207,7 @@ export function teamMessageEchoes(events: TeamEvent[]): Set<number> {
     if (!start || !isTeamHost(start) || start.type !== 'team.tool_started' || start.payload.name !== 'send_message'
       || typeof start.payload.run_id !== 'string' || !message || message.type !== 'team.message_received'
       || message.actor.kind !== 'agent' || (!['message', 'notification'].includes(String(message.payload.kind))
-        && !(message.payload.kind === 'report' && message.payload.visible === true)) || start.payload.role !== message.actor.id
+        && !(['report', 'continuation'].includes(String(message.payload.kind)) && message.payload.visible === true)) || start.payload.role !== message.actor.id
       || p.role !== message.actor.id || result.status !== 'ok') return []
     return [{ run: start.payload.run_id, actor: message.actor.id, text: message.payload.text,
       recipient: teamMessageAudience(message, bySeq).recipient }]

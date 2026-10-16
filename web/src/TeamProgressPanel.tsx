@@ -8,7 +8,7 @@ const ArtifactPreview = lazy(() => import('./Artifact').then((module) => ({ defa
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const excerpt = (value: unknown, limit = 800): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（仅显示部分内容）' : '') : ''
 const toolNames: Record<string, string> = { workspace_run: '运行命令', workspace_read: '读取文件', workspace_write: '写入文件', workspace_search: '查找文件', workspace_list: '列出目录',
-  delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果', read_background: '读取来源材料', read_receipts: '核对执行回执', read_messages: '补读历史消息', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件', set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复', request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论' }
+  delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果', read_background: '读取来源材料', read_receipts: '核对执行回执', read_messages: '补读历史消息', read_checkpoint: '读取工作检查点', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件', set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复', request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论' }
 
 const reviewStatuses: Record<TeamReview['status'], string> = {
   pending: '待复核', changes_requested: '待修复', approved: '已复核通过', outdated: '新版待复核', stale: '历史复核',
@@ -51,7 +51,21 @@ function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean
   const section = String(args.section ?? result.section ?? '')
   const backgroundSections: Record<string, string> = { index: '材料索引', goal: '来源目标', source: '来源对话', artifact: '来源成果' }
   const source = record(result.source)
+  const checkpoint = record(result.checkpoint)
   return <div className="mt-1 space-y-1 whitespace-pre-wrap [overflow-wrap:anywhere]">
+    {p.name === 'read_checkpoint' && <>
+      <p>只读核对持久事件中的工作事实，不读取私有思考，也不代表恢复成功或验收通过。</p>
+      {detail(checkpoint.objective) && <p>当前目标：{detail(checkpoint.objective)}</p>}
+      {typeof checkpoint.as_of_seq === 'number' && <p>事实截至事件 #{checkpoint.as_of_seq}</p>}
+      {typeof checkpoint.open_work_count === 'number' && <p>未交还工作：{checkpoint.open_work_count} 项</p>}
+      {typeof checkpoint.pending_operation_count === 'number' && <p>待核对操作：{checkpoint.pending_operation_count} 项</p>}
+      {Array.isArray(result.assignments) && result.assignments.slice(0, full ? result.assignments.length : 8).map((value, index) => {
+        const assignment = record(value)
+        return <p key={index}>原委托 #{typeof assignment.seq === 'number' ? assignment.seq : '待核对'}：{detail(assignment.text)}</p>
+      })}
+      {(checkpoint.open_work_truncated === true || Array.isArray(result.assignments) && !full && result.assignments.length > 8) && <p>工作索引仅显示部分记录。</p>}
+      {result.has_more === true && <p>还有后续委托{typeof result.next_seq === 'number' ? ` · 下一页从 #${result.next_seq} 之后读取` : ''}。</p>}
+    </>}
     {background && <>
       <p>读取范围：{backgroundSections[section] ?? '来源材料'} · 创建时冻结的历史参考</p>
       {detail(source.filename) && <p>来源文件：{detail(source.filename)}</p>}

@@ -1,4 +1,4 @@
-import { isTeamHost, teamRuns, teamRunStatus } from './team'
+import { isTeamHost, teamContinuationSource, teamRuns, teamRunStatus } from './team'
 import type { TeamEvent, TeamState } from './team'
 
 export type TeamGraphEntry = {
@@ -13,7 +13,7 @@ const record = (value: unknown): Record<string, unknown> => value !== null && ty
 const id = (seq: number) => `event-${seq}`
 export const teamGraphKinds: Record<string, string> = {
   message: '消息', assignment: '委托', report: '回报', progress: '进展', notification: '知会',
-  review: '复核请求', decision: '复核结论',
+  review: '复核请求', decision: '复核结论', continuation: '接续交接',
 }
 const reviewStatuses: Record<string, string> = {
   pending: '待复核', changes_requested: '待修复', approved: '该版本复核通过', outdated: '版本已变化，待重新复核', stale: '历史复核',
@@ -25,7 +25,8 @@ export function projectTeamGraph(team: TeamState, input: readonly TeamEvent[]) {
   const bySeq = new Map(events.map(event => [event.seq, event]))
   const messages = events.filter(event => event.type === 'team.message_received'
     && ['human', 'agent'].includes(event.actor.kind ?? '')
-    && ['message', 'assignment', 'report', 'progress', 'notification'].includes(text(event.payload.kind)))
+    && (['message', 'assignment', 'report', 'progress', 'notification'].includes(text(event.payload.kind))
+      || event.actor.kind === 'agent' && event.payload.kind === 'continuation' && event.payload.visible === true))
   const requests = events.filter(event => isTeamHost(event) && event.type === 'team.review_requested'
     && text(event.payload.author) && text(event.payload.reviewer))
   const requestBySeq = new Map(requests.map(event => [event.seq, event]))
@@ -52,6 +53,8 @@ export function projectTeamGraph(team: TeamState, input: readonly TeamEvent[]) {
   const replies = new Set<number>()
   for (const message of messages) {
     const p = message.payload
+    const continued = teamContinuationSource(message, bySeq)
+    if (continued) connect(continued.seq, message.seq, '接续原委托')
     const source = sourceMessage(message, 'reply_to')
     if (source && source.payload.recipient === message.actor.id && source.actor.id === p.recipient
       && ['report', 'progress'].includes(text(p.kind))) {
@@ -60,8 +63,8 @@ export function projectTeamGraph(team: TeamState, input: readonly TeamEvent[]) {
     }
     const parent = sourceMessage(message, 'parent_assignment_seq')
     if (parent && parent.payload.recipient === message.actor.id && message.actor.kind === 'agent'
-      && ['assignment', 'message', 'notification'].includes(text(p.kind))) {
-      connect(parent.seq, message.seq, p.kind === 'assignment' ? '子委托' : p.kind === 'notification' ? '进展知会' : '协作消息')
+      && ['assignment', 'message', 'notification', 'continuation'].includes(text(p.kind))) {
+      connect(parent.seq, message.seq, p.kind === 'assignment' ? '子委托' : p.kind === 'notification' ? '进展知会' : p.kind === 'continuation' ? '接续交接' : '协作消息')
     }
     const request = requestBySeq.get(Number(p.review_seq))
     if (request && request.seq < message.seq && p.kind === 'assignment' && message.actor.id === request.payload.author
@@ -93,7 +96,7 @@ export function projectTeamGraph(team: TeamState, input: readonly TeamEvent[]) {
     const parent = sent.payload.parent_assignment_seq === source.seq
     const label = sent.payload.kind === 'assignment' ? parent ? '子委托' : '委托'
       : reply && sent.payload.kind === 'report' ? '回报' : reply && sent.payload.kind === 'progress' ? '进展'
-      : parent && sent.payload.kind === 'notification' ? '进展知会' : '协作消息'
+      : parent && sent.payload.kind === 'notification' ? '进展知会' : sent.payload.kind === 'continuation' ? '接续交接' : '协作消息'
     connect(source.seq, sent.seq, label)
   }
   for (const request of requests) {
@@ -116,6 +119,7 @@ export function projectTeamGraph(team: TeamState, input: readonly TeamEvent[]) {
     const kind = review ? 'review' : decision ? 'decision' : text(p.kind)
     const messageStatus = p.kind === 'report' ? '回报已投递' : p.kind === 'progress' ? '进展已投递'
       : p.kind === 'notification' ? '知会已投递'
+      : p.kind === 'continuation' ? teamContinuationSource(event, bySeq) ? '接续指令已投递' : '原委托关联待核对'
       : run && ['failed', 'blocked', 'interrupted', 'uncertain', 'cancelled'].includes(run.status ?? '') ? teamRunStatus(run.status)
       : replies.has(event.seq) ? '已收到回报' : run ? teamRunStatus(run.status) : '消息等待处理'
     const artifacts = review || decision ? request.payload.artifacts : undefined

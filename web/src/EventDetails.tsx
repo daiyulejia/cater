@@ -1,4 +1,5 @@
 import { BrowserReport } from './browserReport'
+import { isTeamRecovery } from './team'
 
 export type DetailEvent = {
   seq: number
@@ -14,6 +15,7 @@ const titles: Record<string, string> = {
   'team.message_received': '团队收到消息', 'team.questions_requested': '等待顾客补充', 'team.run_started': '开始处理消息', 'team.run_finished': '消息处理结果',
   'team.objective_updated': '团队目标已更新', 'team.objective_completed': '店长交付结论',
   'team.model_called': '团队模型用量', 'team.tool_started': '团队工具已发起', 'team.tool_finished': '团队工具回执',
+  'team.tool_reconciled': '发布影响已核对',
   'task.created': '任务已创建', 'task.started': '任务已启动', 'task.interpreted': '任务理解',
   'task.routed': '协作安排', 'mission.created': '工作目标', 'task.decomposed': '任务分工',
   'subtask.assigned': '工作指派', 'plan.proposed': '协作计划', 'plan.amended': '计划调整',
@@ -120,13 +122,38 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
   add('工作项', p.work_item_id)
   switch (event.type) {
     case 'team.message_received':
+      if (p.kind === 'recovery') {
+        if (!isTeamRecovery(event)) {
+          status = '恢复通知来源待核对'
+          note = '来源未通过团队系统身份核对，不能作为恢复依据。'
+          break
+        }
+        status = '恢复通知已记录'
+        add('消息内容', p.text); add('接收成员', member(p.recipient))
+        number('原处理开始事件', p.recovery_of); number('中断事件', p.interrupted_seq); number('目标版本', p.revision)
+        note = '这是内部恢复通知，不代表已经恢复执行或验收通过。'
+        break
+      }
+      if (p.kind === 'continuation') {
+        if (event.actor.kind !== 'agent') {
+          status = '接续消息来源待核对'
+          break
+        }
+        status = '接续指令已记录'
+        number('接续原委托', p.continue_assignment_seq); number('上级委托', p.parent_assignment_seq); number('目标版本', p.revision)
+        note = '这是原委托的补充指令，关联以原消息为准，不代表独立交付或验收通过。'
+      }
       add('消息内容', p.text); add('接收成员', member(p.recipient)); number('回复消息', p.reply_to)
-      add('消息类型', label(p.kind, { message: '聊天消息', assignment: '工作交接', report: '内部报告' }, '消息'))
+      add('消息类型', label(p.kind, { message: '聊天消息', assignment: '工作交接', report: '内部报告', continuation: '接续工作交接' }, '消息'))
       break
     case 'team.run_started': case 'team.run_finished':
       status = event.type === 'team.run_started' ? '正在处理消息' : label(p.status, { done: '消息处理完成', completed: '消息处理完成', finished: '消息处理完成', succeeded: '消息处理完成', waiting: '等待伙伴回复', interrupted: '消息处理中断', failed: '消息处理失败', blocked: '消息处理受阻', cancelled: '消息处理已取消' }, '消息处理结果待确认')
       number('关联消息', p.message_seq); add('处理成员', member(p.role)); add('原因', p.reason)
       note = '消息处理结束不代表任务已交付。'
+      break
+    case 'team.tool_reconciled':
+      status = '实际影响已核对'; number('原操作', p.started_seq); add('核对依据', p.reason)
+      note = '原始操作结果不改写，后续不重放原请求。'
       break
     case 'team.objective_updated': add('当前目标', p.goal); break
     case 'team.objective_completed':
@@ -141,10 +168,22 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
     }
     case 'team.tool_started': case 'team.tool_finished':
       status = event.type === 'team.tool_started' ? '等待工具回执' : label(p.status ?? record(p.result).status, { ok: '工具已完成', completed: '工具已完成', succeeded: '工具已完成', error: '工具未完成', failed: '工具未完成' }, '工具结果待确认')
-      add('工具', p.name ?? p.tool); add('执行成员', member(p.role)); add('摘要', p.summary ?? record(p.result).summary)
+      add('工具', (p.name ?? p.tool) === 'read_checkpoint' ? '读取工作检查点' : p.name ?? p.tool); add('执行成员', member(p.role)); add('摘要', p.summary ?? record(p.result).summary)
       number('关联消息', p.message_seq); number('发起事件', p.started_seq); number('退出码', record(p.result).exit_code)
       add('原因', p.reason ?? record(record(p.result).error).message)
       note = '工具回执仅说明这次操作的结果。'
+      if ((p.name ?? p.tool) === 'read_checkpoint') {
+        const result = record(p.result), checkpoint = record(result.checkpoint)
+        add('当前目标', checkpoint.objective); number('事实截至事件', checkpoint.as_of_seq)
+        number('未交还工作', checkpoint.open_work_count, ' 项'); number('待核对操作', checkpoint.pending_operation_count, ' 项')
+        if (Array.isArray(result.assignments)) add('本页原委托', lines(result.assignments.map(value => {
+          const assignment = record(value)
+          return typeof assignment.seq === 'number' ? `#${assignment.seq}：${text(assignment.text, 500)}` : ''
+        }).filter(Boolean)))
+        if (result.has_more === true) { add('读取范围', '还有后续委托，本页不代表全部工作。'); number('下页起始委托之后', result.next_seq) }
+        if (checkpoint.open_work_truncated === true) add('索引范围', '工作索引仅包含部分记录。')
+        note = '只读核对持久事件中的工作事实，不读取私有思考，也不代表恢复成功或验收通过。'
+      }
       break
     case 'collaboration.requested':
       status = '已发起咨询'

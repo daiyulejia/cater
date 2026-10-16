@@ -35,7 +35,7 @@ import { controlLabels, executionLabel } from './executionControl'
 import type { ControlAction, ExecutionControl } from './executionControl'
 import { clearCreationRecovery, CREATION_RECOVERY_TTL, loadCreationRecovery, readAccessToken, saveCreationRecovery } from './creationRecovery'
 import type { CreationAttempt } from './creationRecovery'
-import { hasActiveTeamMessages, isTeamHost, resolveTeam, teamDeliveries, teamMessageAudience, teamMessageEchoes, teamProgressMessages, teamRunStatus, teamSpeaker, teamStatus } from './team'
+import { hasActiveTeamMessages, isTeamHost, isTeamRecovery, resolveTeam, teamDeliveries, teamMessageAudience, teamMessageEchoes, teamProgressMessages, teamRunStatus, teamSpeaker, teamStatus } from './team'
 import type { TeamState, TeamSummary } from './team'
 
 const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
@@ -225,7 +225,8 @@ function isDriverGateway(event: Event): boolean {
 }
 
 function conversationFor(events: Event[], identities: Record<string, OrgRole>, organization: Organization | null, questions: Question[] = [], clarifications: Clarification[] = [], receipts: ConversationReceipt[] = [], teamEnabled = false, questionnaires: Questionnaire[] = []): ChatItem[] {
-  const humanMessages = events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'human')
+  const humanMessages = events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'human'
+    && !['recovery', 'continuation'].includes(String(event.payload.kind)))
   const initialHuman = humanMessages[0]
   const humanRequests = new Set(humanMessages.map((event) => event.payload.request_id).filter((id) => typeof id === 'string' && id))
   const shownRequests = new Set<string>()
@@ -297,8 +298,14 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       || event.type.startsWith('delivery.') || event.type === 'task.decomposed' || event.type === 'subtask.assigned'
       || (event.type === 'brief.generated' && payload.reason === 'work_checkpoint'))) return []
     if (event.type === 'team.message_received') {
+      if (payload.kind === 'recovery') {
+        if (!isTeamRecovery(event) || typeof payload.text !== 'string' || !payload.text.trim()) return []
+        return [{ ...message('恢复通知', payload.text, 'system'), actor: 'system', display: '系统', role: '',
+          systemActor: true, internal: true, targets: [], replyTo: undefined }]
+      }
+      if (payload.kind === 'continuation' && actor.kind !== 'agent') return []
       if (actor.kind !== 'human' && (actor.kind !== 'agent' || (!['assignment', 'message', 'notification'].includes(String(payload.kind))
-        && !(payload.kind === 'report' && payload.visible === true)))) return []
+        && !(['report', 'continuation'].includes(String(payload.kind)) && payload.visible === true)))) return []
       if (typeof payload.text !== 'string' || !payload.text.trim()) return []
       if (actor.kind === 'human' && typeof payload.request_id === 'string' && payload.request_id) {
         if (shownRequests.has(payload.request_id)) return []
@@ -306,11 +313,11 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       }
       const item = message(undefined, payload.text, actor.kind === 'human' ? 'human' : 'agent', 'collaboration')
       item.systemActor = false
-      item.internal = teamEnabled && teamMessageAudience(event, bySeq).audience === 'team'
+      item.internal = payload.kind === 'continuation' || teamEnabled && teamMessageAudience(event, bySeq).audience === 'team'
       item.targets = typeof payload.recipient === 'string' ? [displayName(payload.recipient)] : []
-      if (actor.kind === 'agent' && ['assignment', 'notification'].includes(String(payload.kind))) {
+      if (actor.kind === 'agent' && ['assignment', 'notification', 'continuation'].includes(String(payload.kind))) {
         item.notice = true
-        item.text = `@${displayName(actor.id)} → ${item.targets.length ? `@${item.targets[0]}` : '伙伴'} · ${payload.kind === 'notification' ? '进展知会' : '工作交接'}`
+        item.text = `@${displayName(actor.id)} → ${item.targets.length ? `@${item.targets[0]}` : '伙伴'} · ${payload.kind === 'notification' ? '进展知会' : payload.kind === 'continuation' ? '接续工作交接' : '工作交接'}`
         item.details = [payload.text]
         item.targets = []
       } else if (actor.kind === 'human') {

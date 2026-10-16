@@ -177,9 +177,12 @@ with Runtime(sys.argv[1], roles_path=sys.argv[2], drivers={"team_test": driver})
         self.assertEqual(result.returncode, 37, result.stderr.decode("utf-8", errors="replace"))
         self.assertEqual(self.rt.team.view(self.task)["assignments"], [])
         self.assertEqual(self.rt.team._pending_operations(self.task)[0]["outcome"], "unsettled")
+        self.driver.steps[self.manager] = [test_simple_team.turn("Inspect the interrupted action without replaying it.")]
         self.rt.team.run(self.task)
         self.assertEqual(self.rt.team._pending_operations(self.task)[0]["outcome"], "not_committed")
-        self.assertEqual(self.driver.calls, [])
+        self.assertEqual(len(self.driver.calls), 1)
+        self.assertEqual(self.driver.calls[0]["context"]["message"]["kind"], "recovery")
+        self.assertEqual(self.driver.calls[0]["history"], [])
         self.assertEqual(self.rt.team.view(self.task)["assignments"], [])
         self.assertTrue(self.rt.verify_chain().ok)
 
