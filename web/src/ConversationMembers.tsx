@@ -25,11 +25,11 @@ export function ConversationMembers({ participants, members, portrait, onMention
     setOpen(next)
   }}>
     <Dialog.Trigger asChild>
-      <button ref={trigger} type="button" aria-label={`本次伙伴，${ids.length} 位`} title="查看本次伙伴" className="inline-flex min-h-11 max-w-full items-center gap-2 rounded-md px-2 text-[#45665c] hover:bg-[#fff0e8]">
+      <button ref={trigger} type="button" aria-label={`本次伙伴，${ids.length} 位`} title="查看本次伙伴" className="conversation-members-trigger inline-flex min-h-9 max-w-full items-center gap-1 rounded-md px-1 text-[#45665c] hover:bg-[#fff0e8] sm:min-h-11 sm:gap-2 sm:px-2">
         {preview.length === 0 && <Cat size={17} aria-hidden="true" className="shrink-0 text-[#a8624a]" />}
-        {preview.length > 0 && <span aria-hidden="true" className="flex shrink-0 -space-x-2">{preview.map((id, index) => <span key={id} className={`${index === 0 ? 'flex' : 'hidden sm:flex'} size-8 shrink-0`}>{portrait(id, 'sm')}</span>)}</span>}
-        <span className="min-w-0 truncate text-xs font-semibold"><span className="hidden sm:inline">本次</span>伙伴 <span className="font-normal text-[#748b81]">· {ids.length}</span></span>
-        <ChevronRight size={14} aria-hidden="true" className="shrink-0 text-[#748b81]" />
+        {preview.length > 0 && <span aria-hidden="true" className="flex shrink-0 -space-x-2">{preview.map((id, index) => <span key={id} className={`${index === 0 ? 'flex' : 'hidden sm:flex'} size-6 shrink-0 sm:size-8`}>{portrait(id, 'sm')}</span>)}</span>}
+        <span className="min-w-0 truncate text-xs font-semibold"><span className="hidden sm:inline">本次伙伴 · </span><span className="font-normal text-[#748b81]">{ids.length}</span></span>
+        <ChevronRight size={14} aria-hidden="true" className="hidden shrink-0 text-[#748b81] sm:block" />
       </button>
     </Dialog.Trigger>
     <Dialog.Portal>

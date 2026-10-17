@@ -269,6 +269,8 @@ test('输入框点名建议随任务关闭，草稿仍归属于原任务', async
 
 test('任务列表可收起，伙伴按需打开，不改变当前任务或草稿', async () => {
   render(<App />); await ready('乙'); write('保留这段方向')
+  expect(document.getElementById('task-list')?.classList.contains('mobile-collapsed')).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: '展开任务列表' }))
   fireEvent.click(screen.getByRole('button', { name: '收起任务列表' }))
   expect(screen.getByRole('button', { name: '展开任务列表' }).getAttribute('aria-expanded')).toBe('false')
   expect(document.getElementById('task-list')?.classList.contains('mobile-collapsed')).toBe(true)

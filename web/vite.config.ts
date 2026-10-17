@@ -12,6 +12,11 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              name: 'chat-controls',
+              test: /[\\/]src[\\/](?:ChatFilters|ConversationMembers|TaskControlMenu|WorkspacePanel)\.tsx$/,
+              priority: 20,
+            },
+            {
               name: 'command-output',
               test: /[\\/]src[\\/](?:CommandOutputPreview|outputPreview)\.tsx?$/,
               priority: 20,

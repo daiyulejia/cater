@@ -31,6 +31,8 @@ import { collaborationProjection, workTransfers } from './collaborationProjectio
 import type { WorkAssignment } from './collaborationProjection'
 import { readJsonResponse, request } from './request'
 import { TaskControlMenu } from './TaskControlMenu'
+import { ChatFilters } from './ChatFilters'
+import type { ChatFilter } from './ChatFilters'
 import { WorkspacePanel, WorkspaceToolProgress } from './WorkspacePanel'
 import type { WorkspaceBinding, WorkspaceOption } from './WorkspacePanel'
 import { controlLabels, executionLabel } from './executionControl'
@@ -190,8 +192,8 @@ const taskListStatus = (task: Task, activity = task.activity) => {
   return task.status === 'running' && task.brief ? '等待下一轮' : statusText(task.status)
 }
 
-const driverModeText = (mode?: Organization['mode']) => ({ local_demo: '本地演示模式', mixed_driver: '部分成员已接入外部驱动', external_driver: '已接入外部驱动' }[mode ?? 'local_demo'] ?? '本地演示模式')
-const driverModeStyle = (mode?: Organization['mode']) => ({ local_demo: 'bg-amber-50 text-amber-800', mixed_driver: 'bg-sky-50 text-sky-800', external_driver: 'bg-teal-50 text-teal-800' }[mode ?? 'local_demo'] ?? 'bg-amber-50 text-amber-800')
+const driverModeText = (mode?: Organization['mode']) => mode ? { local_demo: '本地演示模式', mixed_driver: '部分成员已接入外部驱动', external_driver: '已接入外部驱动' }[mode] : '模式待确认'
+const driverModeStyle = (mode?: Organization['mode']) => mode ? { local_demo: 'bg-amber-50 text-amber-800', mixed_driver: 'bg-sky-50 text-sky-800', external_driver: 'bg-teal-50 text-teal-800' }[mode] : 'bg-stone-50 text-stone-600'
 
 function reasonText(value: string): string {
   const veto = /^Veto role\(s\) raised concern: (.+)\.$/.exec(value)
@@ -817,13 +819,15 @@ function App() {
   const derivationRef = useRef<DerivationSource | null>(null)
   const derivationRequests = useRef<Record<string, { text: string; requestId: string }>>({})
   const focusComposerRef = useRef(false)
+  const focusTaskHeadingRef = useRef(false)
   const chatPaneRef = useRef<HTMLElement>(null)
   const [roles, setRoles] = useState<OrgRole[]>([])
   const [organization, setOrganization] = useState<Organization | null>(null)
   const [pending, setPending] = useState<Set<string>>(new Set())
   const [showEvidence, setShowEvidence] = useState(false)
   const [showMobileBoard, setShowMobileBoard] = useState(false)
-  const [tasksCollapsed, setTasksCollapsed] = useState(false)
+  const [taskListPreference, setTasksCollapsed] = useState<boolean>()
+  const tasksCollapsed = taskListPreference ?? selectedId !== null
   const [taskSearchOpen, setTaskSearchOpen] = useState(false)
   const [graphOpen, setGraphOpen] = useState(false)
   const [graphLoaded, setGraphLoaded] = useState(false)
@@ -835,7 +839,7 @@ function App() {
   const profileMounted = useRef(true)
   const [chainStatus, setChainStatus] = useState<ChainStatus | null>(null)
   const [checkingChain, setCheckingChain] = useState(false)
-  const [chatFilter, setChatFilter] = useState<'all' | ChatItem['category']>('all')
+  const [chatFilter, setChatFilter] = useState<ChatFilter>('all')
   const [error, setError] = useState('')
   const [taskListError, setTaskListError] = useState('')
   const [sendErrors, setSendErrors] = useState<Record<string, string>>({})
@@ -906,6 +910,7 @@ function App() {
   }
 
   const chooseTask = useCallback((id: string | null, remember = true) => {
+    focusTaskHeadingRef.current = false
     questionModeRef.current = false
     setQuestionMode(false)
     derivationRef.current = null
@@ -990,6 +995,13 @@ function App() {
     setSendErrors((current) => ({ ...current, [newKey]: '上次新建任务的提交结果未知。原草稿已恢复，可核对任务列表后手动重试。' }))
     chooseTask(null)
   }
+
+  useLayoutEffect(() => {
+    if (focusTaskHeadingRef.current) {
+      chatPaneRef.current?.querySelector<HTMLHeadingElement>('h1')?.focus()
+      focusTaskHeadingRef.current = false
+    }
+  }, [selectedId])
 
   useLayoutEffect(() => {
     if (!focusComposerRef.current) return
@@ -1504,21 +1516,27 @@ function App() {
         </button>
         <div className="flex items-center gap-2 text-xs">
           <TeamDirectory members={team} availability={organization?.availability} open={teamOpen} onOpenChange={setTeamOpen} refreshing={teamRefreshing} error={teamError} onRefresh={() => void refreshOrganization()} portrait={(id) => <Portrait id={id} size="xl" />} onMention={(name) => { if (task) setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${name} `); else setDraft((current) => `${current.trim()}${current.trim() ? ' ' : ''}@${name} `) }} />
-          <span className={`max-w-32 truncate rounded-md px-2.5 py-1.5 text-[11px] font-medium sm:max-w-none ${driverModeStyle(organization?.mode)}`} title="具体成员状态可在工作板查看。">{driverModeText(organization?.mode)}</span>
+          <span className={`channel-mode max-w-32 shrink-0 rounded-md px-2.5 py-1.5 text-[11px] font-medium sm:max-w-none ${driverModeStyle(organization?.mode)}`} title={driverModeText(organization?.mode)}><span className="sr-only sm:not-sr-only">{driverModeText(organization?.mode)}</span><span className="sm:hidden" aria-hidden="true">{organization?.mode === 'external_driver' ? '外接' : organization?.mode === 'mixed_driver' ? '混合' : organization?.mode === 'local_demo' ? '演示' : '待确认'}</span></span>
           <button type="button" onClick={() => void verifyChain()} disabled={checkingChain} className={`inline-flex size-8 items-center justify-center rounded-md hover:bg-[#e7f0ec] sm:w-auto sm:gap-1 sm:px-2 ${chainStatus && !chainStatus.ok ? 'text-rose-700' : 'text-[#34786e]'}`} aria-label={checkingChain ? '正在核验事件链' : chainStatus ? chainStatus.ok ? `上次核验通过，共 ${chainStatus.checked} 条事件` : `事件链异常，事件 #${chainStatus.broken_at ?? '?'}` : '核验事件链'} title={chainStatus?.reason || '点击核验事件链；显示的是上次核验结果'}><ShieldCheck size={17} /><span className="hidden sm:inline">{checkingChain ? '正在核验' : chainStatus ? chainStatus.ok ? `已核验 ${chainStatus.checked} 条` : `链异常 · #${chainStatus.broken_at ?? '?'}` : '核验事件链'}</span></button>
         </div>
       </header>
-      <main className={`app-layout grid grid-cols-1 ${task ? 'lg:grid-cols-[252px_minmax(0,1fr)_318px]' : 'lg:grid-cols-[252px_minmax(0,1fr)]'}`}>
-        <aside className="task-sidebar min-h-0 lg:flex lg:flex-col lg:overflow-y-auto">
-          <div className="flex items-center justify-between px-4 pb-2 pt-4">
-            <div><span className="text-[11px] font-semibold text-[#a56b56]">正在聊</span><h2 className="flex items-center gap-1.5 text-base font-bold"><PawPrint size={17} className="text-[#c36550]" /> 我的任务 <span className="text-xs font-medium text-[#a98e81]">{tasks.length}</span></h2></div>
+      <main data-conversation={Boolean(task)} className={`app-layout grid grid-cols-1 ${task ? 'lg:grid-cols-[252px_minmax(0,1fr)_318px]' : 'lg:grid-cols-[252px_minmax(0,1fr)]'}`}>
+        <aside className="task-sidebar min-h-0 lg:flex lg:flex-col lg:overflow-y-auto" onKeyDown={event => {
+          if (task && !tasksCollapsed && event.key === 'Escape') {
+            event.preventDefault()
+            setTasksCollapsed(true)
+            event.currentTarget.querySelector<HTMLButtonElement>('[aria-controls="task-list"]')?.focus()
+          }
+        }}>
+          <div className="task-sidebar-heading flex items-center justify-between px-4 pb-2 pt-4">
+            <div><span className="task-sidebar-eyebrow text-[11px] font-semibold text-[#a56b56]">正在聊</span><h2 className="flex items-center gap-1.5 text-base font-bold"><PawPrint size={17} className="text-[#c36550]" /> 我的任务 <span className="text-xs font-medium text-[#a98e81]">{tasks.length}</span></h2></div>
             <div className="flex gap-1">
               <button type="button" onClick={() => { setTaskSearchOpen(!(taskSearchOpen && !tasksCollapsed)); setTasksCollapsed(false) }} aria-label={taskSearchOpen && !tasksCollapsed ? '收起任务查找' : '查找任务'} title={taskSearchOpen && !tasksCollapsed ? '收起任务查找' : '查找任务'} aria-controls="task-search" aria-expanded={taskSearchOpen && !tasksCollapsed} className="grid size-9 place-items-center rounded-md text-[#a9604f] hover:bg-[#fff5eb] lg:hidden"><Search size={17} /></button>
               <button type="button" onClick={() => setTasksCollapsed(!tasksCollapsed)} aria-controls="task-list" aria-expanded={!tasksCollapsed} aria-label={tasksCollapsed ? '展开任务列表' : '收起任务列表'} title={tasksCollapsed ? '展开任务列表' : '收起任务列表'} className="grid size-9 place-items-center rounded-md text-[#a9604f] hover:bg-[#fff5eb] lg:hidden"><ChevronDown size={18} className={tasksCollapsed ? '' : 'rotate-180'} /></button>
               <button className="grid size-9 place-items-center rounded-md border border-[#ead2c5] bg-white text-[#b15342] shadow-sm hover:bg-[#fff0e9]" title="新建任务" aria-label="新建任务" onClick={() => chooseTask(null)}><Plus size={18} /></button>
             </div>
           </div>
-          <TaskList tasks={tasks} selectedId={selectedId} drafts={drafts} collapsed={tasksCollapsed} searchOpen={taskSearchOpen} onChoose={chooseTask} statusLabel={(item) => executionLabel(executionControls[item.id]?.state) || (item.team?.enabled ? teamStatus(item.team, item.activity) : item.status_label)} />
+          <TaskList tasks={tasks} selectedId={selectedId} drafts={drafts} collapsed={tasksCollapsed} searchOpen={taskSearchOpen} onChoose={id => { chooseTask(id); setTasksCollapsed(true); focusTaskHeadingRef.current = id !== selectedId }} statusLabel={(item) => executionLabel(executionControls[item.id]?.state) || (item.team?.enabled ? teamStatus(item.team, item.activity) : item.status_label)} />
         </aside>
         <section ref={chatPaneRef} className="chat-pane flex min-h-0 flex-col">
           {recovery && <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[#eaded1] px-4 py-2 text-xs text-[#52766d] sm:px-7" role="status">
@@ -1528,11 +1546,11 @@ function App() {
           </div>}
           {task ? <>
             <div className="chat-heading flex items-start justify-between gap-3 px-4 py-3 sm:px-7 sm:py-4" style={{ backgroundImage: `linear-gradient(90deg, #fffaf5 0%, rgba(255,250,245,.98) 55%, rgba(255,250,245,.78) 100%), url(${cafeWelcome})` }}>
-              <div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div>
+              <div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 tabIndex={-1} className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div>
               <div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${executionState === 'running' && currentActivity?.active && currentActivity.state === executionState ? 'is-running' : ''}`}>{loading ? '读取对话' : executionLabel(executionState) || taskListStatus(task, currentActivity)}</span><button id="workboard-trigger" onClick={() => setShowMobileBoard(true)} aria-label="打开成果与过程" title="打开成果与过程" aria-haspopup="dialog" aria-expanded={showMobileBoard} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div>
             </div>
-            <div className="filter-strip flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-7"><div className="flex gap-1 overflow-x-auto" role="group" aria-label="对话筛选">{([{ id: 'all', label: '全部' }, { id: 'collaboration', label: '协作' }, { id: 'decision', label: '决策' }, { id: 'deliverable', label: '成果' }] as const).map((filter) => <button key={filter.id} onClick={() => setChatFilter(filter.id)} aria-pressed={chatFilter === filter.id} className={`filter-button shrink-0 px-3 py-1.5 text-xs font-semibold ${chatFilter === filter.id ? 'is-active' : ''}`}>{filter.label}</button>)}</div>
-              <div className="flex max-w-full flex-wrap items-center gap-2">
+            <div className="filter-strip flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-7"><ChatFilters value={chatFilter} onChange={setChatFilter} />
+              <div className="chat-tools flex max-w-full flex-wrap items-center gap-2">
                 <ConversationMembers key={task.id} members={team} participants={participants} portrait={(id, size) => <Portrait id={id} size={size} />} onMention={(id) => setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${names[id] ?? id} `)} onOpenDirectory={() => { setTeamOpen(true); void refreshOrganization() }} />
                 {currentDetail?.background && <ConversationOrigin key={`origin:${task.id}`} background={currentDetail.background} onNavigate={(id) => { chooseTask(id); focusComposerRef.current = true }} />}
                 <WorkspacePanel taskId={task.id} workspace={currentDetail?.workspace} disabled={loading || isSending || controlBusy}
