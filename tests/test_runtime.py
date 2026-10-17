@@ -173,14 +173,17 @@ def background_test_web(testcase, db, *, driver, runtime_factory):
     owners = []
     owners_lock = threading.Lock()
     runners = []
+    started_threads = []
+    start_thread = threading.Thread.start
     runner_type = web_module.ActivityRunner
 
     @contextmanager
     def tracked_runtime():
-        state = {"thread": threading.current_thread(), "closed": False}
+        state = {"thread": threading.current_thread(), "constructed": False, "closed": False}
         with owners_lock:
             owners.append(state)
         runtime = runtime_factory()
+        state["constructed"] = True
         try:
             with runtime:
                 yield runtime
@@ -195,33 +198,47 @@ def background_test_web(testcase, db, *, driver, runtime_factory):
         runners.append(runner)
         return runner
 
-    with patch.object(web_module, "ActivityRunner", side_effect=capture_runner):
-        handler = make_handler(db, runtime_factory=tracked_runtime)
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-    server.daemon_threads = False
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        driver.release.set()
-        server.shutdown()
-        thread.join()
-        server.server_close()
-        # Request handlers have drained, so they cannot spawn another consumer.
-        consumer_names = set()
-        for runner in runners:
-            with runner._lock:
-                consumer_names.update(f"cater-run-{task_id}" for task_id in runner._activities)
-        consumers = {item for item in threading.enumerate() if item.name in consumer_names}
-        with owners_lock:
-            consumers.update(state["thread"] for state in owners)
-        consumers.discard(threading.current_thread())
-        for consumer in consumers:
-            consumer.join(timeout=5)
-            testcase.assertFalse(consumer.is_alive(), f"test thread still alive: {consumer.name}")
-        with owners_lock:
-            testcase.assertTrue(all(state["closed"] for state in owners), "Runtime connection left open")
+    def track_start(thread, *args, **kwargs):
+        owner = getattr(getattr(thread, "_target", None), "__self__", None)
+        if any(owner is runner for runner in runners):
+            # Register before bootstrap: a child can start before it opens a Runtime.
+            with owners_lock:
+                started_threads.append(thread)
+        return start_thread(thread, *args, **kwargs)
+
+    with patch.object(threading.Thread, "start", track_start):
+        with patch.object(web_module, "ActivityRunner", side_effect=capture_runner):
+            handler = make_handler(db, runtime_factory=tracked_runtime)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        server.daemon_threads = False
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield f"http://127.0.0.1:{server.server_port}"
+        finally:
+            driver.release.set()
+            server.shutdown()
+            thread.join()
+            server.server_close()
+            joined = set()
+            deadline = time.monotonic() + 5
+            while True:
+                with owners_lock:
+                    consumers = list(dict.fromkeys(started_threads + [state["thread"] for state in owners]))
+                pending = [consumer for consumer in consumers
+                           if consumer is not threading.current_thread() and consumer not in joined]
+                if not pending:
+                    break
+                for consumer in pending:
+                    # A failed Thread.start has no native thread to join.
+                    if consumer.ident is not None:
+                        consumer.join(timeout=max(0, deadline - time.monotonic()))
+                        testcase.assertFalse(consumer.is_alive(), f"test thread still alive: {consumer.name}")
+                    joined.add(consumer)
+                # Joining a parent can start another queued activity; collect again.
+            with owners_lock:
+                testcase.assertTrue(all(not state["constructed"] or state["closed"] for state in owners),
+                                    "Runtime connection left open")
 
 
 class RuntimeTests(unittest.TestCase):
@@ -3058,7 +3075,7 @@ class WebTests(unittest.TestCase):
     def test_web_queues_a_follow_up_round_after_a_human_direction(self):
         driver = BlockingDriver()
         self.addCleanup(driver.release.set)
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as resources:
             db = str(Path(tmp) / "web-follow-up.db")
             roles = Path(tmp) / "roles.json"
             roles.write_text(
@@ -3075,12 +3092,8 @@ class WebTests(unittest.TestCase):
             def runtime_factory() -> Runtime:
                 return Runtime(db, roles_path=roles, drivers={"blocking": driver})
 
-            base, server, thread = start_test_web(
-                self,
-                db,
-                runtime_factory=runtime_factory,
-                return_server=True,
-            )
+            base = resources.enter_context(background_test_web(
+                self, db, driver=driver, runtime_factory=runtime_factory))
             create = Request(
                 f"{base}/api/tasks",
                 data=json.dumps({"goal": "Work, then change direction", "run": True, "background": True}).encode("utf-8"),
@@ -3118,14 +3131,11 @@ class WebTests(unittest.TestCase):
 
             self.assertEqual(completed["activity"]["state"], "completed")
             self.assertGreaterEqual(len(completed["task"]["messages"]), 2)
-            server.shutdown()
-            thread.join(timeout=1)
-            server.server_close()
 
     def test_web_uses_the_latest_queued_strategy_after_multiple_directions(self):
         driver = BlockingDriver()
         self.addCleanup(driver.release.set)
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as resources:
             db = str(Path(tmp) / "web-latest-direction.db")
             roles = Path(tmp) / "roles.json"
             roles.write_text(
@@ -3142,7 +3152,8 @@ class WebTests(unittest.TestCase):
             def runtime_factory() -> Runtime:
                 return Runtime(db, roles_path=roles, drivers={"blocking": driver})
 
-            base, server, thread = start_test_web(self, db, runtime_factory=runtime_factory, return_server=True)
+            base = resources.enter_context(background_test_web(
+                self, db, driver=driver, runtime_factory=runtime_factory))
             create = Request(
                 f"{base}/api/tasks",
                 data=json.dumps({"goal": "Work while receiving new directions", "run": True, "background": True}).encode("utf-8"),
@@ -3179,9 +3190,6 @@ class WebTests(unittest.TestCase):
                     break
                 time.sleep(0.03)
             self.assertEqual(completed["activity"]["state"], "completed")
-            server.shutdown()
-            thread.join(timeout=1)
-            server.server_close()
 
     def test_bundled_workroom_includes_chinese_shell_and_static_assets(self):
         root = Path(web_module.__file__).resolve().parent / "static" / "workroom"
