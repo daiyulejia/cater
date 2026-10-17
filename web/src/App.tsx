@@ -1082,7 +1082,8 @@ function App() {
               goal: task.goal, status: task.status, status_label: task.status_label }
               : item.team?.enabled && task.team?.enabled && item.latest_seq === task.latest_seq && item.team.revision === task.team.revision
                 && item.team.status === task.team.status && item.team.pending_count === task.team.pending_count
-                ? { ...item, team: { ...task.team, ...item.team } } : item
+                ? { ...item, team: { ...task.team, ...item.team,
+                  effects_pending_count: item.team.effects_pending_count } } : item
             return summaryOrder(merged, task) >= 0 ? merged : task
           }), ...received.values()]
         })

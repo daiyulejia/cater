@@ -1,5 +1,5 @@
 import type { Artifact } from './Artifact'
-import { isTeamHost, teamRunStatus, teamStatus } from './team'
+import { isTeamHost, teamEffectsPendingCount, teamRunStatus, teamStatus } from './team'
 import type { TeamActivity, TeamEvent, TeamReview, TeamState } from './team'
 import { NativeBrowserReceipt } from './browserReport'
 import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle, nativeProjectHistoryReceiptStatus, nativeProjectRestoreReceiptStatus, projectHistoryReadArguments } from './conversationActivityState'
@@ -185,9 +185,11 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
 export function TeamProgressPanel({ team, events, names, executionState = 'running', activity }: { team: TeamState; events: TeamEvent[]; names: Record<string, string>; executionState?: ExecutionControl['state']; activity?: TeamActivity }) {
   // App resolves event details first, then overlays any newer summary facts.
   const runs = team.runs
+  const effects = teamEffectsPendingCount(team)
   return <section aria-label="团队进度" className="mb-5 space-y-3 text-xs leading-5 text-[#52766d] [overflow-wrap:anywhere]">
     <h2 className="text-sm font-semibold text-[#294a40]">团队进度</h2>
     <p aria-label="团队执行状态" className="font-semibold">{executionState === 'paused' ? '已暂停后续执行' : executionState === 'cancelled' ? '已取消后续执行' : teamStatus({ ...team, runs }, activity)}</p>
+    {effects !== undefined && effects !== 0 && <p>{effects === null ? '操作状态待核对。' : `待核对操作：${effects} 项。`}操作影响尚未确认，请先核对实际结果，勿直接重试。</p>}
     <ModelUsagePanel events={events} names={names} />
     {team.status === 'done' && <p>店长的交付结论，验证范围以交付说明与实际回执为准。</p>}
     <details key={`objective:${team.revision}`}>

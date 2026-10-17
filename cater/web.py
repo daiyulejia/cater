@@ -29,7 +29,7 @@ from .events import Actor as EventActor, Event
 from .fold import TaskSnapshot
 from .ladder import decision_ladder
 from .messages import message_relation
-from .mcp import McpPool
+from .mcp import McpPool, read_only_call
 from .path import organization_path
 from .review import build_review
 from .runtime import DriverHealth, ExecutionScopeChanged, Runtime
@@ -1942,6 +1942,8 @@ def make_handler(
             with summaries_lock, self._runtime() as rt, _read_snapshot(rt):
                 activity_revision, activity_rows = activities.snapshot()
                 head = rt.log.head_hash()
+                attention_unavailable = any(row.get("team", {}).get("effects_pending_count", 0) is None
+                                            for row in summaries_base)
                 now = time.time()
                 lease_version, deadline = summaries_lease_version, summaries_deadline
                 if summaries_head != head or now > deadline:
@@ -1960,14 +1962,15 @@ def make_handler(
                     f"summaries-v1:{head}:{activity_revision}:{lease_version}".encode()
                 ).hexdigest() + '"'
                 supplied = self.headers.get("If-None-Match", "")
-                if any(tag.strip().removeprefix("W/") in {etag.removeprefix("W/"), "*"}
-                       for tag in supplied.split(",")):
+                if not attention_unavailable and any(
+                        tag.strip().removeprefix("W/") in {etag.removeprefix("W/"), "*"}
+                        for tag in supplied.split(",")):
                     self.send_response(HTTPStatus.NOT_MODIFIED)
                     self.send_header("ETag", etag)
                     self.send_header("Cache-Control", "private, no-cache")
                     self.end_headers()
                     return
-                if summaries_head != head or summaries_lease_version != lease_version:
+                if summaries_head != head or summaries_lease_version != lease_version or attention_unavailable:
                     version = _event_version(rt)
                     stats: dict[str, Counter] = {}
                     latest: dict[str, int] = {}
@@ -2001,6 +2004,9 @@ def make_handler(
                                       {"state": "idle", "active": False, "revision": activity_revision}))
                     for row in summaries_base
                 ]
+                if any(row.get("team", {}).get("effects_pending_count", 0) is None for row in rows):
+                    # A transient diagnostic failure is not stable event-derived state.
+                    etag = None
             self._send_json({"tasks": rows}, etag=etag)
 
         def _task_payload(self, task_id: str, runner: ActivityRunner) -> dict[str, Any]:
@@ -2545,7 +2551,38 @@ def _team_enabled(rt: Runtime, task_id: str) -> bool:
 
 def _team_view(rt: Runtime, task_id: str) -> dict[str, Any] | None:
     team = getattr(rt, "team", None)
-    return team.view(task_id) if team is not None else None
+    view = team.view(task_id) if team is not None else None
+    if not view or not view.get("enabled"):
+        return view
+    from .team import EXTERNAL_EFFECT_TOOLS
+
+    try:
+        # Unsettled live work is not a fault. Reuse the engine's pending evidence,
+        # but keep this extra scan out of model context and scheduling projections.
+        pending = team._pending_operations(task_id)
+        count = len({row["started_seq"] for row in pending
+            if row["name"] in EXTERNAL_EFFECT_TOOLS and not read_only_call(row)
+            and (row["outcome"] == "unknown" or "finished_seq" in row)})
+    except Exception:
+        _LOGGER.warning("Cannot project unresolved operation state.")
+        count = None
+    return {**view, "effects_pending_count": count}
+
+
+def _effects_attention_label(team, activity=None):
+    if not isinstance(team, dict) or "effects_pending_count" not in team:
+        return None
+    count = team["effects_pending_count"]
+    if type(count) is not int or not 0 <= count <= 2 ** 53 - 1:
+        return "操作状态待核对"
+    if count == 0:
+        return None
+    if activity and activity.get("active"):
+        if activity.get("state") == "queued":
+            return "消息已排队，有操作待核对"
+        if activity.get("state") == "running":
+            return "正在处理，另有操作待核对"
+    return "有操作影响待核对"
 
 
 # Count conversational records, not inline membership notices. Keep receipt
@@ -2613,7 +2650,7 @@ def _task_summary(task: TaskSnapshot, *, version: int, latest_seq: int, conversa
         active = next((i for i in range(len(runs) - 1, -1, -1)
                        if runs[i].get("revision", team.get("revision")) == team.get("revision")
                        and runs[i].get("status") in {"running", "started"}), None)
-        team_summary = {key: team[key] for key in ("enabled", "status", "pending_count", "revision")
+        team_summary = {key: team[key] for key in ("enabled", "status", "pending_count", "revision", "effects_pending_count")
                         if key in team}
         team_summary["runs"] = [
             {key: runs[i][key] for key in ("message_seq", "role", "status", "revision") if key in runs[i]}
@@ -2624,6 +2661,7 @@ def _task_summary(task: TaskSnapshot, *, version: int, latest_seq: int, conversa
                  "uncertain": "团队结果待核实"}.get(team.get("status"), "团队协作")
         if team.get("pending_count"):
             label = "团队有待处理消息"
+        label = _effects_attention_label(team) or label
     return {"id": task.id, "goal": team["objective"] if team and team.get("enabled") else task.goal,
             "project_id": task.project_id, "status": team["status"] if team and team.get("enabled") else task.status,
             "execution_control": control,
@@ -2645,6 +2683,8 @@ def _summary_activity(row: dict[str, Any], activity: dict[str, Any]) -> dict[str
         else:
             label = ("已收下新方向，当前轮结束后继续" if state.get("follow_up", {}).get("action") == "run"
                      else "协作已排队" if state["state"] == "queued" else "正在协作")
+    if row.get("execution_control", {}).get("state", "running") == "running":
+        label = _effects_attention_label(row.get("team"), activity) or label
     return {**row, "activity": state, "status_label": label}
 
 

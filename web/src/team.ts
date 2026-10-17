@@ -32,6 +32,7 @@ export type TeamState = {
   objective: string
   status: string
   pending_count: number
+  effects_pending_count?: number | null
   runs: TeamRun[]
   assignments: TeamAssignment[]
   reviews?: TeamReview[]
@@ -39,7 +40,7 @@ export type TeamState = {
   revision: number
 }
 
-export type TeamSummary = Pick<TeamState, 'enabled' | 'status' | 'pending_count' | 'revision'> & { runs?: TeamRun[] }
+export type TeamSummary = Pick<TeamState, 'enabled' | 'status' | 'pending_count' | 'revision' | 'effects_pending_count'> & { runs?: TeamRun[] }
 
 export type TeamActivity = { state: string; active: boolean; revision?: number; follow_up?: { action?: string } }
 
@@ -62,6 +63,7 @@ export function resolveTeamTask<T extends { goal: string; status: string; team?:
   const runs = summary.team.runs ?? []
   return { ...detail, goal: summary.goal, status: summary.status,
     team: { ...detail.team, ...summary.team, objective: summary.goal, runs,
+      effects_pending_count: summary.team.effects_pending_count,
       reviews: newObjective ? [] : detail.team.reviews,
       checkpoint: newObjective ? '新目标已收到，详细记录正在同步。' : '详细记录正在同步。' } }
 }
@@ -179,7 +181,20 @@ const currentTeamRuns = (team: TeamSummary) => (team.runs ?? []).filter((run) =>
 const isRunningTeamRun = (run: TeamRun) => ['running', 'started'].includes(run.status ?? '')
 export const hasActiveTeamMessages = (team: TeamSummary) => team.pending_count > 0 || currentTeamRuns(team).some(isRunningTeamRun)
 
+export function teamEffectsPendingCount(team: TeamSummary): number | null | undefined {
+  const count = team.effects_pending_count
+  if (count === undefined) return undefined
+  return typeof count === 'number' && Number.isSafeInteger(count) && count >= 0 ? count : null
+}
+
 export function teamStatus(team: TeamSummary, activity?: TeamActivity): string {
+  const effects = teamEffectsPendingCount(team)
+  if (effects === null) return '操作状态待核对'
+  if (effects !== undefined && effects > 0) {
+    if (activity?.active && activity.state === 'queued') return '消息已排队，有操作待核对'
+    if (activity?.active && activity.state === 'running') return '正在处理，另有操作待核对'
+    return '有操作影响待核对'
+  }
   const followUp = team.status === 'done'
   const processing = followUp ? '正在处理后续消息' : '正在处理消息'
   if (activity?.active) {
