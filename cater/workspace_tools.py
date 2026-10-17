@@ -334,10 +334,12 @@ class WorkspaceExecutor:
               "limit": {"type": "integer", "minimum": 1, "maximum": MAX_MATCHES, "default": 50}}, ["query"]),
         ]
         if self.policy.mode in {"edit", "execute"}:
-            definitions.append(("workspace_write", "Atomically write UTF-8 text. To update an existing file, first workspace_read it and pass that result's sha256 as expected_sha256. Null is ONLY for creating a file that does not exist. On conflict, read again and reconcile before retrying; never blindly overwrite.",
+            definitions.append(("workspace_write", "Atomically write UTF-8 text. To update an existing file, first workspace_read it and pass that result's sha256 as expected_sha256. Null is ONLY for creating a file that does not exist. Optional old_text replaces exactly one literal occurrence with content (which may be empty); it requires a non-null hash and never creates a file. On conflict, read again and reconcile before retrying; never blindly overwrite.",
                                 {"path": relative, "content": {**string, "maxLength": MAX_FILE_BYTES}, "expected_sha256": {
                                     "type": ["string", "null"], "maxLength": 64, "description":
-                                    "Copy sha256 from the latest workspace_read of this file; null only if the file does not exist."}},
+                                    "Copy sha256 from the latest workspace_read of this file; null only if the file does not exist."},
+                                 "old_text": {**string, "minLength": 1, "maxLength": MAX_FILE_BYTES,
+                                    "description": "Optional exact old text to replace once. Include enough context to match uniquely; no regex or whitespace normalization. content then contains only the replacement."}},
                                 ["path", "content", "expected_sha256"]))
         if self.policy.mode == "execute":
             definitions.append(("workspace_run", "Run a trusted host program alias (not an OS sandbox or task acceptance). Long stdout/stderr previews have separate excerpt and tail_excerpt (preview_mode=head_tail); the missing middle is not saved. complete means capture finished, not that the preview is the full log.",
@@ -360,6 +362,21 @@ class WorkspaceExecutor:
             invalid = sorted(key for key, field in schema["properties"].items()
                              if isinstance(arguments, dict) and key in arguments
                              and not _argument_valid(arguments[key], field))
+            if name == "workspace_write" and isinstance(arguments, dict) and "old_text" in arguments:
+                expected = arguments.get("expected_sha256")
+                if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+                    invalid.append("expected_sha256")
+                for key in ("old_text", "content"):
+                    value = arguments.get(key)
+                    if isinstance(value, str):
+                        try:
+                            size = len(value.encode("utf-8"))
+                        except UnicodeError:
+                            invalid.append(key)
+                        else:
+                            if size > MAX_FILE_BYTES:
+                                invalid.append(key)
+                invalid = sorted(set(invalid))
             if (not isinstance(arguments, dict) or arguments.keys() - schema["properties"].keys()
                     or not set(schema["required"]) <= arguments.keys() or invalid):
                 # Only this pure check can assert that no workspace executor was dispatched.
@@ -496,7 +513,7 @@ class WorkspaceExecutor:
         return {"path": self._relative(target), "matches": matches, "scanned_bytes": scanned,
                 "truncated": truncated}
 
-    def _write(self, path: str, content: str, expected_sha256: str | None) -> dict:
+    def _write(self, path: str, content: str, expected_sha256: str | None, old_text: str | None = None) -> dict:
         # Validate the entire request before creating even a parent directory.
         target = self.policy.root.joinpath(*_parts(path))
         _directories(self.policy.root)
@@ -511,10 +528,32 @@ class WorkspaceExecutor:
         if expected_sha256 is not None and (not isinstance(expected_sha256, str)
                                            or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)):
             _deny("invalid_arguments", "expected_sha256 must be null or a lowercase SHA-256 digest.")
+        if old_text is not None:
+            if expected_sha256 is None or not isinstance(old_text, str) or not old_text:
+                _deny("invalid_arguments", "old_text requires nonempty literal text and the existing file's sha256.")
+            if len(old_text.encode("utf-8")) > MAX_FILE_BYTES:
+                _deny("too_large", "Old text exceeds the file size limit.")
+            _text(old_text.encode("utf-8"))
         with _write_lock(self.policy.root):
             # _path permits missing parents only for a validated creation request.
-            target = self._path(path, create_parents=expected_sha256 is None)
-            original = self._check_expected(target, expected_sha256)
+            try:
+                target = self._path(path, create_parents=expected_sha256 is None)
+                original = self._check_expected(target, expected_sha256)
+                if old_text is not None:
+                    before, signature = _read_file(target)
+                    if signature != original or hashlib.sha256(before).hexdigest() != expected_sha256:
+                        _deny("conflict", "File changed before preparing the edit.")
+                    text = _text(before)
+                    index = text.find(old_text)
+                    if index < 0 or text.find(old_text, index + 1) >= 0:
+                        _deny("conflict", "old_text must match exactly once, including overlapping matches. Read the file and use unique context.")
+                    body = (text[:index] + content + text[index + len(old_text):]).encode("utf-8")
+                    if len(body) > MAX_FILE_BYTES:
+                        _deny("too_large", "Edited content exceeds the file size limit.")
+            except FileNotFoundError:
+                if expected_sha256 is not None:
+                    _deny("conflict", "Expected file or parent no longer exists. Read the correct workspace path before editing.")
+                raise
             fd, temporary = tempfile.mkstemp(prefix=".workspace-tmp-", dir=target.parent)
             staging = Path(temporary)
             try:
@@ -538,7 +577,8 @@ class WorkspaceExecutor:
                 if os.path.lexists(staging):
                     staging.unlink()
         return {"path": self._relative(target), "sha256": hashlib.sha256(body).hexdigest(),
-                "bytes": len(body), "created": original is None, "truncated": False}
+                "bytes": len(body), "created": original is None, "truncated": False,
+                **({"replacements": 1, "before_sha256": expected_sha256} if old_text is not None else {})}
 
     def _check_expected(self, path: Path, expected: str | None) -> tuple | None:
         try:

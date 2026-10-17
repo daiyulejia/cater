@@ -437,7 +437,15 @@ class WorkspaceService:
     @staticmethod
     def _public_arguments(name, arguments):
         # Persist file identities and command parameters, but not a second copy of source bodies.
-        public = {key: value for key, value in arguments.items() if key != "content"}
+        excluded = {"content", "old_text"} if name == "workspace_write" else {"content"}
+        public = {key: value for key, value in arguments.items() if key not in excluded}
+        if name == "workspace_write" and isinstance(arguments.get("old_text"), str):
+            try:
+                before = arguments["old_text"].encode("utf-8")
+            except UnicodeError:
+                public["old_text_encoding"] = "invalid_utf8"
+            else:
+                public.update(old_text_bytes=len(before), old_text_sha256=hashlib.sha256(before).hexdigest())
         try:
             json.dumps(public, ensure_ascii=False).encode("utf-8")
         except UnicodeEncodeError:
