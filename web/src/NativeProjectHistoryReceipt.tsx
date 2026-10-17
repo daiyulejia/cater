@@ -1,4 +1,5 @@
-import { nativeProjectHistoryReceiptStatus } from './conversationActivityState'
+import { nativeProjectHistoryReceiptStatus, projectHistoryArchiveReadEvent } from './conversationActivityState'
+import { NativeArtifactReceipt } from './NativeArtifactReceipt'
 import type { TeamEvent } from './team'
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -63,14 +64,18 @@ function DeliveryContent({ content }: { content: string }) {
 
 export function NativeProjectHistoryReceipt({ event }: { event: TeamEvent }) {
   const status = nativeProjectHistoryReceiptStatus(event)
-  if (!['历史目录已读取', '历史交付说明已读取', '历史文件已读取'].includes(status)) return null
+  const archiveEvent = projectHistoryArchiveReadEvent(event)
+  if (!archiveEvent && !['历史目录已读取', '历史交付说明已读取', '历史文件已读取'].includes(status)) return null
   const result = record(event.payload.result), index = result.section === 'index', source = record(result.source)
   const rows = index ? result.entries as Record<string, unknown>[] : []
   const content = typeof result.content === 'string' ? result.content : ''
   const fullDelivery = result.section === 'delivery' && result.offset === 0 && result.has_more === false
   const end = (result.offset as number) + Array.from(content).length
   return <div className="mt-1 min-w-0 space-y-2 [overflow-wrap:anywhere]">
-    {index ? <>
+    {archiveEvent ? <>
+      <p className="font-semibold">同项目历史工程包 · {text(source.filename, 180)}</p>
+      <NativeArtifactReceipt event={archiveEvent} />
+    </> : index ? <>
       {rows.length === 0 && <p>当前项目暂无历史交付。</p>}
       <ul aria-label="同项目历史交付" className="space-y-3">{rows.map(row => <li key={row.delivery_seq as number} className="min-w-0">
         <p className="whitespace-pre-wrap"><strong>历史摘要：</strong>{text(row.summary_excerpt, 640)}{row.summary_truncated === true && '（摘要节选）'}</p>
@@ -102,6 +107,7 @@ export function NativeProjectHistoryReceipt({ event }: { event: TeamEvent }) {
             {typeof source.artifact_seq === 'number' && <p>历史文件事件 #{source.artifact_seq}</p>}
             {text(source.author, 128) && <p>当时发布成员：{text(source.author, 128)}</p>}
             {typeof source.content_sha256 === 'string' && /^[a-f0-9]{64}$/i.test(source.content_sha256) && <p className="font-mono">文件 SHA-256：{source.content_sha256}</p>}
+            {archiveEvent && <p className="font-mono">文件事件 SHA-256：{text(source.event_hash, 64)}</p>}
           </>}
         </div>)}
       </div>

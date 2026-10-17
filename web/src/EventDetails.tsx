@@ -1,6 +1,6 @@
 import { BrowserReport, NativeBrowserReceipt } from './browserReport'
 import { isTeamHost, isTeamRecovery } from './team'
-import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle, nativeProjectHistoryReceiptStatus } from './conversationActivityState'
+import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle, nativeProjectHistoryReceiptStatus, projectHistoryReadArguments } from './conversationActivityState'
 import { NativeSkillReceipt } from './TeamProgressPanel'
 import { usageSummary } from './modelUsage'
 import { containedNote, responseDiagnostics, responseDiagnosticFields, requestFailureFields, stageNote } from './responseDiagnostics'
@@ -468,7 +468,7 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
 }
 
 export function EventDetails({ event: original, actorName, contextEvents = [] }: EventDetailsProps) {
-  const event = frozenReadArguments(original, contextEvents)
+  const event = projectHistoryReadArguments(frozenReadArguments(original, contextEvents), contextEvents)
   const { fields, status, note } = describe(event, actorName)
   // Model and run diagnostics never expose provider metadata or raw exceptions, even in developer details.
   const developerEvent = event.type === 'team.model_called' ? { ...event, payload: usageSummary([event]).calls[0] ?? {} }

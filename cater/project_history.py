@@ -11,6 +11,7 @@ from .artifacts import safe_filename
 from .events import Actor, GENESIS_HASH
 from .json_fields import UNAMBIGUOUS_OBJECT_SQL
 from .tool_protocol import json_utf8
+from .workspace_archive import MAX_ARCHIVE_BYTES, portable_path, validate_manifest
 
 
 TOOL = "read_project_history"
@@ -137,10 +138,18 @@ class ProjectHistory:
     def public_arguments(arguments):
         if not isinstance(arguments, dict):
             return {}
-        return {key: value for key, value in arguments.items()
+        result = {key: value for key, value in arguments.items()
                 if (key == "section" and isinstance(value, str) and value in {"index", "delivery", "artifact"}
                     or key in {"as_of_seq", "before_seq", "limit", "delivery_seq", "artifact_seq", "offset", "length"}
                     and type(value) is int and 0 <= value <= 2 ** 63 - 1)}
+        if arguments.get("section") == "artifact" and "path" in arguments:
+            try:
+                path = portable_path(arguments["path"])
+                if len(path) <= 2048:
+                    result["path"] = path
+            except ValueError:
+                pass
+        return result
 
     @staticmethod
     def _refs(value, delivery_seq):
@@ -247,7 +256,7 @@ class ProjectHistory:
                 "historical_only": True, "note": NOTE}
 
     def read(self, task_id, arguments, *, expected_project_id=None):
-        allowed = {"section", "as_of_seq", "before_seq", "limit", "delivery_seq", "artifact_seq", "offset", "length"}
+        allowed = {"section", "as_of_seq", "before_seq", "limit", "delivery_seq", "artifact_seq", "path", "offset", "length"}
         if (not isinstance(arguments, dict) or set(arguments) - allowed or not isinstance(arguments.get("section"), str)
                 or arguments["section"] not in {"index", "delivery", "artifact"}
                 or "as_of_seq" in arguments and type(arguments["as_of_seq"]) is not int
@@ -255,7 +264,7 @@ class ProjectHistory:
             return _rejected("invalid_project_history_arguments")
         section = arguments["section"]
         keys = {"section", "as_of_seq", "before_seq", "limit"} if section == "index" else {
-            "section", "as_of_seq", "delivery_seq", "offset", "length", *({"artifact_seq"} if section == "artifact" else set())}
+            "section", "as_of_seq", "delivery_seq", "offset", "length", *({"artifact_seq", "path"} if section == "artifact" else set())}
         if set(arguments) - keys:
             return _rejected("invalid_project_history_arguments")
         try:
@@ -265,6 +274,8 @@ class ProjectHistory:
                                     **({"limit": 5} if "limit" not in arguments else {}))
                 return {"status": "ok", "complete": True, "section": section, **result} if result["available"] else _rejected()
             offset, length = arguments.get("offset", 0), arguments.get("length", 8000)
+            if "path" in arguments and len(portable_path(arguments["path"])) > 2048:
+                return _rejected("invalid_project_history_arguments")
             if (not _positive(arguments.get("delivery_seq")) or type(offset) is not int or offset < 0
                     or type(length) is not int or not 1 <= length <= 16000
                     or section == "artifact" and not _positive(arguments.get("artifact_seq"))):
@@ -289,12 +300,16 @@ class ProjectHistory:
                 artifact = next(self.rt.log.iter_events(task_id=event.task_id, event_types=("deliverable.published",),
                                                        after_seq=ref["seq"] - 1, before_seq=ref["seq"] + 1), None)
                 if (artifact is None or artifact.actor.kind != "agent" or artifact.payload.get("filename") != ref["filename"]
-                        or artifact.payload.get("content_sha256") != ref["content_sha256"]
-                        or not isinstance(artifact.payload.get("content"), str)
-                        or hashlib.sha256(artifact.payload["content"].encode("utf-8")).hexdigest() != ref["content_sha256"]):
+                        or artifact.payload.get("content_sha256") != ref["content_sha256"]):
                     return _rejected("project_history_content_unavailable")
-                content = artifact.payload["content"]
                 source.update(artifact_seq=artifact.seq, content_sha256=ref["content_sha256"], filename=ref["filename"], author=artifact.actor.id)
+                if artifact.payload.get("format") == "archive":
+                    return self._read_archive(artifact, arguments, catalog, source)
+                if "path" in arguments:
+                    return _rejected("invalid_project_history_arguments")
+                content = artifact.payload.get("content")
+                if not isinstance(content, str) or hashlib.sha256(content.encode("utf-8")).hexdigest() != ref["content_sha256"]:
+                    return _rejected("project_history_content_unavailable")
             if offset > len(content):
                 return _rejected("invalid_project_history_arguments")
             end = min(len(content), offset + length)
@@ -306,3 +321,29 @@ class ProjectHistory:
             return _rejected("project_history_scope_changed")
         except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
             return _rejected("invalid_project_history_arguments")
+
+    def _read_archive(self, event, arguments, catalog, source):
+        from .team_archive import read_member
+
+        if "path" not in arguments and any(key in arguments for key in ("offset", "length")):
+            return _rejected("invalid_project_history_arguments")
+        try:
+            artifact = {**event.payload, "seq": event.seq}
+            if (type(artifact.get("content_bytes")) is not int
+                    or not 0 < artifact["content_bytes"] <= MAX_ARCHIVE_BYTES
+                    or not isinstance(event.hash, str) or not _SHA.fullmatch(event.hash)):
+                return _rejected("project_history_content_unavailable")
+            validate_manifest(artifact.get("archive"))
+            if "path" in arguments:
+                value = read_member(self.rt.log, artifact, {"path": arguments["path"],
+                    "offset": arguments.get("offset", 0), "length": arguments.get("length", 8000)})
+            else:
+                value = {"status": "ok", **{key: artifact[key] for key in
+                    ("seq", "filename", "format", "content_sha256", "content_bytes", "archive")}}
+            return {"status": "ok", "complete": True, "section": "artifact", "historical_only": True,
+                    **{key: catalog[key] for key in ("as_of_seq", "as_of_hash")},
+                    "source": {**source, "format": "archive", "event_hash": event.hash},
+                    "offset": arguments.get("offset", 0), "archive_read": value, "note": NOTE}
+        except Exception:
+            # Archive/DB exceptions can contain file paths or bytes; return no partial data.
+            return _rejected("project_history_content_unavailable")

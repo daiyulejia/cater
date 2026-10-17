@@ -2,7 +2,7 @@ import type { Artifact } from './Artifact'
 import { isTeamHost, teamRunStatus, teamStatus } from './team'
 import type { TeamActivity, TeamEvent, TeamReview, TeamState } from './team'
 import { NativeBrowserReceipt } from './browserReport'
-import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle, nativeProjectHistoryReceiptStatus } from './conversationActivityState'
+import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle, nativeProjectHistoryReceiptStatus, projectHistoryReadArguments } from './conversationActivityState'
 import { TeamArtifacts } from './TeamArtifacts'
 import { ModelUsagePanel } from './ModelUsagePanel'
 import type { ExecutionControl } from './executionControl'
@@ -156,12 +156,13 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
       const finished = event.type === 'team.tool_finished' ? event : finishFor(event)
       const p = finished?.payload ?? event.payload, result = record(p.result)
       const name = excerpt(event.payload.name ?? event.payload.tool, 100) || '工具调用'
+      const historyReceipt = name === 'read_project_history' ? projectHistoryReadArguments(finished ?? event, receipts) : undefined
       const role = typeof p.role === 'string' ? p.role : event.actor.id
       const status = p.status ?? result.status ?? result.outcome
       const label = name === 'browser_check' ? nativeBrowserReceiptStatus(finished ?? event)
         : isFrozenArchiveReceipt({ ...(finished ?? event), payload: { ...event.payload, ...p } }) ? nativeFrozenArchiveReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } })
         : name === 'read_artifact' ? nativeArtifactReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } })
-        : name === 'read_project_history' ? nativeProjectHistoryReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } })
+        : historyReceipt ? nativeProjectHistoryReceiptStatus(historyReceipt)
         : isNativeMcpTool(name) ? nativeMcpReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } }, name)
         : name === 'list_skills' || name === 'read_skill' ? nativeSkillReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } }, name)
         : !finished ? '已发起，等待回执'
@@ -172,7 +173,7 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
         : ['ok', 'done', 'completed', 'succeeded', 'passed', 'success'].includes(String(status)) ? '工具已完成' : '工具结果待确认'
       return <li key={event.seq}>
         <p><strong>{isNativeMcpTool(name) ? nativeMcpToolTitle(name) : toolNames[name] ?? name}</strong> · {label} · @{names[role] ?? role}</p>
-        <ToolReceipt event={{ ...(finished ?? event), payload: { ...event.payload, ...p } }} full={full} />
+        <ToolReceipt event={historyReceipt ?? { ...(finished ?? event), payload: { ...event.payload, ...p } }} full={full} />
       </li>
     })}</ol>
   </details>

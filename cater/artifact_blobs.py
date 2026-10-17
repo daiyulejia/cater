@@ -1,7 +1,8 @@
 """Content-addressed bytes in the event database, outside event payloads.
 
-Callers must authorize access through current-group publications or exact
-immutable publications already captured in the calling group's frozen background.
+Callers must authorize access through current-group publications, exact
+immutable publications in the calling group's frozen background, or explicitly
+selected same-project historical delivery references.
 A digest is an integrity check, not an access credential.
 """
 

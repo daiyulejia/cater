@@ -173,6 +173,74 @@ function historyReferences(value: unknown, delivery: number, limit: number): val
   }) && new Set(value.map(item => item.seq)).size === value.length && new Set(value.map(item => item.filename)).size === value.length
 }
 
+// Recover host arguments only from the exact initiating event, never from the result.
+export function projectHistoryReadArguments<T extends TeamEvent>(event: T, events: TeamEvent[]): T {
+  if (!isTeamHost(event) || event.type !== 'team.tool_finished'
+    || !historyPositive(event.payload.started_seq)) return event
+  const matches = events.filter(start => start.seq === event.payload.started_seq)
+  if (!matches.length) return event
+  if ((event.payload.name ?? event.payload.tool) !== 'read_project_history'
+    && !matches.some(start => (start.payload.name ?? start.payload.tool) === 'read_project_history')) return event
+  const invalid = (): T => ({ ...event, payload: { ...event.payload, arguments: null } })
+  if (matches.length !== 1) return invalid()
+  const start = matches[0], args = start.payload.arguments
+  if (!isTeamHost(start) || start.type !== 'team.tool_started' || start.seq >= event.seq
+    || (start.payload.name ?? start.payload.tool) !== 'read_project_history'
+    || (event.payload.name ?? event.payload.tool) !== 'read_project_history'
+    || ['role', 'run_id'].some(key => !skillText(start.payload[key]) || start.payload[key] !== event.payload[key])
+    || ['call_id', 'message_seq'].some(key => Object.hasOwn(event.payload, key) && event.payload[key] !== start.payload[key])
+    || Object.hasOwn(start.payload, 'project_scope') && !historyId(start.payload.project_scope)
+    || teamToolReceipt(start, [event]) !== event
+    || args === null || typeof args !== 'object' || Array.isArray(args)) return invalid()
+  if (Object.hasOwn(event.payload, 'arguments') && (Object.keys(object(event.payload.arguments)).length !== Object.keys(object(args)).length
+    || Object.entries(object(args)).some(([key, value]) => object(event.payload.arguments)[key] !== value))
+    || Object.hasOwn(event.payload, 'project_scope') && Object.hasOwn(start.payload, 'project_scope')
+      && event.payload.project_scope !== start.payload.project_scope) {
+    return invalid()
+  }
+  return { ...event, payload: { ...event.payload,
+    ...(Object.hasOwn(event.payload, 'arguments') ? {} : { arguments: args }),
+    ...(!Object.hasOwn(event.payload, 'project_scope') && Object.hasOwn(start.payload, 'project_scope')
+      ? { project_scope: start.payload.project_scope } : {}) } }
+}
+
+export function projectHistoryArchiveReadEvent(event: TeamEvent): TeamEvent | undefined {
+  if (!isTeamHost(event) || event.type !== 'team.tool_finished'
+    || (event.payload.name ?? event.payload.tool) !== 'read_project_history') return
+  const result = object(event.payload.result), args = object(event.payload.arguments)
+  const source = object(result.source), read = object(result.archive_read)
+  if (result.status !== 'ok' || result.complete !== true || result.historical_only !== true
+    || result.section !== 'artifact' || args.section !== 'artifact'
+    || result.truncated !== undefined && result.truncated !== false || result.outcome !== undefined
+    || ![undefined, 'ok', 'completed', 'succeeded'].includes(event.payload.status as string | undefined)
+    || Object.keys(args).some(key => !['section', 'as_of_seq', 'delivery_seq', 'artifact_seq', 'path', 'offset', 'length'].includes(key))
+    || !historyId(source.project_id) || event.payload.project_scope !== source.project_id
+    || !historyId(source.task_id) || !historyId(source.author)
+    || !historyPositive(source.delivery_seq) || args.delivery_seq !== source.delivery_seq || !skillHash(source.delivery_hash)
+    || !historyPositive(source.artifact_seq) || args.artifact_seq !== source.artifact_seq || source.artifact_seq >= source.delivery_seq
+    || !skillCount(result.as_of_seq) || result.as_of_seq < source.delivery_seq || result.as_of_seq >= event.seq
+    || !skillHash(result.as_of_hash) || args.as_of_seq !== undefined && args.as_of_seq !== result.as_of_seq
+    || result.as_of_seq === source.delivery_seq && result.as_of_hash !== source.delivery_hash
+    || source.format !== 'archive' || !skillHash(source.content_sha256) || !skillHash(source.event_hash)
+    || typeof source.filename !== 'string' || !source.filename.endsWith('.zip') || source.filename.includes('/')
+    || !portableArchivePart(source.filename) || new TextEncoder().encode(source.filename).length > 180
+    || !skillCount(result.offset) || result.offset !== (args.offset ?? 0)
+    || Object.hasOwn(args, 'offset') && !skillCount(args.offset)
+    || Object.hasOwn(args, 'length') && (!historyPositive(args.length) || args.length > 16000)
+    || ['content', 'total_chars', 'has_more', 'next_offset', 'read_range'].some(key => Object.hasOwn(result, key))) return
+  const member = Object.hasOwn(args, 'path')
+  if (member ? typeof args.path !== 'string' || Array.from(args.path).length > 2048
+      || read.artifact_seq !== source.artifact_seq || read.archive_sha256 !== source.content_sha256 || read.path !== args.path
+    : read.seq !== source.artifact_seq || read.filename !== source.filename || read.format !== 'archive'
+      || read.content_sha256 !== source.content_sha256 || ['offset', 'length'].some(key => Object.hasOwn(args, key))) return
+  const adapted: TeamEvent = { ...event, payload: { name: 'read_artifact', status: event.payload.status,
+    arguments: { artifact_seq: source.artifact_seq, ...(member ? { path: args.path,
+      ...(Object.hasOwn(args, 'offset') ? { offset: args.offset } : {}),
+      ...(Object.hasOwn(args, 'length') ? { length: args.length } : {}) } : {}) }, result: read } }
+  return ['工程文件清单已读取', '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对']
+    .includes(nativeArtifactReceiptStatus(adapted)) ? adapted : undefined
+}
+
 export function nativeProjectHistoryReceiptStatus(event: TeamEvent): string {
   if (!isTeamHost(event)) return '历史回执来源待核对'
   if ((event.payload.name ?? event.payload.tool) !== 'read_project_history') return '历史回执待核对'
@@ -181,6 +249,13 @@ export function nativeProjectHistoryReceiptStatus(event: TeamEvent): string {
   if (event.type !== 'team.tool_finished') return uncertain
   if (result.status === 'error' && result.complete === true && result.outcome === 'not_started'
     && skillText(result.code) && skillText(result.message)) return '未开始读取历史'
+  if (Object.hasOwn(event.payload, 'arguments') && (event.payload.arguments === null
+    || typeof event.payload.arguments !== 'object' || Array.isArray(event.payload.arguments))) return uncertain
+  if (Object.hasOwn(result, 'archive_read') || object(result.source).format === 'archive') {
+    const adapted = projectHistoryArchiveReadEvent(event)
+    return adapted ? nativeArtifactReceiptStatus(adapted) : uncertain
+  }
+  if (Object.hasOwn(args, 'path')) return uncertain
   if (result.status !== 'ok' || result.complete !== true || result.historical_only !== true || result.truncated === true || result.outcome !== undefined
     || ![undefined, 'ok', 'completed', 'succeeded'].includes(event.payload.status as string | undefined)
     || !skillCount(result.as_of_seq) || !skillHash(result.as_of_hash)
@@ -565,7 +640,10 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
     const run = roleRuns.get(role), tool = latestTools.get(role)
     const toolName = tool?.payload.name ?? (isNativeMcpTool(tool?.payload.tool) || ['read_project_history', 'read_artifact', 'read_background'].includes(String(tool?.payload.tool)) ? tool?.payload.tool : undefined)
     const receipt = tool ? teamToolReceipt(tool, hosts) : undefined
-    const finished = receipt && tool && (['list_skills', 'read_skill'].includes(String(tool.payload.name)) || isNativeMcpTool(toolName) || ['read_project_history', 'read_artifact', 'read_background'].includes(String(toolName)))
+    const finished = receipt && toolName === 'read_project_history'
+      && (Object.hasOwn(object(receipt.payload.result), 'archive_read') || object(object(receipt.payload.result).source).format === 'archive')
+      ? projectHistoryReadArguments(receipt, hosts)
+      : receipt && tool && (['list_skills', 'read_skill'].includes(String(tool.payload.name)) || isNativeMcpTool(toolName) || ['read_project_history', 'read_artifact', 'read_background'].includes(String(toolName)))
       ? { ...receipt, payload: { ...tool.payload, ...receipt.payload } } : receipt
     const toolBelongs = tool && (!run?.start || tool.seq > run.start.seq
       && (run.start.payload.run_id === undefined || tool.payload.run_id === run.start.payload.run_id))

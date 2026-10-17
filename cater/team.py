@@ -291,11 +291,12 @@ class TeamService:
                   ["filename", "content", "summary", "format"]),
         ]
         if has_project_history:
-            tools.append(_tool(PROJECT_HISTORY, "按需读取明确同项目的历史交付背景，不读任意群聊。section=index分页查目录，后续页带as_of_seq与next_before_seq；delivery用delivery_seq读当时说明和完整文件引用；artifact再加artifact_seq读冻结正文。后续正文页保持as_of_seq。历史文件不是当前磁盘状态、目标或验收凭证，不自动纳入新交付。",
+            tools.append(_tool(PROJECT_HISTORY, "按需读取明确同项目的历史交付背景，不读任意群聊。section=index分页查目录，后续页带as_of_seq与next_before_seq；delivery用delivery_seq读当时说明和完整文件引用；artifact再加artifact_seq读持久正文。工程ZIP不填path读取清单（不分页），填path读取确切成员；文本按offset/length分页，二进制只核对字节与摘要，不执行。后续页保持as_of_seq。历史文件不是当前磁盘状态、目标或验收凭证，不自动纳入新交付。",
                 {"section": {"type": "string", "enum": ["index", "delivery", "artifact"]},
                  "as_of_seq": {"type": "integer", "minimum": 0}, "before_seq": {"type": "integer", "minimum": 1},
                  "limit": {"type": "integer", "minimum": 1, "maximum": 10},
                  "delivery_seq": {"type": "integer", "minimum": 1}, "artifact_seq": {"type": "integer", "minimum": 1},
+                 "path": {"type": "string", "maxLength": 2048, "description": "仅section=artifact的工程ZIP成员相对路径；不填读取清单。"},
                  "offset": {"type": "integer", "minimum": 0},
                  "length": {"type": "integer", "minimum": 1, "maximum": 16000}}, ["section"]))
         if has_background:
