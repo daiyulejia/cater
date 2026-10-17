@@ -68,6 +68,14 @@ export function NativeBrowserReceipt({ event }: { event: TeamEvent }) {
   if (!isTeamHost(event) || event.type !== 'team.tool_finished') return null
   const result = record(event.payload.result), plan = record(result.browser_plan)
   const artifacts = Array.isArray(result.checked_artifacts) ? result.checked_artifacts : []
+  const copied = Array.isArray(result.checked_files) ? result.checked_files : undefined
+  const validCopied = copied && copied.length > 0 && copied.length <= 128 && copied.every(value => {
+    const file = record(value)
+    return typeof file.path === 'string' && file.path.length > 0 && file.path.length <= 4096 && Array.from(file.path).length <= 2048
+      && count(file.bytes) && count(file.artifact_seq) && file.artifact_seq > 0
+      && artifacts.some(source => record(source).seq === file.artifact_seq)
+      && typeof file.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(file.sha256)
+  })
   return <div className="min-w-0 space-y-1 whitespace-pre-wrap [overflow-wrap:anywhere]">
     <p>检查对象为固定已发布文件副本，不代表工作区现状；回执不等于整体验收通过。</p>
     <p>{result.scope_current === false ? '历史版本：目标、控制或成果版本已变化。' : result.scope_current === true ? '回执记录时范围有效。' : '当前范围未确认。'}</p>
@@ -78,6 +86,20 @@ export function NativeBrowserReceipt({ event }: { event: TeamEvent }) {
       </li>
     })}</ul>
     {!artifacts.length && <p>被检查的文件版本未完整记录。</p>}
+    {validCopied && <details className="min-w-0">
+      <summary className="cursor-pointer">实际副本文件 · {copied.length} 项</summary>
+      <p>检查只覆盖以下依赖，不代表覆盖工程包中其他文件。</p>
+      <ul aria-label="实际浏览器副本文件" className="max-h-48 overflow-y-auto">{copied.map((value, index) => {
+        const file = record(value)
+        return <li key={index} className="min-w-0 py-1"><code>{text(file.path, 2048)}</code>
+          <p>{String(file.bytes)} 字节 · 来源成果事件 #{String(file.artifact_seq)}</p>
+          <details><summary className="cursor-pointer">内容指纹</summary>
+            <p className="font-mono">SHA-256：{String(file.sha256)}</p>
+          </details>
+        </li>
+      })}</ul>
+    </details>}
+    {result.checked_files !== undefined && !validCopied && <p>副本文件范围记录不完整，不能据此确认全部依赖。</p>}
     {text(plan.entrypoint) && <p>浏览器入口：{text(plan.entrypoint)}</p>}
     {Array.isArray(plan.steps) && <p>计划步骤：{plan.steps.length} 项；实际执行以回执步骤为准。</p>}
     <BrowserReport report={result.browser_report} conclusion={nativeBrowserReceiptStatus(event)} />

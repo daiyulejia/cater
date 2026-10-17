@@ -20,6 +20,7 @@ from .review_contract import receipt_context
 
 PLAN_FILE = ".cater-browser-check.json"
 MAX_BROWSER_STEPS = 128
+RELATIVE_FILES_LAYOUT = "relative_paths_v1"
 ACTION_FIELDS = {
     "click": {"selector": 500}, "press": {"key": 50},
     "click_at": {"selector": 500, "x": None, "y": None},
@@ -37,13 +38,29 @@ def validate_filenames(filenames: list[str]) -> None:
         raise ValueError("浏览器检查只支持名称安全且不重复的提交文件。")
 
 
-def normalize_plan(raw: object, filenames: list[str]) -> dict:
+def validate_browser_paths(filenames: list[str]) -> None:
+    from .workspace_archive import _paths, portable_path
+
+    if not isinstance(filenames, list) or not 1 <= len(filenames) <= 128:
+        raise ValueError("浏览器检查需要一至128个明确文件。")
+    for name in filenames:
+        portable_path(name)
+        if any(candidate.startswith(".") or re.search(r"[%#]", candidate)
+               for part in name.split("/") for candidate in (part, unicodedata.normalize("NFKC", part))):
+            raise ValueError("浏览器依赖路径不支持隐藏段、百分号或井号；请明确选择可检查的页面依赖。")
+    _paths(filenames)
+
+
+def normalize_plan(raw: object, filenames: list[str], *, relative_paths: bool = False) -> dict:
     if not isinstance(raw, dict) or set(raw) != {"entrypoint", "steps"}:
         raise ValueError("浏览器检查须包含 entrypoint 和 steps。")
     entry = raw["entrypoint"]
     if not isinstance(entry, str) or entry not in filenames or not entry.lower().endswith((".html", ".htm")):
         raise ValueError("检查入口必须是本次提交的 HTML 文件。")
-    validate_filenames(filenames)
+    if relative_paths:
+        validate_browser_paths(filenames)
+    else:
+        validate_filenames(filenames)
     steps = raw["steps"]
     if not isinstance(steps, list) or not 1 <= len(steps) <= MAX_BROWSER_STEPS:
         observed = len(steps) if isinstance(steps, list) else type(steps).__name__
@@ -76,6 +93,8 @@ def normalize_plan(raw: object, filenames: list[str]) -> dict:
     if not any(s["action"].startswith("assert_") for s in steps):
         raise ValueError("检查必须包含可失败的行为断言，打开页面不算通过。")
     result = {**raw, "files": filenames}
+    if relative_paths:
+        result["files_layout"] = RELATIVE_FILES_LAYOUT
     if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 65536:
         raise ValueError("浏览器检查计划过大。")
     return result

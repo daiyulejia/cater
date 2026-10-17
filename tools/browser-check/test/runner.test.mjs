@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
-import { validatePlan, safeBasename, serializeReport } from '../runner.mjs';
+import { validatePlan, safeBasename, safeRelativePath, serializeReport } from '../runner.mjs';
 
 const RUNNER = fileURLToPath(new URL('../runner.mjs', import.meta.url));
 const PLAN = '.cater-browser-check.json';
@@ -20,6 +20,66 @@ document.querySelector('#name').onkeydown = event => { if (event.key === 'Enter'
 </script></body></html>`;
 const assertion = (expression = 'true', label = '检查实际结果') => ({ action: 'assert_js', label, expression });
 const planFor = (steps = [assertion()], files = ['index.html']) => ({ entrypoint: 'index.html', files, steps });
+const relativePlan = (files = ['pages/index.html'], steps = [assertion()]) => ({
+  files_layout: 'relative_paths_v1', entrypoint: files[0], files, steps,
+});
+
+test('relative path policy checks original and NFKC segments with exact bounds', () => {
+  const valid = ['pages/index.html', '资源 目录/a b.png', "assets/it's+ok.js", 'a/'.repeat(31) + 'b',
+    'a'.repeat(240), '图'.repeat(80), '😀'.repeat(60), 'a'.repeat(239) + '/x',
+    [...Array(8).fill('a'.repeat(240)), 'b'.repeat(120)].join('/')];
+  for (const name of valid) assert.equal(safeRelativePath(name), true, name);
+  const invalid = ['', '.', '..', '/a', 'a/', 'a//b', 'a/./b', 'a/../b', 'a\\b', 'C:/a', 'c:a',
+    '//server/a', '.hidden/a', 'a/.hidden', 'a/x.', 'a/x ', 'a/ x', 'a/\tbad',
+    'a/%2e%2e/b', 'a/x#y', 'a/x%y', 'a/x~1', 'a/x~9.txt', 'a/\ud800',
+    'a/'.repeat(32) + 'b', 'a'.repeat(241), '图'.repeat(81), '😀'.repeat(61),
+    [...Array(8).fill('a'.repeat(240)), 'b'.repeat(121)].join('/')];
+  for (const c of ['\0', '\x7f', '\u0085', '\u200d', '\ufeff', '\ue000', '\uffff', '\u0378',
+    '\\', ':', '*', '?', '"', '<', '>', '|', '%', '#', '\uff0f', '\uff3c', '\uff1a']) invalid.push(`a/x${c}y`);
+  for (const device of ['CON', 'prn', 'AUX', 'nul', 'CONIN$', 'conout$',
+    ...Array.from({ length: 9 }, (_, i) => `COM${i + 1}`),
+    ...Array.from({ length: 9 }, (_, i) => `LPT${i + 1}`), 'COM¹', 'COM²', 'LPT³', 'ＣＯＮ', 'ＣＯＭ１']) {
+    invalid.push(`a/${device}`, `${device}/x`, `a/${device}.txt`, `a/${device} .txt`);
+  }
+  invalid.push('a/．hidden', 'a/x．', 'a/\u00a0x', 'a/x\u00a0', 'a/x～１');
+  for (const name of invalid) assert.equal(safeRelativePath(name), false, JSON.stringify(name));
+  for (const value of [null, undefined, [], {}, 12]) assert.equal(safeRelativePath(value), false);
+});
+
+test('relative plan exact schema, entry, limits and directory/leaf aliases', () => {
+  const good = relativePlan(['pages/index.html', 'pages/app.js', 'assets/x.png']);
+  assert.equal(validatePlan(good), good);
+  const invalid = [
+    { ...good, files_layout: 'relative_paths_v2' }, { ...good, extra: true },
+    { ...good, entrypoint: 'pages/INDEX.html' }, { ...good, entrypoint: 'pages/app.js' },
+    { ...good, files: [] }, { ...good, files: Array(129).fill('a') },
+    { ...good, steps: [] }, { ...good, steps: Array.from({ length: 129 }, () => assertion()) },
+    { ...good, steps: [{ action: 'wait', label: 'wait', ms: 2001 }, assertion()] },
+  ];
+  for (const files of [
+    ['pages/index.html', 'pages/INDEX.HTML'], ['pages/index.html', 'Pages/app.js'],
+    ['pages/index.html', 'ｐａｇｅｓ/app.js'], ['pages/index.html', 'pages'],
+    ['pages/index.html', 'pages/app', 'pages/app/x.js'],
+    ['pages/index.html', 'pages/app/x.js', 'pages/app'],
+    ['pages/index.html', 'é/a.js', 'e\u0301/b.js'],
+    ['pages/index.html', 'assets/K.js', 'assets/K.js'],
+    ['pages/index.html', '.hidden/a.js'], ['pages/index.html', '%2e%2e/a.js'],
+    ['pages/index.html', 'CON/a.js'],
+  ]) invalid.push({ ...good, files });
+  for (const plan of invalid) assert.throws(() => validatePlan(plan));
+  assert.doesNotThrow(() => validatePlan(relativePlan(['index.html',
+    ...Array.from({ length: 127 }, (_, i) => `assets/file${i}.js`)], Array.from({ length: 128 }, () => assertion()))));
+  // Preserve legacy NFC-only aliases and its original basename policy, even where v1 is stricter.
+  for (const name of ['CONIN$.txt', 'x~1.txt', 'x\u200d.txt']) {
+    assert.equal(safeBasename(name), true);
+    assert.doesNotThrow(() => validatePlan(planFor(undefined, ['index.html', name])));
+    assert.equal(safeRelativePath(name), false);
+  }
+  assert.doesNotThrow(() => validatePlan(planFor(undefined, ['index.html', 'K.txt', 'Ｋ.txt'])));
+  assert.throws(() => validatePlan({ ...good, files_layout: undefined }));
+  assert.throws(() => validatePlan({ ...good, files_layout: null }));
+  assert.throws(() => validatePlan({ ...good, files_layout: false }));
+});
 
 test('128 observed assertions fit the host capture without losing results', () => {
   const report = { outcome: 'passed', plan_sha256: 'a'.repeat(64), counts: { page_errors: 0 },
@@ -67,7 +127,10 @@ async function temporary(t) {
 async function fixture(t, plan = planFor(), body = html, extras = {}) {
   const directory = await temporary(t);
   await writeFile(path.join(directory, 'index.html'), body);
-  for (const [name, content] of Object.entries(extras)) await writeFile(path.join(directory, name), content);
+  for (const [name, content] of Object.entries(extras)) {
+    await mkdir(path.dirname(path.join(directory, name)), { recursive: true });
+    await writeFile(path.join(directory, name), content);
+  }
   await writeFile(path.join(directory, PLAN), JSON.stringify(plan));
   return directory;
 }
@@ -100,6 +163,199 @@ function invoke(directory, { runner = RUNNER, env = {}, args = ['--plan', PLAN] 
     });
   });
 }
+
+test('portable URL punctuation loads exactly selected flat and nested dependencies', async t => {
+  for (const relative of [false, true]) {
+    for (const name of ['app+v1.js', 'app@v1.js']) {
+      await t.test(`${relative ? 'relative' : 'flat'} ${name}`, async t => {
+        const entrypoint = relative ? 'site/index+@.html' : 'index.html';
+        const dependency = relative ? `site/${name}` : name;
+        const plan = { entrypoint, files: [entrypoint, dependency], steps: [assertion('globalThis.loaded === 7')],
+          ...(relative ? { files_layout: 'relative_paths_v1' } : {}) };
+        const page = `<!doctype html><script src="${name}"></script>`;
+        const directory = await fixture(t, plan, page, {
+          ...(relative ? { [entrypoint]: page } : {}), [dependency]: 'globalThis.loaded=7;',
+        });
+        const result = await invoke(directory);
+        assert.equal(result.code, 0, JSON.stringify(result));
+        assert.equal(result.report.outcome, 'passed');
+        assert.equal(result.report.counts.blocked_requests, 0);
+      });
+    }
+  }
+});
+
+const nestedFiles = ['页面 dir/index page.html', '页面 dir/js/app.js', '页面 dir/js/value.js',
+  '页面 dir/css/style sheet.css', '页面 dir/images/pixel image.png'];
+const nestedBody = `<!doctype html><meta charset="utf-8">
+<link rel="stylesheet" href="css/style%20sheet.css">
+<button id="start">Start</button><output id="score">0</output>
+<img id="pixel" src="images/pixel%20image.png">
+<script type="module" src="js/app.js"></script>`;
+const nestedAssets = {
+  [nestedFiles[0]]: nestedBody,
+  [nestedFiles[1]]: `import { value } from './value.js';
+    document.querySelector('#start').onclick = () => document.querySelector('#score').textContent = String(value);`,
+  [nestedFiles[2]]: 'export const value = 7;',
+  [nestedFiles[3]]: '#start { color: rgb(12, 34, 56); background-image: url("../images/pixel%20image.png"); }',
+  [nestedFiles[4]]: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=', 'base64'),
+};
+const nestedSteps = [
+  { action: 'click', label: 'nested module interaction', selector: '#start' },
+  { action: 'assert_text', label: 'imported value', selector: '#score', text: '7' },
+  assertion(`getComputedStyle(document.querySelector('#start')).color === 'rgb(12, 34, 56)'`),
+  assertion(`() => { const img = document.querySelector('#pixel'); return img.complete && img.naturalWidth === 1 && img.naturalHeight === 1; }`),
+];
+
+test('real Chromium: v1 nested HTML, module imports, CSS and PNG visibly affect the page', async t => {
+  const plan = relativePlan(nestedFiles, nestedSteps);
+  const directory = await fixture(t, plan, html, nestedAssets);
+  // Unselected entries must never be inspected or served.
+  await symlink(directory, path.join(directory, 'unselected-link'), process.platform === 'win32' ? 'junction' : 'dir');
+  const { code, report } = await invoke(directory);
+  assert.equal(code, 0, JSON.stringify(report));
+  assert.ok(report.steps.every(step => step.status === 'passed'));
+  assert.equal(report.counts.blocked_requests, 0);
+  assert.equal(report.plan_sha256, createHash('sha256').update(await readFile(path.join(directory, PLAN))).digest('hex'));
+  const png = await readFile(path.join(directory, SHOT));
+  assert.equal(report.screenshot.sha256, createHash('sha256').update(png).digest('hex'));
+});
+
+test('real Chromium: missing allowlist dependencies fail the corresponding actual observation', async t => {
+  for (const [missing, failedIndex] of [[nestedFiles[1], 1], [nestedFiles[2], 1], [nestedFiles[3], 2], [nestedFiles[4], 3]]) {
+    await t.test(missing, async t => {
+      const plan = relativePlan(nestedFiles.filter(name => name !== missing), nestedSteps);
+      const directory = await fixture(t, plan, html, nestedAssets);
+      const { code, report } = await invoke(directory);
+      assert.equal(code, 1, JSON.stringify(report));
+      assert.equal(report.phase, 'execution');
+      assert.equal(report.steps[failedIndex].status, 'failed', JSON.stringify(report));
+      assert.ok(report.blocked_requests.some(request => request.url.endsWith(missing.split('/').map(encodeURIComponent).join('/'))));
+    });
+  }
+});
+
+test('real Chromium: v1 outbound, encoded traversal, query and unselected nested resources stay blocked', async t => {
+  const urls = ['https://external.invalid/no', 'http://192.0.2.1/no',
+    '/页面%20dir/images/%2e%2e/%2e%2e/not-allowlisted.txt', '/..%2fnot-allowlisted.txt',
+    '/页面%20dir/js%2fapp.js', '/页面%20dir/images/pixel%20image.png?query=1',
+    '/页面%20dir/.hidden.js'];
+  const steps = [...nestedSteps, assertion(`Promise.all(${JSON.stringify(urls)}.map(url => fetch(url).then(() => false, () => true))).then(values => values.every(Boolean))`)];
+  const directory = await fixture(t, relativePlan(nestedFiles, steps), html,
+    { ...nestedAssets, 'not-allowlisted.txt': 'unselected', '页面 dir/.hidden.js': 'unselected' });
+  const { code, report } = await invoke(directory);
+  assert.equal(code, 0, JSON.stringify(report));
+  assert.ok(report.counts.blocked_requests >= urls.length);
+});
+
+test('v1 refuses missing files, parent links, leaf links, hardlinks and directories before launch', async t => {
+  const outside = await temporary(t);
+  await writeFile(path.join(outside, 'index.html'), html);
+  for (const kind of ['missing', 'parent-junction', 'nested-parent-junction', 'file-symlink', 'hardlink', 'directory']) {
+    await t.test(kind, async t => {
+      const name = kind === 'nested-parent-junction' ? 'pages/deeper/index.html' : 'pages/index.html';
+      const directory = await fixture(t, relativePlan([name]));
+      if (kind === 'parent-junction') {
+        await symlink(outside, path.join(directory, 'pages'), process.platform === 'win32' ? 'junction' : 'dir');
+      } else {
+        await mkdir(path.join(directory, 'pages'));
+        if (kind === 'nested-parent-junction') {
+          await symlink(outside, path.join(directory, 'pages/deeper'), process.platform === 'win32' ? 'junction' : 'dir');
+        } else if (kind === 'file-symlink') {
+          try { await symlink(path.join(outside, 'index.html'), path.join(directory, name), 'file'); }
+          catch (error) {
+            if (error.code === 'EPERM') { t.skip('Windows account cannot create file symlinks'); return; }
+            throw error;
+          }
+        } else if (kind === 'hardlink') await link(path.join(outside, 'index.html'), path.join(directory, name));
+        else if (kind === 'directory') await mkdir(path.join(directory, name));
+      }
+      const { code, report } = await invoke(directory, { env: { PLAYWRIGHT_BROWSERS_PATH: path.join(directory, 'missing-browser') } });
+      assert.equal(code, 1, JSON.stringify(report));
+      assert.equal(report.phase, 'validation');
+      assert.equal(report.screenshot, null);
+    });
+  }
+});
+
+test('v1 invalid path plans fail validation even when Chromium is unavailable', async t => {
+  for (const files of [
+    ['index.html', '.hidden/a.js'], ['index.html', '%2e%2e/a.js'],
+    ['index.html', 'CONIN$/a.js'], ['index.html', 'LPT²/a.js'],
+    ['index.html', 'assets/a.js', 'ａｓｓｅｔｓ/b.js'],
+    ['index.html', 'assets/a.js', 'ASSETS/b.js'],
+  ]) {
+    const directory = await fixture(t, relativePlan(files));
+    const { code, report } = await invoke(directory, { env: { PLAYWRIGHT_BROWSERS_PATH: path.join(directory, 'missing-browser') } });
+    assert.equal(code, 1);
+    assert.equal(report.phase, 'validation');
+    assert.equal(report.screenshot, null);
+  }
+});
+
+test('v1 preserves the realpath cwd contract for a root junction', async t => {
+  const target = await fixture(t, relativePlan(), html, { 'pages/index.html': html });
+  const container = await temporary(t);
+  const alias = path.join(container, 'root-alias');
+  await symlink(target, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const { code, report } = await invoke(alias);
+  assert.equal(code, 0, JSON.stringify(report));
+});
+
+test('v1 rejects file and parent changes between validation, open and completed read', async t => {
+  for (const mutation of ['before-open', 'during-read', 'parent-during-read', 'hardlink-during-read']) {
+    await t.test(mutation, async t => {
+      const directory = await fixture(t, relativePlan(), html, { 'pages/index.html': html });
+      // Wrap the standard fs API in an isolated child to schedule real disk changes exactly
+      // at the read boundary; no polling race or browser dependency is involved.
+      const source = `
+        import fs from 'node:fs/promises';
+        import path from 'node:path';
+        import { syncBuiltinESMExports } from 'node:module';
+        const originalOpen = fs.open;
+        let changed = false;
+        const mutate = async filename => {
+          if (changed) return;
+          changed = true;
+          if (${JSON.stringify(mutation)} === 'parent-during-read') {
+            await fs.writeFile(path.join(path.dirname(filename), 'new-sibling'), 'changed');
+          } else if (${JSON.stringify(mutation)} === 'hardlink-during-read') {
+            await fs.link(filename, path.join(path.dirname(filename), 'new-link'));
+          } else {
+            const stat = await fs.stat(filename);
+            const bytes = await fs.readFile(filename);
+            bytes[0] ^= 1;
+            await fs.writeFile(filename, bytes);
+            await fs.utimes(filename, stat.atime, stat.mtime);
+          }
+        };
+        fs.open = async (filename, ...args) => {
+          if (!filename.endsWith(path.join('pages', 'index.html'))) return originalOpen(filename, ...args);
+          if (${JSON.stringify(mutation)} === 'before-open') await mutate(filename);
+          const handle = await originalOpen(filename, ...args);
+          const originalRead = handle.read.bind(handle);
+          handle.read = async (...readArgs) => {
+            const result = await originalRead(...readArgs);
+            if (${JSON.stringify(mutation)} !== 'before-open') await mutate(filename);
+            return result;
+          };
+          return handle;
+        };
+        syncBuiltinESMExports();
+        const { run, serializeReport } = await import(${JSON.stringify(pathToFileURL(RUNNER).href)});
+        const { report, exitCode } = await run(['--plan', ${JSON.stringify(PLAN)}]);
+        if (!changed) throw new Error('mutation hook did not execute');
+        process.stdout.write(serializeReport(report));
+        process.exitCode = exitCode;
+      `;
+      const { code, report } = await invoke(directory, { runner: '--input-type=module', args: ['--eval', source],
+        env: { PLAYWRIGHT_BROWSERS_PATH: path.join(directory, 'missing-browser') } });
+      assert.equal(code, 1, JSON.stringify(report));
+      assert.equal(report.phase, 'validation');
+      assert.match(report.error, /changed during/);
+    });
+  }
+});
 
 test('real Chromium: all action types, page expressions, assets, Unicode names, screenshot receipt', async t => {
   const steps = [

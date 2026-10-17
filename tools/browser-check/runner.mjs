@@ -72,14 +72,51 @@ export function safeBasename(value) {
     && path.basename(value) === value;
 }
 
+export function safeRelativePath(value) {
+  if (typeof value !== 'string' || !value.isWellFormed() || !value.length
+    || [...value].length > 2048) return false;
+  const segments = value.split('/');
+  return segments.length <= 32 && segments.every(segment => {
+    if (!segment.length || Buffer.byteLength(segment) > 240) return false;
+    return [segment, segment.normalize('NFKC')].every(part =>
+      part.length > 0 && part === part.trim() && !part.startsWith('.') && !part.endsWith('.')
+      && !/[\p{C}\\/:*?"<>|%#]/u.test(part) && !/~[0-9]/u.test(part)
+      && !/^(con|prn|aux|nul|conin\$|conout\$|com[1-9]|lpt[1-9])(?:[ .]|$)/i.test(part));
+  });
+}
+
+function validateRelativeFiles(files) {
+  requireThat(files.every(safeRelativePath), 'files: unsafe relative path');
+  const nodes = new Map();
+  for (const name of files) {
+    const parts = name.split('/');
+    for (let i = 1; i <= parts.length; i++) {
+      const original = parts.slice(0, i).join('/');
+      const key = original.normalize('NFKC').toLowerCase();
+      const directory = i < parts.length;
+      const previous = nodes.get(key);
+      requireThat(!previous || (previous.original === original && previous.directory && directory),
+        'files: duplicate, directory alias or file-prefix collision');
+      nodes.set(key, { original, directory });
+    }
+  }
+}
+
 export function validatePlan(plan) {
-  exactKeys(plan, ['entrypoint', 'files', 'steps'], 'plan');
+  const relative = plan?.files_layout === 'relative_paths_v1';
+  exactKeys(plan, relative ? ['entrypoint', 'files', 'steps', 'files_layout'] : ['entrypoint', 'files', 'steps'], 'plan');
   requireThat(Array.isArray(plan.files) && plan.files.length >= 1 && plan.files.length <= 128, 'files: expected 1..128 basenames');
-  requireThat(plan.files.every(safeBasename), 'files: unsafe basename');
-  const folded = plan.files.map(name => name.normalize('NFC').toLowerCase());
-  requireThat(new Set(folded).size === folded.length, 'files: duplicate basename');
-  requireThat(safeBasename(plan.entrypoint) && /\.html?$/i.test(plan.entrypoint)
-    && plan.files.includes(plan.entrypoint), 'entrypoint: expected allowlisted HTML basename');
+  if (relative) {
+    validateRelativeFiles(plan.files);
+    requireThat(safeRelativePath(plan.entrypoint) && /\.html?$/i.test(plan.entrypoint)
+      && plan.files.includes(plan.entrypoint), 'entrypoint: expected allowlisted HTML relative path');
+  } else {
+    requireThat(plan.files.every(safeBasename), 'files: unsafe basename');
+    const folded = plan.files.map(name => name.normalize('NFC').toLowerCase());
+    requireThat(new Set(folded).size === folded.length, 'files: duplicate basename');
+    requireThat(safeBasename(plan.entrypoint) && /\.html?$/i.test(plan.entrypoint)
+      && plan.files.includes(plan.entrypoint), 'entrypoint: expected allowlisted HTML basename');
+  }
   requireThat(Array.isArray(plan.steps) && plan.steps.length >= 1 && plan.steps.length <= 128, 'steps: expected 1..128 steps');
   for (const [index, step] of plan.steps.entries()) {
     const where = `step ${index + 1}`;
@@ -112,8 +149,25 @@ export function validatePlan(plan) {
   return plan;
 }
 
-async function readRegularFile(root, name, limit) {
+function sameSnapshot(a, b) {
+  return ['dev', 'ino', 'mode', 'nlink', 'size', 'mtimeNs', 'ctimeNs', 'birthtimeNs']
+    .every(key => a[key] === b[key]);
+}
+
+async function readRegularFile(root, name, limit, relative = false) {
   const filename = path.join(root, name);
+  const parents = [];
+  if (relative) {
+    let parent = root;
+    for (const segment of name.split('/').slice(0, -1)) {
+      parent = path.join(parent, segment);
+      const stat = await lstat(parent, { bigint: true });
+      requireThat(stat.isDirectory() && !stat.isSymbolicLink() && await realpath(parent) === parent,
+        `${name}: expected exact regular parent directory, no link or reparse`);
+      parents.push({ parent, stat });
+    }
+  }
+  const snapshot = relative ? await lstat(filename, { bigint: true }) : null;
   const before = await lstat(filename);
   requireThat(before.isFile() && !before.isSymbolicLink() && before.nlink === 1, `${name}: expected regular file, no symlink or hardlink`);
   requireThat(await realpath(filename) === filename, `${name}: resolved path escapes exact copied file`);
@@ -121,6 +175,8 @@ async function readRegularFile(root, name, limit) {
   const handle = await open(filename, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const opened = await handle.stat();
+    if (relative) requireThat(sameSnapshot(snapshot, await handle.stat({ bigint: true })),
+      `${name}: file changed during validation`);
     requireThat(opened.isFile() && opened.nlink === 1 && opened.ino === before.ino
       && opened.dev === before.dev && opened.size === before.size, `${name}: file changed during validation`);
     const bytes = Buffer.alloc(Math.min(limit + 1, opened.size + 1));
@@ -135,10 +191,40 @@ async function readRegularFile(root, name, limit) {
       && after.size === opened.size && after.mtimeMs === opened.mtimeMs
       && await realpath(filename) === filename && length === opened.size,
     `${name}: file changed during read`);
+    if (relative) {
+      const final = await lstat(filename, { bigint: true });
+      requireThat(final.isFile() && !final.isSymbolicLink() && final.nlink === 1n
+        && sameSnapshot(snapshot, final) && sameSnapshot(snapshot, await handle.stat({ bigint: true })),
+      `${name}: file changed during read`);
+      for (const { parent, stat } of parents) {
+        const finalParent = await lstat(parent, { bigint: true });
+        requireThat(finalParent.isDirectory() && !finalParent.isSymbolicLink()
+          && sameSnapshot(stat, finalParent) && await realpath(parent) === parent,
+        `${name}: parent directory changed during read`);
+      }
+    }
     return bytes.subarray(0, length);
   } finally {
     await handle.close();
   }
+}
+
+function artifactUrl(plan, name) {
+  const encoded = plan.files_layout === 'relative_paths_v1'
+    ? name.split('/').map(encodeURIComponent).join('/') : encodeURIComponent(name);
+  return `${ORIGIN}/${encoded}`;
+}
+
+function requestArtifactUrl(plan, value) {
+  try {
+    const url = new URL(value);
+    if (url.origin !== ORIGIN || url.username || url.password || value.includes('?') || value.includes('#')) return null;
+    const parts = url.pathname.slice(1).split('/').map(decodeURIComponent);
+    if (parts.some(part => !part || part === '.' || part === '..' || /[\\/]/u.test(part))) return null;
+    const name = parts.join('/');
+    if (!(plan.files_layout === 'relative_paths_v1' ? safeRelativePath(name) : safeBasename(name))) return null;
+    return artifactUrl(plan, name);
+  } catch { return null; }
 }
 
 async function loadInputs(argv) {
@@ -150,9 +236,10 @@ async function loadInputs(argv) {
   const files = new Map();
   let total = 0;
   for (const name of plan.files) {
-    const body = await readRegularFile(root, name, Math.min(MAX_FILE, MAX_TOTAL - total));
+    const body = await readRegularFile(root, name, Math.min(MAX_FILE, MAX_TOTAL - total),
+      plan.files_layout === 'relative_paths_v1');
     total += body.length;
-    files.set(`${ORIGIN}/${encodeURIComponent(name)}`, { body, name });
+    files.set(artifactUrl(plan, name), { body, name });
   }
   // Never follow or overwrite a pre-existing screenshot, including a link.
   try {
@@ -306,7 +393,7 @@ async function checkArtifacts(browser, inputs, report) {
   let initialRequest = true;
   let navigationViolation = false;
   let closing = false;
-  const entryUrl = `${ORIGIN}/${encodeURIComponent(plan.entrypoint)}`;
+  const entryUrl = artifactUrl(plan, plan.entrypoint);
   const block = (kind, url) => append(report, 'blocked_requests', { kind, url: clip(url, 180) }, 8);
   const routeFailure = error => {
     if (!closing) append(report, 'page_errors', `interception: ${errorText(error)}`);
@@ -331,10 +418,11 @@ async function checkArtifacts(browser, inputs, report) {
     try {
       const request = route.request();
       const url = request.url();
-      const file = files.get(url);
+      const key = requestArtifactUrl(plan, url);
+      const file = files.get(key);
       let allow = request.method() === 'GET' && Boolean(file);
       if (request.isNavigationRequest()) {
-        allow = allow && initialRequest && url === entryUrl && request.frame() === page?.mainFrame();
+        allow = allow && initialRequest && key === entryUrl && request.frame() === page?.mainFrame();
         if (allow) initialRequest = false;
       }
       if (!allow) {

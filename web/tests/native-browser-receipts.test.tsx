@@ -25,6 +25,52 @@ const result = (): Record<string, unknown> => ({
   stderr: { excerpt: 'RAW_STDERR', complete: true }, exit_code: 0, duration_ms: 83,
 })
 const finished = (value: unknown = result(), actor = host) => event(11, 'team.tool_finished', { ...started.payload, started_seq: 10, status: 'ok', result: value }, actor)
+
+test('工程检查在原回执折叠实际成员，保留ZIP版本且不暗示覆盖未选文件', () => {
+  const value = { ...result(), checked_artifacts: [{ seq: 5, filename: 'project.zip', content_sha256: hash }],
+    check_kind: 'browser', artifacts_unchanged: true,
+    browser_plan: { files_layout: 'relative_paths_v1', entrypoint: 'site/index.html', files: ['site/index.html', 'assets/pixel.png'],
+      steps: (result().browser_plan as { steps: unknown[] }).steps },
+    checked_files: [{ artifact_seq: 5, path: 'site/index.html', bytes: 83, sha256: 'b'.repeat(64) },
+      { artifact_seq: 5, path: 'assets/pixel.png', bytes: 70, sha256: 'c'.repeat(64) }] }
+  const view = render(<EventDetails event={finished(value)} />)
+  const files = within(view.container).getByLabelText('实际浏览器副本文件')
+  expect(files.closest('details')?.open).toBe(false)
+  expect(files.textContent).toContain('site/index.html')
+  expect(files.textContent).toContain('assets/pixel.png')
+  expect(view.container.textContent).toContain('不代表覆盖工程包中其他文件')
+  expect(view.container.textContent).toContain('project.zip')
+  expect(view.container.textContent).toContain('检查通过')
+  expect(view.container.textContent).not.toContain('回执不完整或不一致')
+  expect(view.container.querySelector('a, img, script')).toBeNull()
+})
+
+test.each(['missing-entry', 'unknown-source', 'duplicate-path', 'missing-hash', 'oversized', 'wrong-layout'])('工程回执%s不能显示通过', mode => {
+  const value = result()
+  value.check_kind = 'browser'; value.artifacts_unchanged = true
+  value.checked_artifacts = [{ seq: 5, filename: 'project.zip', content_sha256: hash }]
+  const file: Record<string, unknown> = { artifact_seq: 5, path: 'site/index.html', bytes: 83, sha256: hash }
+  const plan: Record<string, unknown> = { files_layout: 'relative_paths_v1', entrypoint: 'site/index.html',
+    files: ['site/index.html'], steps: (result().browser_plan as { steps: unknown[] }).steps }
+  value.browser_plan = plan
+  value.checked_files = [file]
+  if (mode === 'missing-entry') plan.entrypoint = 'site/missing.html'
+  if (mode === 'unknown-source') file.artifact_seq = 999
+  if (mode === 'duplicate-path') { value.checked_files = [file, file]; plan.files = [file.path, file.path] }
+  if (mode === 'missing-hash') delete file.sha256
+  if (mode === 'oversized') file.bytes = 17 * 1024 * 1024
+  if (mode === 'wrong-layout') plan.files_layout = 'untrusted'
+  const view = render(<EventDetails event={finished(value)} />)
+  expect(auditContent(view.container)).toContain('回执不完整或不一致')
+  expect(auditContent(view.container)).not.toContain('检查通过')
+})
+
+test.each([[], null, [null], [{ artifact_seq: 999, path: 'outside', bytes: 1, sha256: hash }],
+  [{ artifact_seq: 5, path: 'bad', bytes: -1, sha256: hash }]])('无效工程成员清单不伪装完整检查范围 %j', checked_files => {
+  const view = render(<EventDetails event={finished({ ...result(), checked_files })} />)
+  expect(view.container.textContent).toContain('副本文件范围记录不完整')
+  expect(within(view.container).queryByLabelText('实际浏览器副本文件')).toBeNull()
+})
 const team: TeamState = { enabled: true, objective: '检查交互', status: 'running', revision: 0, runs: [], assignments: [], pending_count: 0, checkpoint: '' }
 const activity = (receipt?: DetailEvent, start = started) => conversationActivity({ team, events: [
   event(1, 'team.message_received', { recipient: 'dev', kind: 'message' }, { id: 'human', kind: 'human', role: 'human' }),

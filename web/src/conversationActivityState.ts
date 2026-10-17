@@ -31,6 +31,7 @@ const string = (value: unknown) => typeof value === 'string' ? value : undefined
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const timestamp = (event?: TimedEvent) => event?.ts ? Date.parse(event.ts) : NaN
 const tools: Record<string, string> = {
+  publish_workspace_archive: '发布工程包',
   workspace_read: '读取文件', workspace_run: '运行命令', workspace_write: '写入文件', workspace_search: '查找文件',
   workspace_list: '列出目录', browser_check: '浏览器检查', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果',
   read_receipts: '核对执行回执', read_messages: '补读历史消息', read_background: '读取来源材料', read_checkpoint: '读取工作检查点', read_delivery: '读取交付说明', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件',
@@ -292,6 +293,21 @@ export function nativeBrowserReceiptStatus(event: TeamEvent): string {
   if (incomplete) return '回执不完整，结果待确认'
   if (result.outcome === 'failed') return '检查未通过'
   const artifacts = Array.isArray(result.checked_artifacts) ? result.checked_artifacts.map(object) : []
+  const copies = Array.isArray(result.checked_files) ? result.checked_files.map(object) : []
+  const copyPaths = copies.map(file => file.path)
+  const planFiles = Array.isArray(plan.files) ? plan.files : []
+  const relativeInputs = plan.files_layout === 'relative_paths_v1'
+    && result.check_kind === 'browser' && result.artifacts_unchanged === true
+    && copies.length > 0 && copies.length <= 128 && new Set(copyPaths).size === copies.length
+    && new Set(artifacts.map(item => item.seq)).size === artifacts.length
+    && copies.length === planFiles.length && copies.every((file, index) =>
+      typeof file.path === 'string' && file.path.length > 0 && file.path === planFiles[index]
+      && typeof file.bytes === 'number' && Number.isSafeInteger(file.bytes) && file.bytes >= 0 && file.bytes <= 16 * 1024 * 1024
+      && typeof file.sha256 === 'string' && /^[a-f0-9]{64}$/i.test(file.sha256)
+      && artifacts.some(source => source.seq === file.artifact_seq))
+    && copies.reduce((sum, file) => sum + Number(file.bytes), 0) <= 32 * 1024 * 1024
+    && artifacts.every(source => copies.some(file => file.artifact_seq === source.seq))
+    && typeof plan.entrypoint === 'string' && /\.html?$/i.test(plan.entrypoint) && copyPaths.includes(plan.entrypoint)
   const planned = Array.isArray(plan.steps) ? plan.steps.map(object) : []
   const steps = Array.isArray(report.steps) ? report.steps.map(object) : []
   // A successful tool call is not evidence that the planned assertions passed.
@@ -300,7 +316,8 @@ export function nativeBrowserReceiptStatus(event: TeamEvent): string {
     && (result.exit_code === undefined || result.exit_code === 0) && result.artifacts_unchanged !== false
     && artifacts.length > 0 && artifacts.every((item) => typeof item.seq === 'number' && Number.isSafeInteger(item.seq) && item.seq > 0
       && typeof item.filename === 'string' && item.filename.trim() && typeof item.content_sha256 === 'string' && /^[a-f0-9]{64}$/i.test(item.content_sha256))
-    && typeof plan.entrypoint === 'string' && artifacts.some((item) => item.filename === plan.entrypoint)
+    && (relativeInputs || plan.files_layout === undefined && result.checked_files === undefined
+      && typeof plan.entrypoint === 'string' && artifacts.some((item) => item.filename === plan.entrypoint))
     && planned.length > 0 && planned.length <= 128 && planned.length === steps.length
     && planned.every((step) => typeof step.label === 'string' && step.label.trim())
     && planned.some((step) => ['assert_visible', 'assert_text', 'assert_js'].includes(String(step.action)))

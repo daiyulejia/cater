@@ -122,7 +122,12 @@ class BrowserDiagnosticsContractTests(unittest.TestCase):
         self.assertEqual(schema["name"], "browser_check")
         outer = schema["input_schema"]
         self.assertEqual(outer["required"], ["artifact_seqs", "plan"])
-        self.assertEqual(set(outer["properties"]), {"artifact_seqs", "plan"})
+        self.assertEqual(set(outer["properties"]), {"artifact_seqs", "plan", "archive_files"})
+        selection = outer["properties"]["archive_files"]
+        self.assertEqual((selection["type"], selection["minItems"], selection["maxItems"]), ("array", 1, 128))
+        self.assertEqual(set(selection["items"]["properties"]), {"artifact_seq", "paths"})
+        self.assertEqual(set(selection["items"]["required"]), {"artifact_seq", "paths"})
+        self.assertFalse(selection["items"]["additionalProperties"])
         self.assertIs(outer["additionalProperties"], False)
         plan = outer["properties"]["plan"]
         self.assertEqual(plan["required"], ["entrypoint", "steps"])

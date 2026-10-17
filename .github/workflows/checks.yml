@@ -65,6 +65,14 @@ jobs:
         run: npm run install:browser
       - name: Verify real browser boundaries and assertions
         run: npm test
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.11'
+      - name: Verify published project archives through native tools
+        working-directory: .
+        env:
+          CATER_ARCHIVE_BROWSER_TESTS: '1'
+        run: python -m unittest discover -s tests -p test_archive_browser_cycle.py
 
   runtime:
     name: ${{ matrix.os }} / Python ${{ matrix.python }} / ${{ matrix.selection }}
