@@ -7,6 +7,8 @@ import { CommandOutputs } from './CommandOutputPreview'
 import { hasBrowserReceipt } from './outputPreview'
 import { NativeMcpReceipt } from './NativeMcpReceipt'
 import { NativeProjectHistoryReceipt } from './NativeProjectHistoryReceipt'
+import { NativeArtifactReceipt } from './NativeArtifactReceipt'
+import { nativeArtifactReceiptStatus } from './conversationActivityState'
 
 export type DetailEvent = {
   seq: number
@@ -189,6 +191,12 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       break
     }
     case 'team.tool_started': case 'team.tool_finished':
+      if ((p.name ?? p.tool) === 'read_artifact') {
+        status = nativeArtifactReceiptStatus(event)
+        add('工具', '读取成果')
+        if (isTeamHost(event)) add('读取成员', member(p.role))
+        break
+      }
       if ((p.name ?? p.tool) === 'read_project_history') {
         status = nativeProjectHistoryReceiptStatus(event)
         add('工具', '读取同项目历史')
@@ -413,6 +421,7 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
   const nativeBrowser = ['team.tool_started', 'team.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'browser_check'
   const nativeMcp = ['team.tool_started', 'team.tool_finished'].includes(event.type) && isNativeMcpTool(event.payload.name ?? event.payload.tool)
   const projectHistory = ['team.tool_started', 'team.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'read_project_history'
+  const artifactRead = ['team.tool_started', 'team.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'read_artifact'
   const browser = nativeBrowser || event.type === 'verification.completed' && hasBrowserReceipt(event.payload)
   const outputs = event.type === 'verification.completed' ? event.payload
     : ['team.tool_finished', 'workspace.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'workspace_run' ? record(event.payload.result) : undefined
@@ -430,6 +439,7 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
     {skillTool(event) && event.type === 'team.tool_finished' && <NativeSkillReceipt event={event} />}
     {nativeMcp && event.type === 'team.tool_finished' && <NativeMcpReceipt key={event.seq} event={event} />}
     {projectHistory && event.type === 'team.tool_finished' && <NativeProjectHistoryReceipt key={event.seq} event={event} />}
+    {artifactRead && event.type === 'team.tool_finished' && <NativeArtifactReceipt key={event.seq} event={event} />}
     {note && <p className="text-[#728679]">{note}</p>}
     {event.type === 'collaboration.finished' && ['answered', 'declined'].includes(String(event.payload.status))
       && event.actor.kind === 'system' && event.actor.id === 'collaboration' && event.actor.role === 'collaboration'
@@ -439,7 +449,7 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
         {event.payload.evidence.filter((entry) => entry && Number.isInteger(entry.artifact_seq) && entry.artifact_seq > 0 && typeof entry.quote === 'string')
           .map((entry, index) => <blockquote key={index} className="mt-2 whitespace-pre-wrap">成果 #{entry.artifact_seq}：{entry.quote}</blockquote>)}
       </details>}
-    {!skillTool(event) && !browser && !nativeMcp && !projectHistory && <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
+    {!skillTool(event) && !browser && !nativeMcp && !projectHistory && !artifactRead && <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
       <summary className="cursor-pointer text-[#728679]">开发者详情</summary>
       <pre tabIndex={0} aria-label="原始事件 JSON" className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(event, null, 2)}</pre>
     </details>}

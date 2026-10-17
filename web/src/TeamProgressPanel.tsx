@@ -9,6 +9,8 @@ import type { ExecutionControl } from './executionControl'
 import { CommandOutputs } from './CommandOutputPreview'
 import { NativeMcpReceipt } from './NativeMcpReceipt'
 import { NativeProjectHistoryReceipt } from './NativeProjectHistoryReceipt'
+import { NativeArtifactReceipt } from './NativeArtifactReceipt'
+import { nativeArtifactReceiptStatus } from './conversationActivityState'
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const excerpt = (value: unknown, limit = 800): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（仅显示部分内容）' : '') : ''
@@ -70,6 +72,7 @@ export function NativeSkillReceipt({ event }: { event: TeamEvent }) {
 }
 
 function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean }) {
+  if ((event.payload.name ?? event.payload.tool) === 'read_artifact') return <NativeArtifactReceipt event={event} />
   if ((event.payload.name ?? event.payload.tool) === 'read_project_history') return <NativeProjectHistoryReceipt event={event} />
   if (isNativeMcpTool(event.payload.name ?? event.payload.tool)) return <NativeMcpReceipt event={event} />
   if (['list_skills', 'read_skill'].includes((event.payload.name ?? event.payload.tool) as string)) return <NativeSkillReceipt event={event} />
@@ -158,6 +161,7 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
       const role = typeof p.role === 'string' ? p.role : event.actor.id
       const status = p.status ?? result.status ?? result.outcome
       const label = name === 'browser_check' ? nativeBrowserReceiptStatus(finished ?? event)
+        : name === 'read_artifact' ? nativeArtifactReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } })
         : name === 'read_project_history' ? nativeProjectHistoryReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } })
         : isNativeMcpTool(name) ? nativeMcpReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } }, name)
         : name === 'list_skills' || name === 'read_skill' ? nativeSkillReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } }, name)

@@ -248,7 +248,10 @@ class TeamService:
                    "expected_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
                    "offset": {"type": "integer", "minimum": 0},
                    "limit": {"type": "integer", "minimum": 1, "maximum": 12000}}, ["skill_id"]),
-            _tool("read_artifact", "读取本群已发布成果的完整正文。", {"artifact_seq": {"type": "integer"}}, ["artifact_seq"]),
+            _tool("read_artifact", "读取本群确切版本成果。不带offset/length返回完整正文；局部核对可按Unicode字符分页，offset默认0，length默认8000、最多16000。read_range说明本页覆盖，全文SHA/bytes不变；尾页不等于读过全文，读取不等于复核通过。",
+                  {"artifact_seq": {"type": "integer", "minimum": 1},
+                   "offset": {"type": "integer", "minimum": 0},
+                   "length": {"type": "integer", "minimum": 1, "maximum": 16000}}, ["artifact_seq"]),
             _tool("request_review", "提交当前真实成果给一位独立伙伴复核，本轮等待结果。修复后先发布新版，再用原review_seq交回同一复核者，不能只说修好了。复核发现的问题必须闭环，店长不会越过未完成复核交付。",
                   {"reviewer": recipient, "artifact_seqs": {"type": "array", "minItems": 1, "maxItems": 20,
                       "items": {"type": "integer", "minimum": 1}}, "instruction": string,
@@ -641,9 +644,26 @@ class TeamService:
         if name == "finish_work":
             return self._finish_work(task_id, role, arguments, tool_start)
         if name == "read_artifact":
+            if type(arguments["artifact_seq"]) is not int or arguments["artifact_seq"] < 1:
+                raise ValueError("成果序号需要正整数。")
             artifact = next((a for a in self.rt.task(task_id).deliverables if a["seq"] == arguments["artifact_seq"]), None)
             if artifact is None:
                 raise ValueError("找不到本群成果。")
+            if "offset" in arguments or "length" in arguments:
+                offset, length = arguments.get("offset", 0), arguments.get("length", 8000)
+                if (type(offset) is not int or offset < 0 or type(length) is not int or not 1 <= length <= 16000):
+                    raise ValueError("成果分页需要非负整数offset和1到16000的整数length，单位为Unicode字符。")
+                content = artifact.get("content")
+                if not isinstance(content, str):
+                    raise ValueError("这份成果没有保存可读取正文，不能返回正文分页。")
+                if offset > len(content):
+                    raise ValueError("成果分页起点超出正文字符数。")
+                end = min(len(content), offset + length)
+                return {"status": "ok", **artifact, "content": content[offset:end], "read_range": {
+                    "unit": "unicode_codepoints", "offset": offset, "returned_chars": end - offset,
+                    "total_chars": len(content), "has_more": end < len(content),
+                    "next_offset": end if end < len(content) else None,
+                    "content_complete": offset == 0 and end == len(content)}}
             return {"status": "ok", **artifact}
         if name == "read_receipts":
             limit = arguments.get("limit", 20)
