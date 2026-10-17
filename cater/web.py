@@ -1365,6 +1365,33 @@ def make_handler(
                     return self._send_json(chain_to_dict(rt.verify_chain()))
             if path.startswith("/api/tasks/"):
                 task_id = path.split("/", 3)[3]
+                if "/artifacts/" in task_id:
+                    from .team_archive import artifact_bytes
+
+                    task_id, seq_text = task_id.split("/artifacts/", 1)
+                    if not seq_text.isascii() or not seq_text.isdecimal() or len(seq_text) > 18 or int(seq_text) < 1:
+                        return self._bad_request("成果序号需要单个正整数。")
+                    with self._runtime() as rt:
+                        with _read_snapshot(rt):
+                            task = rt.task(task_id)
+                            if task is None:
+                                return self._not_found()
+                            artifact = next((a for a in task.deliverables if a["seq"] == int(seq_text)
+                                             and a.get("format") == "archive"), None)
+                            if artifact is None:
+                                return self._not_found()
+                            try:
+                                raw = artifact_bytes(rt.log, artifact)
+                            except ValueError:
+                                return self._conflict("工程归档缺失或与已发布版本不一致，未用其他文件替代。")
+                        self.send_response(HTTPStatus.OK)
+                        self.send_header("Content-Type", "application/zip")
+                        self.send_header("Content-Disposition", 'attachment; filename="cater-project.zip"')
+                        self.send_header("Cache-Control", "no-store")
+                        self.send_header("Content-Length", str(len(raw)))
+                        self.end_headers()
+                        self.wfile.write(raw)
+                        return
                 if task_id.endswith("/delivery"):
                     task_id = task_id.removesuffix("/delivery")
                     with self._runtime() as rt:

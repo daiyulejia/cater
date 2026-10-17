@@ -3,11 +3,13 @@ import * as Dialog from '@radix-ui/react-dialog'
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Check, Copy, Download, ExternalLink, FileText, HardDrive, X } from 'lucide-react'
+import { ArchivePreview } from './ArchivePreview'
 
 export type Artifact = {
   seq: number; title: string; summary: string; kind?: string; uri?: string; message_seq?: number
   actor?: string; source?: string; content?: string; format?: string; filename?: string; content_error?: string
   content_sha256?: string
+  content_bytes?: number; archive?: unknown
   local_path?: string; local_save_error?: string
 }
 
@@ -26,7 +28,7 @@ function downloadName(item: Artifact): string {
   return `成果-${item.seq}.${item.format === 'markdown' ? 'md' : 'txt'}`
 }
 
-const sourceText = (source?: string) => source === 'local_demo' ? '演示样例' : source === 'external' ? '成员发布' : '来源未记录'
+const sourceText = (source?: string) => source === 'local_demo' ? '演示样例' : source === 'external' || source === 'team' ? '成员发布' : '来源未记录'
 const bodyError = (reason?: string) => ({ too_large: '正文太大，需要拆分后重新发布。', invalid_format: '正文格式不支持，摘要已保留。', invalid_encoding: '正文编码异常，摘要已保留。', invalid_content: '没有收到可阅读的正文。' }[reason ?? ''] ?? '没有收到可阅读的正文。')
 
 function ArtifactSummary({ item, reader = false }: { item: Artifact; reader?: boolean }) {
@@ -62,7 +64,7 @@ function LocalSaveStatus({ path, error, hasBody }: { path?: string; error?: stri
   </details>
 }
 
-export function ArtifactPreview({ item, publisher, showSummary = true }: { item: Artifact; publisher?: string; showSummary?: boolean }) {
+export function ArtifactPreview({ item, publisher, showSummary = true, taskId, accessToken }: { item: Artifact; publisher?: string; showSummary?: boolean; taskId?: string; accessToken?: string }) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const [downloadError, setDownloadError] = useState(false)
   const hasBody = typeof item.content === 'string' && Boolean(item.content.trim()) && !item.content_error && new TextEncoder().encode(item.content).length <= 65536
@@ -117,6 +119,7 @@ export function ArtifactPreview({ item, publisher, showSummary = true }: { item:
       </Dialog.Root>}
       {source && <a href={source} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-[#377d70]"><ExternalLink size={13} /> 打开来源</a>}
     </div>
+    {item.format === 'archive' && <ArchivePreview key={`${taskId}:${item.seq}`} item={item} taskId={taskId} accessToken={accessToken} />}
     <LocalSaveStatus key={`${item.local_path ?? ''}:${item.local_save_error ?? ''}`} path={item.local_path} error={item.local_save_error} hasBody={hasBody} />
     {item.uri && !source && <details key={`${item.seq}:reference`} className="mt-2 text-[11px] leading-5 text-[#86968c]">
       <summary className="cursor-pointer">资源引用</summary>

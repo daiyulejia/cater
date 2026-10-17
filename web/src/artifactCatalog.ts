@@ -45,7 +45,10 @@ export function teamArtifactCatalog(team: TeamState, artifacts: Artifact[], even
       if (names.has(name) || seqs.has(ref.seq) || matches.length !== 1)
         return fallback('交付文件引用重复或无法对应，未用最新发布替代交付版本。')
       const item = matches[0]
-      if (item.filename !== ref.filename || item.content_sha256 !== ref.content_sha256 || typeof item.content !== 'string' || item.content_error)
+      const archive = item.format === 'archive' && record(item.archive) && item.archive.version === 1
+        && Array.isArray(item.archive.files) && item.archive.files.length > 0
+        && typeof item.content_bytes === 'number' && Number.isSafeInteger(item.content_bytes) && item.content_bytes > 0
+      if (item.filename !== ref.filename || item.content_sha256 !== ref.content_sha256 || (typeof item.content !== 'string' && !archive) || item.content_error)
         return fallback('交付文件版本无法核对，未用最新发布替代交付版本。')
       if (boundary && item.seq <= boundary.seq && !(transition.payload.artifact_selection === 'explicit' && transition.payload.objective_seq === boundary.seq))
         return fallback('清单包含旧目标文件，但没有记录明确沿用；当前交付范围待核对。')

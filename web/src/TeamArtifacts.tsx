@@ -53,16 +53,16 @@ function DeliveryDownload({ taskId, seq, accessToken }: { taskId: string; seq: n
   </div>
 }
 
-function ArtifactRows({ items, names, label }: { items: Artifact[]; names: Record<string, string>; label: string }) {
+function ArtifactRows({ items, names, label, taskId, accessToken }: { items: Artifact[]; names: Record<string, string>; label: string; taskId: string; accessToken: string }) {
   return <Suspense fallback={<p role="status" className="text-xs text-[#52766d]">正在读取成果…</p>}>
     <ul aria-label={label} className="space-y-3">{items.map(item => <li key={item.seq} className="min-w-0 border-l-2 border-[#78a291] py-1 pl-3 [overflow-wrap:anywhere]">
       <p className="mb-1 text-[11px] text-[#728679]">{names[item.actor ?? ''] ?? '伙伴'} · 事件 #{item.seq}</p>
-      <ArtifactPreview item={item} publisher={names[item.actor ?? ''] ?? item.actor ?? '伙伴'} />
+      <ArtifactPreview item={item} publisher={names[item.actor ?? ''] ?? item.actor ?? '伙伴'} taskId={taskId} accessToken={accessToken} />
     </li>)}</ul>
   </Suspense>
 }
 
-function History({ items, names, later = false }: { items: Artifact[]; names: Record<string, string>; later?: boolean }) {
+function History({ items, names, later = false, taskId, accessToken }: { items: Artifact[]; names: Record<string, string>; later?: boolean; taskId: string; accessToken: string }) {
   const [open, setOpen] = useState(false)
   if (!items.length) return null
   const title = later ? '交付后发布' : '历史发布'
@@ -70,7 +70,7 @@ function History({ items, names, later = false }: { items: Artifact[]; names: Re
     <summary className="cursor-pointer text-xs font-semibold text-[#52766d]">{title} · {items.length} 份</summary>
     {open && <div className="mt-3 space-y-3">
       {later && <p className="text-[11px] leading-5 text-[#916949]">这些版本不在本次交付包内。</p>}
-      <ArtifactRows items={items} names={names} label={title} />
+      <ArtifactRows items={items} names={names} label={title} taskId={taskId} accessToken={accessToken} />
     </div>}
   </details>
 }
@@ -88,9 +88,9 @@ export function TeamArtifacts({ team, taskId, artifacts, events, names, accessTo
     <p className="mb-3 text-[11px] leading-5 text-[#728679]">{catalog.kind === 'delivery' ? `店长交付记录 #${catalog.deliverySeq} · 验证范围以交付说明及实际回执为准。`
       : catalog.kind === 'current' ? '本轮最新发布，尚未确认交付。' : '发布记录不等于当前交付版本。'}</p>
     {catalog.issue && <p role="alert" className="mb-3 text-xs leading-5 text-amber-800">{catalog.issue}</p>}
-    {catalog.primary.length ? <ArtifactRows items={catalog.primary} names={names} label={title} />
+    {catalog.primary.length ? <ArtifactRows items={catalog.primary} names={names} label={title} taskId={taskId} accessToken={accessToken} />
       : <p className="text-xs leading-5 text-[#728679]">{catalog.kind === 'delivery' ? '这次交付没有附带文件。' : '本轮还没有发布成果。'}</p>}
-    <History key={`${taskId}:${team.revision}:later`} items={catalog.later} names={names} later />
-    <History key={`${taskId}:${team.revision}:history`} items={catalog.history} names={names} />
+    <History key={`${taskId}:${team.revision}:later`} items={catalog.later} names={names} taskId={taskId} accessToken={accessToken} later />
+    <History key={`${taskId}:${team.revision}:history`} items={catalog.history} names={names} taskId={taskId} accessToken={accessToken} />
   </section>
 }

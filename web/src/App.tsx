@@ -1629,7 +1629,7 @@ function AuditTrail({ item }: { item: ChatItem }) {
   </details>
 }
 
-function ArtifactPreview(props: { item: Artifact; publisher?: string; showSummary?: boolean }) {
+function ArtifactPreview(props: { item: Artifact; publisher?: string; showSummary?: boolean; taskId?: string; accessToken?: string }) {
   return <AsyncPanel fallback={<p role="status" className="question-progress">正在读取成果…</p>}><LazyArtifactPreview {...props} /></AsyncPanel>
 }
 
@@ -1703,7 +1703,7 @@ function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; arti
       <MessageContext item={item} taskId={taskId} controls={controls} />
       {item.progress && <AsyncPanel fallback={null}><WorkProgressPanel events={item.progress} claim={item.id} name={item.display} /></AsyncPanel>}
       {item.progress && <WorkspaceToolProgress events={item.progress} claim={item.id} name={item.display} />}
-      {item.evidence.type === 'deliverable.published' && <ArtifactPreview item={artifact ?? untrustedArtifact(item.evidence)} publisher={item.display} showSummary={false} />}
+      {item.evidence.type === 'deliverable.published' && <ArtifactPreview item={artifact ?? untrustedArtifact(item.evidence)} publisher={item.display} showSummary={false} taskId={taskId} accessToken={accessToken} />}
       {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.internal && item.targets.length > 0 && <span>收件人：</span>}{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
       {(item.details?.length || item.evidence.type === 'team.objective_completed') ? <AsyncPanel fallback={null}><MessageDetails item={item} /></AsyncPanel> : null}
       <AuditTrail item={item} />

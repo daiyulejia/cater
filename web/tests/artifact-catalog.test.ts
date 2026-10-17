@@ -18,6 +18,17 @@ const done = (items: Artifact[], seq = 20, change: Record<string, unknown> = {})
 const project = (items: Artifact[], events = [started], team = state()) => teamArtifactCatalog(team, items, events)
 const ids = (items: Artifact[]) => items.map(item => item.seq)
 
+test('工程ZIP没有内联正文仍绑定确切交付版本，不取后来的同名版本', () => {
+  const first = artifact(3, 'project.zip', { format: 'archive', content: undefined, content_bytes: 200,
+    archive: { version: 1, files: [{ path: 'src/main.py', bytes: 0, sha256: hash, executable: false }], total_bytes: 0 } })
+  const later = { ...first, seq: 22, content_sha256: 'b'.repeat(64) }
+  const catalog = project([first, later], [started, done([first])], state({ status: 'done', revision: 20 }))
+  expect(catalog.kind).toBe('delivery')
+  expect(ids(catalog.primary)).toEqual([3])
+  expect(ids(catalog.later)).toEqual([22])
+  expect(project([{ ...first, archive: undefined }], [started, done([first])], state({ status: 'done', revision: 20 })).kind).toBe('unresolved')
+})
+
 test('本轮同名文件只显示最新事件，乱序输入不修改原数据，历史仍完整', () => {
   const items = [artifact(8, 'app.js'), artifact(2, 'index.html'), artifact(6, 'index.html'), artifact(3, 'app.js')]
   const source = JSON.stringify(items)

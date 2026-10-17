@@ -232,14 +232,22 @@ def _verify(directory: Path, manifest: dict, bodies: dict[str, bytes]) -> None:
             raise ArtifactStoreError(f"artifact content tampering: {entry['path']}")
 
 
-def materialize_team_artifact(root: str | os.PathLike[str], task_id: str, artifact: dict) -> str:
+def materialize_team_artifact(root: str | os.PathLike[str], task_id: str, artifact: dict, *, body: bytes | None = None) -> str:
     """Save a ledger-derived team artifact without fabricating a legacy work submission."""
     _name(task_id)
     filename = _name(artifact["filename"])
-    content = artifact["content"].encode("utf-8")
+    if artifact.get("format") == "archive":
+        from .workspace_archive import MAX_ARCHIVE_BYTES, validate_manifest
+
+        validate_manifest(artifact.get("archive"))
+        if type(body) is not bytes or len(body) != artifact.get("content_bytes"):
+            raise ArtifactStoreError("invalid archive body")
+        content, limit = body, MAX_ARCHIVE_BYTES
+    else:
+        content, limit = artifact["content"].encode("utf-8"), MAX_CONTENT_BYTES
     sha = hashlib.sha256(content).hexdigest()
     if (not _positive(artifact.get("seq")) or sha != artifact.get("content_sha256")
-            or len(content) > MAX_CONTENT_BYTES):
+            or len(content) > limit):
         raise ArtifactStoreError("invalid team artifact")
     base = Path(root).absolute()
     _directories(base, create=True)
@@ -250,7 +258,7 @@ def materialize_team_artifact(root: str | os.PathLike[str], task_id: str, artifa
         _directories(version, create=True)
         path = version / filename
         if path.exists():
-            if _read(path, MAX_CONTENT_BYTES) != content:
+            if _read(path, limit) != content:
                 raise ArtifactStoreError("saved team artifact was modified")
         else:
             _write(path, content)

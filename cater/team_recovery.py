@@ -183,7 +183,7 @@ class TeamRecovery:
 
     def reconcile_publication(self, task_id, started_seq, *, reason, invocation_stopped=False):
         return self._reconcile_tool(task_id, started_seq, reason=reason, invocation_stopped=invocation_stopped,
-                                    names={"publish_artifact", "publish_workspace_file"})
+                                    names={"publish_artifact", "publish_workspace_file", "publish_workspace_archive"})
 
     def reconcile_browser_check(self, task_id, started_seq, *, reason, invocation_stopped=False):
         return self._reconcile_tool(task_id, started_seq, reason=reason, invocation_stopped=invocation_stopped,

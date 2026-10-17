@@ -30,7 +30,7 @@ MAX_ACTOR_TURNS = 32
 LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "set_objective", "request_questions",
                                "request_review", "record_review", "finish_work"})
 LOCAL_EVENT_CONTRACT = {"version": 1, "kind": "atomic_local_events", "receipt": "same_transaction"}
-EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", "publish_artifact", "publish_workspace_file", "browser_check", MCP_CALL})
+EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "browser_check", MCP_CALL})
 PAUSED_TOOLS = frozenset({"read_artifact", "read_receipts", "read_messages", "read_background", "read_checkpoint",
                           "read_delivery", "list_skills", "read_skill", "wait_for_reply", PROJECT_HISTORY})
 
@@ -248,8 +248,9 @@ class TeamService:
                    "expected_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
                    "offset": {"type": "integer", "minimum": 0},
                    "limit": {"type": "integer", "minimum": 1, "maximum": 12000}}, ["skill_id"]),
-            _tool("read_artifact", "读取本群确切版本成果。不带offset/length返回完整正文；局部核对可按Unicode字符分页，offset默认0，length默认8000、最多16000。read_range说明本页覆盖，全文SHA/bytes不变；尾页不等于读过全文，读取不等于复核通过。",
+            _tool("read_artifact", "读取本群确切版本成果。文本不带offset/length返回完整正文；工程ZIP默认返回文件清单，指定path读取其中UTF8文本分页，二进制仅返回元信息。局部核对按Unicode字符分页，offset默认0，length默认8000、最多16000；尾页不等于读过全文，读取不等于复核通过。",
                   {"artifact_seq": {"type": "integer", "minimum": 1},
+                   "path": {"type": "string", "description": "仅工程ZIP：文件清单中的完整相对路径。"},
                    "offset": {"type": "integer", "minimum": 0},
                    "length": {"type": "integer", "minimum": 1, "maximum": 16000}}, ["artifact_seq"]),
             _tool("request_review", "提交当前真实成果给一位独立伙伴复核，本轮等待结果。修复后先发布新版，再用原review_seq交回同一复核者，不能只说修好了。复核发现的问题必须闭环，店长不会越过未完成复核交付。",
@@ -300,7 +301,10 @@ class TeamService:
                            "description": "可选：明确选择本次交付的文件事件序号，包括需要沿用的旧文件；空数组表示无文件。不填时只收本轮目标内每个文件名的最新发布，不自动带上旧目标文件。"}}, ["summary", "verification"]),
             ]
         if workspace is not None:
+            from .team_archive import schema as archive_schema
+
             tools += workspace.schemas()
+            tools.append(archive_schema())
             tools.append(_tool("publish_workspace_file", "直接读取工作目录中已写好的真实UTF-8文件并发布，不必重复复述整份源码。",
                 {"path": string, "summary": string, "format": {"type": "string", "enum": ["code", "markdown", "text"]}},
                 ["path", "summary", "format"]))
@@ -393,7 +397,7 @@ class TeamService:
             reconciled = (isinstance(p.get("call_id"), str) and bool(p["call_id"].strip())
                 and isinstance(p.get("name"), str) and p["name"] in EXTERNAL_EFFECT_TOOLS and any(
                 (e.type == "workspace.tool_reconciled" and p["name"] in {"workspace_write", "workspace_run"}
-                 or e.type == "team.tool_reconciled" and p["name"] in {"publish_artifact", "publish_workspace_file", "browser_check", MCP_CALL}
+                 or e.type == "team.tool_reconciled" and p["name"] in {"publish_artifact", "publish_workspace_file", "publish_workspace_archive", "browser_check", MCP_CALL}
                  and all(e.payload.get(k) == p.get(k) for k in ("run_id", "role", "name")))
                 and e.actor == Actor.human() and e.seq > start.seq
                 and type(e.payload.get("started_seq")) is int and e.payload["started_seq"] == start.seq
@@ -520,7 +524,7 @@ class TeamService:
             "pending_operations": [{k: row[k] for k in row if k != "arguments"} for row in pending[-20:]],
             "pending_operations_truncated": len(pending) > 20,
             "conversation": history[-60:], "artifacts": [{k: a.get(k) for k in
-                ("seq", "filename", "summary", "content_sha256", "local_path")} for a in task.deliverables],
+                ("seq", "filename", "summary", "content_sha256", "local_path", "format")} for a in task.deliverables],
             "questionnaires": self.rt.questionnaires.view(task_id)[-5:],
             "workspace": self.rt.workspaces.view(task_id), "rules": self.rt.rulebook.snapshot(task_id)["rules"],
             "background": dialogue_background(background, reader="read_background") if background is not None else None}
@@ -548,7 +552,7 @@ class TeamService:
 
     def _execute(self, task_id, role, name, arguments, workspace, binding, tool_start, assignment):
         if self.view(task_id)["status"] == "done" and name in {
-                "delegate", "publish_artifact", "publish_workspace_file", "workspace_write", "workspace_run", MCP_CALL, "request_review", "record_review"}:
+                "delegate", "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "workspace_write", "workspace_run", MCP_CALL, "request_review", "record_review"}:
             raise WorkConflict("当前工作已交付；如需继续修改，请先由店长采用新的工作目标。")
         if name == "wait_for_reply":
             return {"status": "ok", "waiting": True}
@@ -649,6 +653,12 @@ class TeamService:
             artifact = next((a for a in self.rt.task(task_id).deliverables if a["seq"] == arguments["artifact_seq"]), None)
             if artifact is None:
                 raise ValueError("找不到本群成果。")
+            if "path" in arguments:
+                if artifact.get("format") != "archive":
+                    raise ValueError("只有工程ZIP可以按path读取文件。")
+                from .team_archive import read_member
+
+                return read_member(self.rt.log, artifact, arguments)
             if "offset" in arguments or "length" in arguments:
                 offset, length = arguments.get("offset", 0), arguments.get("length", 8000)
                 if (type(offset) is not int or offset < 0 or type(length) is not int or not 1 <= length <= 16000):
@@ -695,6 +705,10 @@ class TeamService:
                 response.update(pending_operations=pending[-limit:], pending_has_more=len(pending) > limit,
                     pending_next_before_seq=pending[-limit]["seq"] if len(pending) > limit else None)
             return response
+        if name == "publish_workspace_archive":
+            from .team_archive import publish
+
+            return publish(self, task_id, role, arguments, workspace, binding, tool_start)
         if name == "publish_workspace_file":
             current = self.rt.workspaces.view(task_id)
             if workspace is None or not current["available"] or current["fingerprint"] != binding["fingerprint"] or current["revision"] != binding["revision"]:
@@ -723,16 +737,7 @@ class TeamService:
                 _name(payload["filename"])
             except ArtifactStoreError:
                 return _publication_rejected("invalid_artifact_filename", "文件名不符合可落盘的便携命名要求，未开始发布。请使用普通文件名，避免保留设备名、控制字符或特殊路径。")
-            unknown_publications = [r for r in self._pending_operations(task_id)
-                if r["started_seq"] != tool_start.seq and r["name"] in {"publish_artifact", "publish_workspace_file"}]
-            for pending in unknown_publications:
-                args = pending.get("arguments") or {}
-                target = (args.get("filename") if pending["name"] == "publish_artifact" else args.get("path")) if isinstance(args, dict) else None
-                if pending["name"] == "publish_workspace_file" and isinstance(target, str):
-                    target = target.replace("\\", "/").rsplit("/", 1)[-1]
-                target = safe_filename(target)
-                if target is None or target.casefold() == payload["filename"].casefold():
-                    raise WorkConflict("同名成果有发布影响待核对，不能重复发布或落盘；先核对原操作与实际文件。")
+            self._publication_guard(task_id, payload["filename"], tool_start)
             e = self.rt.log.emit(type="deliverable.published", actor=Actor.agent(role.id, role.role), task_id=task_id,
                                  payload={**payload, "source": "team", "phase": "team"})
             result = {"status": "ok", "artifact_seq": e.seq, "filename": payload["filename"]}
@@ -753,6 +758,20 @@ class TeamService:
                     raise WorkConflict("工作目录有未结束或待核对操作，不能重复执行。")
                 return workspace.execute(name, arguments)
         raise ValueError("工具尚未接入。")
+
+    def _publication_guard(self, task_id, filename, tool_start):
+        for pending in self._pending_operations(task_id):
+            if pending["started_seq"] == tool_start.seq or pending["name"] not in {
+                    "publish_artifact", "publish_workspace_file", "publish_workspace_archive"}:
+                continue
+            args = pending.get("arguments") or {}
+            target = (args.get("path") if pending["name"] == "publish_workspace_file"
+                      else args.get("filename")) if isinstance(args, dict) else None
+            if pending["name"] == "publish_workspace_file" and isinstance(target, str):
+                target = target.replace("\\", "/").rsplit("/", 1)[-1]
+            target = safe_filename(target)
+            if target is None or target.casefold() == filename.casefold():
+                raise WorkConflict("同名成果有发布影响待核对，不能重复发布或落盘；先核对原操作与实际文件。")
 
     def _invoke_tool(self, task_id, role, started, revision, call, schema, workspace, binding, tool_start, assignment):
         def settle(result):
@@ -848,6 +867,18 @@ class TeamService:
                 selected = [by_seq[seq] for seq in seqs]
                 if len({a["filename"] for a in selected}) != len(selected):
                     return {"status": "error", "code": "invalid_delivery_files", "message": "同一文件名只选择一个交付版本。"}
+            selected = list({a["filename"]: a for a in selected}.values())
+            chosen = {a["filename"]: a for a in selected}
+            approved = {ref["filename"]: ref
+                for review in sorted(current_work["reviews"], key=lambda row: row.get("decision_seq", 0))
+                if review["status"] == "approved" for ref in review["artifacts"]}
+            mismatches = [ref for filename, ref in approved.items() if filename in chosen
+                and any(chosen[ref["filename"]].get(key) != ref.get(key)
+                        for key in ("seq", "filename", "content_sha256"))]
+            if mismatches:
+                return {"status": "error", "code": "delivery_review_mismatch",
+                    "approved_artifacts": mismatches,
+                    "message": "所选文件不是本轮独立复核通过的确切版本，未交付旧版或替代版；请选择获批版本，或将实际拟交付版本重新提交复核。"}
             payload = {"summary": _text(arguments["summary"]), "verification": _text(arguments["verification"]),
                        "run_id": tool_start.payload["run_id"], "objective_seq": boundary,
                        "artifact_selection": "explicit" if "artifact_seqs" in arguments else "current_objective",
@@ -931,6 +962,8 @@ class TeamService:
                 "continuation只是原委托的补充输入，接收者仍完成原委托并向原委托人回报，不把它当成另一份独立工作。"
                 "成果用publish_artifact保存完整正文；操作和验证依据来自实际工具回执。"
                 "已写入工作目录的文件优先用publish_workspace_file直接发布，避免复述整份源码。"
+                "多目录工程、空文件或二进制成果用publish_workspace_archive明确选文件发布ZIP，保留原目录；"
+                "复核者用read_artifact的path读取ZIP内确切版本，清单或打包成功不等于程序运行通过。"
                 "店长读成果，用read_receipts核对真实工具回执、跟进修正，能够交付时用finish_work记录结果及验证边界。"
                 "finish_work默认只包含本轮目标内最新发布；需沿用旧文件或筛选整包时用artifact_seqs明确选择全部所需文件，不省略未改动的本地依赖。"
                 "skills_index只含可用工作指引的有界目录；需要具体方法时read_skill读取，不必全部读完才能工作。"
@@ -1169,6 +1202,7 @@ class TeamService:
 
     def archive(self, task_id, expected_delivery_seq=None):
         import hashlib
+        from .team_archive import artifact_bytes
 
         if expected_delivery_seq is not None and (type(expected_delivery_seq) is not int or expected_delivery_seq <= 0):
             raise ValueError("交付版本需要正整数。")
@@ -1178,7 +1212,7 @@ class TeamService:
         delivery = None
         artifacts = self.rt.task(task_id).deliverables
         files = {a["filename"]: a for a in artifacts
-                 if a.get("filename") and isinstance(a.get("content"), str)}
+                 if a.get("filename") and (isinstance(a.get("content"), str) or a.get("format") == "archive")}
         if current["status"] == "done":
             delivery = next((e for e in reversed(self.rt.log.read(task_id=task_id))
                              if e.actor == HOST and e.type == "team.objective_completed" and e.seq == current["revision"]), None)
@@ -1200,9 +1234,9 @@ class TeamService:
                             and not (delivery.payload.get("artifact_selection") == "explicit" and delivery.payload.get("objective_seq") == boundary)):
                         raise ValueError("旧目标文件没有明确沿用记录，当前交付范围待核对。")
                     artifact = by_seq.get(ref["seq"])
-                    if (artifact is None or not isinstance(artifact.get("content"), str)
+                    if (artifact is None
                             or any(artifact.get(k) != ref.get(k) for k in ("filename", "content_sha256"))
-                            or hashlib.sha256(artifact["content"].encode("utf-8")).hexdigest() != ref.get("content_sha256")):
+                            or hashlib.sha256(artifact_bytes(self.rt.log, artifact)).hexdigest() != ref.get("content_sha256")):
                         raise ValueError("交付引用不一致，未下载其他版本替代已验收文件。")
                     frozen[ref["filename"]] = artifact
                 files = frozen
@@ -1211,7 +1245,7 @@ class TeamService:
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
             for name, artifact in files.items():
-                archive.writestr(name, artifact["content"].encode("utf-8"))
+                archive.writestr(name, artifact_bytes(self.rt.log, artifact))
             archive.writestr("__cater__/manifest.json", json.dumps({"objective": current["objective"],
                 "files": [{"filename": name, "seq": a["seq"], "sha256": a["content_sha256"]} for name, a in files.items()]},
                 ensure_ascii=False, indent=2))
