@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import time
 import tomllib
 import unittest
 from unittest.mock import patch
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlencode
@@ -164,6 +166,62 @@ def start_test_web(
     testcase.addCleanup(server.shutdown)
     base = f"http://127.0.0.1:{server.server_port}"
     return (base, server, thread) if return_server else base
+
+
+@contextmanager
+def background_test_web(testcase, db, *, driver, runtime_factory):
+    owners = []
+    owners_lock = threading.Lock()
+    runners = []
+    runner_type = web_module.ActivityRunner
+
+    @contextmanager
+    def tracked_runtime():
+        state = {"thread": threading.current_thread(), "closed": False}
+        with owners_lock:
+            owners.append(state)
+        runtime = runtime_factory()
+        try:
+            with runtime:
+                yield runtime
+        finally:
+            # Probe on the connection's owner thread, not the cleanup thread.
+            with testcase.assertRaisesRegex(sqlite3.ProgrammingError, "closed"):
+                runtime.log.db.execute("SELECT 1")
+            state["closed"] = True
+
+    def capture_runner(factory):
+        runner = runner_type(factory)
+        runners.append(runner)
+        return runner
+
+    with patch.object(web_module, "ActivityRunner", side_effect=capture_runner):
+        handler = make_handler(db, runtime_factory=tracked_runtime)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    server.daemon_threads = False
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        driver.release.set()
+        server.shutdown()
+        thread.join()
+        server.server_close()
+        # Request handlers have drained, so they cannot spawn another consumer.
+        consumer_names = set()
+        for runner in runners:
+            with runner._lock:
+                consumer_names.update(f"cater-run-{task_id}" for task_id in runner._activities)
+        consumers = {item for item in threading.enumerate() if item.name in consumer_names}
+        with owners_lock:
+            consumers.update(state["thread"] for state in owners)
+        consumers.discard(threading.current_thread())
+        for consumer in consumers:
+            consumer.join(timeout=5)
+            testcase.assertFalse(consumer.is_alive(), f"test thread still alive: {consumer.name}")
+        with owners_lock:
+            testcase.assertTrue(all(state["closed"] for state in owners), "Runtime connection left open")
 
 
 class RuntimeTests(unittest.TestCase):
@@ -2919,8 +2977,7 @@ class WebTests(unittest.TestCase):
 
     def test_web_can_run_collaboration_in_background_without_duplicate_rounds(self):
         driver = BlockingDriver()
-        self.addCleanup(driver.release.set)
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as resources:
             db = str(Path(tmp) / "web-background.db")
             roles = Path(tmp) / "roles.json"
             roles.write_text(
@@ -2937,12 +2994,12 @@ class WebTests(unittest.TestCase):
             def runtime_factory() -> Runtime:
                 return Runtime(db, roles_path=roles, drivers={"blocking": driver})
 
-            base, server, thread = start_test_web(
+            base = resources.enter_context(background_test_web(
                 self,
                 db,
+                driver=driver,
                 runtime_factory=runtime_factory,
-                return_server=True,
-            )
+            ))
             request = Request(
                 f"{base}/api/tasks",
                 data=json.dumps({"goal": "Run in the background", "run": True, "background": True}).encode("utf-8"),
@@ -2997,9 +3054,6 @@ class WebTests(unittest.TestCase):
             self.assertEqual(completed["activity"]["state"], "completed")
             self.assertIn("activity.completed", [event["type"] for event in completed["events"]])
             self.assertEqual(len(completed["task"]["messages"]), 1)
-            server.shutdown()
-            thread.join(timeout=1)
-            server.server_close()
 
     def test_web_queues_a_follow_up_round_after_a_human_direction(self):
         driver = BlockingDriver()

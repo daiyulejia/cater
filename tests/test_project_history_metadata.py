@@ -111,6 +111,50 @@ class ProjectMetadataTests(unittest.TestCase):
             self.assertEqual(task_api_payload(self.rt, legacy)["organization_memory"], [{"seq": 1}])
             old.assert_called_once_with(exclude_task_id=legacy)
 
+    def test_nul_suffixed_keys_cannot_place_unbound_task_in_project_history(self):
+        self.publication(self.source)
+        self.complete(self.source)
+        self.assertTrue(self.rt.team.project_history.index(self.task)["available"])
+        special = "unbound-special-key"
+        self.rt.log.emit(type="task.created", actor=Actor.human(), task_id=special,
+                         payload={"goal": "未关联项目", "project_id\0alias": self.project})
+        self.assertIsNone(self.rt.rulebook.task_project(special))
+        for task in (special, self.task):
+            with self.subTest(task=task):
+                result = self.rt.team.project_history.index(task)
+                self.assertFalse(result["available"])
+                self.assertEqual(result["reason"], "metadata_query_unavailable")
+                self.assertNotIn("entries", result)
+        self.assertTrue(self.rt.verify_chain().ok)
+
+    def test_ambiguous_later_binding_does_not_fall_back_to_previous_project_scope(self):
+        other = self.rt.rulebook.create_project("另一个项目")["id"]
+        self.rt.log.emit(type="task.project_bound", actor=Actor.human(), task_id=self.task,
+                         payload={"project_id": other, "project_id\0alias": self.project})
+        self.assertEqual(self.rt.rulebook.task_project(self.task), other)
+        result = self.rt.team.project_history.read(self.task, {"section": "index"},
+                                                   expected_project_id=self.project)
+        self.assertEqual(result["outcome"], "not_started")
+        self.assertNotIn("entries", result)
+        self.assertNotIn("source", result)
+        self.assertTrue(self.rt.verify_chain().ok)
+
+    def test_raw_duplicate_metadata_keys_are_unavailable_not_first_value_wins(self):
+        # Only this temporary ledger models imported or corrupted raw JSON.
+        self.rt.log.db.execute("INSERT INTO events "
+            "(id, ts, task_id, actor_json, type, category, payload_json, prev_hash, hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("raw-duplicate-id", "2026-10-17T00:00:00+00:00", "raw-duplicate",
+             json.dumps(Actor.human().to_dict()), "task.created", "lifecycle",
+             '{"goal":"历史样本","project_id":"first","project\\u005fid":"last"}',
+             self.rt.log.head_hash(), "f" * 64))
+        self.rt.log.db.commit()
+        self.assertEqual(self.rt.rulebook.task_project("raw-duplicate"), "last")
+        result = self.rt.team.project_history.index(self.task)
+        self.assertFalse(result["available"])
+        self.assertEqual(result["reason"], "metadata_query_unavailable")
+        self.assertNotIn("entries", result)
+
 
 if __name__ == "__main__":
     unittest.main()

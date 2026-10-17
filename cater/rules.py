@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import uuid
+from contextlib import closing
 from typing import Any, Callable
 
 from .events import Actor, Event, EventLog, HeadChanged
+from .json_fields import UNAMBIGUOUS_OBJECT_SQL
 
 RULE_EVENTS = ("rule.recorded", "rule.updated")
 MAX_SCOPE_CHARS = 6000
@@ -57,11 +60,59 @@ class RuleBook:
             raise ValueError("unknown project")
         return project_id
 
+    def _json_projection_available(self) -> bool:
+        try:
+            with closing(self.log.db.execute("SELECT json_valid('{}'), json_type('{}'), "
+                                            "'{}' -> '$.project_id', (SELECT count(*) FROM json_each('{}'))")) as cursor:
+                cursor.fetchone()
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if exc.sqlite_errorcode == sqlite3.SQLITE_ERROR and any(part in message for part in (
+                    "no such function", "no such table: json_each", "syntax error", "not authorized to use function")):
+                return False
+            raise
+        return True
+
+    def _task_fields(self, field, event_types, *, default=None):
+        """Project task fields and keep rule changes in the same ordered read."""
+        if field not in {"project_id", "inherited_rules"}:
+            raise ValueError("unknown task metadata field")
+        if not self._json_projection_available():
+            for event in self.log.iter_events(event_types=event_types):
+                applicable = (bool(event.task_id) if field == "project_id"
+                              else event.type != "task.created" or event.actor == Actor.human())
+                yield {"seq": event.seq, "ts": event.ts, "task_id": event.task_id, "type": event.type,
+                       "actor": event.actor, "value": event.payload if event.type in RULE_EVENTS
+                       else event.payload.get(field, default) if applicable else default}
+            return
+        clauses = ["type IN (" + ",".join("?" for _ in event_types) + ")"]
+        parameters = list(event_types)
+        # Only task object fields are projected, not partial Events. Keep old
+        # parser semantics for ambiguous keys and legacy/error payloads.
+        projected = f"type NOT IN ('rule.recorded', 'rule.updated') AND ({UNAMBIGUOUS_OBJECT_SQL})"
+        sql = ("SELECT seq, ts, task_id, type, actor_json, "
+               f"CASE WHEN {projected} THEN payload_json -> '$.{field}' END AS field_json, "
+               f"CASE WHEN NOT ({projected}) THEN payload_json END AS legacy_json "
+               "FROM events WHERE " + " AND ".join(clauses) + " ORDER BY seq")
+        with closing(self.log.db.execute(sql, parameters)) as cursor:
+            for row in cursor:
+                actor = Actor(**json.loads(row["actor_json"]))
+                applicable = (bool(row["task_id"]) if field == "project_id"
+                              else row["type"] != "task.created" or actor == Actor.human())
+                if row["legacy_json"] is not None:
+                    payload = json.loads(row["legacy_json"])
+                    value = (payload if row["type"] in RULE_EVENTS else payload.get(field, default)
+                             if applicable else default)
+                else:
+                    value = (json.loads(row["field_json"]) if applicable and row["field_json"] is not None else default)
+                yield {"seq": row["seq"], "ts": row["ts"], "task_id": row["task_id"], "type": row["type"],
+                       "actor": actor, "value": value}
+
     def task_projects(self) -> dict[str, str | None]:
         result = {}
-        for event in self.log.iter_events(event_types=("task.created", "task.project_bound")):
-            if event.task_id:
-                result[event.task_id] = event.payload.get("project_id")
+        for row in self._task_fields("project_id", ("task.created", "task.project_bound")):
+            if row["task_id"]:
+                result[row["task_id"]] = row["value"]
         return result
 
     def task_project(self, task_id: object) -> str | None:
@@ -82,13 +133,15 @@ class RuleBook:
 
     def all_rules(self) -> list[dict[str, Any]]:
         current = {}
-        for event in self.log.iter_events(event_types=(*RULE_EVENTS, "task.created")):
-            if event.type == "task.created":
-                if event.actor == Actor.human():
-                    for rule in event.payload.get("inherited_rules", []):
-                        current[rule["id"]] = {**rule, "seq": event.seq, "updated_at": event.ts}
+        for row in self._task_fields("inherited_rules", (*RULE_EVENTS, "task.created"), default=[]):
+            if row["type"] == "task.created":
+                if row["actor"] != Actor.human():
+                    continue
+                rules = row["value"]
             else:
-                current[event.payload["id"]] = {**event.payload, "seq": event.seq, "updated_at": event.ts}
+                rules = [row["value"]]
+            for rule in rules:
+                current[rule["id"]] = {**rule, "seq": row["seq"], "updated_at": row["ts"]}
         return list(current.values())
 
     def view(self, *, task_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:

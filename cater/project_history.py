@@ -9,6 +9,7 @@ import sqlite3
 
 from .artifacts import safe_filename
 from .events import Actor, GENESIS_HASH
+from .json_fields import UNAMBIGUOUS_OBJECT_SQL
 from .tool_protocol import json_utf8
 
 
@@ -78,6 +79,11 @@ class ProjectHistory:
                    f"THEN CAST(json_extract(payload_json, '$.{key}') AS BLOB) END AS {key}"
                    for key, limit in fields.items()]
         try:
+            ambiguous = self.rt.log.db.execute("SELECT 1 FROM events WHERE seq < ? "
+                "AND type IN ('project.created', 'task.created', 'task.project_bound') "
+                f"AND NOT ({UNAMBIGUOUS_OBJECT_SQL}) LIMIT 1", (seq + 1,)).fetchone()
+            if ambiguous:
+                raise _MetadataUnavailable("项目历史元数据存在歧义，未猜测项目范围。")
             cursor = self.rt.log.db.execute("SELECT seq, task_id, actor_json, type, " + ", ".join(columns)
                 + ", (COALESCE(json_type(payload_json, '$.background'), 'null') <> 'null' "
                 + "OR COALESCE(json_extract(payload_json, '$.context_scope') = 'task', 0)) AS isolated "
@@ -111,7 +117,8 @@ class ProjectHistory:
         try:
             row = self.rt.log.db.execute("SELECT CASE WHEN json_type(payload_json, '$.goal') = 'text' "
                 "AND length(json_extract(payload_json, '$.goal')) <= 32000 "
-                "THEN CAST(json_extract(payload_json, '$.goal') AS BLOB) END AS goal FROM events WHERE seq = ?",
+                "THEN CAST(json_extract(payload_json, '$.goal') AS BLOB) END AS goal FROM events WHERE seq = ? "
+                f"AND ({UNAMBIGUOUS_OBJECT_SQL})",
                 (created_seq,)).fetchone()
             return row["goal"].decode("utf-8") if row and row["goal"] is not None else None
         except UnicodeError:
