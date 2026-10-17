@@ -14,6 +14,8 @@ const MAX_FILE = 16 * 1024 * 1024;
 const MAX_TOTAL = 32 * 1024 * 1024;
 const STEP_TIMEOUT = 3_000;
 const RUN_TIMEOUT = 60_000;
+const OBSERVATION_TIMEOUT = 1_000;
+const OBSERVATION_CHARS = 1_200;
 const ACTIONS = {
   click: { selector: 500 },
   click_at: { selector: 500, x: null, y: null },
@@ -83,7 +85,8 @@ export function validatePlan(plan) {
     const where = `step ${index + 1}`;
     requireThat(step && typeof step.action === 'string' && Object.hasOwn(ACTIONS, step.action), `${where}: unknown action`);
     const fields = ACTIONS[step.action];
-    exactKeys(step, ['action', 'label', ...Object.keys(fields)], where);
+    const optional = step.action === 'assert_js' && Object.hasOwn(step, 'observe') ? ['observe'] : [];
+    exactKeys(step, ['action', 'label', ...Object.keys(fields), ...optional], where);
     textField(step.label, 100, `${where}.label`);
     requireThat(!/[\x00-\x1f\x7f]/u.test(step.label), `${where}.label: control characters are forbidden`);
     for (const [key, limit] of Object.entries(fields)) {
@@ -100,6 +103,9 @@ export function validatePlan(plan) {
       // Parse only. Never run model expressions in the Node host.
       try { new Script(step.expression); }
       catch { throw new Error(`${where}: browser expression has invalid JavaScript syntax`); }
+    }
+    if (optional.length) {
+      textField(step.observe, 4000, `${where}.observe`);
     }
   }
   requireThat(plan.steps.some(step => step.action.startsWith('assert_')), 'steps: at least one assertion is required');
@@ -275,6 +281,18 @@ async function executeStep(page, step, result) {
   }
 }
 
+async function observeFailure(page, expression) {
+  return bounded(() => page.evaluate(async ({ source, limit }) => {
+    let value = (0, eval)(source);
+    if (typeof value === 'function') value = value();
+    value = await value;
+    const encoded = typeof value === 'string' ? value : JSON.stringify(value);
+    const text = encoded === undefined ? String(value) : encoded;
+    const chars = Array.from(text);
+    return chars.length > limit ? chars.slice(0, limit).join('') + '…（诊断已截断）' : text;
+  }, { source: expression, limit: OBSERVATION_CHARS }), OBSERVATION_TIMEOUT, 'failure observation');
+}
+
 async function checkArtifacts(browser, inputs, report) {
   const { root, plan, files } = inputs;
   const context = await browser.newContext({
@@ -362,6 +380,12 @@ async function checkArtifacts(browser, inputs, report) {
       } catch (error) {
         result.status = 'failed';
         result.error = errorText(error);
+        if (step.action === 'assert_js' && Object.hasOwn(step, 'observe')) {
+          try { result.observed = await observeFailure(page, step.observe); }
+          catch (observationError) {
+            result.error += `\n状态采集未完成：${errorText(observationError)}`;
+          }
+        }
         break;
       }
     }

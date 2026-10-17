@@ -25,8 +25,10 @@
 - `assert_visible`: `selector`。
 - `assert_text`: `selector`、`text`，期望该元素文本包含此内容。
 - `evaluate`: `expression`，仅在页面内执行的 JavaScript，用于明确标注的测试初态设置。支持表达式、语句或无参函数；函数会在页面内被调用。
-- `assert_js`: `expression`，仅在页面内执行的 JavaScript，必须返回布尔值 true 才算通过。支持表达式或无参函数，例如 `() => document.querySelector('#score').textContent === '0'`。
+- `assert_js`: `expression`，仅在页面内执行的 JavaScript，必须返回布尔值 true 才算通过。支持表达式或无参函数，例如 `() => document.querySelector('#score').textContent === '0'`。可选 `observe` 用于失败后采集实际状态，例如 `() => ({score: document.querySelector('#score').textContent})`，不改写失败结论；通过时不会执行。
 
 `evaluate` 会丢弃返回值，即使返回 false 也不算断言失败。所有验证比较必须使用 `assert_js`，不要只给 evaluate 起名“断言”。规划最多 128 步，不需要等待时不加 wait；可以在一个 assert_js 里验证同一操作的多个结果，但不能省略必要的行为。五子棋这类需要连续落子的场景，应先统计真实点击和断言的总步数；总执行时间仍不超过60秒。不要为了满足步数而删掉验收条目。
 
 选择器不超过 500 字符，表达式不超过 4000 字符，文本不超过 2000 字符。不允许提供未列出的字段、命令或文件路径。网页入口必须是本次提交文件，不能跳转到外部 URL。若所有标准无法在这些能力内检查，返回 unsupported，plan 为 null。
+
+`observe` 只在失败后额外执行一次，最多等待1秒，在页面内将结果转为纯文本或JSON，最多保留1200字符；超长与报告压缩可能进一步节选。采集出错不覆盖原失败，也不继续后续步骤。表达式可能影响页面，宿主不保证它是纯函数；只读取实际状态，不写入预期答案。诊断文字不是新的断言或验收结论，需结合原操作、版本和测试前提判断。

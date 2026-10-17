@@ -475,3 +475,106 @@ test('large labels, expressions, errors and log storms keep all steps within 750
   assert.equal(report.steps[31].actual, false);
   assert.match(report.steps[31].error, /did not return exactly true/);
 });
+
+test('optional failure observations preserve strict plan validation without running host code', () => {
+  const legacy = planFor();
+  assert.equal(validatePlan(legacy), legacy);
+  const valid = planFor([{ ...assertion('false'), observe: '() => ({count: 0})' }]);
+  assert.equal(validatePlan(valid), valid);
+  for (const observe of ['', '  ', null, 1, false, [], {}, 'x'.repeat(4001)]) {
+    assert.throws(() => validatePlan(planFor([{ ...assertion('false'), observe }])));
+  }
+  assert.throws(() => validatePlan(planFor([{ action: 'evaluate', label: '准备', expression: '0', observe: '0' }, assertion()])));
+  assert.throws(() => validatePlan(planFor([{ ...assertion('false'), observation: '0' }])));
+  assert.doesNotThrow(() => validatePlan(planFor([{ ...assertion('false'), observe: 'process.exit(17)' }])));
+  assert.doesNotThrow(() => validatePlan(planFor([{ ...assertion('false'), observe: '() => {' }])));
+});
+
+test('real Chromium: failed assertion collects actual page state and never becomes passed', async t => {
+  const directory = await fixture(t, planFor([
+    { action: 'click', label: '点击一次', selector: '#start' },
+    { ...assertion('score === 2'), observe: '() => ({score, text: document.querySelector("#score").textContent})' },
+    assertion('true', '失败后不应执行'),
+  ]));
+  const { code, report } = await invoke(directory);
+  assert.equal(code, 1);
+  assert.equal(report.outcome, 'failed');
+  assert.equal(report.steps[1].actual, false);
+  assert.equal(report.steps[1].status, 'failed');
+  assert.deepEqual(JSON.parse(report.steps[1].observed), { score: 1, text: '1' });
+  assert.match(report.steps[1].error, /did not return exactly true/);
+  assert.equal(report.steps[2].status, 'not_run');
+});
+
+test('real Chromium: passing assertion never executes the optional observation', async t => {
+  const directory = await fixture(t, planFor([
+    { ...assertion('true'), observe: '() => { globalThis.unwantedObservation = true; throw new Error("not allowed on pass"); }' },
+    assertion('globalThis.unwantedObservation === undefined'),
+  ]));
+  const { code, report } = await invoke(directory);
+  assert.equal(code, 0);
+  assert.equal(report.outcome, 'passed');
+  assert.equal(Object.hasOwn(report.steps[0], 'observed'), false);
+  assert.equal(Object.hasOwn(report.steps[0], 'error'), false);
+});
+
+test('real Chromium: diagnostic errors and timeout do not replace the primary failure', async t => {
+  for (const [name, observe] of [
+    ['throw', '() => { throw new Error("diagnostic failed"); }'],
+    ['cycle', '() => { const value = {}; value.self = value; return value; }'],
+    ['bigint', '() => 1n'],
+    ['timeout', '() => new Promise(() => {})'],
+  ]) await t.test(name, async () => {
+    const directory = await fixture(t, planFor([{ ...assertion('false'), observe }]));
+    const { code, report } = await invoke(directory);
+    assert.equal(code, 1);
+    assert.equal(report.outcome, 'failed');
+    assert.equal(report.steps[0].actual, false);
+    assert.match(report.steps[0].error, /^assert_js: expression did not return exactly true/);
+    assert.match(report.steps[0].error, /状态采集未完成/);
+    assert.equal(Object.hasOwn(report.steps[0], 'observed'), false);
+  });
+});
+
+test('real Chromium: thrown assertion can report state; observations stay page-only and bounded', async t => {
+  for (const [name, observe, expected] of [
+    ['page-only', '() => typeof process + ":" + typeof require', 'undefined:undefined'],
+    ['undefined', '() => undefined', 'undefined'],
+    ['async', 'async () => ({score, available: true})', '{"score":0,"available":true}'],
+    ['unicode', '() => "😀".repeat(200000)', '😀'.repeat(1200) + '…（诊断已截断）'],
+    ['mutating', '() => { globalThis.score = 100; return true; }', 'true'],
+  ]) await t.test(name, async () => {
+    const directory = await fixture(t, planFor([{ ...assertion('missingFixtureName === 1'), observe }]));
+    const { code, report, stdout } = await invoke(directory);
+    assert.equal(code, 1);
+    assert.equal(report.outcome, 'failed');
+    assert.equal(report.steps[0].status, 'failed');
+    assert.equal(Object.hasOwn(report.steps[0], 'actual'), false);
+    assert.match(report.steps[0].error, /ReferenceError/);
+    assert.equal(report.steps[0].observed, expected);
+    assert.ok(Buffer.byteLength(stdout) <= 7500);
+  });
+});
+
+test('real Chromium: invalid optional observation syntax does not block the primary assertion', async t => {
+  const directory = await fixture(t, planFor([{ ...assertion('false'), observe: '() => {' }]));
+  const { code, report } = await invoke(directory);
+  assert.equal(code, 1);
+  assert.equal(report.outcome, 'failed');
+  assert.equal(report.phase, 'execution');
+  assert.equal(report.steps[0].actual, false);
+  assert.match(report.steps[0].error, /^assert_js: expression did not return exactly true/);
+  assert.match(report.steps[0].error, /状态采集未完成/);
+  assert.match(report.steps[0].error, /SyntaxError/);
+  const passing = await fixture(t, planFor([{ ...assertion('true'), observe: '() => {' }]));
+  assert.equal((await invoke(passing)).code, 0);
+});
+
+test('observation expressions participate in the exact plan hash', async t => {
+  const plan = planFor([{ ...assertion('false'), observe: '() => ({score})' }]);
+  const directory = await fixture(t, plan);
+  const bytes = await readFile(path.join(directory, PLAN));
+  const { report } = await invoke(directory);
+  assert.equal(report.plan_sha256, createHash('sha256').update(bytes).digest('hex'));
+  assert.equal(report.steps[0].observed, '{"score":0}');
+});

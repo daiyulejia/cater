@@ -53,15 +53,16 @@ def normalize_plan(raw: object, filenames: list[str]) -> dict:
             raise ValueError("未知浏览器动作。")
         fields = ACTION_FIELDS[step["action"]]
         expected = {"action", "label", *fields}
-        if set(step) != expected:
+        optional = {"observe"} if step["action"] == "assert_js" else set()
+        if not expected <= set(step) or set(step) - expected - optional:
             missing = sorted(expected - set(step))
-            extra = sorted(set(step) - expected)
+            extra = sorted(set(step) - expected - optional)
             raise ValueError(f"浏览器动作字段不符合接口：第 {index} 步 {step['action']}，"
-                             f"缺少 {missing}，多出 {extra}；只使用 {sorted(expected)}。")
+                             f"缺少 {missing}，多出 {extra}；必需 {sorted(expected)}，可选 {sorted(optional)}。")
         if (not isinstance(step["label"], str) or not step["label"].strip() or len(step["label"]) > 100
                 or re.search(r"[\x00-\x1f\x7f]", step["label"])):
             raise ValueError("每步检查需要简短说明。")
-        for key, limit in fields.items():
+        for key, limit in {**fields, **({"observe": 4000} if "observe" in step else {})}.items():
             value = step[key]
             if key == "ms":
                 if type(value) is not int or not 0 <= value <= 2000:

@@ -205,3 +205,25 @@ test('长文本、哈希和恶意字段保持可折行纯文本，不渲染链�
   expect(progress.container.textContent).not.toMatch(/TEMP_ONLY|javascript:|HIDDEN_REPORT|HIDDEN_EXPRESSION|RAW_STDOUT/)
   expect(progress.container.querySelector('a, img, script')).toBeNull()
 })
+
+test('失败诊断在双入口显示为实际观察，不能变成通过或执行计划表达式', () => {
+  const value = result()
+  const observed = '{"count":"1","markup":"<script>不执行</script>"}'
+  value.outcome = 'failed'
+  value.browser_plan = { entrypoint: '入口.html', steps: [{ action: 'assert_js', label: '核对计数',
+    expression: 'PRIVATE_ASSERT_EXPRESSION', observe: 'PRIVATE_OBSERVE_EXPRESSION' }] }
+  value.browser_report = { outcome: 'failed', counts: { page_errors: 0 }, steps: [{
+    index: 1, action: 'assert_js', label: '核对计数', status: 'failed', actual: false, observed,
+    error: 'assert_js: expression did not return exactly true\n状态采集未完成：另一个诊断未完成',
+  }] }
+  const receipt = finished(value)
+  for (const view of [render(<TeamToolProgress events={[started, receipt]} names={{}} />), render(<EventDetails event={receipt} />)]) {
+    expect(view.container.textContent).toContain('检查未通过')
+    expect(view.container.textContent).toContain('实际判断：不满足')
+    expect(view.container.textContent).toContain(`实际观察：${observed}`)
+    expect(view.container.textContent).toContain('状态采集未完成')
+    expect(view.container.textContent).not.toMatch(/检查通过|PRIVATE_|RAW_STDOUT|RAW_STDERR/)
+    expect(view.container.querySelector('script, iframe, img, a')).toBeNull()
+  }
+  expect(activity(receipt).lines.find(line => line.role === 'dev')?.warning).toBe(true)
+})

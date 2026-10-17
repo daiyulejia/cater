@@ -31,8 +31,11 @@ def browser_schema():
             properties[key] = ({"type": "integer", "minimum": 0, "maximum": 2000} if key == "ms"
                 else {"type": "number", "minimum": 0, "maximum": 16384} if key in {"x", "y"}
                 else {"type": "string", "maxLength": limit})
+        if action == "assert_js":
+            properties["observe"] = {"type": "string", "minLength": 1, "maxLength": 4000,
+                "description": "可选：仅断言失败后在页面内采集诊断值（最多1200字符/1秒），不改写断言结论；不要修改页面来制造结果。"}
         variants.append({"type": "object", "additionalProperties": False,
-                         "properties": properties, "required": list(properties)})
+                         "properties": properties, "required": [key for key in properties if key != "observe"]})
     return {"name": "browser_check",
         "description": "实际检查本群已发布静态网页的固定副本。artifact_seqs列HTML及其本地JS/CSS等全部依赖；plan指定入口与操作/断言（至少一个assert_*）。不访问任意网址、外网、登录态或工作目录，不启动后端。可使用click/fill/press/click_at、短wait、assert_visible/assert_text/assert_js；evaluate仅页面内测试准备，不可用自设状态冒充功能。结果outcome才是实际检查结论，status=ok仅表示拿到回执；失败先判断实现还是检查有误，修复后发布新版再检。",
         "input_schema": {"type": "object", "additionalProperties": False,
