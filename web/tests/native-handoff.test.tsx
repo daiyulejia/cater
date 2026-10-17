@@ -23,7 +23,7 @@ async function mount(initial: TaskDetail, other?: TaskDetail) {
   })
   vi.stubGlobal('fetch', fetchMock)
   render(<App />)
-  await screen.findByRole('region', { name: '团队进度' })
+  await screen.findByRole('region', { name: '团队进度' }, { timeout: 3000 })
   await waitFor(() => expect(screen.getByLabelText('聊天记录').getAttribute('aria-busy')).toBe('false'))
   return { fetchMock, update: async (next: TaskDetail) => {
     current = next

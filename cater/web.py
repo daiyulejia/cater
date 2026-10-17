@@ -2605,7 +2605,20 @@ def _task_summary(task: TaskSnapshot, *, version: int, latest_seq: int, conversa
                   team: dict[str, Any] | None = None) -> dict[str, Any]:
     control = execution_control or {"state": "running", "seq": None, "reason": ""}
     label = _task_status_label(task)
+    team_summary = {}
     if team and team.get("enabled"):
+        runs = team.get("runs", [])
+        latest = next((i for i in range(len(runs) - 1, -1, -1)
+                       if runs[i].get("revision", team.get("revision")) == team.get("revision")), None)
+        active = next((i for i in range(len(runs) - 1, -1, -1)
+                       if runs[i].get("revision", team.get("revision")) == team.get("revision")
+                       and runs[i].get("status") in {"running", "started"}), None)
+        team_summary = {key: team[key] for key in ("enabled", "status", "pending_count", "revision")
+                        if key in team}
+        team_summary["runs"] = [
+            {key: runs[i][key] for key in ("message_seq", "role", "status", "revision") if key in runs[i]}
+            for i in sorted({latest, active} - {None})
+        ]
         label = {"idle": "团队待开始", "running": "团队协作中", "completed": "团队本轮完成",
                  "done": "团队本轮完成", "blocked": "团队待处理", "failed": "团队执行失败",
                  "uncertain": "团队结果待核实"}.get(team.get("status"), "团队协作")
@@ -2615,8 +2628,7 @@ def _task_summary(task: TaskSnapshot, *, version: int, latest_seq: int, conversa
             "project_id": task.project_id, "status": team["status"] if team and team.get("enabled") else task.status,
             "execution_control": control,
             "status_label": {"paused": "已暂停", "cancelled": "已取消"}.get(control["state"], label),
-            **({"team": {key: team[key] for key in ("enabled", "status", "pending_count", "revision")
-                         if key in team}} if team and team.get("enabled") else {}),
+            **({"team": team_summary} if team_summary else {}),
             "conversation_count": conversation_count,
             "latest_seq": latest_seq, "version": version, "evaluated_at": time.time()}
 

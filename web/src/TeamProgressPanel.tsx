@@ -1,6 +1,6 @@
 import type { Artifact } from './Artifact'
-import { isTeamHost, teamRuns, teamRunStatus, teamStatus } from './team'
-import type { TeamEvent, TeamReview, TeamState } from './team'
+import { isTeamHost, teamRunStatus, teamStatus } from './team'
+import type { TeamActivity, TeamEvent, TeamReview, TeamState } from './team'
 import { NativeBrowserReceipt } from './browserReport'
 import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle, nativeProjectHistoryReceiptStatus } from './conversationActivityState'
 import { TeamArtifacts } from './TeamArtifacts'
@@ -178,11 +178,12 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
   </details>
 }
 
-export function TeamProgressPanel({ team, events, names, executionState = 'running' }: { team: TeamState; events: TeamEvent[]; names: Record<string, string>; executionState?: ExecutionControl['state'] }) {
-  const runs = teamRuns(team, events)
+export function TeamProgressPanel({ team, events, names, executionState = 'running', activity }: { team: TeamState; events: TeamEvent[]; names: Record<string, string>; executionState?: ExecutionControl['state']; activity?: TeamActivity }) {
+  // App resolves event details first, then overlays any newer summary facts.
+  const runs = team.runs
   return <section aria-label="团队进度" className="mb-5 space-y-3 text-xs leading-5 text-[#52766d] [overflow-wrap:anywhere]">
     <h2 className="text-sm font-semibold text-[#294a40]">团队进度</h2>
-    <p aria-label="团队执行状态" className="font-semibold">{executionState === 'paused' ? '已暂停后续执行' : executionState === 'cancelled' ? '已取消后续执行' : teamStatus({ ...team, runs })}</p>
+    <p aria-label="团队执行状态" className="font-semibold">{executionState === 'paused' ? '已暂停后续执行' : executionState === 'cancelled' ? '已取消后续执行' : teamStatus({ ...team, runs }, activity)}</p>
     <ModelUsagePanel events={events} names={names} />
     {team.status === 'done' && <p>店长的交付结论，验证范围以交付说明与实际回执为准。</p>}
     <details key={`objective:${team.revision}`}>
@@ -205,11 +206,11 @@ export function TeamProgressPanel({ team, events, names, executionState = 'runni
   </section>
 }
 
-export function TeamWorkboard({ team, taskId, artifacts, events, names, accessToken, executionState }: {
-  team: TeamState; taskId: string; artifacts: Artifact[]; events: TeamEvent[]; names: Record<string, string>; accessToken?: string; executionState?: ExecutionControl['state']
+export function TeamWorkboard({ team, taskId, artifacts, events, names, accessToken, executionState, activity }: {
+  team: TeamState; taskId: string; artifacts: Artifact[]; events: TeamEvent[]; names: Record<string, string>; accessToken?: string; executionState?: ExecutionControl['state']; activity?: TeamActivity
 }) {
   return <div className="space-y-5">
-    <TeamProgressPanel team={team} events={events} names={names} executionState={executionState} />
+    <TeamProgressPanel team={team} events={events} names={names} executionState={executionState} activity={activity} />
     <TeamArtifacts team={team} taskId={taskId} artifacts={artifacts} events={events} names={names} accessToken={accessToken} />
     <details className="border-t border-[#eaded1] pt-4 text-xs text-[#52766d]"><summary className="cursor-pointer font-semibold">过程证据 · {events.length} 条记录</summary><a className="mt-2 inline-block underline" href={`/tasks/${encodeURIComponent(taskId)}`}>打开完整审计回放</a></details>
   </div>

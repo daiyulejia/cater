@@ -41,6 +41,31 @@ export type TeamState = {
 
 export type TeamSummary = Pick<TeamState, 'enabled' | 'status' | 'pending_count' | 'revision'> & { runs?: TeamRun[] }
 
+export type TeamActivity = { state: string; active: boolean; revision?: number; follow_up?: { action?: string } }
+
+export function resolveTeamActivity<T extends TeamActivity>(detail: T | undefined, summary: T | undefined, newObjective: boolean): T | undefined {
+  return newObjective || (summary?.revision ?? -1) > (detail?.revision ?? -1) ? summary : detail
+}
+
+export function hasNewTeamObjective(detail?: TeamSummary | null, summary?: TeamSummary | null): boolean {
+  return Boolean(detail?.enabled && summary?.enabled && summary.revision > detail.revision)
+}
+
+export function resolveTeamTask<T extends { goal: string; status: string; team?: TeamState | null }>(
+  detail: T | undefined, summary: { goal: string; status: string; version: number; team?: TeamSummary | null } | undefined,
+  detailVersion: number,
+): T | undefined {
+  if (!detail?.team?.enabled || !summary?.team?.enabled
+    || (!hasNewTeamObjective(detail.team, summary.team) && summary.version <= detailVersion)) return detail
+  const newObjective = hasNewTeamObjective(detail.team, summary.team)
+  // A compact snapshot cannot repair every old run; do not merge it into stale live facts.
+  const runs = summary.team.runs ?? []
+  return { ...detail, goal: summary.goal, status: summary.status,
+    team: { ...detail.team, ...summary.team, objective: summary.goal, runs,
+      reviews: newObjective ? [] : detail.team.reviews,
+      checkpoint: newObjective ? '新目标已收到，详细记录正在同步。' : '详细记录正在同步。' } }
+}
+
 export type TeamEvent = {
   seq: number
   type: string
@@ -150,16 +175,31 @@ export function teamProgressMessages(events: TeamEvent[]): Set<number> {
   return progress
 }
 
-export const hasActiveTeamMessages = (team: TeamSummary) => team.pending_count > 0 || Boolean(team.runs?.some((run) =>
-  (run.revision === undefined || run.revision === team.revision) && ['running', 'started'].includes(run.status ?? '')))
+const currentTeamRuns = (team: TeamSummary) => (team.runs ?? []).filter((run) => run.revision === undefined || run.revision === team.revision)
+const isRunningTeamRun = (run: TeamRun) => ['running', 'started'].includes(run.status ?? '')
+export const hasActiveTeamMessages = (team: TeamSummary) => team.pending_count > 0 || currentTeamRuns(team).some(isRunningTeamRun)
 
-export function teamStatus(team: TeamSummary): string {
-  if (hasActiveTeamMessages(team)) return team.status === 'done' ? '正在处理后续消息' : '正在处理消息'
+export function teamStatus(team: TeamSummary, activity?: TeamActivity): string {
+  const followUp = team.status === 'done'
+  const processing = followUp ? '正在处理后续消息' : '正在处理消息'
+  if (activity?.active) {
+    if (activity.state === 'queued') return followUp ? '后续消息已排队' : '消息处理已排队'
+    if (activity.state === 'running') return processing
+  }
+  if (activity?.state === 'failed') return '执行失败，需跟进'
+  const currentRuns = currentTeamRuns(team)
+  if (currentRuns.some(isRunningTeamRun)) {
+    return activity?.active === false ? '执行状态待核对' : processing
+  }
+  const latest = currentRuns.at(-1)
+  if (latest?.status === 'failed') return team.pending_count > 0 ? '处理失败，仍有待办' : teamRunStatus('failed')
+  if (team.pending_count > 0) return followUp ? '后续消息等待处理' : '消息等待处理'
   if (team.status === 'done') return '店长确认可交付'
   if (team.status === 'failed' || team.status === 'blocked') return '任务需要跟进'
-  const currentRuns = (team.runs ?? []).filter((run) => run.revision === undefined || run.revision === team.revision)
-  const latest = currentRuns.at(-1)
-  return ['done', 'finished', 'completed', 'succeeded'].includes(latest?.status ?? '') ? '消息处理完成，任务待交付' : '任务进行中'
+  if (latest && ['interrupted', 'cancelled'].includes(latest.status ?? '')) return `本轮${teamRunStatus(latest.status)}`
+  if (latest?.status === 'waiting') return '本轮结束，等待消息'
+  if (latest && ['blocked', 'uncertain'].includes(latest.status ?? '')) return '处理结果待核对'
+  return ['done', 'finished', 'completed', 'succeeded'].includes(latest?.status ?? '') ? '消息处理完成，任务待交付' : '任务待推进'
 }
 
 export const teamRunStatus = (status?: string) => ({

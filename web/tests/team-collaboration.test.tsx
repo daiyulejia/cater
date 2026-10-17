@@ -35,6 +35,23 @@ test.each(['paused', 'cancelled'] as const)('App将%s执行控制传到有待处
   expect(board().queryByText('正在处理消息')).toBeNull()
 })
 
+test.each([
+  ['queued', true, 'failed', '消息处理已排队'],
+  ['running', true, 'running', '正在处理消息'],
+  ['completed', false, 'failed', '消息处理失败'],
+  ['completed', false, 'waiting', '本轮结束，等待消息'],
+  ['completed', false, 'running', '执行状态待核对'],
+] as const)('App统一列表、顶部、过程状态：消费者%s，角色%s', async (state, active, status, label) => {
+  const current = detail([], teamState({ runs: [{ message_seq: 1, role: 'dev', revision: 1, status }] }))
+  current.activity = { state, active }
+  const { fetchMock } = await mount(current)
+  expect(board().getByLabelText('团队执行状态').textContent).toBe(label)
+  expect(document.querySelector('.chat-heading .status-pill')?.textContent).toBe(label)
+  expect(screen.getByRole('button', { name: /团队接力/ }).textContent).toContain(label)
+  expect(Boolean(document.querySelector('.chat-heading .status-pill.is-running'))).toBe(active && state === 'running')
+  expect(fetchMock.mock.calls.some(([, init]) => init.method === 'POST')).toBe(false)
+})
+
 const recoveryMessage = () => event(4, 'team.message_received', { kind: 'recovery', recipient: 'store_manager',
   recovery_of: 2, recovery_hash: 'original-start-hash', interrupted_seq: 3, revision: 1, scope: { revision: 1 }, text: '先核对持久事实，再决定如何继续' })
 
@@ -159,7 +176,7 @@ test('仅知会的进展留在可展开协作记录，不冒充待执行工作�
 })
 
 test('已交付后的追问仍显示消息在处理，不把旧交付当成本轮答复', () => {
-  expect(teamStatus(teamState({ status: 'done', pending_count: 1 }))).toBe('正在处理后续消息')
+  expect(teamStatus(teamState({ status: 'done', pending_count: 1 }))).toBe('后续消息等待处理')
   expect(teamStatus(teamState({ status: 'done', runs: [{ role: 'dev', revision: 1, status: 'running' }] }))).toBe('正在处理后续消息')
   expect(teamStatus(teamState({ status: 'done', runs: [{ role: 'dev', revision: 0, status: 'running' }] }))).toBe('店长确认可交付')
 })
@@ -695,7 +712,7 @@ test('waiting 安静等待不算任务完成，讲解和追问继续从原聊天
     event(2, 'team.run_finished', { message_seq: 1, role: 'store_manager', status: 'waiting' }),
     event(3, 'team.tool_finished', { role: 'store_manager', name: 'wait_for_reply', result: { status: 'ok', waiting: true } }),
   ], teamState({ checkpoint: '等待伙伴回复，收到消息后继续。' })))
-  expect(board().getByText('任务进行中')).toBeTruthy()
+  expect(board().getByText('本轮结束，等待消息')).toBeTruthy()
   expect(board().getByText('等待伙伴回复，收到消息后继续。')).toBeTruthy()
   expect(stream().queryByText('等待伙伴回复')).toBeNull()
   expect(screen.queryByRole('button', { name: '提问', exact: true })).toBeNull()

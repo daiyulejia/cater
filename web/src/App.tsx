@@ -37,7 +37,7 @@ import { controlLabels, executionLabel } from './executionControl'
 import type { ControlAction, ExecutionControl } from './executionControl'
 import { clearCreationRecovery, CREATION_RECOVERY_TTL, loadCreationRecovery, readAccessToken, saveCreationRecovery } from './creationRecovery'
 import type { CreationAttempt } from './creationRecovery'
-import { hasActiveTeamMessages, isTeamHost, isTeamRecovery, resolveTeam, teamDeliveries, teamMessageAudience, teamMessageEchoes, teamProgressMessages, teamRunStatus, teamSpeaker, teamStatus } from './team'
+import { hasActiveTeamMessages, hasNewTeamObjective, isTeamHost, isTeamRecovery, resolveTeam, resolveTeamActivity, resolveTeamTask, teamDeliveries, teamMessageAudience, teamMessageEchoes, teamProgressMessages, teamRunStatus, teamSpeaker, teamStatus } from './team'
 import type { TeamState, TeamSummary } from './team'
 import { AsyncPanel } from './AsyncPanel'
 import { ReloadContext } from './pageReloadContext'
@@ -179,9 +179,10 @@ const activityText = (activity?: Activity) => {
   return ''
 }
 
-const taskListStatus = (task: Task) => {
-  if (task.team?.enabled) return teamStatus(task.team)
-  if (task.activity?.active) return activityText(task.activity) || '正在协作'
+const taskListStatus = (task: Task, activity = task.activity) => {
+  if (task.team?.enabled) return teamStatus(task.team, activity)
+  const activeLabel = activityText(activity)
+  if (activeLabel) return activeLabel
   if (task.work?.items.length) {
     if (task.work.items.some((item) => item.status === 'uncertain')) return '结果待核实'
     if (!task.work.scope_current) return '需要重新核对'
@@ -1030,7 +1031,7 @@ function App() {
     const base = next.summary ?? { id, goal: next.task.goal, project_id: next.task.project_id,
       status: next.task.status, status_label: taskListStatus({ ...next.task, activity: next.activity }),
       activity: next.activity, latest_seq: seq, version }
-    const item = team?.enabled ? { ...base, team, goal: next.task.goal, status: next.task.status, status_label: teamStatus(team) } : base
+    const item = team?.enabled ? { ...base, team, goal: next.task.goal, status: next.task.status, status_label: teamStatus(team, next.activity) } : base
     const previous = versionsRef.current[id]
     const comparison = previous ? summaryOrder(item, previous.summary) : 1
     if (activate) chooseTask(id)
@@ -1195,17 +1196,15 @@ function App() {
   }, [organization, roles])
   const currentDetail = detail?.task.id === selectedId ? detail : null
   const selectedSummary = tasks.find((item) => item.id === selectedId)
-  const syncingObjective = Boolean(selectedSummary?.team?.enabled && currentDetail?.task.team?.enabled
-    && selectedSummary.team.revision > currentDetail.task.team.revision)
+  const syncingObjective = hasNewTeamObjective(currentDetail?.task.team, selectedSummary?.team)
+  const currentActivity = resolveTeamActivity(currentDetail?.activity, selectedSummary?.activity, syncingObjective)
   const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization, currentDetail.questions, currentDetail.clarifications, currentDetail.conversation, Boolean(currentDetail.task.team?.enabled), currentDetail.questionnaires)
     .map(item => syncingObjective && item.evidence.type === 'team.objective_completed' ? { ...item, historicalDelivery: true } : item) : [], [currentDetail, identities, organization, syncingObjective])
   const visibleConversation = useMemo(() => chatFilter === 'all' ? conversation : conversation.filter((item) => item.category === chatFilter), [chatFilter, conversation])
   const baseTask: Task | undefined = selectedId ? currentDetail?.task ?? (selectedSummary
     ? { ...selectedSummary, team: selectedSummary.team ? { objective: selectedSummary.goal, assignments: [], checkpoint: '', runs: [], ...selectedSummary.team } : undefined,
       acceptance: [], messages: [], assignments: [], deliverables: [] } : undefined) : undefined
-  const task = syncingObjective && baseTask?.team && selectedSummary?.team ? { ...baseTask, goal: selectedSummary.goal,
-    status: selectedSummary.status, team: { ...baseTask.team, ...selectedSummary.team, objective: selectedSummary.goal,
-      runs: selectedSummary.team.runs ?? [], reviews: [], checkpoint: '新目标已收到，详细记录正在同步。' } } : baseTask
+  const task = resolveTeamTask(baseTask, selectedSummary, currentDetail?.summary?.version ?? currentDetail?.events.at(-1)?.seq ?? 0)
   const loading = selectedId !== null && currentDetail === null
   const workspaceActive = task?.team?.enabled ? hasActiveTeamMessages(task.team)
     : Boolean(currentDetail?.activity?.active || task?.activity?.active || task?.work?.items.some((item) =>
@@ -1519,7 +1518,7 @@ function App() {
               <button className="grid size-9 place-items-center rounded-md border border-[#ead2c5] bg-white text-[#b15342] shadow-sm hover:bg-[#fff0e9]" title="新建任务" aria-label="新建任务" onClick={() => chooseTask(null)}><Plus size={18} /></button>
             </div>
           </div>
-          <TaskList tasks={tasks} selectedId={selectedId} drafts={drafts} collapsed={tasksCollapsed} searchOpen={taskSearchOpen} onChoose={chooseTask} statusLabel={(item) => executionLabel(executionControls[item.id]?.state) || (item.team?.enabled ? teamStatus(item.team) : item.status_label)} />
+          <TaskList tasks={tasks} selectedId={selectedId} drafts={drafts} collapsed={tasksCollapsed} searchOpen={taskSearchOpen} onChoose={chooseTask} statusLabel={(item) => executionLabel(executionControls[item.id]?.state) || (item.team?.enabled ? teamStatus(item.team, item.activity) : item.status_label)} />
         </aside>
         <section ref={chatPaneRef} className="chat-pane flex min-h-0 flex-col">
           {recovery && <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[#eaded1] px-4 py-2 text-xs text-[#52766d] sm:px-7" role="status">
@@ -1530,7 +1529,7 @@ function App() {
           {task ? <>
             <div className="chat-heading flex items-start justify-between gap-3 px-4 py-3 sm:px-7 sm:py-4" style={{ backgroundImage: `linear-gradient(90deg, #fffaf5 0%, rgba(255,250,245,.98) 55%, rgba(255,250,245,.78) 100%), url(${cafeWelcome})` }}>
               <div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div>
-              <div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${executionState === 'running' && currentDetail?.activity?.active ? 'is-running' : ''}`}>{loading ? '接入对话中' : executionLabel(executionState) || (task.team?.enabled ? taskListStatus(task) : activityText(currentDetail?.activity) || taskListStatus(task))}</span><button id="workboard-trigger" onClick={() => setShowMobileBoard(true)} aria-label="打开成果与过程" title="打开成果与过程" aria-haspopup="dialog" aria-expanded={showMobileBoard} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div>
+              <div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${executionState === 'running' && currentActivity?.active && currentActivity.state === executionState ? 'is-running' : ''}`}>{loading ? '读取对话' : executionLabel(executionState) || taskListStatus(task, currentActivity)}</span><button id="workboard-trigger" onClick={() => setShowMobileBoard(true)} aria-label="打开成果与过程" title="打开成果与过程" aria-haspopup="dialog" aria-expanded={showMobileBoard} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div>
             </div>
             <div className="filter-strip flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-7"><div className="flex gap-1 overflow-x-auto" role="group" aria-label="对话筛选">{([{ id: 'all', label: '全部' }, { id: 'collaboration', label: '协作' }, { id: 'decision', label: '决策' }, { id: 'deliverable', label: '成果' }] as const).map((filter) => <button key={filter.id} onClick={() => setChatFilter(filter.id)} aria-pressed={chatFilter === filter.id} className={`filter-button shrink-0 px-3 py-1.5 text-xs font-semibold ${chatFilter === filter.id ? 'is-active' : ''}`}>{filter.label}</button>)}</div>
               <div className="flex max-w-full flex-wrap items-center gap-2">
@@ -1574,7 +1573,7 @@ function App() {
               </div>
               {!loading && unread > 0 && <button onClick={jumpToLatest} className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-md border border-[#d9b9a5] bg-[#fff7eb] px-3 py-2 text-xs font-semibold text-[#915340] shadow-md" title="返回最新消息"><ArrowDown size={15} /> 查看新消息 · {unread}</button>}
             </div>
-            {!loading && currentDetail && task.team?.enabled && <div className="shrink-0 px-4 sm:px-7"><AsyncPanel fallback={<p role="status" className="py-2 text-xs text-[#52766d]">正在读取工作进展…</p>}><ConversationActivity key={task.id} team={task.team} events={currentDetail.events} names={names} leaderId={organization?.leader.id ?? 'store_manager'} sending={pending.has(task.id)} activity={currentDetail.activity} executionState={executionState} syncError={loadError} controlBusy={controlBusy} portrait={(id) => <Portrait id={id} size="sm" />} onInspect={() => setShowMobileBoard(true)} onRefresh={() => setReloadToken((current) => current + 1)} onPause={() => void controlTask('pause')} /></AsyncPanel></div>}
+            {!loading && currentDetail && task.team?.enabled && <div className="shrink-0 px-4 sm:px-7"><AsyncPanel fallback={<p role="status" className="py-2 text-xs text-[#52766d]">正在读取工作进展…</p>}><ConversationActivity key={task.id} team={task.team} events={currentDetail.events} names={names} leaderId={organization?.leader.id ?? 'store_manager'} sending={pending.has(task.id)} activity={currentActivity} executionState={executionState} syncError={loadError} controlBusy={controlBusy} portrait={(id) => <Portrait id={id} size="sm" />} onInspect={() => setShowMobileBoard(true)} onRefresh={() => setReloadToken((current) => current + 1)} onPause={() => void controlTask('pause')} /></AsyncPanel></div>}
             {derivation ? <DerivationDraftBar goal={derivation.goal} onCancel={cancelDerivation} /> : legacyQuestionMode ? <QuestionComposerBar onCancel={toggleQuestion} /> : rulesControl}
             <DirectionComposer key={composerKey} members={team} message={message} isSending={isSending} isLoading={loading} deriving={Boolean(derivation)} questioning={legacyQuestionMode} onMessageChange={setMessage} onSend={() => void (derivation ? deriveTask() : legacyQuestionMode ? sendQuestion() : sendDirection())} />
           </> : <><EmptyConversation onChoose={setDraft} />{isSending && <div className="px-4 sm:px-7"><ChatWaiting text="正在发送给店长，等待接收回执" error="" onRetry={() => {}} /></div>}{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} disabled={!recoveryReady || !pageReady || Boolean(recovery)} workspaceControl={<WorkspacePanel draft workspaceId={newWorkspaceId} disabled={!recoveryReady || !pageReady || Boolean(recovery)} loadOptions={loadWorkspaceOptions} onSelect={selectDraftWorkspace} />} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}
@@ -1582,7 +1581,7 @@ function App() {
           {(visibleError || (!loading && loadError)) && <p role="alert" className="mx-4 mb-3 rounded-md border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 sm:mx-7">{visibleError || loadError}</p>}
         </section>
         {task && <WorkboardPanel taskId={task.id} open={showMobileBoard} onOpenChange={setShowMobileBoard}>
-          {currentDetail ? <>{!task.team?.enabled && <><WorkItems work={task.work} names={names} /><DeliveryPanel key={task.id} taskId={task.id} delivery={task.work?.delivery} names={names} accessToken={accessToken} /><VerificationBoard items={task.verifications ?? []} /></>}<Workboard task={task} detail={currentDetail} names={names} accessToken={accessToken} executionState={executionState} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />{Boolean(currentDetail.organization_memory?.length) && <details className="mt-5 border-t border-[#dce8e1] pt-4"><summary className="cursor-pointer text-xs font-semibold text-[#52766d]">猫咖记忆 · {currentDetail.organization_memory?.length} 项</summary><div className="mt-3"><MemoryBoard items={currentDetail.organization_memory ?? []} names={names} /></div></details>}</> : <p className="text-xs leading-6 text-[#74897d]">正在读取这件事的成果与过程。</p>}
+          {currentDetail ? <>{!task.team?.enabled && <><WorkItems work={task.work} names={names} /><DeliveryPanel key={task.id} taskId={task.id} delivery={task.work?.delivery} names={names} accessToken={accessToken} /><VerificationBoard items={task.verifications ?? []} /></>}<Workboard task={task} detail={currentDetail} activity={currentActivity} names={names} accessToken={accessToken} executionState={executionState} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />{Boolean(currentDetail.organization_memory?.length) && <details className="mt-5 border-t border-[#dce8e1] pt-4"><summary className="cursor-pointer text-xs font-semibold text-[#52766d]">猫咖记忆 · {currentDetail.organization_memory?.length} 项</summary><div className="mt-3"><MemoryBoard items={currentDetail.organization_memory ?? []} names={names} /></div></details>}</> : <p className="text-xs leading-6 text-[#74897d]">正在读取这件事的成果与过程。</p>}
         </WorkboardPanel>}
       </main>
     </div>
@@ -1725,8 +1724,8 @@ function VerificationBoard({ items }: { items: Verification[] }) {
   return <section className="mb-5 border-b border-[#eaded1] pb-5"><div className="mb-2 flex items-center justify-between"><h2 className="text-sm font-semibold">本机检查</h2><span className="text-xs text-stone-400">显式运行 · {items.length} 次</span></div><div className="space-y-3">{[...items].reverse().slice(0, 3).map((item) => <div key={item.seq} className={`border-l-2 pl-3 py-1 ${item.outcome === 'passed' ? 'border-emerald-600' : 'border-rose-600'}`}><strong className="text-xs text-stone-800">{item.outcome === 'passed' ? '命令通过' : item.outcome === 'timeout' ? '执行超时' : item.outcome === 'launch_error' ? '无法启动' : item.outcome === 'unavailable' ? '检查工具不可用' : '命令失败'}</strong><p className="mt-1 break-all font-mono text-[11px] leading-5 text-stone-600">{item.command.join(' ')}</p><p className="mt-1 text-[11px] text-stone-500">事件 #{item.seq}{item.for_event ? ` · 关联自报 #${item.for_event}` : ''} · 退出码 {item.exit_code ?? '无'}</p>{item.outcome === 'unavailable' && <p className="mt-1 text-[11px] text-amber-700">工具不可用，不能据此认定成果错误。</p>}{item.git?.dirty && <p className="mt-1 text-[11px] text-amber-700">工作区有未提交改动，未绑定具体文件内容</p>}</div>)}</div><p className="mt-2 text-[11px] leading-5 text-stone-500">单条命令通过，不代表诊断或整项任务已证实。</p></section>
 }
 
-function Workboard({ task, detail, names, accessToken, executionState, driverCoverage, showEvidence, onToggleEvidence }: { task: Task; detail: TaskDetail | null; names: Record<string, string>; accessToken?: string; executionState: ExecutionControl['state']; driverCoverage?: DriverCoverage[]; showEvidence: boolean; onToggleEvidence: () => void }) {
-  if (task.team?.enabled) return <AsyncPanel fallback={<p role="status" className="text-xs text-[#52766d]">正在读取团队进度…</p>}><TeamWorkboard team={task.team} taskId={task.id} artifacts={task.deliverables ?? []} events={detail?.events ?? []} names={names} accessToken={accessToken} executionState={executionState} /></AsyncPanel>
+function Workboard({ task, detail, activity, names, accessToken, executionState, driverCoverage, showEvidence, onToggleEvidence }: { task: Task; detail: TaskDetail | null; activity?: Activity; names: Record<string, string>; accessToken?: string; executionState: ExecutionControl['state']; driverCoverage?: DriverCoverage[]; showEvidence: boolean; onToggleEvidence: () => void }) {
+  if (task.team?.enabled) return <AsyncPanel fallback={<p role="status" className="text-xs text-[#52766d]">正在读取团队进度…</p>}><TeamWorkboard team={task.team} taskId={task.id} artifacts={task.deliverables ?? []} events={detail?.events ?? []} names={names} accessToken={accessToken} executionState={executionState} activity={activity} /></AsyncPanel>
   const assignments = [...task.assignments].reverse().filter((item, index, all) => all.findIndex((other) => other.owner === item.owner) === index).filter((item) => item.status === undefined || item.status === 'assigned')
   const participants = assignments.length
     ? assignments.map((item) => item.owner)
