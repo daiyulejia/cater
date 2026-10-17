@@ -4,6 +4,7 @@ import json
 import tempfile
 import threading
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -14,7 +15,7 @@ from cater.drivers import DriverResponse
 from cater.runtime import Runtime
 from cater.web import task_api_payload
 from cater.work import WorkConflict
-from test_runtime import start_test_web
+from test_runtime import BlockingDriver, background_test_web, start_test_web
 from test_work import WorkDriver, item
 
 
@@ -215,12 +216,22 @@ class ClarificationFlowTests(unittest.TestCase):
                 self.assertEqual(len(worker.calls), 1)
 
     def test_api_persists_answer_and_does_not_queue_it_twice(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        driver = BlockingDriver()
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as resources:
             db = Path(tmp) / "api.db"
-            with Runtime(db) as rt:
+
+            def runtime_factory():
+                return Runtime(
+                    db, drivers={name: driver for name in ("product", "design", "dev", "test")},
+                    text_retry=True)
+
+            with runtime_factory() as rt:
                 task = rt.create_task("欢迎说明")
                 question = rt.clarifications.request(task, "store_manager", QUESTION, scope=rt.work.scope(task))
-            base = start_test_web(self, str(db))
+            base = resources.enter_context(background_test_web(
+                self, str(db), driver=driver,
+                runtime_factory=runtime_factory,
+            ))
             body = {"question_seq": question.seq, "kind": "choice", "option_index": 1, "request_id": "api"}
 
             def post(value):
