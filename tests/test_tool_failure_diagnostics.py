@@ -56,7 +56,7 @@ class ToolFailureDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("not charged", str(error).lower())
         self.assertIsNone(error.__cause__)
         self.assertIsNone(error.__context__)
-        self.assertTrue(set(vars(error)) <= {"status_code", "failure_kind", "transport_phase"})
+        self.assertTrue(set(vars(error)) <= {"status_code", "failure_kind", "transport_phase", "transport_issue"})
         self.assertNotIsInstance(error, (TextTransportFailure, TextRequestRejected))
 
     def test_http_statuses_have_safe_metadata_in_both_phases_without_body_or_header_access(self):
@@ -100,20 +100,23 @@ class ToolFailureDiagnosticsTests(unittest.TestCase):
 
     def test_timeout_and_network_types_are_classified_without_reason_string_parsing(self):
         for phase in TOOL_TRANSPORT_PHASES:
-            for original, kind in ((TimeoutError(PRIVATE), "timeout"),
-                                   (socket.timeout(PRIVATE), "timeout"),
-                                   (URLError(TimeoutError(PRIVATE)), "timeout"),
-                                   (URLError("timed out " + PRIVATE), "network_error"),
-                                   (URLError(OSError(PRIVATE)), "network_error"),
-                                   (OSError(PRIVATE), "network_error"),
-                                   (ConnectionResetError(PRIVATE), "network_error"),
-                                   (RemoteDisconnected(PRIVATE), "network_error"),
-                                   (BadStatusLine(PRIVATE), "network_error"),
-                                   (IncompleteRead(PRIVATE.encode(), 999), "network_error")):
+            for original, kind, issue in ((TimeoutError(PRIVATE), "timeout", None),
+                                   (socket.timeout(PRIVATE), "timeout", None),
+                                   (URLError(TimeoutError(PRIVATE)), "timeout", None),
+                                   (URLError("timed out " + PRIVATE), "network_error", None),
+                                   (URLError(OSError(PRIVATE)), "network_error", None),
+                                   (OSError(PRIVATE), "network_error", None),
+                                   (ConnectionResetError(PRIVATE), "network_error", "connection_reset"),
+                                   (RemoteDisconnected(PRIVATE), "network_error", "remote_disconnected"),
+                                   (BadStatusLine(PRIVATE), "network_error", "http_protocol_error"),
+                                   (IncompleteRead(PRIVATE.encode(), 999), "network_error", "incomplete_response")):
                 with self.subTest(phase=phase, error_type=type(original).__name__):
                     error = self.failure_for(original, phase=phase)
                     self.assertIs(type(error), DriverUnavailable)
-                    self.assertEqual(tool_failure_diagnostics(error), {"failure_kind": kind, "transport_phase": phase})
+                    expected = {"failure_kind": kind, "transport_phase": phase}
+                    if issue is not None:
+                        expected["transport_issue"] = issue
+                    self.assertEqual(tool_failure_diagnostics(error), expected)
                     self.assert_private(error)
 
     def test_arbitrary_reason_objects_are_not_stringified(self):

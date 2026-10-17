@@ -7,6 +7,8 @@ import math
 import os
 import queue
 import re
+import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -15,7 +17,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from http.client import HTTPException
+from http.client import HTTPException, IncompleteRead, RemoteDisconnected
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
@@ -166,6 +168,34 @@ class ToolRequestRejected(DriverUnavailable):
 
 TOOL_FAILURE_KINDS = frozenset({"http_error", "network_error", "timeout", "invalid_request", "missing_credentials"})
 TOOL_TRANSPORT_PHASES = frozenset({"request", "response_read"})
+TOOL_TRANSPORT_ISSUES = frozenset({
+    "dns_lookup_failed", "tls_certificate_error", "tls_error", "connection_refused",
+    "connection_reset", "broken_pipe", "remote_disconnected", "incomplete_response", "http_protocol_error",
+})
+
+
+def _transport_issue(error: BaseException) -> str | None:
+    """Classify observed transport types only; reason text and errno are private."""
+    if isinstance(error, URLError):
+        reason = error.reason
+        if not isinstance(reason, BaseException):
+            return None
+        error = reason
+    # Order matters for subclasses of reset, SSL and HTTP protocol errors.
+    for error_type, issue in (
+        (socket.gaierror, "dns_lookup_failed"),
+        (ssl.SSLCertVerificationError, "tls_certificate_error"),
+        (ssl.SSLError, "tls_error"),
+        (RemoteDisconnected, "remote_disconnected"),
+        (ConnectionRefusedError, "connection_refused"),
+        (ConnectionResetError, "connection_reset"),
+        (BrokenPipeError, "broken_pipe"),
+        (IncompleteRead, "incomplete_response"),
+        (HTTPException, "http_protocol_error"),
+    ):
+        if isinstance(error, error_type):
+            return issue
+    return None
 
 
 def tool_failure_diagnostics(error: BaseException) -> dict[str, str | int]:
@@ -187,6 +217,9 @@ def tool_failure_diagnostics(error: BaseException) -> dict[str, str | int]:
     status = fields.get("status_code")
     if kind == "http_error" and type(status) is int and 100 <= status <= 599:
         result["status_code"] = status
+    issue = fields.get("transport_issue")
+    if kind == "network_error" and type(issue) is str and issue in TOOL_TRANSPORT_ISSUES:
+        result["transport_issue"] = issue
     return result
 
 
@@ -251,6 +284,10 @@ def _tool_api_request(*, endpoint: str, body: dict, headers: dict, name: str,
         else:
             message = f"Tool API endpoint is unavailable (connection or network failure during {display_phase})"
         failure = _tool_failure(DriverUnavailable(message), "timeout" if timed_out else "network_error", phase)
+        if not timed_out:
+            issue = _transport_issue(exc)
+            if issue is not None:
+                failure.transport_issue = issue
     except (ValueError, TypeError, UnicodeError):
         failure = _tool_failure(DriverUnavailable("Tool API request failed (invalid request or headers)"),
                                 "invalid_request", phase)

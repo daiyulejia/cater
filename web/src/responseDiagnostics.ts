@@ -20,6 +20,17 @@ const stages = {
   response_handling: '处理模型响应', tool_dispatch: '分派工具', tool_execution: '执行工具',
   tool_result_recording: '记录工具结果',
 } as const
+const transportIssues = {
+  dns_lookup_failed: ['域名解析失败', '核对服务地址、DNS 与代理设置；此记录不能区分配置错误或临时故障。'],
+  tls_certificate_error: ['TLS 证书校验失败', '核对服务证书、系统时间及受信代理证书；不要关闭证书校验。'],
+  tls_error: ['TLS 连接异常', '核对服务端 TLS 与代理配置；不要通过关闭安全校验绕过。'],
+  connection_refused: ['连接被拒绝', '核对地址、端口及服务状态；记录不能确定拒绝来自服务端还是中间网络。'],
+  connection_reset: ['连接被重置', '核对服务与代理的连接日志；无法仅凭此记录认定请求未被处理。'],
+  broken_pipe: ['连接写入中断', '核对连接及代理日志，先检查此前回执，勿直接重复操作。'],
+  remote_disconnected: ['远端断开连接', '核对服务和代理日志；连接断开不代表远端没有收到或处理请求。'],
+  incomplete_response: ['HTTP 响应读取不完整', '核对服务与代理的响应日志；保留此前成果，不将截断响应当成完整结果。'],
+  http_protocol_error: ['HTTP 传输协议异常', '核对服务地址、协议及代理配置；这不是模型正文格式或余额的判断。'],
+} as const
 
 export type ResponseDiagnostics = {
   responseStatus?: 'contained' | 'protocol_error'
@@ -74,6 +85,12 @@ export function requestFailureFields(payload: Record<string, unknown>): [string,
   }
   const phase = known(get('transport_phase'), { request: true, response_read: true })
   if (kind && phase) fields.push(['传输浮现阶段', phase === 'response_read' ? '接收响应时' : '请求过程中'])
+  const issue = kind === 'network_error' ? known(get('transport_issue'), transportIssues) : undefined
+  if (issue) {
+    const [observation, direction] = transportIssues[issue]
+    fields.push(['已记录连接类别', observation], ['核对方向', direction],
+      ['诊断边界', '类别来自底层异常，不是完整根因，也不证明远端未执行或未计费。'])
+  }
   return fields
 }
 
