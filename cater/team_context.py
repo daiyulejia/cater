@@ -7,6 +7,7 @@ from .tool_protocol import json_utf8, prepare_tool_turn
 
 CONVERSATION_BYTES = 16000
 HISTORY_BYTES = 96000
+INPUT_SOURCES = ("message", "active_assignment", "latest_customer_message")
 
 
 def json_bytes(value):
@@ -21,6 +22,57 @@ def _preview(row, key, limit):
             key + "_truncated": True, key + "_bytes": len(value.encode("utf-8"))}
 
 
+def _same_body(left, right):
+    return (isinstance(left, dict) and isinstance(right, dict)
+            and "context_ref" not in left and "context_ref" not in right
+            and "text_truncated" not in left and "text_truncated" not in right
+            and type(left.get("seq")) is int and left["seq"] > 0
+            and type(right.get("seq")) is int and right["seq"] == left["seq"]
+            and isinstance(left.get("sender"), str) and bool(left["sender"])
+            and left["sender"] == right.get("sender")
+            and isinstance(left.get("text"), str) and left["text"] == right.get("text")
+            and all(type(left[key]) is type(right[key]) and left[key] == right[key]
+                    for key in left.keys() & right.keys()))
+
+
+def _source_key(row, sources):
+    if not isinstance(row, dict) or type(row.get("seq")) is not int or row["seq"] < 1:
+        return None
+    matching = {key: source for key, source in sources.items() if isinstance(source, dict)
+                and type(source.get("seq")) is int and source["seq"] == row["seq"]}
+    if any(not _same_body(row, source) for source in matching.values()):
+        return None
+    return next(iter(matching), None)
+
+
+def _body_reference(row, sources):
+    key = _source_key(row, sources)
+    if key is not None:
+        candidate = {**row, "text": None, "context_ref": key}
+        if json_bytes(candidate) < json_bytes(row):
+            return candidate
+    return row
+
+
+def _reference_inputs(context):
+    candidate, sources, changed = dict(context), {}, False
+    original_sources = {key: context.get(key) for key in INPUT_SOURCES}
+    for key in INPUT_SOURCES:
+        row = context.get(key)
+        replacement = (row if key == "message" or _source_key(row, original_sources) is None
+                       else _body_reference(row, sources))
+        if replacement is not row:
+            candidate[key], changed = replacement, True
+        elif _same_body(row, row):
+            sources[key] = row
+    if not changed:
+        return context
+    candidate["context_window"] = {**context["context_window"], "note": (
+        "聊天和工作索引可能是节选，不是完整要求或验收结论。关键正文及reviews完整保留；"
+        "text为null且带context_ref时，读取本轮同名字段的完整text，一跳引用而非省略；需要其他细节时读来源。")}
+    return candidate if json_bytes(candidate) < json_bytes(context) else context
+
+
 def model_context(context):
     """Keep live requirements exact, and make historical excerpts explicit."""
     result = dict(context)
@@ -32,17 +84,14 @@ def model_context(context):
               if row["status"] == "running" or index >= len(work["runs"]) - 8],
         runs_total=len(work["runs"]))
     # These payloads already have authoritative copies elsewhere in this input.
-    pinned = {row["seq"] for row in (context["message"], context.get("active_assignment"),
-                                     context.get("latest_customer_message")) if row}
+    sources = {key: context.get(key) for key in INPUT_SOURCES}
     result["open_assignments"] = [
-        {**row, "text": None, "context_ref": "message" if row["seq"] == context["message"]["seq"]
-         else "active_assignment" if context.get("active_assignment") and row["seq"] == context["active_assignment"]["seq"]
-         else "latest_customer_message"} if row["seq"] in pinned else _preview(row, "text", 1536)
+        replacement if (replacement := _body_reference(row, sources)) is not row else _preview(row, "text", 1536)
         for row in context["open_assignments"]]
     result["outgoing_work"] = [_preview(_preview(row, "text", 1536), "latest_update", 1024)
                                for row in context["outgoing_work"]]
     result["notifications"] = [_preview(row, "text", 1536) for row in context["notifications"]]
-    rows = [row for row in context["conversation"] if row["seq"] not in pinned]
+    rows = [row for row in context["conversation"] if _source_key(row, sources) is None]
     selected, total = [], 2
     for row in reversed(rows):
         preview = _preview(row, "text", 4096)
@@ -63,7 +112,7 @@ def model_context(context):
         "artifact_versions_total": len(context["artifacts"]),
         "note": "聊天和工作索引可能是节选，不是完整要求或验收结论。message、active_assignment、最新顾客消息及reviews保留原文；需要细节时读取来源。",
     }
-    return result
+    return _reference_inputs(result)
 
 
 def history_window(history, receipts, *, tools, budget=HISTORY_BYTES):
