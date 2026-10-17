@@ -149,25 +149,40 @@ class TeamRecovery:
         return rows
 
     def checkpoint(self, task_id):
-        events = self.rt.log.read(task_id=task_id)
-        assignments = self.assignments(task_id, events=events)
-        objectives = [e for e in events if e.actor == HOST and e.type == "team.objective_updated"]
-        objective = objectives[-1].payload["goal"] if objectives else self.rt.task(task_id).goal
-        return {"as_of_seq": events[-1].seq if events else 0,
+        return self._capture(task_id)[0]
+
+    def _capture(self, task_id):
+        # Keep all database projections in one short read snapshot, including
+        # shared rules/workspaces, without taking over a caller's transaction.
+        db = self.rt.log.db
+        owned = not db.in_transaction
+        if owned:
+            db.execute("BEGIN")
+        try:
+            events = self.rt.log.read(task_id=task_id)
+            assignments = self.assignments(task_id, events=events)
+            objectives = [e for e in events if e.actor == HOST and e.type == "team.objective_updated"]
+            objective = objectives[-1].payload["goal"] if objectives else self.rt.task(task_id).goal
+            checkpoint = {"as_of_seq": events[-1].seq if events else 0,
                 "as_of_hash": events[-1].hash if events else None,
                 "scope": self.scope(task_id, events=events), "objective": objective,
                 "open_work": [{k: v for k, v in row.items() if k != "text"} for row in assignments[-20:]],
                 "open_work_count": len(assignments), "open_work_truncated": len(assignments) > 20,
                 "pending_operation_count": len(self.team._pending_operations(task_id)),
                 "note": "从持久事件重建的当前事实，不是恢复旧模型历史、重放操作或宣告验收的授权。"}
+            return checkpoint, assignments
+        finally:
+            if owned:
+                db.rollback()
 
     def read(self, task_id, arguments):
         after, limit = arguments.get("after_seq", 0), arguments.get("limit", 20)
         if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 50:
             raise ValueError("检查点读取需要非负序号和1至50条分页大小。")
-        rows = [r for r in self.assignments(task_id) if r["seq"] > after]
+        checkpoint, assignments = self._capture(task_id)
+        rows = [r for r in assignments if r["seq"] > after]
         page = rows[:limit]
-        return {"status": "ok", "checkpoint": self.checkpoint(task_id), "assignments": page,
+        return {"status": "ok", "checkpoint": checkpoint, "assignments": page,
                 "has_more": len(rows) > limit, "next_seq": page[-1]["seq"] if page else after}
 
     def continuation(self, task_id, role, recipient, seq):
