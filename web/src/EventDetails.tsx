@@ -3,6 +3,7 @@ import { isTeamHost, isTeamRecovery } from './team'
 import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle, nativeProjectHistoryReceiptStatus } from './conversationActivityState'
 import { NativeSkillReceipt } from './TeamProgressPanel'
 import { usageSummary } from './modelUsage'
+import { containedNote, responseDiagnostics, responseDiagnosticFields, requestFailureFields, stageNote } from './responseDiagnostics'
 import { CommandOutputs } from './CommandOutputPreview'
 import { hasBrowserReceipt } from './outputPreview'
 import { NativeMcpReceipt } from './NativeMcpReceipt'
@@ -182,11 +183,22 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       add('消息内容', p.text); add('接收成员', member(p.recipient)); number('回复消息', p.reply_to)
       add('消息类型', label(p.kind, { message: '聊天消息', assignment: '工作交接', report: '内部报告', continuation: '接续工作交接' }, '消息'))
       break
-    case 'team.run_started': case 'team.run_finished':
+    case 'team.run_started': case 'team.run_finished': {
+      const diagnostic = event.type === 'team.run_finished' && isTeamHost(event) ? responseDiagnostics(p, true) : {}
+      const hasDiagnostic = event.type === 'team.run_finished' && ['response_status', 'failure_stage'].some(key => Object.hasOwn(p, key))
       status = event.type === 'team.run_started' ? '正在处理消息' : label(p.status, { done: '消息处理完成', completed: '消息处理完成', finished: '消息处理完成', succeeded: '消息处理完成', waiting: '等待伙伴回复', interrupted: '消息处理中断', failed: '消息处理失败', blocked: '消息处理受阻', cancelled: '消息处理已取消' }, '消息处理结果待确认')
-      number('关联消息', p.message_seq); add('处理成员', member(p.role)); add('原因', p.reason)
+      number('关联消息', p.message_seq); add('处理成员', member(p.role))
+      if (!hasDiagnostic) add('原因', p.reason)
+      if (diagnostic.responseStatus === 'contained') status = '响应未通过完整性检查'
+      for (const [name, value] of responseDiagnosticFields(diagnostic)) add(name, value)
+      const requestFailure = event.type === 'team.run_finished' && isTeamHost(event) ? requestFailureFields(p) : []
+      for (const [name, value] of requestFailure) add(name, value)
       note = '消息处理结束不代表任务已交付。'
+      if (diagnostic.responseStatus === 'contained') note += containedNote
+      if (diagnostic.failureStage) note += stageNote
+      if (requestFailure.length) note += '已有成果和操作记录保留；远端是否已处理或计费需核对回执与服务商账单，诊断不代表允许重试。'
       break
+    }
     case 'team.tool_reconciled':
       status = '实际影响已核对'; number('原操作', p.started_seq); add('核对依据', p.reason)
       note = '原始操作结果不改写，后续不重放原请求。'
@@ -208,6 +220,11 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
         add('用量状态', status)
         status = '响应格式错误'
       }
+      if (call.responseStatus === 'contained') {
+        add('用量状态', status)
+        status = '响应未通过完整性检查'
+      }
+      for (const [name, value] of responseDiagnosticFields(call)) add(name, value)
       add('调用成员', member(call.role))
       if (call.tokens !== null) number(call.source === 'reported' ? '已报告用量' : call.source === 'estimated' ? '估算值' : '未注明来源的记录值', call.tokens, ' token')
       number(call.inputKind === 'uncached' ? '输入（不含缓存）' : '输入（含缓存）', call.input, ' token')
@@ -217,6 +234,7 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       number('工具定义 JSON 字节', call.requestSizes.tools)
       note = '缓存和推理细项不重复叠加到总量；未报告不等于未消耗。字节不是 token，实际费用以服务商账单为准。'
       if (call.responseStatus === 'protocol_error') note = `响应格式无效，工作未继续；已报告用量仍保留。${note}`
+      if (call.responseStatus === 'contained') note = `${containedNote}${note}`
       break
     }
     case 'team.tool_started': case 'team.tool_finished':
@@ -452,6 +470,9 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
 export function EventDetails({ event: original, actorName, contextEvents = [] }: EventDetailsProps) {
   const event = frozenReadArguments(original, contextEvents)
   const { fields, status, note } = describe(event, actorName)
+  // Model and run diagnostics never expose provider metadata or raw exceptions, even in developer details.
+  const developerEvent = event.type === 'team.model_called' ? { ...event, payload: usageSummary([event]).calls[0] ?? {} }
+    : event.type === 'team.run_finished' ? { ...event, payload: isTeamHost(event) ? { ...responseDiagnostics(event.payload, true), requestFailure: requestFailureFields(event.payload) } : {} } : event
   const title = label(event.type, titles, '事件记录')
   const recorder = resolvedName(event.actor.id, actorName) || label(event.actor.kind, { human: '用户', system: '系统', agent: '成员' }, '记录来源待核对')
   const nativeBrowser = ['team.tool_started', 'team.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'browser_check'
@@ -489,7 +510,7 @@ export function EventDetails({ event: original, actorName, contextEvents = [] }:
       </details>}
     {!skillTool(event) && !browser && !nativeMcp && !projectHistory && !artifactRead && !frozenArchive && <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
       <summary className="cursor-pointer text-[#728679]">开发者详情</summary>
-      <pre tabIndex={0} aria-label="原始事件 JSON" className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(event, null, 2)}</pre>
+      <pre tabIndex={0} aria-label={developerEvent === event ? '原始事件 JSON' : '安全事件 JSON'} className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(developerEvent, null, 2)}</pre>
     </details>}
   </section>
 }

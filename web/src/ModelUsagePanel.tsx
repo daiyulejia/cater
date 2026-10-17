@@ -2,6 +2,7 @@ import { Gauge } from 'lucide-react'
 import type { TeamEvent } from './team'
 import { usageSummary } from './modelUsage'
 import type { UsageCall, UsageSource } from './modelUsage'
+import { containedNote, responseDiagnosticFields } from './responseDiagnostics'
 
 const format = (value: number) => value.toLocaleString('zh-CN')
 const count = (value: number | null) => value === null ? '未记录' : format(value)
@@ -59,6 +60,8 @@ export function ModelUsagePanel({ events, names }: { events: TeamEvent[]; names:
           <p className="font-medium">@{name(call.role)} · {call.tokens === null ? '用量未报告' : `${format(call.tokens)} token`}</p>
           <p className="text-[11px] text-[#74897d]">事件 #{call.seq} · {sourceLabels[call.source]}</p>
           {call.responseStatus === 'protocol_error' && <p className="mt-1 text-[11px] text-[#a36045]">响应格式错误，工作未继续；已报告用量仍保留。</p>}
+          {responseDiagnosticFields(call).map(([label, value]) => <p key={label} className="mt-1 text-[11px] text-[#a36045]">{label}：{value}</p>)}
+          {call.responseStatus === 'contained' && <p className="mt-1 text-[11px] text-[#74897d]">{containedNote}</p>}
           <CallDetails call={call} />
         </li>)}
       </ol>

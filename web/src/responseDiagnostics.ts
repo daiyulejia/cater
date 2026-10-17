@@ -1,0 +1,106 @@
+const reasons = {
+  incomplete_stop: '响应未完整结束',
+  invalid_content: '响应内容格式无效',
+  inconsistent_stop: '结束状态与响应内容不一致',
+  unsupported_content: '响应包含不支持的内容类型',
+  invalid_tool_calls: '响应中的工具请求格式无效',
+} as const
+const protocols = { openai_compatible: 'OpenAI 兼容协议', anthropic: 'Anthropic 协议' } as const
+const openaiStops = {
+  stop: '正常结束标记', tool_calls: '工具请求标记', length: '达到输出长度限制',
+  content_filter: '内容过滤标记', function_call: '旧式函数请求标记',
+} as const
+const anthropicStops = {
+  end_turn: '回合结束标记', stop_sequence: '停止序列标记', tool_use: '工具请求标记',
+  max_tokens: '达到输出长度限制', pause_turn: '回合暂停标记', refusal: '拒绝响应标记',
+  model_context_window_exceeded: '上下文窗口超限标记',
+} as const
+const stages = {
+  setup: '准备处理', context_assembly: '组装上下文', model_request: '请求模型',
+  response_handling: '处理模型响应', tool_dispatch: '分派工具', tool_execution: '执行工具',
+  tool_result_recording: '记录工具结果',
+} as const
+
+export type ResponseDiagnostics = {
+  responseStatus?: 'contained' | 'protocol_error'
+  responseReason?: keyof typeof reasons
+  responseProtocol?: keyof typeof protocols
+  responseStop?: keyof typeof openaiStops | keyof typeof anthropicStops
+  responseClientToolsExecuted?: false
+  failureStage?: keyof typeof stages
+  responseDiagnosticsConflict?: true
+}
+
+function known<T extends object>(value: unknown, allowed: T): keyof T | undefined {
+  return typeof value === 'string' && Object.hasOwn(allowed, value) ? value as keyof T : undefined
+}
+
+export function responseDiagnostics(payload: Record<string, unknown>, includeStage = false): ResponseDiagnostics {
+  const get = (key: string) => Object.hasOwn(payload, key) ? payload[key] : undefined
+  const result: ResponseDiagnostics = {}
+  const status = get('response_status')
+  if (status === 'contained' || status === 'protocol_error') result.responseStatus = status
+  if (status === 'contained') {
+    const reason = known(get('response_reason'), reasons)
+    const protocol = known(get('response_protocol'), protocols)
+    if (reason) result.responseReason = reason
+    if (protocol) {
+      result.responseProtocol = protocol
+      const stop = protocol === 'anthropic' ? known(get('response_stop'), anthropicStops) : known(get('response_stop'), openaiStops)
+      if (stop) result.responseStop = stop
+    }
+    if (get('response_client_tools_executed') === false) result.responseClientToolsExecuted = false
+  }
+  const stage = includeStage ? known(get('failure_stage'), stages) : undefined
+  if (stage) result.failureStage = stage
+  return result
+}
+
+export const containedNote = '已保留先前成果，宿主停止后未自动续试。先前操作及本次响应的远端或驱动内部执行、计费仍需核对回执与服务商账单。'
+export const stageNote = '阶段仅表示错误浮现的位置，不代表根因或允许重试。'
+
+export function requestFailureFields(payload: Record<string, unknown>): [string, string][] {
+  const get = (key: string) => Object.hasOwn(payload, key) ? payload[key] : undefined
+  const kinds = {
+    http_error: '模型服务返回 HTTP 错误', network_error: '模型连接或传输失败', timeout: '模型请求或响应超时',
+    invalid_request: '请求参数或接入配置未通过检查', missing_credentials: '本机未读到该通道的凭据',
+  }
+  const kind = known(get('failure_kind'), kinds)
+  const code = get('status_code')
+  const fields: [string, string][] = []
+  if (kind) fields.push(['请求诊断', kinds[kind]])
+  if (typeof code === 'number' && Number.isInteger(code) && code >= 100 && code <= 599) {
+    fields.push(['HTTP 状态', code === 429 ? 'HTTP 429（服务商限流）' : `HTTP ${code}`])
+  }
+  const phase = known(get('transport_phase'), { request: true, response_read: true })
+  if (kind && phase) fields.push(['传输浮现阶段', phase === 'response_read' ? '接收响应时' : '请求过程中'])
+  return fields
+}
+
+export function responseDiagnosticFields(diagnostic: ResponseDiagnostics): [string, string][] {
+  const fields: [string, string][] = []
+  if (diagnostic.responseStatus === 'contained') {
+    fields.push(['响应状态', '响应未通过完整性检查'], ['响应原因', diagnostic.responseReason ? reasons[diagnostic.responseReason] : '具体原因未记录'])
+    if (diagnostic.responseProtocol) fields.push(['响应协议', protocols[diagnostic.responseProtocol]])
+    if (diagnostic.responseStop && diagnostic.responseProtocol) {
+      const stops = diagnostic.responseProtocol === 'anthropic' ? anthropicStops : openaiStops
+      if (Object.hasOwn(stops, diagnostic.responseStop)) fields.push(['响应结束状态', (stops as Record<string, string>)[diagnostic.responseStop]])
+    }
+    if (diagnostic.responseClientToolsExecuted === false) fields.push(['本次响应工具', '这次响应的宿主工具请求未执行'])
+  }
+  if (diagnostic.failureStage) fields.push(['错误浮现阶段', stages[diagnostic.failureStage]])
+  if (diagnostic.responseDiagnosticsConflict) fields.push(['响应诊断核对', '同一事件的响应诊断不一致，差异字段未采用'])
+  return fields
+}
+
+export function commonResponseDiagnostics(a: ResponseDiagnostics, b: ResponseDiagnostics): ResponseDiagnostics {
+  const result: ResponseDiagnostics = {}
+  for (const key of ['responseStatus', 'responseReason', 'responseProtocol', 'responseStop', 'responseClientToolsExecuted'] as const) {
+    if (a[key] !== undefined && a[key] === b[key]) Object.assign(result, { [key]: a[key] })
+  }
+  if (a.responseDiagnosticsConflict || b.responseDiagnosticsConflict
+    || ['responseStatus', 'responseReason', 'responseProtocol', 'responseStop', 'responseClientToolsExecuted'].some(key => a[key as keyof ResponseDiagnostics] !== b[key as keyof ResponseDiagnostics])) {
+    result.responseDiagnosticsConflict = true
+  }
+  return result
+}

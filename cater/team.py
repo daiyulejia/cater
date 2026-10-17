@@ -18,7 +18,7 @@ from .team_recovery import RECOVERY_CONTRACT, TeamRecovery
 from .team_delivery import HandoffError, TeamDelivery, handoff_schema
 from .team_browser import BROWSER_CONTRACT, TeamBrowser, browser_schema
 from .team_context import history_window, json_bytes, model_context
-from .tool_protocol import safe_tool_usage
+from .tool_protocol import contained_response_diagnostics, safe_tool_usage
 from .usage import valid_token_count
 from .mcp import CALL as MCP_CALL, LIST as MCP_LIST, read_only_call
 from .project_history import ProjectHistory, TOOL as PROJECT_HISTORY
@@ -54,6 +54,20 @@ def _tool(name, description, properties, required):
 def _publication_rejected(code, message, **details):
     return {"status": "error", "code": code, "complete": True, "outcome": "not_started",
             "message": message, **details}
+
+
+def _contained_reason(name, failure):
+    reason, stop = failure.get("response_reason"), failure.get("response_stop")
+    issue = {"invalid_content": "返回内容的结构未通过校验",
+             "invalid_tool_calls": "返回的工具请求格式或标识未通过校验",
+             "inconsistent_stop": "返回内容与结束标记不一致",
+             "unsupported_content": "返回了当前接入不支持的内容类型"}.get(reason, "没有完整返回可用响应")
+    if reason == "incomplete_stop":
+        issue = ("本次响应达到输出长度上限，未完整返回" if stop in {"length", "max_tokens"}
+                 else "服务报告本次上下文超出可处理范围" if stop == "model_context_window_exceeded"
+                 else "服务返回了未能继续处理的结束状态")
+    return (f"{name}{issue}；宿主未执行这次响应中的工具请求，先前成果和操作记录保留。"
+            "本轮未自动续试，计费情况仍以实际用量记录为准。")
 
 
 def _reported_messages(messages):
@@ -897,6 +911,7 @@ class TeamService:
     def _run_message(self, task_id, message, role, started):
         status, reason, final = "completed", "", ""
         failure = {}
+        failure_stage = "setup"
         awaiting_customer = False
         revision = self.view(task_id)["revision"]
         assignment = self._waiting_assignment(task_id, message, role)
@@ -995,6 +1010,7 @@ class TeamService:
                 budget = getattr(driver, "token_budget", None)
                 if valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget:
                     raise WorkConflict("当前通道已达到顾客配置的用量上限，未继续调用。")
+                failure_stage = "context_assembly"
                 context = model_context(self._context(task_id, message, role,
                     run_id=started.payload["run_id"], tool_names={t["name"] for t in tools}))
                 wire_history, window = history_window(history, history_receipts, tools=tools)
@@ -1003,22 +1019,29 @@ class TeamService:
                 request_sizes = {"prompt_utf8_bytes": len(prompt.encode("utf-8")),
                                  "history_json_bytes": json_bytes(wire_history), "tools_json_bytes": json_bytes(tools),
                                  "history_omitted_groups": window["omitted_groups"]}
+                failure_stage = "model_request"
                 try:
                     turn = driver.tool_turn(role=role.role, prompt=prompt, history=wire_history, tools=tools)
                 except DriverProtocolError as error:
+                    failure_stage = "response_handling"
                     counts = tool_protocol_error_usage(error)
                     if counts is not None:
                         self.rt.log.emit(type="team.model_called", actor=HOST, task_id=task_id, payload={
                             "role": role.id, "driver": role.driver, "run_id": started.payload["run_id"],
                             **counts, "request_sizes": request_sizes, "response_status": "protocol_error"})
                     raise
+                failure_stage = "response_handling"
                 meta = turn.meta or {}
+                response_diagnostics = contained_response_diagnostics(meta)
                 self.rt.log.emit(type="team.model_called", actor=HOST, task_id=task_id, payload={
                     "role": role.id, "driver": role.driver, "run_id": started.payload["run_id"],
                     "tokens": turn.tokens if valid_token_count(turn.tokens) else 0,
                     "token_usage": meta.get("token_usage", "unavailable"), "request_sizes": request_sizes,
-                    "usage": safe_tool_usage(meta.get("usage"))})
+                    "usage": safe_tool_usage(meta.get("usage")), **response_diagnostics,
+                    **({"response_client_tools_executed": False} if response_diagnostics else {})})
                 if meta.get("contained"):
+                    failure.update(response_diagnostics)
+                    failure["response_client_tools_executed"] = False
                     raise ValueError("模型本轮没有完整返回，已有操作记录保留。")
                 if window["omitted_groups"] and {call.id for call in turn.calls} & {
                         call["id"] for row in history if row["role"] == "assistant"
@@ -1046,6 +1069,7 @@ class TeamService:
                 waiting = False
                 operation_failed = False
                 for call in turn.calls:
+                    failure_stage = "tool_dispatch"
                     self._current(task_id, started, role, revision)
                     if call.name not in {t["name"] for t in tools}:
                         raise ValueError("模型请求了未接入工具。")
@@ -1063,8 +1087,10 @@ class TeamService:
                                     else self.project_history.public_arguments(call.arguments) if call.name == PROJECT_HISTORY
                                     else self.rt.workspaces._public_arguments(call.name, call.arguments)})
                     schema = next(t["input_schema"] for t in tools if t["name"] == call.name)
+                    failure_stage = "tool_execution"
                     result = self._invoke_tool(task_id, role, started, revision, call, schema,
                                                workspace, binding, tool_start, assignment)
+                    failure_stage = "tool_result_recording"
                     history.append({"role": "tool", "tool_call_id": call.id, "is_error": result.get("status") != "ok",
                                     "content": json.dumps(result, ensure_ascii=False)})
                     history_receipts.append({"call_id": call.id, "started_seq": tool_start.seq, "name": call.name,
@@ -1089,9 +1115,12 @@ class TeamService:
         except Exception as exc:
             status, reason = "failed", f"{role.name}的本轮调用未完成，已有成果和操作记录保留；需要核对接入或执行记录。"
             failure["error_type"] = type(exc).__name__
+            failure["failure_stage"] = failure_stage
             failure.update(tool_failure_diagnostics(exc))
             code = getattr(exc, "status_code", None)
-            if type(code) is int and 100 <= code <= 599:
+            if failure.get("response_status") == "contained":
+                reason = _contained_reason(role.name, failure)
+            elif type(code) is int and 100 <= code <= 599:
                 failure["status_code"] = code
                 if code == 429:
                     reason = f"{role.name}本轮模型请求被服务商限流（HTTP 429），不是工作已完成；已有成果和操作记录保留。"

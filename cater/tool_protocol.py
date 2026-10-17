@@ -264,12 +264,33 @@ def _contained(tokens: int, meta: dict, reason: str) -> ToolTurn:
     return ToolTurn("", [], tokens, meta, _assistant("", []))
 
 
+ANTHROPIC_STOPS = frozenset({"end_turn", "stop_sequence", "tool_use", "max_tokens", "pause_turn", "refusal",
+                             "model_context_window_exceeded"})
+OPENAI_STOPS = frozenset({"stop", "tool_calls", "length", "content_filter", "function_call"})
+CONTAINED_REASONS = frozenset({"incomplete_stop", "invalid_content", "inconsistent_stop", "unsupported_content", "invalid_tool_calls"})
+
+
+def contained_response_diagnostics(meta: object) -> dict[str, str]:
+    """Copy fixed response enums only, never provider content or private state."""
+    if type(meta) is not dict or meta.get("contained") is not True:
+        return {}
+    result = {"response_status": "contained"}
+    reason, protocol = meta.get("reason"), meta.get("mode")
+    if type(reason) is str and reason in CONTAINED_REASONS:
+        result["response_reason"] = reason
+    if type(protocol) is str and protocol in {"openai_compatible", "anthropic"}:
+        result["response_protocol"] = protocol
+        field, allowed = ("finish_reason", OPENAI_STOPS) if protocol == "openai_compatible" else ("stop_reason", ANTHROPIC_STOPS)
+        stop = meta.get(field)
+        if type(stop) is str and stop in allowed:
+            result["response_stop"] = stop
+    return result
+
+
 def anthropic_turn(data: dict, *, driver: str, names: set[str], seen: set[str]) -> ToolTurn:
     tokens, meta = _usage(data, anthropic=True, driver=driver)
     stop = data.get("stop_reason")
-    known_stops = {"end_turn", "stop_sequence", "tool_use", "max_tokens", "pause_turn", "refusal",
-                   "model_context_window_exceeded"}
-    meta["stop_reason"] = stop if isinstance(stop, str) and stop in known_stops else None
+    meta["stop_reason"] = stop if isinstance(stop, str) and stop in ANTHROPIC_STOPS else None
     if data.get("type") != "message" or data.get("role", "assistant") != "assistant":
         raise ValueError("Anthropic response must be an assistant message")
     if not isinstance(stop, str) or stop not in {"end_turn", "stop_sequence", "tool_use"}:
@@ -293,8 +314,7 @@ def openai_turn(data: dict, *, driver: str, names: set[str], seen: set[str]) -> 
         raise ValueError("Chat response must contain exactly one choice")
     choice = choices[0]
     stop = choice.get("finish_reason")
-    known_stops = {"stop", "tool_calls", "length", "content_filter", "function_call"}
-    meta["finish_reason"] = stop if isinstance(stop, str) and stop in known_stops else None
+    meta["finish_reason"] = stop if isinstance(stop, str) and stop in OPENAI_STOPS else None
     if not isinstance(stop, str) or stop not in {"stop", "tool_calls"}:
         return _contained(tokens, meta, "incomplete_stop")
     message = choice.get("message")
