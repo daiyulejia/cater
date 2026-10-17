@@ -1,20 +1,37 @@
-import { nativeArtifactReceiptStatus } from './conversationActivityState'
+import { artifactReceiptContent, nativeArtifactReceiptStatus } from './conversationActivityState'
+import { archiveEntries } from './archiveManifest'
 import type { TeamEvent } from './team'
 
 export function NativeArtifactReceipt({ event }: { event: TeamEvent }) {
   const status = nativeArtifactReceiptStatus(event)
-  if (!['成果正文已读取', '成果本页已读取', '成果仅有元数据，正文不可读'].includes(status)) return null
-  const result = event.payload.result as Record<string, unknown>
+  if (!['成果正文已读取', '成果本页已读取', '成果仅有元数据，正文不可读', '工程文件清单已读取',
+    '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对'].includes(status)) return null
+  const raw = event.payload.result as Record<string, unknown>
+  const result = artifactReceiptContent(raw)
+  const manifest = status === '工程文件清单已读取' ? archiveEntries(raw.archive) : null
+  const member = raw.artifact_seq !== undefined
+  const binary = status === '工程二进制字节已核对'
   const range = result.read_range as Record<string, unknown> | undefined
   const content = typeof result.content === 'string' ? Array.from(result.content) : undefined
-  const binding = `${event.seq}:${result.seq}:${result.content_sha256}:${range?.offset}:${range?.returned_chars}`
+  const binding = JSON.stringify([event.seq, result.seq, result.filename, result.content_sha256, raw.archive_sha256, range?.offset, range?.returned_chars])
   return <div key={binding} className="mt-1 min-w-0 space-y-2 [overflow-wrap:anywhere]">
-    <p className="whitespace-pre-wrap font-semibold">成果版本 #{result.seq as number}{typeof result.filename === 'string' ? ` · ${result.filename}` : ''}</p>
+    <p className="whitespace-pre-wrap font-semibold">{manifest || member ? '工程包' : '成果'}版本 #{result.seq as number}{typeof result.filename === 'string' ? ` · ${result.filename}` : ''}</p>
     {result.filename === undefined && <>
       {typeof result.title === 'string' && result.title.trim() && <p className="whitespace-pre-wrap">成果标题：{result.title}</p>}
       <p>文件名未提供。</p>
     </>}
-    {range ? <>
+    {manifest ? <>
+      <p>本次只读取文件清单，未读取成员正文，也未在界面重新核对 ZIP 字节。</p>
+      <details>
+        <summary className="cursor-pointer font-semibold">工程文件清单 · {manifest.length} 份</summary>
+        <ul aria-label="已读取的工程文件清单" className="mt-1 max-h-48 overflow-auto">
+          {manifest.map(entry => <li key={entry.path} className="py-1">
+            <code className="block whitespace-pre-wrap">{entry.path}</code>
+            <span>{entry.bytes} 字节 · {entry.executable ? '可执行文件' : '普通文件'}</span>
+          </li>)}
+        </ul>
+      </details>
+    </> : binary ? <p>宿主已核对二进制字节与摘要；未解释或执行文件内容，不是文本正文读取。</p> : range ? <>
       <p>本页起点：{range.offset as number} · 本页 {range.returned_chars as number} 字符 · 全文共 {range.total_chars as number} 字符（Unicode 码点）</p>
       {range.has_more ? <p>还有后续正文 · 下一页起点 {range.next_offset as number}。</p> : <p>已到末页，无下一页。</p>}
       <p>{range.content_complete ? '本页覆盖全文。' : '本页未覆盖全文；末页不代表已读取全文。'}</p>
@@ -24,11 +41,14 @@ export function NativeArtifactReceipt({ event }: { event: TeamEvent }) {
     </> : <p>旧成果仅保存元数据，未保存可读取正文；无法确认正文范围或全文覆盖。</p>}
     <p>读取不代表复核通过、验证完成或任务交付。</p>
     <details>
-      <summary className="cursor-pointer font-semibold">全文指纹与大小</summary>
+      <summary className="cursor-pointer font-semibold">{manifest ? '工程包' : member ? '成员文件' : '全文'}指纹与大小</summary>
       <div className="mt-1 space-y-1">
-        <p>以下 SHA-256 与字节数属于完整原文，不是本页；仅展示记录值，未在此验证。</p>
+        <p>{manifest ? '以下为发布记录中的 ZIP 指纹与大小，不代表本次读取所有成员。'
+          : member ? '以下为完整成员文件的指纹与大小，不是本页；仅展示宿主回执，未在界面重新验证。'
+          : '以下 SHA-256 与字节数属于完整原文，不是本页；仅展示记录值，未在此验证。'}</p>
         <p className="font-mono">全文 SHA-256：{result.content_sha256 as string ?? '未提供'}</p>
         <p>全文大小：{result.content_bytes === undefined ? '未提供' : `${result.content_bytes} 字节`}</p>
+        {member && <p className="font-mono">所属工程包 SHA-256：{raw.archive_sha256 as string}</p>}
       </div>
     </details>
     {content && <details>

@@ -1,5 +1,6 @@
 import { isTeamHost, isTeamRecovery, teamMessageAudience, teamProgressMessages, teamSpeaker } from './team'
 import type { TeamEvent, TeamRun, TeamState } from './team'
+import { archiveEntries, portableArchivePart } from './archiveManifest'
 
 type TimedEvent = TeamEvent & { ts?: string }
 export type ConversationActivityInput = {
@@ -46,13 +47,19 @@ const skillCount = (value: unknown): value is number => typeof value === 'number
 const skillText = (value: unknown): value is string => typeof value === 'string' && Boolean(value.trim())
 const skillHash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value)
 
+export function artifactReceiptContent(result: Record<string, unknown>): Record<string, unknown> {
+  return result.artifact_seq === undefined ? result : { ...result, seq: result.artifact_seq, filename: result.path,
+    content_sha256: result.sha256, content_bytes: result.bytes }
+}
+
 export function nativeArtifactReceiptStatus(event: TeamEvent): string {
   const uncertain = '成果读取回执待核对'
   if (!isTeamHost(event)) return '成果读取来源待核对'
   if ((event.payload.name ?? event.payload.tool) !== 'read_artifact') return uncertain
   if (event.type === 'team.tool_started') return '已发起，等待回执'
   if (event.type !== 'team.tool_finished') return uncertain
-  const result = object(event.payload.result), args = object(event.payload.arguments)
+  const raw = object(event.payload.result), args = object(event.payload.arguments)
+  const result = artifactReceiptContent(raw)
   if ([event.payload.status, result.status].some(value => ['error', 'failed', 'blocked', 'cancelled'].includes(String(value)))) return '成果读取未完成'
   if (result.status !== 'ok' || ![undefined, 'ok', 'completed', 'succeeded'].includes(event.payload.status as string | undefined)
     || result.complete !== undefined && result.complete !== true || result.truncated !== undefined && result.truncated !== false
@@ -62,8 +69,26 @@ export function nativeArtifactReceiptStatus(event: TeamEvent): string {
     || result.content_bytes !== undefined && !skillCount(result.content_bytes)
     || event.payload.arguments !== undefined && (event.payload.arguments === null || typeof event.payload.arguments !== 'object' || Array.isArray(event.payload.arguments))
     || args.artifact_seq !== undefined && args.artifact_seq !== result.seq) return uncertain
+  const member = Object.hasOwn(raw, 'artifact_seq') || Object.hasOwn(args, 'path')
+  if (member) {
+    if (args.artifact_seq !== raw.artifact_seq || typeof raw.path !== 'string' || args.path !== raw.path
+      || new TextEncoder().encode(raw.path).length > 4096 || !raw.path.split('/').every(portableArchivePart)
+      || !skillHash(raw.archive_sha256) || !skillHash(raw.sha256) || !skillCount(raw.bytes) || raw.bytes > 32 * 1024 * 1024
+      || typeof raw.executable !== 'boolean' || ['seq', 'filename', 'content_sha256', 'content_bytes', 'format', 'archive'].some(key => Object.hasOwn(raw, key))
+      || Object.hasOwn(args, 'offset') && !skillCount(args.offset)
+      || Object.hasOwn(args, 'length') && (!skillCount(args.length) || args.length < 1 || args.length > 16000)) return uncertain
+    if (raw.content_kind === 'binary') return raw.content === null && !Object.hasOwn(raw, 'read_range')
+      ? '工程二进制字节已核对' : uncertain
+    if (raw.content_kind !== 'utf8' || !Object.hasOwn(raw, 'read_range')) return uncertain
+  } else if (raw.format === 'archive') {
+    return args.artifact_seq === raw.seq && typeof raw.filename === 'string' && raw.filename.endsWith('.zip')
+      && !raw.filename.includes('/') && portableArchivePart(raw.filename) && new TextEncoder().encode(raw.filename).length <= 180
+      && skillHash(raw.content_sha256) && skillCount(raw.content_bytes) && raw.content_bytes > 0 && raw.content_bytes <= 65 * 1024 * 1024
+      && archiveEntries(raw.archive) !== null && !['content', 'read_range', 'offset', 'length'].some(key => Object.hasOwn(raw, key))
+      && !['offset', 'length'].some(key => Object.hasOwn(args, key)) ? '工程文件清单已读取' : uncertain
+  } else if (['archive', 'archive_sha256', 'content_kind', 'path'].some(key => Object.hasOwn(raw, key))) return uncertain
   const paged = Object.hasOwn(result, 'read_range')
-  const requestedPage = Object.hasOwn(args, 'offset') || Object.hasOwn(args, 'length')
+  const requestedPage = member || Object.hasOwn(args, 'offset') || Object.hasOwn(args, 'length')
   if (Object.hasOwn(args, 'offset') && !skillCount(args.offset)
     || Object.hasOwn(args, 'length') && (!skillCount(args.length) || args.length < 1 || args.length > 16000)) return uncertain
   if (!paged && requestedPage) return uncertain
@@ -84,7 +109,8 @@ export function nativeArtifactReceiptStatus(event: TeamEvent): string {
     || range.content_complete && result.content_bytes !== bytes || result.content_bytes < range.total_chars
     || requestedPage && (range.offset !== (args.offset ?? 0)
       || chars !== Math.min((args.length as number | undefined) ?? 8000, range.total_chars - range.offset))) return uncertain
-  return range.content_complete ? '成果正文已读取' : '成果本页已读取'
+  return member ? range.content_complete ? '工程文件正文已读取' : '工程文件本页已读取'
+    : range.content_complete ? '成果正文已读取' : '成果本页已读取'
 }
 
 const historyId = (value: unknown) => skillText(value) && value.length <= 256 && Array.from(value).length <= 128
@@ -509,7 +535,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
           : successful(run?.status) ? '本轮消息处理已结束' : '执行结果待确认'
     if (action && tool?.payload.name !== 'wait_for_reply' && !awaitingCustomer) text = `${action} · ${finished ? toolOutcome(finished, toolName) : '已发起，等待回执'}；${text}`
     lines.push({ id: role, role, text: `${label(role)} · ${text}`, moving,
-      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回', '历史目录已读取', '历史交付说明已读取', '历史文件已读取', '成果正文已读取', '成果本页已读取'].includes(toolOutcome(finished, toolName))) })
+      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回', '历史目录已读取', '历史交付说明已读取', '历史文件已读取', '成果正文已读取', '成果本页已读取', '工程文件清单已读取', '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对'].includes(toolOutcome(finished, toolName))) })
   }
   const reported = new Set(events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'agent'
     && event.payload.kind === 'report' && (() => {
