@@ -24,7 +24,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .processes import ProcessScope
 from .tool_protocol import (ToolTurn, json_utf8, openai_history, openai_turn, prepare_tool_turn,
-                            strict_json)
+                            strict_json, safe_tool_usage, _usage)
 from .usage import usage_source, valid_token_count
 
 
@@ -114,6 +114,25 @@ class DriverError(RuntimeError):
 
 class DriverProtocolError(DriverError):
     """The driver responded with a malformed payload."""
+
+
+def _tool_response_error(message: str, data: dict, *, anthropic: bool) -> DriverProtocolError:
+    tokens, meta = _usage(data, anthropic=anthropic, driver="")
+    error = DriverProtocolError(message)
+    error._tool_response_usage = {"tokens": tokens, "token_usage": meta["token_usage"], "usage": meta["usage"]}
+    return error
+
+
+def tool_protocol_error_usage(error: BaseException) -> dict | None:
+    """Retain only response counters, never malformed content or private blocks."""
+    if not isinstance(error, DriverProtocolError):
+        return None
+    value = vars(error).get("_tool_response_usage")
+    if not isinstance(value, dict):
+        return None
+    reported = value.get("token_usage") == "reported" and valid_token_count(value.get("tokens"))
+    return {"tokens": value["tokens"] if reported else 0,
+            "token_usage": "reported" if reported else "unavailable", "usage": safe_tool_usage(value.get("usage"))}
 
 
 class DriverUnavailable(DriverError):
@@ -689,7 +708,7 @@ class OpenAICompatibleDriver:
         try:
             return openai_turn(data, driver=self.name, names={t["name"] for t in definitions}, seen=seen)
         except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
-            raise DriverProtocolError("Invalid OpenAI tool response") from None
+            raise _tool_response_error("Invalid OpenAI tool response", data, anthropic=False) from None
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
         api_key = os.environ.get(self.api_key_env)

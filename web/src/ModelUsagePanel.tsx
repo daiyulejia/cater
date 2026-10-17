@@ -58,6 +58,7 @@ export function ModelUsagePanel({ events, names }: { events: TeamEvent[]; names:
         {recent.map((call) => <li key={call.seq} className="min-w-0 py-2">
           <p className="font-medium">@{name(call.role)} · {call.tokens === null ? '用量未报告' : `${format(call.tokens)} token`}</p>
           <p className="text-[11px] text-[#74897d]">事件 #{call.seq} · {sourceLabels[call.source]}</p>
+          {call.responseStatus === 'protocol_error' && <p className="mt-1 text-[11px] text-[#a36045]">响应格式错误，工作未继续；已报告用量仍保留。</p>}
           <CallDetails call={call} />
         </li>)}
       </ol>

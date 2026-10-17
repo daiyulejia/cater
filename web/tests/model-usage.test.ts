@@ -115,6 +115,75 @@ describe('source and total validation', () => {
   })
 })
 
+describe('protocol error responses', () => {
+  test('format failure retains only the known status and existing whitelisted measurements', () => {
+    const receipt = reported(1, 130, { response_status: 'protocol_error', usage: {
+      total_tokens: 130, prompt_tokens: 100, completion_tokens: 30,
+      prompt_tokens_details: { cached_tokens: 80 }, completion_tokens_details: { reasoning_tokens: 20 },
+      body: 'PRIVATE_BODY', error: 'PRIVATE_ERROR',
+    }, request_sizes: { prompt_utf8_bytes: 40, history_json_bytes: 50, tools_json_bytes: 60,
+      history_omitted_groups: 2, body: 'PRIVATE_BODY' },
+    response: 'PRIVATE_RESPONSE', message: 'PRIVATE_MESSAGE', reasoning: 'PRIVATE_REASONING' })
+    const summary = usageSummary([receipt, structuredClone(receipt), reported(2, 5)])
+    expect(summary.calls[0]).toMatchObject({ responseStatus: 'protocol_error', source: 'reported', tokens: 130,
+      input: 100, output: 30, cacheRead: 80, reasoning: 20,
+      requestSizes: { prompt: 40, history: 50, tools: 60, omittedGroups: 2 } })
+    expect(summary).toMatchObject({ reportedCalls: 2, reportedTokens: 135, detailCalls: 1 })
+    expect(JSON.stringify(summary)).not.toContain('PRIVATE_')
+  })
+
+  test.each([
+    {}, { token_usage: 'unavailable', tokens: 0 }, { token_usage: 'reported', tokens: '0' },
+    { token_usage: 'reported', usage: { prompt_tokens: 10, completion_tokens: 2 } },
+  ])('format failure cannot manufacture reported usage: %j', payload => {
+    const summary = usageSummary([event(1, { response_status: 'protocol_error', ...payload })])
+    expect(summary.calls[0]).toMatchObject({ responseStatus: 'protocol_error', tokens: null, ...noDetails })
+    expect(summary).toMatchObject({ reportedCalls: 0, reportedTokens: null, detailCalls: 0 })
+  })
+
+  test('format failure keeps explicit reported zero distinct from unavailable zero', () => {
+    const summary = usageSummary([reported(1, 0, { response_status: 'protocol_error' }),
+      event(2, { response_status: 'protocol_error', token_usage: 'unavailable', tokens: 0 })])
+    expect(summary.calls.map(call => call.tokens)).toEqual([0, null])
+    expect(summary).toMatchObject({ reportedCalls: 1, reportedTokens: 0, unavailableCalls: 1 })
+  })
+
+  test.each([undefined, null, 'success', 'Protocol_error', 'protocol_error ', '__proto__', 'constructor',
+    '<img src=x onerror=alert(1)>', true, 1, {}, ['protocol_error']])('unknown status preserves historical projection: %j', response_status => {
+    const original = reported(1, 10)
+    const unknown = reported(1, 10, { response_status })
+    expect(usageSummary([original, unknown])).toEqual(usageSummary([original]))
+    expect(Object.hasOwn(usageSummary([unknown]).calls[0], 'responseStatus')).toBe(false)
+  })
+
+  test('inherited status cannot forge a protocol error', () => {
+    const payload = Object.assign(Object.create({ response_status: 'protocol_error' }), reported(1, 10).payload)
+    expect(usageSummary([event(1, payload)])).toEqual(usageSummary([reported(1, 10)]))
+  })
+
+  test.each([undefined, 'success', '<script>remote</script>'])('status disagreement fails closed through replay: %j', response_status => {
+    const failed = reported(1, 10, { response_status: 'protocol_error' })
+    const other = reported(1, 10, { response_status })
+    for (const events of [[failed, other, failed], [other, failed, other], [failed, failed, other]]) {
+      const summary = usageSummary(events)
+      expect(summary.calls).toHaveLength(1)
+      expect(summary.calls[0]).toMatchObject({ source: 'unavailable', tokens: null, ...noDetails, requestSizes: noSizes })
+      expect(Object.hasOwn(summary.calls[0], 'responseStatus')).toBe(false)
+      expect(summary).toMatchObject({ reportedCalls: 0, reportedTokens: null, unavailableCalls: 1 })
+    }
+  })
+
+  test('agreed failure status never restores usage after a different measurement conflicts', () => {
+    const first = reported(1, 10, { response_status: 'protocol_error' })
+    const second = reported(1, 11, { response_status: 'protocol_error' })
+    const events = [first, second, first, second]
+    const summary = usageSummary(events)
+    expect(summary).toEqual(usageSummary([...events].reverse()))
+    expect(summary.calls[0]).toMatchObject({ responseStatus: 'protocol_error', source: 'unavailable', tokens: null })
+    expect(summary).toMatchObject({ reportedCalls: 0, reportedTokens: null, unavailableCalls: 1 })
+  })
+})
+
 describe('protocol details', () => {
   test('Anthropic uncached input and cache details never alter the supplied total', () => {
     const summary = usageSummary([reported(1, 175, { usage: { total_tokens: 175, input_tokens: 20, output_tokens: 5,

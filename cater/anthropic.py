@@ -12,7 +12,7 @@ from urllib.request import Request
 
 from .drivers import (MAX_API_RESPONSE_BYTES, DriverProtocolError, DriverResponse,
                       DriverUnavailable, TextRequestRejected, TextTransportFailure, _open_api_request, _safe_api_endpoint,
-                      _retry_after_seconds, _text_only_request, _token_budget, _tool_api_request)
+                      _retry_after_seconds, _text_only_request, _token_budget, _tool_api_request, _tool_response_error)
 from .tool_protocol import ToolTurn, anthropic_history, anthropic_turn, prepare_tool_turn
 from .usage import valid_token_count
 
@@ -78,7 +78,7 @@ class AnthropicMessagesDriver:
         try:
             return anthropic_turn(data, driver=self.name, names={t["name"] for t in definitions}, seen=seen)
         except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
-            raise DriverProtocolError("Invalid Anthropic tool response") from None
+            raise _tool_response_error("Invalid Anthropic tool response", data, anthropic=True) from None
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
         key = os.environ.get(self.api_key_env)

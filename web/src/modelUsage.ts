@@ -7,6 +7,7 @@ export type UsageCall = {
   seq: number
   role: string
   driver?: string
+  responseStatus?: 'protocol_error'
   source: UsageSource
   tokens: number | null
   input: number | null
@@ -61,6 +62,7 @@ function project(event: TeamEvent): UsageCall {
   const call: UsageCall = {
     seq: event.seq, role: label(field(p, 'role')) ?? 'unknown',
     ...(label(field(p, 'driver')) !== undefined ? { driver: label(field(p, 'driver')) } : {}),
+    ...(field(p, 'response_status') === 'protocol_error' ? { responseStatus: 'protocol_error' } as const : {}),
     source, tokens: source === 'unavailable' ? null : total, ...emptyDetails(), requestSizes: emptySizes(),
   }
   const sizes = record(field(p, 'request_sizes'))
@@ -130,6 +132,7 @@ export function usageSummary(events: TeamEvent[]): UsageSummary {
       bySeq.set(seq, {
         seq, role: previous.role === call.role ? call.role : 'unknown',
         ...(previous.driver !== undefined && previous.driver === call.driver ? { driver: call.driver } : {}),
+        ...(previous.responseStatus !== undefined && previous.responseStatus === call.responseStatus ? { responseStatus: call.responseStatus } : {}),
         source: 'unavailable', tokens: null, ...emptyDetails(), requestSizes: emptySizes(),
       })
     }

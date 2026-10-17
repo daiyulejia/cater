@@ -12,7 +12,7 @@ from dataclasses import asdict
 from .artifacts import MAX_CONTENT_BYTES, normalize_deliverables, safe_filename
 from .activity_owner import activity_owner
 from .events import Actor
-from .drivers import tool_failure_diagnostics
+from .drivers import DriverProtocolError, tool_failure_diagnostics, tool_protocol_error_usage
 from .room_dialogue import addressed_role
 from .team_recovery import RECOVERY_CONTRACT, TeamRecovery
 from .team_delivery import HandoffError, TeamDelivery, handoff_schema
@@ -969,7 +969,15 @@ class TeamService:
                 request_sizes = {"prompt_utf8_bytes": len(prompt.encode("utf-8")),
                                  "history_json_bytes": json_bytes(wire_history), "tools_json_bytes": json_bytes(tools),
                                  "history_omitted_groups": window["omitted_groups"]}
-                turn = driver.tool_turn(role=role.role, prompt=prompt, history=wire_history, tools=tools)
+                try:
+                    turn = driver.tool_turn(role=role.role, prompt=prompt, history=wire_history, tools=tools)
+                except DriverProtocolError as error:
+                    counts = tool_protocol_error_usage(error)
+                    if counts is not None:
+                        self.rt.log.emit(type="team.model_called", actor=HOST, task_id=task_id, payload={
+                            "role": role.id, "driver": role.driver, "run_id": started.payload["run_id"],
+                            **counts, "request_sizes": request_sizes, "response_status": "protocol_error"})
+                    raise
                 meta = turn.meta or {}
                 self.rt.log.emit(type="team.model_called", actor=HOST, task_id=task_id, payload={
                     "role": role.id, "driver": role.driver, "run_id": started.payload["run_id"],

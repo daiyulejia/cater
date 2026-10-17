@@ -1,6 +1,6 @@
 {
-  "_chat-conversation-DSkDJRW_.js": {
-    "file": "assets/chat-conversation-DSkDJRW_.js",
+  "_chat-conversation-Cz5KNpPV.js": {
+    "file": "assets/chat-conversation-Cz5KNpPV.js",
     "name": "chat-conversation",
     "imports": [
       "_rolldown-runtime-hePW80VL.js",
@@ -17,11 +17,11 @@
       "_react-vendor-BvB9BS1T.js"
     ]
   },
-  "_conversationActivityState-ayoK2KjW.js": {
-    "file": "assets/conversationActivityState-ayoK2KjW.js",
+  "_conversationActivityState-DMFI3chl.js": {
+    "file": "assets/conversationActivityState-DMFI3chl.js",
     "name": "conversationActivityState",
     "imports": [
-      "_chat-conversation-DSkDJRW_.js"
+      "_chat-conversation-Cz5KNpPV.js"
     ]
   },
   "_graph-vendor-B1dum-A4.js": {
@@ -68,7 +68,7 @@
     ]
   },
   "index.html": {
-    "file": "assets/index-FooEy6jE.js",
+    "file": "assets/index-CgDu20LZ.js",
     "name": "index",
     "src": "index.html",
     "isEntry": true,
@@ -78,7 +78,7 @@
       "_command-output-BZCznp8P.js",
       "_page-recovery-B5I1CFt7.js",
       "_vendor-ZOHsz5m0.js",
-      "_chat-conversation-DSkDJRW_.js"
+      "_chat-conversation-Cz5KNpPV.js"
     ],
     "dynamicImports": [
       "src/TaskGraph.tsx",
@@ -141,7 +141,7 @@
     ]
   },
   "src/ConversationActivity.tsx": {
-    "file": "assets/ConversationActivity-Br5s3x5f.js",
+    "file": "assets/ConversationActivity-BaPVMi7L.js",
     "name": "ConversationActivity",
     "src": "src/ConversationActivity.tsx",
     "isDynamicEntry": true,
@@ -150,11 +150,11 @@
       "_react-vendor-BvB9BS1T.js",
       "_page-recovery-B5I1CFt7.js",
       "_vendor-ZOHsz5m0.js",
-      "_conversationActivityState-ayoK2KjW.js"
+      "_conversationActivityState-DMFI3chl.js"
     ]
   },
   "src/DeliveryPanel.tsx": {
-    "file": "assets/DeliveryPanel-Dk0XPqyG.js",
+    "file": "assets/DeliveryPanel-u35BkBhc.js",
     "name": "DeliveryPanel",
     "src": "src/DeliveryPanel.tsx",
     "isDynamicEntry": true,
@@ -168,27 +168,27 @@
     ]
   },
   "src/EventDetails.tsx": {
-    "file": "assets/EventDetails-9XE5isoD.js",
+    "file": "assets/EventDetails-BEaKLHaF.js",
     "name": "EventDetails",
     "src": "src/EventDetails.tsx",
     "isDynamicEntry": true,
     "imports": [
       "_react-vendor-BvB9BS1T.js",
       "_command-output-BZCznp8P.js",
-      "_chat-conversation-DSkDJRW_.js",
-      "_conversationActivityState-ayoK2KjW.js",
+      "_chat-conversation-Cz5KNpPV.js",
+      "_conversationActivityState-DMFI3chl.js",
       "src/browserReport.tsx",
       "src/TeamProgressPanel.tsx"
     ]
   },
   "src/MessageDetails.tsx": {
-    "file": "assets/MessageDetails-Bpmu53m7.js",
+    "file": "assets/MessageDetails-D2dRuw9Y.js",
     "name": "MessageDetails",
     "src": "src/MessageDetails.tsx",
     "isDynamicEntry": true,
     "imports": [
       "_react-vendor-BvB9BS1T.js",
-      "_chat-conversation-DSkDJRW_.js"
+      "_chat-conversation-Cz5KNpPV.js"
     ]
   },
   "src/QuestionDetails.tsx": {
@@ -215,7 +215,7 @@
     ]
   },
   "src/TaskGraph.tsx": {
-    "file": "assets/TaskGraph-BHHPf12X.js",
+    "file": "assets/TaskGraph-C5sEmTO1.js",
     "name": "TaskGraph",
     "src": "src/TaskGraph.tsx",
     "isDynamicEntry": true,
@@ -223,7 +223,7 @@
       "_rolldown-runtime-hePW80VL.js",
       "_react-vendor-BvB9BS1T.js",
       "_vendor-ZOHsz5m0.js",
-      "_chat-conversation-DSkDJRW_.js",
+      "_chat-conversation-Cz5KNpPV.js",
       "_graph-vendor-B1dum-A4.js"
     ],
     "css": [
@@ -231,7 +231,7 @@
     ]
   },
   "src/TeamProgressPanel.tsx": {
-    "file": "assets/TeamProgressPanel-CQ5eBz1l.js",
+    "file": "assets/TeamProgressPanel-C_jlmrAd.js",
     "name": "TeamProgressPanel",
     "src": "src/TeamProgressPanel.tsx",
     "isDynamicEntry": true,
@@ -240,9 +240,9 @@
       "_react-vendor-BvB9BS1T.js",
       "_command-output-BZCznp8P.js",
       "_vendor-ZOHsz5m0.js",
-      "_chat-conversation-DSkDJRW_.js",
+      "_chat-conversation-Cz5KNpPV.js",
       "index.html",
-      "_conversationActivityState-ayoK2KjW.js",
+      "_conversationActivityState-DMFI3chl.js",
       "src/browserReport.tsx"
     ],
     "dynamicImports": [
@@ -250,7 +250,7 @@
     ]
   },
   "src/WelcomeView.tsx": {
-    "file": "assets/WelcomeView-BZpLOG3N.js",
+    "file": "assets/WelcomeView-BBql8O2F.js",
     "name": "WelcomeView",
     "src": "src/WelcomeView.tsx",
     "isDynamicEntry": true,
@@ -260,7 +260,7 @@
     ]
   },
   "src/WorkProgressPanel.tsx": {
-    "file": "assets/WorkProgressPanel-CbZ7T_I9.js",
+    "file": "assets/WorkProgressPanel-B8BU3hwy.js",
     "name": "WorkProgressPanel",
     "src": "src/WorkProgressPanel.tsx",
     "isDynamicEntry": true,
@@ -283,14 +283,14 @@
     "src": "src/assets/staff-portraits.jpg"
   },
   "src/browserReport.tsx": {
-    "file": "assets/browserReport-_U_mXuEZ.js",
+    "file": "assets/browserReport-8jhq-lGU.js",
     "name": "browserReport",
     "src": "src/browserReport.tsx",
     "isDynamicEntry": true,
     "imports": [
       "_react-vendor-BvB9BS1T.js",
-      "_chat-conversation-DSkDJRW_.js",
-      "_conversationActivityState-ayoK2KjW.js"
+      "_chat-conversation-Cz5KNpPV.js",
+      "_conversationActivityState-DMFI3chl.js"
     ]
   }
 }

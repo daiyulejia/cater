@@ -180,6 +180,10 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
         break
       }
       status = { reported: '用量已报告', estimated: '估算用量', unavailable: '用量未报告', unspecified: '用量来源未注明' }[call.source]
+      if (call.responseStatus === 'protocol_error') {
+        add('用量状态', status)
+        status = '响应格式错误'
+      }
       add('调用成员', member(call.role))
       if (call.tokens !== null) number(call.source === 'reported' ? '已报告用量' : call.source === 'estimated' ? '估算值' : '未注明来源的记录值', call.tokens, ' token')
       number(call.inputKind === 'uncached' ? '输入（不含缓存）' : '输入（含缓存）', call.input, ' token')
@@ -188,6 +192,7 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       number('提示正文字节', call.requestSizes.prompt); number('历史 JSON 字节', call.requestSizes.history)
       number('工具定义 JSON 字节', call.requestSizes.tools)
       note = '缓存和推理细项不重复叠加到总量；未报告不等于未消耗。字节不是 token，实际费用以服务商账单为准。'
+      if (call.responseStatus === 'protocol_error') note = `响应格式无效，工作未继续；已报告用量仍保留。${note}`
       break
     }
     case 'team.tool_started': case 'team.tool_finished':

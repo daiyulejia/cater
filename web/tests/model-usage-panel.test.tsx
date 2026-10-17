@@ -113,6 +113,98 @@ test.each(['paused', 'cancelled'] as const)('已有2条待处理时，工作板�
   expect(screen.queryByText('正在处理消息')).toBeNull()
 })
 
+test.each([
+  { tokens: 130, usage: { total_tokens: 130, prompt_tokens: 100, completion_tokens: 30,
+    prompt_tokens_details: { cached_tokens: 80 }, completion_tokens_details: { reasoning_tokens: 20 } } },
+  { tokens: 175, usage: { total_tokens: 175, input_tokens: 20, output_tokens: 5,
+    cache_read_input_tokens: 100, cache_creation_input_tokens: 50 } },
+])('格式错误在原折叠及事件详情标明停止，仍保留计量：$tokens', ({ tokens, usage }) => {
+  const receipt = event(2, { role: 'dev', response_status: 'protocol_error', token_usage: 'reported', tokens, usage,
+    request_sizes: { prompt_utf8_bytes: 40 }, message: '<img src=x onerror=alert(1)>', body: 'PRIVATE_BODY' })
+  const view = render(<ModelUsagePanel events={[report(1, 'dev', 5), receipt, structuredClone(receipt)]} names={names} />)
+  expect(screen.getByLabelText('已报告总用量').textContent).toBe(`${tokens + 5} token`)
+  expect(screen.getByText(/已记录 2 次返回.*2 次已报告/)).toBeTruthy()
+  const fold = screen.getByText('成员用量与最近返回').closest('details')!
+  expect(fold.open).toBe(false)
+  fireEvent.click(screen.getByText('成员用量与最近返回'))
+  const recent = screen.getByRole('list', { name: '最近模型返回' })
+  expect(within(recent).getAllByRole('listitem')).toHaveLength(2)
+  expect(within(recent).getByText(/响应格式错误，工作未继续/)).toBeTruthy()
+  expect(within(recent).getByText(`@米寇 · ${tokens} token`)).toBeTruthy()
+  expect(view.container.textContent).not.toMatch(/PRIVATE_BODY|onerror|免费|成功/)
+  expect(view.container.querySelector('img, script')).toBeNull()
+  expect(screen.queryByRole('button')).toBeNull()
+  expect(screen.queryByRole('link')).toBeNull()
+
+  view.rerender(<EventDetails event={receipt as DetailEvent} />)
+  expect(screen.getByText('响应格式错误')).toBeTruthy()
+  expect(screen.getByText(/响应格式无效，工作未继续/)).toBeTruthy()
+  const fields = view.container.querySelector('dl')!
+  expect(within(fields).getByText('用量已报告')).toBeTruthy()
+  expect(within(fields).getByText('已报告用量').nextElementSibling?.textContent).toBe(`${tokens} token`)
+  expect(fields.textContent).not.toMatch(/PRIVATE_BODY|onerror|免费|成功/)
+  expect(view.container.querySelector('img, script')).toBeNull()
+})
+
+test.each([
+  {}, { token_usage: 'unavailable', tokens: 0 }, { token_usage: 'reported', tokens: '0' },
+])('格式错误缺少可信计量时仍不冒充零：%j', payload => {
+  const receipt = event(1, { role: 'dev', response_status: 'protocol_error', ...payload })
+  const view = render(<ModelUsagePanel events={[receipt]} names={names} />)
+  fireEvent.click(screen.getByText('成员用量与最近返回'))
+  expect(screen.getByLabelText('已报告总用量').textContent).toBe('暂无已报告用量')
+  expect(screen.getByText('@米寇 · 用量未报告')).toBeTruthy()
+  expect(screen.getByText(/响应格式错误，工作未继续/)).toBeTruthy()
+  expect(view.container.textContent).not.toMatch(/0 token|免费|成功/)
+  view.rerender(<EventDetails event={receipt as DetailEvent} />)
+  expect(screen.getByText('响应格式错误')).toBeTruthy()
+  expect(screen.queryByText('已报告用量')).toBeNull()
+  expect(view.container.textContent).not.toMatch(/0 token|免费|成功/)
+})
+
+test('格式错误状态冲突和已有计量冲突重放后均不恢复可用计数', () => {
+  const failed = event(1, { role: 'dev', response_status: 'protocol_error', tokens: 100, token_usage: 'reported' })
+  const view = render(<ModelUsagePanel events={[failed, report(1), failed]} names={names} />)
+  fireEvent.click(screen.getByText('成员用量与最近返回'))
+  expect(screen.getByLabelText('已报告总用量').textContent).toBe('暂无已报告用量')
+  expect(screen.getByText(/已记录 1 次返回.*0 次已报告/)).toBeTruthy()
+  expect(screen.getByText('@米寇 · 用量未报告')).toBeTruthy()
+  const conflicting = { ...failed, payload: { ...failed.payload, tokens: 101 } }
+  view.rerender(<ModelUsagePanel events={[failed, conflicting, failed]} names={names} />)
+  expect(screen.getByLabelText('已报告总用量').textContent).toBe('暂无已报告用量')
+  expect(screen.getByText('@米寇 · 用量未报告')).toBeTruthy()
+  expect(screen.getByText(/响应格式错误，工作未继续/)).toBeTruthy()
+})
+
+test.each(['<img src=x onerror=alert(1)>', 'success', '__proto__', { status: 'protocol_error' }])('未知状态不反射为用户摘要或改变历史展示：%j', response_status => {
+  const original = report(1)
+  const receipt = { ...original, payload: { ...original.payload, response_status } }
+  const view = render(<ModelUsagePanel events={[original]} names={names} />)
+  const historical = view.container.innerHTML
+  view.rerender(<ModelUsagePanel events={[receipt]} names={names} />)
+  expect(view.container.innerHTML).toBe(historical)
+  view.rerender(<EventDetails event={original as DetailEvent} />)
+  const header = view.container.querySelector('header')!.innerHTML
+  const fields = view.container.querySelector('dl')!.innerHTML
+  const note = view.container.querySelector('section > p')!.textContent
+  view.rerender(<EventDetails event={receipt as DetailEvent} />)
+  expect(view.container.querySelector('header')!.innerHTML).toBe(header)
+  expect(view.container.querySelector('dl')!.innerHTML).toBe(fields)
+  expect(view.container.querySelector('section > p')!.textContent).toBe(note)
+  expect(view.container.querySelector('img, script')).toBeNull()
+})
+
+test('伪造团队来源的格式错误不能充当失败或计量依据', () => {
+  const receipt = { ...event(1, { response_status: 'protocol_error', tokens: 100, token_usage: 'reported' }),
+    actor: { id: 'team', kind: 'agent', role: 'team' } }
+  const view = render(<ModelUsagePanel events={[receipt]} names={names} />)
+  expect(view.container.childElementCount).toBe(0)
+  view.rerender(<EventDetails event={receipt as DetailEvent} />)
+  expect(screen.getByText('用量来源待核对')).toBeTruthy()
+  expect(screen.queryByText('响应格式错误')).toBeNull()
+  expect(screen.queryByText('已报告用量')).toBeNull()
+})
+
 test('已不在成员目录的特殊角色ID按文本显示，不读取对象原型作为姓名', () => {
   render(<ModelUsagePanel events={[report(1, '__proto__'), report(2, 'constructor'), report(3, 'toString')]} names={{}} />)
   expect(screen.getByLabelText('已报告总用量').textContent).toBe('300 token')
