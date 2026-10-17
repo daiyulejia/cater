@@ -42,9 +42,33 @@ export type TeamState = {
 
 export type TeamSummary = Pick<TeamState, 'enabled' | 'status' | 'pending_count' | 'revision' | 'effects_pending_count'> & { runs?: TeamRun[] }
 
-export type TeamActivity = { state: string; active: boolean; revision?: number; follow_up?: { action?: string } }
+export type TeamActivity = { state: string; active: boolean; revision?: number; instance_id?: string; follow_up?: { action?: string } }
 
-export function resolveTeamActivity<T extends TeamActivity>(detail: T | undefined, summary: T | undefined, newObjective: boolean): T | undefined {
+export type TeamSnapshotClock = {
+  version: number
+  team?: Pick<TeamSummary, 'revision'> | null
+  activity?: TeamActivity
+  evaluated_at?: number
+  observation_order?: number
+}
+
+export function compareTeamSnapshots(next: TeamSnapshotClock, current: TeamSnapshotClock): number {
+  const durable = next.version - current.version || (next.team?.revision ?? 0) - (current.team?.revision ?? 0)
+  if (durable) return durable
+  // Process-local activity clocks are comparable only within the same instance.
+  if (next.activity?.instance_id !== current.activity?.instance_id) {
+    return (next.observation_order ?? 0) - (current.observation_order ?? 0)
+  }
+  return (next.activity?.revision ?? 0) - (current.activity?.revision ?? 0)
+    || (next.evaluated_at ?? 0) - (current.evaluated_at ?? 0)
+    || (next.observation_order ?? 0) - (current.observation_order ?? 0)
+}
+
+export function resolveTeamActivity<T extends TeamActivity>(detail: T | undefined, summary: T | undefined, newObjective: boolean,
+  detailClock?: TeamSnapshotClock, summaryClock?: TeamSnapshotClock): T | undefined {
+  if (!newObjective && detailClock && summaryClock) {
+    return compareTeamSnapshots(summaryClock, detailClock) > 0 ? summary : detail
+  }
   return newObjective || (summary?.revision ?? -1) > (detail?.revision ?? -1) ? summary : detail
 }
 

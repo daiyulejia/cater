@@ -37,7 +37,7 @@ import { controlLabels, executionLabel } from './executionControl'
 import type { ControlAction, ExecutionControl } from './executionControl'
 import { clearCreationRecovery, CREATION_RECOVERY_TTL, loadCreationRecovery, readAccessToken, saveCreationRecovery } from './creationRecovery'
 import type { CreationAttempt } from './creationRecovery'
-import { hasActiveTeamMessages, hasNewTeamObjective, isTeamHost, isTeamRecovery, resolveTeam, resolveTeamActivity, resolveTeamTask, teamDeliveries, teamMessageAudience, teamMessageEchoes, teamProgressMessages, teamRunStatus, teamSpeaker, teamStatus } from './team'
+import { compareTeamSnapshots as summaryOrder, hasActiveTeamMessages, hasNewTeamObjective, isTeamHost, isTeamRecovery, resolveTeam, resolveTeamActivity, resolveTeamTask, teamDeliveries, teamMessageAudience, teamMessageEchoes, teamProgressMessages, teamRunStatus, teamSpeaker, teamStatus } from './team'
 import type { TeamState, TeamSummary } from './team'
 import { AsyncPanel } from './AsyncPanel'
 import { ReloadContext } from './pageReloadContext'
@@ -74,8 +74,8 @@ type MemoryItem = { seq: number; task_id?: string; actor?: string; title: string
 type OrgRole = { id: string; name: string; role: string; charter?: string }
 type DriverCoverage = { role_id: string; name: string; driver: string; mode: 'local_demo' | 'external' }
 type Organization = { leader: OrgRole; cabinet: OrgRole[]; workers: OrgRole[]; mode?: 'local_demo' | 'mixed_driver' | 'external_driver'; worker_drivers?: DriverCoverage[]; availability?: TeamAvailability }
-type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'; active: boolean; revision?: number; error?: string; follow_up?: { action?: string } }
-type TaskSummary = { id: string; goal: string; project_id?: string | null; status: string; status_label: string; conversation_count?: number; latest_seq: number; version: number; evaluated_at?: number; activity?: Activity; execution_control?: ExecutionControl; team?: TeamSummary | null }
+type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'; active: boolean; revision?: number; instance_id?: string; error?: string; follow_up?: { action?: string } }
+type TaskSummary = { id: string; goal: string; project_id?: string | null; status: string; status_label: string; conversation_count?: number; latest_seq: number; version: number; evaluated_at?: number; observation_order?: number; activity?: Activity; execution_control?: ExecutionControl; team?: TeamSummary | null }
 type Task = {
   team?: TeamState | null
   work?: WorkState | null
@@ -133,11 +133,6 @@ function validateTaskDetail(value: TaskDetail, expectedId?: string): void {
     throw new Error('提交响应不完整或对话不匹配，提交结果未知。草稿已保留，请核对后手动重试。')
   }
 }
-
-const summaryOrder = (next: TaskSummary, current: TaskSummary) => next.version - current.version
-  || (next.team?.revision ?? 0) - (current.team?.revision ?? 0)
-  || (next.activity?.revision ?? 0) - (current.activity?.revision ?? 0)
-  || (next.evaluated_at ?? 0) - (current.evaluated_at ?? 0)
 
 function creationRequestId(): string {
   if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
@@ -1028,9 +1023,10 @@ function App() {
     const id = next.task.id
     const seq = next.events.at(-1)?.seq ?? 0
     const version = next.summary?.version ?? seq
-    const base = next.summary ?? { id, goal: next.task.goal, project_id: next.task.project_id,
+    const base = { ...(next.summary ?? { id, goal: next.task.goal, project_id: next.task.project_id,
       status: next.task.status, status_label: taskListStatus({ ...next.task, activity: next.activity }),
-      activity: next.activity, latest_seq: seq, version }
+      activity: next.activity, latest_seq: seq, version }), observation_order: order }
+    next = { ...next, summary: base }
     const item = team?.enabled ? { ...base, team, goal: next.task.goal, status: next.task.status, status_label: teamStatus(team, next.activity) } : base
     const previous = versionsRef.current[id]
     const comparison = previous ? summaryOrder(item, previous.summary) : 1
@@ -1057,6 +1053,7 @@ function App() {
     const poll = async () => {
       if (cancelled || fetching || !pageVisible()) return
       fetching = true
+      const order = ++detailOrderRef.current
       controller = new AbortController()
       const signal = controller.signal
       try {
@@ -1069,11 +1066,12 @@ function App() {
         if (!result) { setTaskListError(''); return }
         const { next } = result
         if (!Array.isArray(next.tasks)) throw new Error('暂时无法读取任务列表，请稍后重试。')
+        const receivedTasks = next.tasks.map(task => ({ ...task, observation_order: order }))
         etag = result.etag
-        acceptControls(next.tasks)
+        acceptControls(receivedTasks)
         setTaskListError('')
         setTasks((current) => {
-          const received = new Map(next.tasks.map((task) => [task.id, task]))
+          const received = new Map(receivedTasks.map((task) => [task.id, task]))
           return [...current.map((task) => {
             const item = received.get(task.id)
             received.delete(task.id)
@@ -1198,7 +1196,8 @@ function App() {
   const currentDetail = detail?.task.id === selectedId ? detail : null
   const selectedSummary = tasks.find((item) => item.id === selectedId)
   const syncingObjective = hasNewTeamObjective(currentDetail?.task.team, selectedSummary?.team)
-  const currentActivity = resolveTeamActivity(currentDetail?.activity, selectedSummary?.activity, syncingObjective)
+  const currentActivity = resolveTeamActivity(currentDetail?.activity, selectedSummary?.activity, syncingObjective,
+    currentDetail?.summary, selectedSummary)
   const conversation = useMemo(() => currentDetail ? conversationFor(currentDetail.events, identities, organization, currentDetail.questions, currentDetail.clarifications, currentDetail.conversation, Boolean(currentDetail.task.team?.enabled), currentDetail.questionnaires)
     .map(item => syncingObjective && item.evidence.type === 'team.objective_completed' ? { ...item, historicalDelivery: true } : item) : [], [currentDetail, identities, organization, syncingObjective])
   const visibleConversation = useMemo(() => chatFilter === 'all' ? conversation : conversation.filter((item) => item.category === chatFilter), [chatFilter, conversation])

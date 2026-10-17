@@ -25,7 +25,7 @@ pnpm --dir web test
 pnpm --dir web lint
 ```
 
-测试会模拟延迟响应，检查任务切换、草稿归属、重复发送、后台刷新和阅读历史时的新消息提示。GitHub 自动检查也会运行这些测试和前端构建。
+测试会模拟延迟响应，检查任务切换、草稿归属、重复发送、后台刷新和阅读历史时的新消息提示。默认最多使用四个隔离 worker，限制同时运行的 DOM 测试数量；不延长测试超时或跳过断言。GitHub 自动检查也会运行这些测试和前端构建。
 
 真实浏览器布局回归单独启用，复用仓库已固定版本的可选工具，不要求普通前端测试隐式安装浏览器。先在 `tools/browser-check/` 执行 `npm ci --ignore-scripts --no-audit --no-fund` 和 `npm run install:browser`，然后在 PowerShell 中执行：
 

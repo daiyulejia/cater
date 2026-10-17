@@ -56,12 +56,17 @@ class ActivityRunner:
     _BINDING_KEYS = ("conversation_seq", "expected_scope", "finished_seq", "resume_seq", "activation_seq", "team_message_seq")
 
     def __init__(self, runtime_factory: Callable[[], Runtime]):
+        self._instance_id = uuid.uuid4().hex
         self._runtime_factory = runtime_factory
         self._lock = threading.RLock()
         self._activities: dict[str, dict[str, Any]] = {}
         self._revision = 0
         self._question_tasks: dict[str, str] = {}
         self._conversation_tasks: dict[str, str] = {}
+
+    @property
+    def instance_id(self) -> str:
+        return self._instance_id
 
     def answer_conversations(self, task_id: str) -> None:
         with self._lock:
@@ -346,9 +351,10 @@ class ActivityRunner:
                 activity["follow_up"] = dict(activity["follow_up"])
             revision = self._revision
         if not activity:
-            return {"state": "idle", "active": False, "revision": revision}
+            return {"state": "idle", "active": False, "revision": revision, "instance_id": self.instance_id}
         activity["active"] = activity["state"] in {"queued", "running"}
         activity["revision"] = revision
+        activity["instance_id"] = self.instance_id
         return activity
 
     def submit(self, task_id: str, action: str) -> dict[str, Any]:
@@ -1959,7 +1965,7 @@ def make_handler(
                 # evaluated_at may differ across handler lifetimes; validate
                 # semantic row state rather than byte-identical JSON.
                 etag = 'W/"' + hashlib.sha256(
-                    f"summaries-v1:{head}:{activity_revision}:{lease_version}".encode()
+                    f"summaries-v1:{head}:{activities.instance_id}:{activity_revision}:{lease_version}".encode()
                 ).hexdigest() + '"'
                 supplied = self.headers.get("If-None-Match", "")
                 if not attention_unavailable and any(
@@ -2001,7 +2007,8 @@ def make_handler(
                     summaries_lease_version, summaries_deadline = lease_version, deadline
                 rows = [
                     _summary_activity(row, activity_rows.get(row["id"],
-                                      {"state": "idle", "active": False, "revision": activity_revision}))
+                                      {"state": "idle", "active": False, "revision": activity_revision,
+                                       "instance_id": activities.instance_id}))
                     for row in summaries_base
                 ]
                 if any(row.get("team", {}).get("effects_pending_count", 0) is None for row in rows):
@@ -2672,7 +2679,7 @@ def _task_summary(task: TaskSnapshot, *, version: int, latest_seq: int, conversa
 
 
 def _summary_activity(row: dict[str, Any], activity: dict[str, Any]) -> dict[str, Any]:
-    state = {key: activity[key] for key in ("state", "active", "revision") if key in activity}
+    state = {key: activity[key] for key in ("state", "active", "revision", "instance_id") if key in activity}
     if activity.get("follow_up"):
         state["follow_up"] = {"action": activity["follow_up"]["action"]}
     label = row["status_label"]
