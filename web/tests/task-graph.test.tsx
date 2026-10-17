@@ -74,6 +74,13 @@ const details = () => screen.getByRole('complementary', { name: '工作项详情
 const nodeButton = (ordinal: number) => screen.getByRole('button', { name: new RegExp(`^工作 ${ordinal}：`) })
 const viewport = () => document.querySelector<HTMLElement>('.react-flow__viewport')!
 
+it('旧工作图显式未设置 team 时仍显示工作项，不误选团队图', async () => {
+  render(<TaskGraph work={work()} team={undefined} events={undefined} actorText={actorText} open onOpenChange={vi.fn()} />)
+  expect(screen.getByRole('dialog', { name: '任务脉络' })).toBeTruthy()
+  expect(await screen.findByRole('region', { name: '当前任务依赖图' })).toBeTruthy()
+  expect(screen.queryByRole('region', { name: '当前团队协作图' })).toBeNull()
+})
+
 const nativeTeam: TeamState = { enabled: true, objective: '真实接力', status: 'running', pending_count: 0, runs: [], assignments: [], checkpoint: '', revision: 1 }
 const nativeEvents: TeamEvent[] = [
   { seq: 2, type: 'team.message_received', actor: { id: 'dev', kind: 'agent' }, payload: { kind: 'assignment', recipient: 'test', text: '检查移动端' } },

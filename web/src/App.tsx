@@ -14,6 +14,7 @@ import { WorkboardPanel } from './WorkboardPanel'
 import { MentionInput } from './MentionInput'
 import { TeamDirectory } from './TeamDirectory'
 import { TaskList } from './TaskList'
+import { TaskGraphDialog } from './TaskGraphDialog'
 import { RulesPanel } from './RulesPanel'
 import { WorkItems } from './WorkItems'
 import { ConversationMembers } from './ConversationMembers'
@@ -47,7 +48,7 @@ import { loadPageRecovery, openNavigationMemory } from './pageRecovery'
 import type { NavigationMemory, PageDraftSnapshot } from './pageRecovery'
 import { reloadBlocker, reloadPage } from './pageReload'
 
-const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
+const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraphContents })))
 const LazyDeliveryPanel = lazy(() => import('./DeliveryPanel').then((module) => ({ default: module.DeliveryPanel })))
 const EventDetails = lazy(() => import('./EventDetails').then((module) => ({ default: module.EventDetailsList })))
 const BrowserReport = lazy(() => import('./browserReport').then((module) => ({ default: module.BrowserReport })))
@@ -1581,7 +1582,10 @@ function App() {
                 <p className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap [overflow-wrap:anywhere]">{executionControl.reason}</p>
               </details>}
             </div>}
-            {graphLoaded && (task.team?.enabled || task.work?.items.length) ? <AsyncPanel onFailure={() => setGraphOpen(false)} fallback={<p role="status" className="px-4 py-2 text-xs text-[#52766d]">正在打开任务脉络…</p>}><TaskGraph key={task.id} {...(task.team?.enabled ? { team: task.team, events: currentDetail?.events ?? [] } : { work: task.work! })} open={graphOpen} onOpenChange={setGraphOpen} returnFocusRef={graphTriggerRef} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></AsyncPanel> : null}
+            {graphLoaded && (task.team?.enabled || task.work?.items.length) ? <TaskGraphDialog open={graphOpen} onOpenChange={setGraphOpen} returnFocusRef={graphTriggerRef}
+              description={task.team?.enabled ? '当前团队的只读消息与复核关系' : `当前任务 · ${task.work!.items.length} 个工作项`}>
+              <AsyncPanel fallback={<p role="status" className="task-graph-loading"><LoaderCircle size={20} aria-hidden="true" className="shrink-0 motion-safe:animate-spin" />正在读取任务脉络…</p>}><TaskGraph key={task.id} {...(task.team?.enabled ? { team: task.team, events: currentDetail?.events ?? [] } : { work: task.work! })} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></AsyncPanel>
+            </TaskGraphDialog> : null}
             <div className="relative flex min-h-0 flex-1 flex-col">
               <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>
                 {loading ? <ChatWaiting error={loadError} onRetry={() => setReloadToken((current) => current + 1)} /> : <>
