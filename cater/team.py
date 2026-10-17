@@ -1091,14 +1091,24 @@ class TeamService:
                 or assignment is not None and assignment.payload.get("revision") != current_work["revision"]):
             already_reported = True
         if status == "waiting" and assignment is not None and not already_reported and not awaiting_customer:
+            messages = self._messages(task_id)
             notified_parent = any(e.seq > started.seq and e.actor.id == role.id
                 and e.payload.get("kind") == "notification" and e.payload.get("recipient") == assignment.actor.id
-                and e.payload.get("parent_assignment_seq") == assignment.seq for e in self._messages(task_id))
+                and e.payload.get("parent_assignment_seq") == assignment.seq for e in messages)
             artifacts = [a for a in self.rt.task(task_id).deliverables if a["seq"] > started.seq and a.get("actor") == role.id]
+            reported = _reported_messages(messages)
+            child_states = {run["message_seq"]: run["status"] for run in current_work["runs"]}
+            # Delegation already records the next action; an empty wait is not another upstream job.
+            waiting_on_child = not final.strip() and not artifacts and any(
+                e.seq > started.seq and e.actor == Actor.agent(role.id, role.role)
+                and e.payload.get("kind") in {"assignment", "message"}
+                and e.payload.get("parent_assignment_seq") == assignment.seq
+                and e.payload.get("revision") == revision and e.seq not in reported
+                and child_states.get(e.seq, "queued") in {"queued", "running", "waiting"} for e in messages)
             published = "；".join(f"{a.get('filename', a.get('title', '成果'))}（成果 #{a['seq']}）" for a in artifacts)
             text = ("本轮已保存：" + published + "。" if published else "")
             text += (final or "我已处理这轮消息，现在等待后续信息或安排。")
-            if not notified_parent and (assignment.payload["kind"] == "assignment" or published):
+            if not notified_parent and not waiting_on_child and (assignment.payload["kind"] == "assignment" or published):
                 self._send(task_id, role, assignment.actor.id, text, "progress", reply_to=assignment.seq)
         if status != "waiting" and not already_reported and assignment is not None:
             self._send(task_id, role, assignment.actor.id, reason or final or "委托已处理，请查看本轮成果和工具记录。",
