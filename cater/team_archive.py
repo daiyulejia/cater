@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import io
-import zipfile
 
 from .artifact_blobs import read_blob, put_blob
 from .artifact_store import _name, materialize_team_artifact
@@ -98,27 +96,16 @@ def publish(team, task_id, role, arguments, workspace, binding, tool_start):
 
 
 def read_member(log, artifact, arguments):
+    from .archive_members import read_members
     from .workspace_archive import portable_path
 
     path = portable_path(arguments["path"])
-    manifest = artifact.get("archive")
-    validate_manifest(manifest)
-    member = next((entry for entry in manifest["files"] if entry["path"] == path), None)
-    if member is None:
-        raise ValueError("工程清单没有这个文件。")
     offset, length = arguments.get("offset", 0), arguments.get("length", 8000)
     if type(offset) is not int or offset < 0 or type(length) is not int or not 1 <= length <= 16000:
         raise ValueError("工程文本分页需要非负offset和1到16000的length，单位为Unicode字符。")
-    with zipfile.ZipFile(io.BytesIO(artifact_bytes(log, artifact))) as archive:
-        infos = archive.infolist()
-        if len(infos) != len(manifest["files"]) or any(
-                info.filename != entry["path"] or info.file_size != entry["bytes"] or info.is_dir()
-                for info, entry in zip(infos, manifest["files"])):
-            raise ValueError("工程归档与文件清单不一致。")
-        with archive.open(path) as stream:
-            body = stream.read(member["bytes"] + 1)
-    if len(body) != member["bytes"] or hashlib.sha256(body).hexdigest() != member["sha256"]:
-        raise ValueError("工程文件与已发布版本不一致。")
+    member, = read_members(log, artifact, [path], max_files=1,
+        max_member_bytes=32 * 1024 * 1024, max_total_bytes=32 * 1024 * 1024)
+    body = member.pop("body")
     result = {"status": "ok", "artifact_seq": artifact["seq"], "archive_sha256": artifact["content_sha256"], **member}
     try:
         content = body.decode("utf-8")

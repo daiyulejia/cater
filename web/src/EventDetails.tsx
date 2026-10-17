@@ -9,6 +9,8 @@ import { NativeMcpReceipt } from './NativeMcpReceipt'
 import { NativeProjectHistoryReceipt } from './NativeProjectHistoryReceipt'
 import { NativeArtifactReceipt } from './NativeArtifactReceipt'
 import { nativeArtifactReceiptStatus } from './conversationActivityState'
+import { isFrozenArchiveReceipt, nativeFrozenArchiveReceiptStatus, teamToolReceipt } from './conversationActivityState'
+import { NativeFrozenArchiveReceipt } from './NativeFrozenArchiveReceipt'
 
 export type DetailEvent = {
   seq: number
@@ -17,7 +19,29 @@ export type DetailEvent = {
   payload: Record<string, unknown>
 }
 
-export type EventDetailsProps = { event: DetailEvent; actorName?: (id: string) => string }
+export type EventDetailsProps = { event: DetailEvent; actorName?: (id: string) => string; contextEvents?: DetailEvent[] }
+
+function frozenReadArguments(event: DetailEvent, events: DetailEvent[]): DetailEvent {
+  if (!isTeamHost(event) || event.type !== 'team.tool_finished' || !isFrozenArchiveReceipt(event)
+    || Object.hasOwn(event.payload, 'arguments') || !Number.isSafeInteger(event.payload.started_seq)) return event
+  const matches = events.filter(start => start.seq === event.payload.started_seq)
+  if (matches.length !== 1) return event
+  const start = matches[0]
+  const args = start.payload.arguments
+  if (!isTeamHost(start) || start.type !== 'team.tool_started' || start.seq >= event.seq
+    || (start.payload.name ?? start.payload.tool) !== 'read_background'
+    || ['role', 'run_id'].some(key => typeof start.payload[key] !== 'string' || !start.payload[key]
+      || start.payload[key] !== event.payload[key])
+    || typeof start.payload.call_id !== 'string' || !start.payload.call_id
+    || typeof start.payload.message_seq !== 'number' || !Number.isSafeInteger(start.payload.message_seq)
+    || start.payload.message_seq < 1 || teamToolReceipt(start, [event]) !== event
+    || args === null || typeof args !== 'object' || Array.isArray(args)) return event
+  return { ...event, payload: { ...event.payload, arguments: args } }
+}
+
+export function EventDetailsList({ events, actorName }: { events: DetailEvent[]; actorName?: (id: string) => string }) {
+  return <>{events.map(event => <EventDetails key={event.seq} event={event} actorName={actorName} contextEvents={events} />)}</>
+}
 type Field = { label: string; value: string }
 
 const titles: Record<string, string> = {
@@ -196,6 +220,12 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       break
     }
     case 'team.tool_started': case 'team.tool_finished':
+      if (isFrozenArchiveReceipt(event)) {
+        status = nativeFrozenArchiveReceiptStatus(event)
+        add('工具', '读取来源材料')
+        if (isTeamHost(event)) add('读取成员', member(p.role))
+        break
+      }
       if ((p.name ?? p.tool) === 'read_artifact') {
         status = nativeArtifactReceiptStatus(event)
         add('工具', '读取成果')
@@ -419,7 +449,8 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
   return { fields, status, note }
 }
 
-export function EventDetails({ event, actorName }: EventDetailsProps) {
+export function EventDetails({ event: original, actorName, contextEvents = [] }: EventDetailsProps) {
+  const event = frozenReadArguments(original, contextEvents)
   const { fields, status, note } = describe(event, actorName)
   const title = label(event.type, titles, '事件记录')
   const recorder = resolvedName(event.actor.id, actorName) || label(event.actor.kind, { human: '用户', system: '系统', agent: '成员' }, '记录来源待核对')
@@ -427,6 +458,7 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
   const nativeMcp = ['team.tool_started', 'team.tool_finished'].includes(event.type) && isNativeMcpTool(event.payload.name ?? event.payload.tool)
   const projectHistory = ['team.tool_started', 'team.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'read_project_history'
   const artifactRead = ['team.tool_started', 'team.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'read_artifact'
+  const frozenArchive = ['team.tool_started', 'team.tool_finished'].includes(event.type) && isFrozenArchiveReceipt(event)
   const browser = nativeBrowser || event.type === 'verification.completed' && hasBrowserReceipt(event.payload)
   const outputs = event.type === 'verification.completed' ? event.payload
     : ['team.tool_finished', 'workspace.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'workspace_run' ? record(event.payload.result) : undefined
@@ -445,6 +477,7 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
     {nativeMcp && event.type === 'team.tool_finished' && <NativeMcpReceipt key={event.seq} event={event} />}
     {projectHistory && event.type === 'team.tool_finished' && <NativeProjectHistoryReceipt key={event.seq} event={event} />}
     {artifactRead && event.type === 'team.tool_finished' && <NativeArtifactReceipt key={event.seq} event={event} />}
+    {frozenArchive && event.type === 'team.tool_finished' && <NativeFrozenArchiveReceipt event={event} />}
     {note && <p className="text-[#728679]">{note}</p>}
     {event.type === 'collaboration.finished' && ['answered', 'declined'].includes(String(event.payload.status))
       && event.actor.kind === 'system' && event.actor.id === 'collaboration' && event.actor.role === 'collaboration'
@@ -454,7 +487,7 @@ export function EventDetails({ event, actorName }: EventDetailsProps) {
         {event.payload.evidence.filter((entry) => entry && Number.isInteger(entry.artifact_seq) && entry.artifact_seq > 0 && typeof entry.quote === 'string')
           .map((entry, index) => <blockquote key={index} className="mt-2 whitespace-pre-wrap">成果 #{entry.artifact_seq}：{entry.quote}</blockquote>)}
       </details>}
-    {!skillTool(event) && !browser && !nativeMcp && !projectHistory && !artifactRead && <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
+    {!skillTool(event) && !browser && !nativeMcp && !projectHistory && !artifactRead && !frozenArchive && <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
       <summary className="cursor-pointer text-[#728679]">开发者详情</summary>
       <pre tabIndex={0} aria-label="原始事件 JSON" className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(event, null, 2)}</pre>
     </details>}

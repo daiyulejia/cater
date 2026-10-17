@@ -47,7 +47,7 @@ import { reloadBlocker, reloadPage } from './pageReload'
 
 const TaskGraph = lazy(() => import('./TaskGraph').then((module) => ({ default: module.TaskGraph })))
 const LazyDeliveryPanel = lazy(() => import('./DeliveryPanel').then((module) => ({ default: module.DeliveryPanel })))
-const EventDetails = lazy(() => import('./EventDetails').then((module) => ({ default: module.EventDetails })))
+const EventDetails = lazy(() => import('./EventDetails').then((module) => ({ default: module.EventDetailsList })))
 const BrowserReport = lazy(() => import('./browserReport').then((module) => ({ default: module.BrowserReport })))
 const WorkProgressPanel = lazy(() => import('./WorkProgressPanel').then((module) => ({ default: module.WorkProgressPanel })))
 const WorkAssignments = lazy(() => import('./WorkProgressPanel').then((module) => ({ default: module.WorkAssignments })))
@@ -1625,7 +1625,7 @@ function AuditTrail({ item }: { item: ChatItem }) {
   const [open, setOpen] = useState(false)
   return <details className="chat-audit" onToggle={(event) => { if (event.target === event.currentTarget) setOpen(event.currentTarget.open) }}>
     <summary>事件 #{item.id} · 审计记录</summary>
-    {open && <AsyncPanel fallback={<p>正在读取过程记录…</p>}>{(item.auditEvents ?? [item.evidence]).map((event) => <EventDetails key={event.seq} event={event} actorName={item.auditName ?? actorText} />)}</AsyncPanel>}
+    {open && <AsyncPanel fallback={<p>正在读取过程记录…</p>}><EventDetails events={item.auditEvents ?? [item.evidence]} actorName={item.auditName ?? actorText} /></AsyncPanel>}
   </details>
 }
 

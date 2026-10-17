@@ -1,7 +1,8 @@
 """Content-addressed bytes in the event database, outside event payloads.
 
-Callers must authorize access through artifacts already published in the current
-group. A digest is an integrity check, not an access credential.
+Callers must authorize access through current-group publications or exact
+immutable publications already captured in the calling group's frozen background.
+A digest is an integrity check, not an access credential.
 """
 
 from __future__ import annotations

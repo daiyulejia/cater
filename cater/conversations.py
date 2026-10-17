@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -39,7 +40,7 @@ def dialogue_background(snapshot: dict[str, Any], *, reader: str = "explain_task
                      "excerpt_truncated": len(str(source.get("text", ""))) > 500}
                     for source in selected],
         "omitted_sources": len(sources) - len(selected),
-        "artifacts": [{**{key: artifact.get(key) for key in ("task_id", "seq", "content_sha256", "verification")},
+        "artifacts": [{**{key: artifact.get(key) for key in ("task_id", "seq", "content_sha256", "verification", "format", "content_bytes")},
                        "title": str(artifact.get("title", ""))[:300],
                        "filename": str(artifact.get("filename", ""))[:300],
                        "summary_excerpt": str(artifact.get("summary", ""))[:500],
@@ -51,11 +52,11 @@ def dialogue_background(snapshot: dict[str, Any], *, reader: str = "explain_task
     }
 
 
-def read_background(snapshot: dict[str, Any] | None, arguments: dict[str, Any]) -> dict[str, Any]:
+def read_background(snapshot: dict[str, Any] | None, arguments: dict[str, Any], *, log=None) -> dict[str, Any]:
     """Read only the calling conversation's frozen references, never live peers."""
     if snapshot is None:
         return {"status": "error", "message": "本群没有继承的背景快照；请读取本群消息或成果。"}
-    if (not isinstance(arguments, dict) or set(arguments) - {"section", "source_id", "artifact_seq", "offset", "limit"}
+    if (not isinstance(arguments, dict) or set(arguments) - {"section", "source_id", "artifact_seq", "offset", "limit", "path"}
             or arguments.get("section") not in {"index", "goal", "source", "artifact"}):
         raise ValueError("需要有效的背景读取范围。")
     section = arguments["section"]
@@ -63,6 +64,8 @@ def read_background(snapshot: dict[str, Any] | None, arguments: dict[str, Any]) 
     expected = {"source_id"} if section == "source" else {"artifact_seq"} if section == "artifact" else set()
     if selectors != expected:
         raise ValueError("来源原文需要source_id，成果正文需要artifact_seq，索引与目标不接受其他选择器。")
+    if "path" in arguments and section != "artifact":
+        raise ValueError("只有冻结工程成果可以按path读取成员。")
     offset, limit = arguments.get("offset", 0), arguments.get("limit", 20 if section == "index" else 8000)
     maximum = 50 if section == "index" else 16000
     if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= maximum:
@@ -74,7 +77,7 @@ def read_background(snapshot: dict[str, Any] | None, arguments: dict[str, Any]) 
                  "excerpt": str(s.get("text", ""))[:300], "excerpt_truncated": len(str(s.get("text", ""))) > 300}
                 for s in snapshot.get("sources", [])]
         rows.extend({"section": "artifact", **{k: a.get(k) for k in
-                    ("seq", "task_id", "filename", "content_sha256", "verification")},
+                    ("seq", "task_id", "filename", "content_sha256", "verification", "format", "content_bytes")},
                      "summary_excerpt": str(a.get("summary", ""))[:300], "content_included": False}
                     for a in snapshot.get("artifacts", []))
         result.update(entries=rows[offset:offset + limit], total=len(rows), omitted_artifacts=snapshot.get("omitted_artifacts", 0))
@@ -93,6 +96,19 @@ def read_background(snapshot: dict[str, Any] | None, arguments: dict[str, Any]) 
             if len(matches) != 1:
                 return {"status": "error", "message": "这条引用不在本群冻结背景中；请用section=index核对，不能查询其他群的实时材料。"}
             row = matches[0]
+            if section == "artifact" and row.get("format") == "archive":
+                if "path" not in arguments and ("offset" in arguments or "limit" in arguments):
+                    raise ValueError("工程清单无需分页；先读取清单，再用path与offset/limit读取成员正文。")
+                if "path" in arguments:
+                    from .workspace_archive import portable_path
+
+                    try:
+                        portable_path(arguments["path"])
+                    except ValueError:
+                        raise ValueError("工程成员需要清单中确切、安全的相对文件路径。") from None
+                return _read_archive(snapshot, row, arguments, result, log)
+            if "path" in arguments:
+                raise ValueError("只有冻结工程ZIP可以按path读取成员；普通文本按offset/limit读取。")
             content_key = "text" if section == "source" else "content"
             if not isinstance(row.get(content_key), str):
                 return {"status": "error", "message": "快照未保存这份正文，不能把摘要当作完整文件；请说明缺失或向顾客索取。"}
@@ -103,6 +119,55 @@ def read_background(snapshot: dict[str, Any] | None, arguments: dict[str, Any]) 
         size = len(content)
     result.update(has_more=offset + limit < size, next_offset=offset + limit if offset + limit < size else None)
     return result
+
+
+def _read_archive(snapshot, row, arguments, result, log):
+    """Resolve one frozen publication, not a peer's current task or latest file.
+
+    Older snapshots pin task/seq/name/body hash but lack event_hash and size.
+    Exact immutable-event lookup supports those without rewriting the snapshot.
+    """
+    from .team_archive import read_member
+    from .workspace_archive import MAX_ARCHIVE_BYTES, validate_manifest
+
+    unavailable = {"status": "error", "code": "frozen_archive_unavailable",
+        "message": "冻结工程版本不可读或校验不一致；未改读原群新版或工作目录。请核对这份确切来源。"}
+    try:
+        seq, cutoff = row.get("seq"), snapshot.get("source_seq")
+        if (log is None or type(seq) is not int or type(cutoff) is not int or not 0 < seq <= cutoff
+                or not isinstance(row.get("task_id"), str) or not row["task_id"]
+                or not isinstance(row.get("actor"), str) or not row["actor"]):
+            return unavailable
+        events = list(log.iter_events(task_id=row["task_id"], event_types=("deliverable.published",),
+                                     after_seq=seq - 1, before_seq=seq + 1))
+        if len(events) != 1:
+            return unavailable
+        event = events[0]
+        artifact = {**event.payload, "seq": event.seq}
+        if (event.seq != seq or event.task_id != row["task_id"] or event.type != "deliverable.published"
+                or event.actor.kind != "agent" or event.actor.id != row["actor"]
+                or artifact.get("format") != "archive" or artifact.get("filename") != row.get("filename")
+                or artifact.get("content_sha256") != row.get("content_sha256")
+                or not isinstance(artifact.get("content_sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", artifact["content_sha256"]) is None
+                or type(artifact.get("content_bytes")) is not int or not 0 < artifact["content_bytes"] <= MAX_ARCHIVE_BYTES
+                or "event_hash" in row and row["event_hash"] != event.hash
+                or "content_bytes" in row and (type(row["content_bytes"]) is not int or row["content_bytes"] != artifact["content_bytes"])):
+            return unavailable
+        validate_manifest(artifact.get("archive"))
+        if "path" in arguments:
+            value = read_member(log, artifact, {"path": arguments["path"],
+                "offset": arguments.get("offset", 0), "length": arguments.get("limit", 8000)})
+        else:
+            value = {"status": "ok", **{key: artifact[key] for key in
+                ("seq", "filename", "format", "content_sha256", "content_bytes", "archive")}}
+        source = {key: row[key] for key in
+            ("seq", "task_id", "filename", "format", "content_sha256", "verification") if key in row}
+        source["event_hash"] = event.hash
+        return {**result, "complete": True, "source": source, "archive_read": value}
+    except Exception:
+        # ZIP/DB failures can include source paths or content; return no partial body.
+        return unavailable
 
 
 def _size(value: object) -> int:
@@ -146,6 +211,8 @@ def capture(runtime: Runtime, source_task_id: str) -> dict[str, Any]:
             result["omitted_artifacts"] += 1
             continue
         artifact = {k: p[k] for k in ("title", "summary", "content", "format", "filename", "content_sha256") if k in p}
+        if p.get("format") == "archive":
+            artifact.update(content_bytes=p.get("content_bytes"), event_hash=event.hash)
         artifact.update(task_id=source_task_id, seq=event.seq, actor=event.actor.id,
                         verification="accepted_at_capture" if event.seq in accepted else "unverified")
         if "content" in artifact:

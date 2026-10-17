@@ -115,6 +115,57 @@ export function nativeArtifactReceiptStatus(event: TeamEvent): string {
 
 const historyId = (value: unknown) => skillText(value) && value.length <= 256 && Array.from(value).length <= 128
 const historyPositive = (value: unknown): value is number => skillCount(value) && value > 0
+
+export function isFrozenArchiveReceipt(event: TeamEvent): boolean {
+  const result = object(event.payload.result), args = object(event.payload.arguments)
+  return (event.payload.name ?? event.payload.tool) === 'read_background'
+    && (Object.hasOwn(result, 'archive_read') || object(result.source).format === 'archive'
+      || Object.hasOwn(args, 'path') || result.code === 'frozen_archive_unavailable'
+      || result.section === 'artifact' && Object.hasOwn(result, 'complete') && !Object.hasOwn(result, 'content'))
+}
+
+// Bind the frozen envelope before reusing the native archive and member validators.
+export function frozenArchiveReadEvent(event: TeamEvent): TeamEvent | undefined {
+  if (!isTeamHost(event) || (event.payload.name ?? event.payload.tool) !== 'read_background'
+    || event.type !== 'team.tool_finished') return
+  const result = object(event.payload.result), args = object(event.payload.arguments)
+  const source = object(result.source), snapshot = object(result.snapshot), read = object(result.archive_read)
+  if (result.status !== 'ok' || result.complete !== true || result.historical_only !== true
+    || result.section !== 'artifact' || args.section !== 'artifact' || result.truncated !== undefined && result.truncated !== false
+    || !skillCount(result.offset) || result.offset !== (args.offset ?? 0)
+    || result.outcome !== undefined || ![undefined, 'ok', 'completed', 'succeeded'].includes(event.payload.status as string | undefined)
+    || Object.keys(args).some(key => !['section', 'artifact_seq', 'path', 'offset', 'limit'].includes(key))
+    || !historyPositive(source.seq) || args.artifact_seq !== source.seq || !historyId(source.task_id)
+    || source.format !== 'archive' || !skillHash(source.content_sha256) || !skillHash(source.event_hash)
+    || !skillText(source.filename) || !source.filename.endsWith('.zip') || source.filename.includes('/')
+    || !portableArchivePart(source.filename) || new TextEncoder().encode(source.filename).length > 180
+    || source.verification !== 'unverified' && source.verification !== 'accepted_at_capture'
+    || !historyId(snapshot.source_task_id) || !historyPositive(snapshot.source_seq) || snapshot.source_seq < source.seq
+    || !skillHash(snapshot.source_hash) || !skillText(snapshot.captured_at)
+    || snapshot.captured_at.length > 80 || !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(snapshot.captured_at) || !Number.isFinite(Date.parse(snapshot.captured_at))
+    || snapshot.source_seq === source.seq && (snapshot.source_task_id !== source.task_id || snapshot.source_hash !== source.event_hash)
+    || Object.hasOwn(args, 'offset') && !skillCount(args.offset)
+    || Object.hasOwn(args, 'limit') && (!historyPositive(args.limit) || args.limit > 16000)) return
+  const member = Object.hasOwn(args, 'path')
+  if (member ? read.artifact_seq !== source.seq || read.archive_sha256 !== source.content_sha256 || read.path !== args.path
+    : read.seq !== source.seq || read.filename !== source.filename || read.format !== source.format
+      || read.content_sha256 !== source.content_sha256 || ['offset', 'limit'].some(key => Object.hasOwn(args, key))) return
+  const adapted: TeamEvent = { ...event, payload: { name: 'read_artifact', status: event.payload.status,
+    arguments: { artifact_seq: args.artifact_seq, ...(member ? { path: args.path,
+      ...(Object.hasOwn(args, 'offset') ? { offset: args.offset } : {}),
+      ...(Object.hasOwn(args, 'limit') ? { length: args.limit } : {}) } : {}) }, result: read } }
+  return ['工程文件清单已读取', '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对']
+    .includes(nativeArtifactReceiptStatus(adapted)) ? adapted : undefined
+}
+
+export function nativeFrozenArchiveReceiptStatus(event: TeamEvent): string {
+  if (!isTeamHost(event)) return '冻结材料来源待核对'
+  if (event.type === 'team.tool_started') return '已发起，等待回执'
+  const adapted = frozenArchiveReadEvent(event)
+  if (adapted) return nativeArtifactReceiptStatus(adapted)
+  return [event.payload.status, object(event.payload.result).status].some(value => ['error', 'failed', 'blocked', 'cancelled'].includes(String(value)))
+    ? '冻结来源读取未完成' : '冻结来源读取回执待核对'
+}
 function historyReferences(value: unknown, delivery: number, limit: number): value is Record<string, unknown>[] {
   return Array.isArray(value) && value.length <= limit && value.every(item => {
     const ref = object(item)
@@ -354,15 +405,18 @@ export function nativeBrowserReceiptStatus(event: TeamEvent): string {
   return passed ? '检查通过' : '回执不完整或不一致，结果待确认'
 }
 
-function receiptFor(start: TeamEvent, events: TeamEvent[]) {
+export function teamToolReceipt(start: TeamEvent, events: TeamEvent[]) {
   return events.find((event) => isTeamHost(event) && event.type === 'team.tool_finished' && event.seq > start.seq
     && (typeof event.payload.started_seq === 'number' ? event.payload.started_seq === start.seq
       : typeof start.payload.call_id === 'string' && event.payload.call_id === start.payload.call_id)
-    && ['run_id', 'role', 'name', 'message_seq', 'call_id'].every((key) =>
-      event.payload[key] === undefined || start.payload[key] === undefined || event.payload[key] === start.payload[key]))
+    && ['run_id', 'role', 'message_seq', 'call_id'].every((key) =>
+      event.payload[key] === undefined || start.payload[key] === undefined || event.payload[key] === start.payload[key])
+    && ((event.payload.name ?? event.payload.tool) === undefined || (start.payload.name ?? start.payload.tool) === undefined
+      || (event.payload.name ?? event.payload.tool) === (start.payload.name ?? start.payload.tool)))
 }
 
 function toolOutcome(event: TeamEvent, name = event.payload.name) {
+  if (isFrozenArchiveReceipt(event)) return nativeFrozenArchiveReceiptStatus(event)
   if (name === 'read_artifact') return nativeArtifactReceiptStatus(event)
   if (name === 'read_project_history') return nativeProjectHistoryReceiptStatus(event)
   if (isNativeMcpTool(name)) return nativeMcpReceiptStatus(event, name)
@@ -413,7 +467,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   // A manager can adopt a new objective inside the run that received the customer's request.
   const adoptingRuns = new Set(hosts.filter((event) => event.type === 'team.tool_started' && event.payload.name === 'set_objective'
     && event.payload.role === leaderId && update && event.seq < update.seq
-    && (receiptFor(event, hosts)?.seq ?? 0) > update.seq).map((event) => event.payload.run_id).filter((id) => typeof id === 'string'))
+    && (teamToolReceipt(event, hosts)?.seq ?? 0) > update.seq).map((event) => event.payload.run_id).filter((id) => typeof id === 'string'))
   const currentSource = (source?: TeamEvent) => Boolean(source
     && (source.payload.kind !== 'recovery' || isTeamRecovery(source))
     && (source.payload.kind !== 'continuation' || source.actor.kind === 'agent') && (source.seq >= floor
@@ -509,9 +563,9 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   let anyOpenTool = false
   for (const role of roles) {
     const run = roleRuns.get(role), tool = latestTools.get(role)
-    const toolName = tool?.payload.name ?? (isNativeMcpTool(tool?.payload.tool) || ['read_project_history', 'read_artifact'].includes(String(tool?.payload.tool)) ? tool?.payload.tool : undefined)
-    const receipt = tool ? receiptFor(tool, hosts) : undefined
-    const finished = receipt && tool && (['list_skills', 'read_skill'].includes(String(tool.payload.name)) || isNativeMcpTool(toolName) || ['read_project_history', 'read_artifact'].includes(String(toolName)))
+    const toolName = tool?.payload.name ?? (isNativeMcpTool(tool?.payload.tool) || ['read_project_history', 'read_artifact', 'read_background'].includes(String(tool?.payload.tool)) ? tool?.payload.tool : undefined)
+    const receipt = tool ? teamToolReceipt(tool, hosts) : undefined
+    const finished = receipt && tool && (['list_skills', 'read_skill'].includes(String(tool.payload.name)) || isNativeMcpTool(toolName) || ['read_project_history', 'read_artifact', 'read_background'].includes(String(toolName)))
       ? { ...receipt, payload: { ...tool.payload, ...receipt.payload } } : receipt
     const toolBelongs = tool && (!run?.start || tool.seq > run.start.seq
       && (run.start.payload.run_id === undefined || tool.payload.run_id === run.start.payload.run_id))
@@ -521,7 +575,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
     const roleTools = currentTools.filter((event) => event.payload.role === role && (!run?.start
       || run.start.payload.run_id !== undefined && event.payload.run_id === run.start.payload.run_id
       || event.payload.message_seq === run.message_seq))
-    const records = [run?.start, run?.end, ...roleTools, ...roleTools.map((event) => receiptFor(event, hosts)),
+    const records = [run?.start, run?.end, ...roleTools, ...roleTools.map((event) => teamToolReceipt(event, hosts)),
       ...hosts.filter((event) => event.type === 'team.model_called' && event.payload.role === role && run?.start
         && typeof run.start.payload.run_id === 'string' && event.payload.run_id === run.start.payload.run_id)]
       .filter((event): event is TeamEvent => Boolean(event)).sort((a, b) => a.seq - b.seq)
@@ -534,6 +588,10 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
         : failed(run?.status) ? '本轮处理未完成，需核对过程'
           : successful(run?.status) ? '本轮消息处理已结束' : '执行结果待确认'
     if (action && tool?.payload.name !== 'wait_for_reply' && !awaitingCustomer) text = `${action} · ${finished ? toolOutcome(finished, toolName) : '已发起，等待回执'}；${text}`
+    if (finished && isFrozenArchiveReceipt(finished) && frozenArchiveReadEvent(finished)) {
+      const result = object(finished.payload.result), source = object(result.source), snapshot = object(result.snapshot)
+      text += `；冻结历史 · 来源群 ${source.task_id} · 原成果 #${source.seq} · 冻结截止 #${snapshot.source_seq}`
+    }
     lines.push({ id: role, role, text: `${label(role)} · ${text}`, moving,
       warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回', '历史目录已读取', '历史交付说明已读取', '历史文件已读取', '成果正文已读取', '成果本页已读取', '工程文件清单已读取', '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对'].includes(toolOutcome(finished, toolName))) })
   }

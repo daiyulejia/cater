@@ -11,6 +11,8 @@ import { NativeMcpReceipt } from './NativeMcpReceipt'
 import { NativeProjectHistoryReceipt } from './NativeProjectHistoryReceipt'
 import { NativeArtifactReceipt } from './NativeArtifactReceipt'
 import { nativeArtifactReceiptStatus } from './conversationActivityState'
+import { isFrozenArchiveReceipt, nativeFrozenArchiveReceiptStatus, teamToolReceipt } from './conversationActivityState'
+import { NativeFrozenArchiveReceipt } from './NativeFrozenArchiveReceipt'
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const excerpt = (value: unknown, limit = 800): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（仅显示部分内容）' : '') : ''
@@ -73,6 +75,7 @@ export function NativeSkillReceipt({ event }: { event: TeamEvent }) {
 }
 
 function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean }) {
+  if (isFrozenArchiveReceipt(event)) return <NativeFrozenArchiveReceipt event={event} />
   if ((event.payload.name ?? event.payload.tool) === 'read_artifact') return <NativeArtifactReceipt event={event} />
   if ((event.payload.name ?? event.payload.tool) === 'read_project_history') return <NativeProjectHistoryReceipt event={event} />
   if (isNativeMcpTool(event.payload.name ?? event.payload.tool)) return <NativeMcpReceipt event={event} />
@@ -143,13 +146,7 @@ function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean
 export function TeamToolProgress({ events, names, full = false }: { events: TeamEvent[]; names: Record<string, string>; full?: boolean }) {
   const receipts = events.filter((event) => isTeamHost(event) && (event.type === 'team.tool_started' || event.type === 'team.tool_finished'))
   const starts = receipts.filter((event) => event.type === 'team.tool_started')
-  const finishFor = (start: TeamEvent) => receipts.find((event) => event.type === 'team.tool_finished' && event.seq > start.seq
-    && (typeof event.payload.started_seq === 'number' ? event.payload.started_seq === start.seq
-      : typeof start.payload.call_id === 'string' && event.payload.call_id === start.payload.call_id)
-    && (!event.payload.run_id || !start.payload.run_id || event.payload.run_id === start.payload.run_id)
-    && (!event.payload.name || !start.payload.name || event.payload.name === start.payload.name)
-    && (!event.payload.role || !start.payload.role || event.payload.role === start.payload.role)
-    && (!event.payload.message_seq || !start.payload.message_seq || event.payload.message_seq === start.payload.message_seq))
+  const finishFor = (start: TeamEvent) => teamToolReceipt(start, receipts)
   const paired = new Set(starts.map((event) => finishFor(event)?.seq))
   const rows = receipts.filter((event) => event.type === 'team.tool_started' || !paired.has(event.seq))
   if (!rows.length) return null
@@ -162,6 +159,7 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
       const role = typeof p.role === 'string' ? p.role : event.actor.id
       const status = p.status ?? result.status ?? result.outcome
       const label = name === 'browser_check' ? nativeBrowserReceiptStatus(finished ?? event)
+        : isFrozenArchiveReceipt({ ...(finished ?? event), payload: { ...event.payload, ...p } }) ? nativeFrozenArchiveReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } })
         : name === 'read_artifact' ? nativeArtifactReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } })
         : name === 'read_project_history' ? nativeProjectHistoryReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } })
         : isNativeMcpTool(name) ? nativeMcpReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } }, name)
