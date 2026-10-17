@@ -398,6 +398,21 @@ class TeamService:
     def _pending_operations(self, task_id):
         events = self.rt.log.read(task_id=task_id)
         workspace_pending = {e.seq for e in self.rt.workspaces.pending(task_id=task_id)}
+        messages = {e.seq: e for e in events if e.type == "team.message_received"}
+        runs, endings, finishes, reconciliations = {}, {}, {}, {}
+        for event in events:
+            p = event.payload
+            if event.actor == HOST and event.type in {"team.run_started", "team.run_finished"}:
+                # Numeric equality preserves legacy message_seq bool/float matches;
+                # lists/dicts and non-string identities cannot match a valid start.
+                if (isinstance(p.get("run_id"), str) and isinstance(p.get("role"), str)
+                        and isinstance(p.get("message_seq"), (int, float))):
+                    key = (p["run_id"], p["role"], p["message_seq"])
+                    (runs if event.type == "team.run_started" else endings).setdefault(key, []).append(event)
+            elif (event.type in {"team.tool_finished", "team.tool_reconciled", "workspace.tool_reconciled"}
+                    and type(p.get("started_seq")) is int):
+                (finishes if event.type == "team.tool_finished" else reconciliations).setdefault(
+                    p["started_seq"], []).append(event)
         rows = []
         for start in events:
             if start.type != "team.tool_started" or start.actor != HOST or start.payload.get("name") == "read_receipts":
@@ -405,11 +420,11 @@ class TeamService:
             p = start.payload
             binding_valid = (all(isinstance(p.get(key), str) and p[key].strip() for key in ("run_id", "role", "name", "call_id"))
                              and type(p.get("message_seq")) is int and p["message_seq"] > 0)
-            run = next((e for e in events if binding_valid and e.type == "team.run_started" and e.actor == HOST and e.seq < start.seq
-                and all(e.payload.get(key) == p[key] for key in ("run_id", "role", "message_seq"))
-                and any(source.type == "team.message_received" and source.seq == p["message_seq"] and source.seq < e.seq
-                        and source.payload.get("recipient") == p["role"] for source in events)), None)
-            finished = next((e for e in events if run is not None and e.type == "team.tool_finished" and e.actor == HOST
+            key = (p["run_id"], p["role"], p["message_seq"]) if binding_valid else None
+            source = messages.get(p["message_seq"]) if binding_valid else None
+            run = next((e for e in runs.get(key, ()) if e.seq < start.seq and source is not None
+                and source.seq < e.seq and source.payload.get("recipient") == p["role"]), None)
+            finished = next((e for e in finishes.get(start.seq, ()) if run is not None and e.actor == HOST
                 and e.seq > start.seq and type(e.payload.get("started_seq")) is int
                 and e.payload["started_seq"] == start.seq
                 and all(e.payload.get(key) == p.get(key) for key in ("run_id", "role", "name"))
@@ -423,7 +438,7 @@ class TeamService:
                 and e.actor == Actor.human() and e.seq > start.seq
                 and type(e.payload.get("started_seq")) is int and e.payload["started_seq"] == start.seq
                 and e.payload.get("started_hash") == start.hash and e.payload.get("call_id") == p.get("call_id")
-                and e.payload.get("invocation_stopped") is True for e in events))
+                and e.payload.get("invocation_stopped") is True for e in reconciliations.get(start.seq, ())))
             if reconciled:
                 continue
             result = finished.payload["result"] if finished else {}
@@ -440,9 +455,9 @@ class TeamService:
                 unknown = False
             if finished and not unknown and start.seq not in workspace_pending:
                 continue
-            ended = run is not None and any(e.type == "team.run_finished" and e.actor == HOST and e.seq > start.seq
+            ended = run is not None and any(e.seq > start.seq
                 and e.payload.get("status") in ("completed", "waiting", "failed", "interrupted")
-                and all(e.payload.get(key) == p.get(key) for key in ("run_id", "role", "message_seq")) for e in events)
+                for e in endings.get(key, ()))
             contract = p.get("execution_contract")
             local = (isinstance(p.get("name"), str) and p["name"] in LOCAL_EVENT_TOOLS and isinstance(contract, dict)
                      and type(contract.get("version")) is int and contract == LOCAL_EVENT_CONTRACT)
