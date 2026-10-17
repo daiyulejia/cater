@@ -3419,10 +3419,17 @@ class WebTests(unittest.TestCase):
         self.assertEqual(sum(item["status"] == "demo" for item in profile["availability"]["members"]), 7)
 
     def test_web_supports_compact_members_and_leader_dispatch(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as resources:
             db = str(Path(tmp) / "compact-web.db")
             roles = Path(__file__).resolve().parents[1] / "examples" / "compact_roles.json"
-            base = start_test_web(self, db, roles_path=roles)
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db, roles_path=roles))
+            server.daemon_threads = False
+            resources.callback(server.server_close)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            resources.callback(thread.join)
+            resources.callback(server.shutdown)
+            base = f"http://127.0.0.1:{server.server_port}"
             with urlopen(f"{base}/api/organization/profile", timeout=5) as response:
                 profile = json.loads(response.read().decode("utf-8"))
             self.assertEqual(profile["cabinet"], [])
