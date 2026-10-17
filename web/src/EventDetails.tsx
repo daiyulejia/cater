@@ -1,6 +1,6 @@
 import { BrowserReport, NativeBrowserReceipt } from './browserReport'
 import { isTeamHost, isTeamRecovery } from './team'
-import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle, nativeProjectHistoryReceiptStatus, projectHistoryReadArguments } from './conversationActivityState'
+import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle, nativeProjectHistoryReceiptStatus, nativeProjectRestoreReceiptStatus, projectHistoryReadArguments } from './conversationActivityState'
 import { NativeSkillReceipt } from './TeamProgressPanel'
 import { usageSummary } from './modelUsage'
 import { containedNote, responseDiagnostics, responseDiagnosticFields, requestFailureFields, stageNote } from './responseDiagnostics'
@@ -8,6 +8,7 @@ import { CommandOutputs } from './CommandOutputPreview'
 import { hasBrowserReceipt } from './outputPreview'
 import { NativeMcpReceipt } from './NativeMcpReceipt'
 import { NativeProjectHistoryReceipt } from './NativeProjectHistoryReceipt'
+import { NativeProjectRestoreReceipt } from './NativeProjectRestoreReceipt'
 import { NativeArtifactReceipt } from './NativeArtifactReceipt'
 import { nativeArtifactReceiptStatus } from './conversationActivityState'
 import { isFrozenArchiveReceipt, nativeFrozenArchiveReceiptStatus, teamToolReceipt } from './conversationActivityState'
@@ -256,6 +257,12 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
         if (isTeamHost(event)) add('读取成员', member(p.role))
         break
       }
+      if ((p.name ?? p.tool) === 'workspace_restore_project_file') {
+        status = nativeProjectRestoreReceiptStatus(event)
+        add('工具', '恢复历史工程文件')
+        if (isTeamHost(event)) add('执行成员', member(p.role))
+        break
+      }
       if (isNativeMcpTool(p.name ?? p.tool)) {
         status = nativeMcpReceiptStatus(event)
         add('工具', nativeMcpToolTitle(p.name ?? p.tool))
@@ -478,6 +485,7 @@ export function EventDetails({ event: original, actorName, contextEvents = [] }:
   const nativeBrowser = ['team.tool_started', 'team.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'browser_check'
   const nativeMcp = ['team.tool_started', 'team.tool_finished'].includes(event.type) && isNativeMcpTool(event.payload.name ?? event.payload.tool)
   const projectHistory = ['team.tool_started', 'team.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'read_project_history'
+  const projectRestore = ['team.tool_started', 'team.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'workspace_restore_project_file'
   const artifactRead = ['team.tool_started', 'team.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'read_artifact'
   const frozenArchive = ['team.tool_started', 'team.tool_finished'].includes(event.type) && isFrozenArchiveReceipt(event)
   const browser = nativeBrowser || event.type === 'verification.completed' && hasBrowserReceipt(event.payload)
@@ -497,6 +505,7 @@ export function EventDetails({ event: original, actorName, contextEvents = [] }:
     {skillTool(event) && event.type === 'team.tool_finished' && <NativeSkillReceipt event={event} />}
     {nativeMcp && event.type === 'team.tool_finished' && <NativeMcpReceipt key={event.seq} event={event} />}
     {projectHistory && event.type === 'team.tool_finished' && <NativeProjectHistoryReceipt key={event.seq} event={event} />}
+    {projectRestore && event.type === 'team.tool_finished' && <NativeProjectRestoreReceipt key={event.seq} event={event} />}
     {artifactRead && event.type === 'team.tool_finished' && <NativeArtifactReceipt key={event.seq} event={event} />}
     {frozenArchive && event.type === 'team.tool_finished' && <NativeFrozenArchiveReceipt event={event} />}
     {note && <p className="text-[#728679]">{note}</p>}
@@ -508,7 +517,7 @@ export function EventDetails({ event: original, actorName, contextEvents = [] }:
         {event.payload.evidence.filter((entry) => entry && Number.isInteger(entry.artifact_seq) && entry.artifact_seq > 0 && typeof entry.quote === 'string')
           .map((entry, index) => <blockquote key={index} className="mt-2 whitespace-pre-wrap">成果 #{entry.artifact_seq}：{entry.quote}</blockquote>)}
       </details>}
-    {!skillTool(event) && !browser && !nativeMcp && !projectHistory && !artifactRead && !frozenArchive && <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
+    {!skillTool(event) && !browser && !nativeMcp && !projectHistory && !projectRestore && !artifactRead && !frozenArchive && <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
       <summary className="cursor-pointer text-[#728679]">开发者详情</summary>
       <pre tabIndex={0} aria-label={developerEvent === event ? '原始事件 JSON' : '安全事件 JSON'} className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(developerEvent, null, 2)}</pre>
     </details>}

@@ -2,13 +2,14 @@ import type { Artifact } from './Artifact'
 import { isTeamHost, teamRunStatus, teamStatus } from './team'
 import type { TeamActivity, TeamEvent, TeamReview, TeamState } from './team'
 import { NativeBrowserReceipt } from './browserReport'
-import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle, nativeProjectHistoryReceiptStatus, projectHistoryReadArguments } from './conversationActivityState'
+import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle, nativeProjectHistoryReceiptStatus, nativeProjectRestoreReceiptStatus, projectHistoryReadArguments } from './conversationActivityState'
 import { TeamArtifacts } from './TeamArtifacts'
 import { ModelUsagePanel } from './ModelUsagePanel'
 import type { ExecutionControl } from './executionControl'
 import { CommandOutputs } from './CommandOutputPreview'
 import { NativeMcpReceipt } from './NativeMcpReceipt'
 import { NativeProjectHistoryReceipt } from './NativeProjectHistoryReceipt'
+import { NativeProjectRestoreReceipt } from './NativeProjectRestoreReceipt'
 import { NativeArtifactReceipt } from './NativeArtifactReceipt'
 import { nativeArtifactReceiptStatus } from './conversationActivityState'
 import { isFrozenArchiveReceipt, nativeFrozenArchiveReceiptStatus, teamToolReceipt } from './conversationActivityState'
@@ -17,6 +18,7 @@ import { NativeFrozenArchiveReceipt } from './NativeFrozenArchiveReceipt'
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const excerpt = (value: unknown, limit = 800): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（仅显示部分内容）' : '') : ''
 const toolNames: Record<string, string> = { workspace_run: '运行命令', workspace_read: '读取文件', workspace_write: '写入文件', workspace_search: '查找文件', workspace_list: '列出目录',
+  workspace_restore_project_file: '恢复历史工程文件',
   publish_workspace_archive: '发布工程包',
   list_skills: '查看工作指引目录', read_skill: '阅读工作指引', read_project_history: '读取同项目历史', browser_check: '浏览器检查', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果', read_background: '读取来源材料', read_receipts: '核对执行回执', read_messages: '补读历史消息', read_checkpoint: '读取工作检查点', read_delivery: '读取交付说明', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件', set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复', request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论' }
 
@@ -78,6 +80,7 @@ function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean
   if (isFrozenArchiveReceipt(event)) return <NativeFrozenArchiveReceipt event={event} />
   if ((event.payload.name ?? event.payload.tool) === 'read_artifact') return <NativeArtifactReceipt event={event} />
   if ((event.payload.name ?? event.payload.tool) === 'read_project_history') return <NativeProjectHistoryReceipt event={event} />
+  if ((event.payload.name ?? event.payload.tool) === 'workspace_restore_project_file') return <NativeProjectRestoreReceipt event={event} />
   if (isNativeMcpTool(event.payload.name ?? event.payload.tool)) return <NativeMcpReceipt event={event} />
   if (['list_skills', 'read_skill'].includes((event.payload.name ?? event.payload.tool) as string)) return <NativeSkillReceipt event={event} />
   if ((event.payload.name ?? event.payload.tool) === 'browser_check') return <NativeBrowserReceipt event={event} />
@@ -156,13 +159,13 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
       const finished = event.type === 'team.tool_finished' ? event : finishFor(event)
       const p = finished?.payload ?? event.payload, result = record(p.result)
       const name = excerpt(event.payload.name ?? event.payload.tool, 100) || '工具调用'
-      const historyReceipt = name === 'read_project_history' ? projectHistoryReadArguments(finished ?? event, receipts) : undefined
+      const historyReceipt = ['read_project_history', 'workspace_restore_project_file'].includes(name) ? projectHistoryReadArguments(finished ?? event, receipts) : undefined
       const role = typeof p.role === 'string' ? p.role : event.actor.id
       const status = p.status ?? result.status ?? result.outcome
       const label = name === 'browser_check' ? nativeBrowserReceiptStatus(finished ?? event)
         : isFrozenArchiveReceipt({ ...(finished ?? event), payload: { ...event.payload, ...p } }) ? nativeFrozenArchiveReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } })
         : name === 'read_artifact' ? nativeArtifactReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } })
-        : historyReceipt ? nativeProjectHistoryReceiptStatus(historyReceipt)
+        : historyReceipt ? name === 'workspace_restore_project_file' ? nativeProjectRestoreReceiptStatus(historyReceipt) : nativeProjectHistoryReceiptStatus(historyReceipt)
         : isNativeMcpTool(name) ? nativeMcpReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } }, name)
         : name === 'list_skills' || name === 'read_skill' ? nativeSkillReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } }, name)
         : !finished ? '已发起，等待回执'

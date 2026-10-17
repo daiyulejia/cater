@@ -41,6 +41,7 @@ const tools: Record<string, string> = {
   list_skills: '查看工作指引目录', read_skill: '阅读工作指引',
   list_mcp_tools: '查看外部工具目录', call_mcp_tool: '调用外部工具',
   read_project_history: '读取同项目历史',
+  workspace_restore_project_file: '恢复历史工程文件',
 }
 
 const skillCount = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
@@ -179,14 +180,17 @@ export function projectHistoryReadArguments<T extends TeamEvent>(event: T, event
     || !historyPositive(event.payload.started_seq)) return event
   const matches = events.filter(start => start.seq === event.payload.started_seq)
   if (!matches.length) return event
-  if ((event.payload.name ?? event.payload.tool) !== 'read_project_history'
-    && !matches.some(start => (start.payload.name ?? start.payload.tool) === 'read_project_history')) return event
+  const supported = ['read_project_history', 'workspace_restore_project_file']
+  const name = event.payload.name ?? event.payload.tool
+  if (!supported.includes(String(name))
+    && !matches.some(start => supported.includes(String(start.payload.name ?? start.payload.tool)))) return event
   const invalid = (): T => ({ ...event, payload: { ...event.payload, arguments: null } })
   if (matches.length !== 1) return invalid()
   const start = matches[0], args = start.payload.arguments
   if (!isTeamHost(start) || start.type !== 'team.tool_started' || start.seq >= event.seq
-    || (start.payload.name ?? start.payload.tool) !== 'read_project_history'
-    || (event.payload.name ?? event.payload.tool) !== 'read_project_history'
+    || !supported.includes(String(name)) || (start.payload.name ?? start.payload.tool) !== name
+    || name === 'workspace_restore_project_file' && [start, event].some(item =>
+      Object.hasOwn(item.payload, 'name') && Object.hasOwn(item.payload, 'tool') && item.payload.name !== item.payload.tool)
     || ['role', 'run_id'].some(key => !skillText(start.payload[key]) || start.payload[key] !== event.payload[key])
     || ['call_id', 'message_seq'].some(key => Object.hasOwn(event.payload, key) && event.payload[key] !== start.payload[key])
     || Object.hasOwn(start.payload, 'project_scope') && !historyId(start.payload.project_scope)
@@ -202,6 +206,54 @@ export function projectHistoryReadArguments<T extends TeamEvent>(event: T, event
     ...(Object.hasOwn(event.payload, 'arguments') ? {} : { arguments: args }),
     ...(!Object.hasOwn(event.payload, 'project_scope') && Object.hasOwn(start.payload, 'project_scope')
       ? { project_scope: start.payload.project_scope } : {}) } }
+}
+
+// The receipt binds source metadata to the observed destination, without implying execution.
+export function projectRestoreReceiptEvent(event: TeamEvent): TeamEvent | undefined {
+  if (!isTeamHost(event) || event.type !== 'team.tool_finished'
+    || (event.payload.name ?? event.payload.tool) !== 'workspace_restore_project_file'
+    || Object.hasOwn(event.payload, 'tool') && event.payload.tool !== 'workspace_restore_project_file') return
+  const result = object(event.payload.result), args = object(event.payload.arguments)
+  const source = object(result.source), member = object(result.member), restored = object(result.restored_file)
+  const path = (value: unknown): value is string => typeof value === 'string' && Array.from(value).length <= 2048
+    && new TextEncoder().encode(value).length <= 4096 && value.split('/').every(portableArchivePart)
+  if (result.status !== 'ok' || result.complete !== true || !['written', 'already_present'].includes(String(result.outcome))
+    || ![undefined, 'ok', 'completed', 'succeeded'].includes(event.payload.status as string | undefined)
+    || result.truncated !== undefined && result.truncated !== false
+    || Object.keys(args).some(key => !['as_of_seq', 'delivery_seq', 'artifact_seq', 'path', 'destination'].includes(key))
+    || !historyId(source.project_id) || event.payload.project_scope !== source.project_id
+    || !historyId(source.task_id) || !historyId(source.author)
+    || !historyPositive(source.delivery_seq) || args.delivery_seq !== source.delivery_seq || !skillHash(source.delivery_hash)
+    || !historyPositive(source.artifact_seq) || args.artifact_seq !== source.artifact_seq || source.artifact_seq >= source.delivery_seq
+    || !historyPositive(result.as_of_seq) || args.as_of_seq !== result.as_of_seq
+    || result.as_of_seq < source.delivery_seq || result.as_of_seq >= event.seq || !skillHash(result.as_of_hash)
+    || result.as_of_seq === source.delivery_seq && result.as_of_hash !== source.delivery_hash
+    || source.format !== 'archive' || !skillHash(source.content_sha256) || !skillHash(source.event_hash)
+    || typeof source.filename !== 'string' || !source.filename.endsWith('.zip') || source.filename.includes('/')
+    || !portableArchivePart(source.filename) || new TextEncoder().encode(source.filename).length > 180
+    || !path(args.path) || member.path !== args.path || !path(restored.path)
+    || Object.hasOwn(args, 'destination') && !path(args.destination)
+    || restored.path !== (Object.hasOwn(args, 'destination') ? args.destination : args.path)
+    || !skillHash(member.sha256) || member.sha256 !== restored.sha256
+    || !skillCount(member.bytes) || member.bytes > 32 * 1024 * 1024 || member.bytes !== restored.bytes
+    || typeof member.executable !== 'boolean' || restored.executable_requested !== member.executable
+    || typeof restored.executable !== 'boolean' || typeof restored.created !== 'boolean' || typeof restored.already_present !== 'boolean'
+    || restored.created === restored.already_present || restored.created !== (result.outcome === 'written')
+    || Object.keys(member).some(key => !['path', 'sha256', 'bytes', 'executable'].includes(key))
+    || Object.keys(restored).some(key => !['path', 'sha256', 'bytes', 'created', 'already_present', 'executable', 'executable_requested'].includes(key))
+    || ['content', 'body', 'bytes', 'base64', 'raw_bytes', 'archive_read', 'read_range'].some(key => Object.hasOwn(result, key))) return
+  return event
+}
+
+export function nativeProjectRestoreReceiptStatus(event: TeamEvent): string {
+  if (!isTeamHost(event)) return '恢复回执来源待核对'
+  if ((event.payload.name ?? event.payload.tool) !== 'workspace_restore_project_file') return '恢复回执待核对'
+  if (event.type === 'team.tool_started') return '已发起，等待恢复回执'
+  const result = object(event.payload.result)
+  if (result.outcome === 'effects_unknown') return '恢复影响待核对'
+  if (projectRestoreReceiptEvent(event)) return result.outcome === 'written' ? '历史文件已创建' : '已有相同文件，未重写'
+  if (result.status === 'error' && result.complete === true && result.outcome === 'not_started') return '未开始恢复历史文件'
+  return '恢复回执待核对'
 }
 
 export function projectHistoryArchiveReadEvent(event: TeamEvent): TeamEvent | undefined {
@@ -494,6 +546,7 @@ function toolOutcome(event: TeamEvent, name = event.payload.name) {
   if (isFrozenArchiveReceipt(event)) return nativeFrozenArchiveReceiptStatus(event)
   if (name === 'read_artifact') return nativeArtifactReceiptStatus(event)
   if (name === 'read_project_history') return nativeProjectHistoryReceiptStatus(event)
+  if (name === 'workspace_restore_project_file') return nativeProjectRestoreReceiptStatus(event)
   if (isNativeMcpTool(name)) return nativeMcpReceiptStatus(event, name)
   if (name === 'browser_check') return nativeBrowserReceiptStatus(event)
   if (name === 'list_skills' || name === 'read_skill') return nativeSkillReceiptStatus(event, name)
@@ -638,11 +691,11 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   let anyOpenTool = false
   for (const role of roles) {
     const run = roleRuns.get(role), tool = latestTools.get(role)
-    const toolName = tool?.payload.name ?? (isNativeMcpTool(tool?.payload.tool) || ['read_project_history', 'read_artifact', 'read_background'].includes(String(tool?.payload.tool)) ? tool?.payload.tool : undefined)
+    const toolName = tool?.payload.name ?? (isNativeMcpTool(tool?.payload.tool) || ['read_project_history', 'read_artifact', 'read_background', 'workspace_restore_project_file'].includes(String(tool?.payload.tool)) ? tool?.payload.tool : undefined)
     const receipt = tool ? teamToolReceipt(tool, hosts) : undefined
-    const finished = receipt && toolName === 'read_project_history'
-      && (Object.hasOwn(object(receipt.payload.result), 'archive_read') || object(object(receipt.payload.result).source).format === 'archive')
-      ? projectHistoryReadArguments(receipt, hosts)
+    const finished = receipt && (toolName === 'workspace_restore_project_file' || toolName === 'read_project_history'
+      && (Object.hasOwn(object(receipt.payload.result), 'archive_read') || object(object(receipt.payload.result).source).format === 'archive'))
+      ? projectHistoryReadArguments(receipt, events)
       : receipt && tool && (['list_skills', 'read_skill'].includes(String(tool.payload.name)) || isNativeMcpTool(toolName) || ['read_project_history', 'read_artifact', 'read_background'].includes(String(toolName)))
       ? { ...receipt, payload: { ...tool.payload, ...receipt.payload } } : receipt
     const toolBelongs = tool && (!run?.start || tool.seq > run.start.seq
@@ -671,7 +724,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       text += `；冻结历史 · 来源群 ${source.task_id} · 原成果 #${source.seq} · 冻结截止 #${snapshot.source_seq}`
     }
     lines.push({ id: role, role, text: `${label(role)} · ${text}`, moving,
-      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回', '历史目录已读取', '历史交付说明已读取', '历史文件已读取', '成果正文已读取', '成果本页已读取', '工程文件清单已读取', '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对'].includes(toolOutcome(finished, toolName))) })
+      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回', '历史目录已读取', '历史交付说明已读取', '历史文件已读取', '成果正文已读取', '成果本页已读取', '工程文件清单已读取', '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对', '历史文件已创建', '已有相同文件，未重写'].includes(toolOutcome(finished, toolName))) })
   }
   const reported = new Set(events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'agent'
     && event.payload.kind === 'report' && (() => {

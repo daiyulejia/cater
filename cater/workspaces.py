@@ -153,7 +153,7 @@ class WorkspaceService:
                         or isinstance(result.get("error"), dict) and result["error"].get("code") == "process_failed"):
                     continue
                 # Older mutation receipts can report failure after applying an effect.
-                if (start.payload.get("name") in ("workspace_write", "workspace_run")
+                if (start.payload.get("name") in ("workspace_write", "workspace_run", "workspace_restore_project_file")
                         and isinstance(result.get("error"), dict) and result["error"].get("code") == "operation_failed"):
                     continue
             starts.pop(start.seq, None)

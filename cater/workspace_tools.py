@@ -35,6 +35,7 @@ from .processes import ProcessScope
 from .verification import _Capture
 
 MAX_FILE_BYTES = 1024 * 1024
+MAX_INSTALL_BYTES = 32 * 1024 * 1024
 DEFAULT_READ_BYTES = 16000
 MAX_READ_BYTES = 65536
 MAX_ENTRIES = 200
@@ -211,14 +212,14 @@ def _open_file(path: Path, flags: int, *, create: bool = False) -> int:
         raise
 
 
-def _read_file(path: Path) -> tuple[bytes, tuple]:
+def _read_file(path: Path, *, limit: int = MAX_FILE_BYTES) -> tuple[bytes, tuple]:
     with os.fdopen(_open_file(path, os.O_RDONLY), "rb") as stream:
         before = os.fstat(stream.fileno())
-        if before.st_size > MAX_FILE_BYTES:
+        if before.st_size > limit:
             _deny("too_large", "File exceeds the size limit.")
-        body = stream.read(MAX_FILE_BYTES + 1)
+        body = stream.read(limit + 1)
         after = os.fstat(stream.fileno())
-    if len(body) > MAX_FILE_BYTES:
+    if len(body) > limit:
         _deny("too_large", "File exceeds the size limit.")
     if _signature(before) != _signature(after) or _signature(after) != _signature(_inspect(path, False)):
         _deny("conflict", "File changed during access.")
@@ -579,6 +580,103 @@ class WorkspaceExecutor:
         return {"path": self._relative(target), "sha256": hashlib.sha256(body).hexdigest(),
                 "bytes": len(body), "created": original is None, "truncated": False,
                 **({"replacements": 1, "before_sha256": expected_sha256} if old_text is not None else {})}
+
+    def install_bytes(self, path: str, body: bytes, *, executable: bool = False, guard=None) -> dict:
+        """Install trusted host bytes without replacing an existing file.
+
+        This host primitive is intentionally absent from model tool schemas.
+        A guard rejects by raising; it runs under the root write lock.
+        """
+        publication_attempted = False
+        try:
+            if self.policy.mode not in ("edit", "execute"):
+                _deny("tool_denied", "Workspace installation requires edit permission.")
+            parts = _parts(path)
+            if (not parts or type(body) is not bytes or type(executable) is not bool
+                    or (guard is not None and not callable(guard))):
+                _deny("invalid_arguments", "A file path, bytes and boolean executable flag are required.")
+            if len(body) > MAX_INSTALL_BYTES:
+                _deny("too_large", "Content exceeds the installation size limit.")
+
+            def observe(target):
+                current, signature = _read_file(target, limit=MAX_INSTALL_BYTES)
+                if current != body:
+                    _deny("conflict", "Existing file differs from installation content.")
+                info = _inspect(target, False)
+                if _signature(info) != signature:
+                    _deny("conflict", "File changed during installation verification.")
+                return info, signature
+
+            with _write_lock(self.policy.root):
+                target = self._path(path, create_parents=True)
+                parent = _inspect(target.parent, True)
+                try:
+                    original, signature = observe(target)
+                except FileNotFoundError:
+                    original = None
+                if original is not None:
+                    if guard is not None:
+                        guard()
+                    self._path(path)
+                    actual, current = observe(target)
+                    if current != signature or actual.st_mode != original.st_mode:
+                        _deny("conflict", "File changed before installation verification.")
+                else:
+                    fd, temporary = tempfile.mkstemp(prefix=".workspace-tmp-", dir=target.parent)
+                    staging = Path(temporary)
+                    try:
+                        with os.fdopen(fd, "wb") as stream:
+                            stream.write(body)
+                            stream.flush()
+                            if os.name != "nt" and executable:
+                                os.fchmod(stream.fileno(), 0o700)
+                            os.fsync(stream.fileno())
+                            staged = os.fstat(stream.fileno())
+                        if guard is not None:
+                            guard()
+                        self._path(path)
+                        if not os.path.samestat(parent, _inspect(target.parent, True)):
+                            _deny("conflict", "Parent changed before publication.")
+                        staged_info, _ = observe(staging)
+                        if (_signature(staged_info) != _signature(staged)
+                                or staged_info.st_mode != staged.st_mode):
+                            _deny("conflict", "Staging file changed before publication.")
+                        try:
+                            _inspect(target, False)
+                        except FileNotFoundError:
+                            pass
+                        else:
+                            _deny("conflict", "File appeared before publication.")
+                        # A link call can fail after taking effect; only EEXIST
+                        # proves that our create-if-absent did not publish.
+                        publication_attempted = True
+                        try:
+                            os.link(staging, target, follow_symlinks=False)
+                        except FileExistsError:
+                            publication_attempted = False
+                            _deny("conflict", "File appeared before publication.")
+                        staging.unlink()
+                        self._path(path)
+                        actual, _ = observe(target)
+                        if not os.path.samestat(staged, actual):
+                            _deny("conflict", "Installed file changed after publication.")
+                    finally:
+                        if os.path.lexists(staging):
+                            staging.unlink()
+                result = {"path": self._relative(target), "sha256": hashlib.sha256(body).hexdigest(),
+                          "bytes": len(body), "created": original is None,
+                          "already_present": original is not None,
+                          "executable": os.name != "nt" and bool(actual.st_mode & 0o111),
+                          "executable_requested": executable}
+            return result
+        except BaseException as exc:
+            if publication_attempted:
+                raise OSError("Workspace installation effects are unknown.") from None
+            if isinstance(exc, _Denied):
+                raise
+            if isinstance(exc, Exception):
+                _deny("operation_failed", "Workspace installation was rejected before publication.")
+            raise
 
     def _check_expected(self, path: Path, expected: str | None) -> tuple | None:
         try:

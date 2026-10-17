@@ -22,6 +22,7 @@ from .tool_protocol import contained_response_diagnostics, safe_tool_usage
 from .usage import valid_token_count
 from .mcp import CALL as MCP_CALL, LIST as MCP_LIST, read_only_call
 from .project_history import ProjectHistory, TOOL as PROJECT_HISTORY
+from .project_restore import TOOL as PROJECT_RESTORE, public_arguments as restore_arguments
 from .work import WorkConflict
 
 
@@ -30,7 +31,7 @@ MAX_ACTOR_TURNS = 32
 LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "set_objective", "request_questions",
                                "request_review", "record_review", "finish_work"})
 LOCAL_EVENT_CONTRACT = {"version": 1, "kind": "atomic_local_events", "receipt": "same_transaction"}
-EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "browser_check", MCP_CALL})
+EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", PROJECT_RESTORE, "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "browser_check", MCP_CALL})
 PAUSED_TOOLS = frozenset({"read_artifact", "read_receipts", "read_messages", "read_background", "read_checkpoint",
                           "read_delivery", "list_skills", "read_skill", "wait_for_reply", PROJECT_HISTORY})
 
@@ -320,6 +321,10 @@ class TeamService:
             from .team_archive import schema as archive_schema
 
             tools += workspace.schemas()
+            if has_project_history and workspace.policy.mode in {"edit", "execute"}:
+                from .project_restore import schema as restore_schema
+
+                tools.append(restore_schema())
             tools.append(archive_schema())
             tools.append(_tool("publish_workspace_file", "直接读取工作目录中已写好的真实UTF-8文件并发布，不必重复复述整份源码。",
                 {"path": string, "summary": string, "format": {"type": "string", "enum": ["code", "markdown", "text"]}},
@@ -412,7 +417,7 @@ class TeamService:
                 and isinstance(e.payload.get("result"), dict) and e.payload["result"].get("status") in ("ok", "error")), None)
             reconciled = (isinstance(p.get("call_id"), str) and bool(p["call_id"].strip())
                 and isinstance(p.get("name"), str) and p["name"] in EXTERNAL_EFFECT_TOOLS and any(
-                (e.type == "workspace.tool_reconciled" and p["name"] in {"workspace_write", "workspace_run"}
+                (e.type == "workspace.tool_reconciled" and p["name"] in {"workspace_write", "workspace_run", PROJECT_RESTORE}
                  or e.type == "team.tool_reconciled" and p["name"] in {"publish_artifact", "publish_workspace_file", "publish_workspace_archive", "browser_check", MCP_CALL}
                  and all(e.payload.get(k) == p.get(k) for k in ("run_id", "role", "name")))
                 and e.actor == Actor.human() and e.seq > start.seq
@@ -568,7 +573,7 @@ class TeamService:
 
     def _execute(self, task_id, role, name, arguments, workspace, binding, tool_start, assignment):
         if self.view(task_id)["status"] == "done" and name in {
-                "delegate", "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "workspace_write", "workspace_run", MCP_CALL, "request_review", "record_review"}:
+                "delegate", "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "workspace_write", "workspace_run", PROJECT_RESTORE, MCP_CALL, "request_review", "record_review"}:
             raise WorkConflict("当前工作已交付；如需继续修改，请先由店长采用新的工作目标。")
         if name == "wait_for_reply":
             return {"status": "ok", "waiting": True}
@@ -578,6 +583,10 @@ class TeamService:
                 return {"status": "error", "code": "project_history_scope_changed", "complete": True, "outcome": "not_started",
                         "message": "本群项目范围已经变化，未按旧上下文读取新的项目背景。"}
             return self.project_history.read(task_id, arguments, expected_project_id=expected)
+        if name == PROJECT_RESTORE:
+            from .project_restore import restore
+
+            return restore(self, task_id, role, arguments, workspace, binding, tool_start)
         if name in {MCP_LIST, MCP_CALL}:
             current = self.rt.workspaces.view(task_id)
             if any(current.get(key) != binding.get(key) for key in ("available", "revision", "fingerprint", "workspace_id")):
@@ -1083,9 +1092,10 @@ class TeamService:
                                  **({"execution_contract": dict(BROWSER_CONTRACT)} if call.name == "browser_check" else {}),
                                  **({"execution_contract": self.rt.mcp.contract(task_id, role.id, call.arguments,
                                         expected_configuration=context.get("mcp_index", {}).get("configuration_sha256"))} if call.name == MCP_CALL else {}),
-                                 **({"project_scope": context.get("project_history", {}).get("project_id")} if call.name == PROJECT_HISTORY else {}),
+                                 **({"project_scope": context.get("project_history", {}).get("project_id")} if call.name in {PROJECT_HISTORY, PROJECT_RESTORE} else {}),
                                  "arguments": self.rt.mcp.public_arguments(call.arguments) if call.name in {MCP_LIST, MCP_CALL}
                                     else self.project_history.public_arguments(call.arguments) if call.name == PROJECT_HISTORY
+                                    else restore_arguments(call.arguments) if call.name == PROJECT_RESTORE
                                     else self.rt.workspaces._public_arguments(call.name, call.arguments)})
                     schema = next(t["input_schema"] for t in tools if t["name"] == call.name)
                     failure_stage = "tool_execution"
