@@ -191,9 +191,16 @@ class TeamSupervisionTests(unittest.TestCase):
         self.assertEqual(self.rt.team.view(self.task)["status"], "done")
         self.assertGreater(self.rt.team.view(self.task)["revision"], before)
 
-    def test_finish_work_stops_side_effects_from_an_already_running_worker(self):
+    def test_finish_work_stops_late_side_effects_after_running_worker_returns(self):
         root = self.bind_workspace()
         (root / "input.txt").write_text("fixture input", encoding="utf-8")
+
+        def return_result(context, history, tools):
+            return self.native_turn("", ("send_message", {
+                "recipient": self.manager, "text": "Final result returned for your decision",
+                "reply_to": context["active_assignment"]["seq"],
+            }))
+
         self.driver.steps = {
             self.manager: [
                 self.native_turn("", ("delegate", {"recipient": self.worker, "instruction": "Prepare the result"})),
@@ -203,7 +210,7 @@ class TeamSupervisionTests(unittest.TestCase):
                 self.native_turn("Worker interruption acknowledged."),
             ],
             self.worker: [
-                self.native_turn("", ("send_message", {"recipient": self.manager, "text": "Ready for your decision"})),
+                return_result,
                 self.native_turn("", ("workspace_read", {"path": "input.txt"})),
                 self.native_turn("",
                     ("workspace_write", {"path": "obsolete.txt", "content": "obsolete effect", "expected_sha256": None}),

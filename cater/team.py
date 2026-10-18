@@ -861,7 +861,14 @@ class TeamService:
             if unknown_seqs:
                 return {"status": "error", "code": "operation_pending", "started_seqs": sorted(unknown_seqs),
                         "message": "工作目录仍有未结算或影响待核对的操作，不能将未知结果作为最终交付。请先核对实际文件、进程和工具回执。"}
-            unfinished = [r for r in self.recovery.assignments(task_id) if r["requires_return"]]
+            open_work = self.recovery.assignments(task_id)
+            def current_input(row):
+                # Finishing answers this exact incoming request, not other queued work.
+                return (row["status"] == "running" and row["recipient"] == role.id
+                        and row["latest_message_seq"] == tool_start.payload["message_seq"]
+                        and row["run_id"] == tool_start.payload["run_id"])
+
+            unfinished = [r for r in open_work if r["requires_return"] and not current_input(r)]
             if unfinished:
                 return {"status": "error", "code": "work_pending", "assignments": unfinished,
                         "message": "仍有中断或失败后未正式交回的工作。请核对现状并接续原委托，收回结果后再交付。"}
@@ -894,6 +901,11 @@ class TeamService:
             if open_authors:
                 return {"status": "error", "code": "author_pending", "assignments": open_authors,
                         "message": "成果作者的委托尚未正式交回，可能仍在处理复核意见。请收回最终成果与复核结论；不要在作者收尾时结束目标。"}
+            active_work = [row for row in open_work if row["status"] in {"queued", "running"}
+                           and not current_input(row)]
+            if active_work:
+                return {"status": "error", "code": "work_pending", "assignments": active_work,
+                        "message": "本轮已派出的工作仍在排队或执行，包括尚无文件的分析委托。请等待已有回报，不要重复派活或在接收者首次产出前结束目标；阶段进展可以直接回复顾客。"}
             boundary = max((e.seq for e in self.rt.log.read(task_id=task_id) if e.actor == HOST
                             and e.type in {"team.started", "team.objective_updated"}), default=0)
             artifacts = self.rt.task(task_id).deliverables

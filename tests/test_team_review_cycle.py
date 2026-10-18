@@ -412,7 +412,7 @@ class TeamReviewCycleTests(TeamSupervisionTests):
         self.assertEqual(self.request([self.rt.task(self.task).deliverables[0]["seq"]], review_seq=request["review_seq"])["status"], "error")
         self.assertEqual(self.finish()["status"], "ok")
 
-    def test_unrelated_notification_and_busy_non_author_do_not_block_delivery(self):
+    def test_notification_does_not_block_but_busy_non_author_must_return(self):
         request = self.request([self.publish()])
         self.assertEqual(self.record(request["review_seq"])["status"], "ok")
         self.acknowledge_latest_review()
@@ -422,11 +422,17 @@ class TeamReviewCycleTests(TeamSupervisionTests):
         self.assertEqual(notice["status"], "ok")
         source = self.rt.team._send(self.task, self.rt.organization.leader, self.observer,
                                     "Unrelated non-author task", "assignment")
-        self.rt.log.emit(type="team.run_started", actor=HOST, task_id=self.task, payload={
+        run = self.rt.log.emit(type="team.run_started", actor=HOST, task_id=self.task, payload={
             "message_seq": source.seq, "role": self.observer, "run_id": "unrelated-busy-role",
             "revision": self.rt.team.view(self.task)["revision"],
             "control_seq": self.rt.execution_control.view(self.task)["seq"],
         })
+        self.assertEqual(self.finish()["code"], "work_pending")
+        self.assertEqual(self.rt.team.view(self.task)["status"], "running")
+        self.rt.log.emit(type="team.run_finished", actor=HOST, task_id=self.task,
+                         payload={**run.payload, "status": "completed"})
+        self.rt.team._send(self.task, self.rt.team._role(self.observer), self.manager,
+                           "Analysis returned; no additional files.", "report", reply_to=source.seq)
         self.assertEqual(self.finish()["status"], "ok")
         self.assertEqual(self.rt.team.view(self.task)["status"], "done")
 

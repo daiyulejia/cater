@@ -153,7 +153,7 @@ test('原生聊天复用脉络入口且不创建旧计划，打开关闭后保�
   trigger.focus()
   fireEvent.click(trigger)
   const dialog = await screen.findByRole('dialog', { name: '任务脉络' })
-  expect(within(dialog).getByRole('region', { name: '当前团队协作图' })).toBeTruthy()
+  expect(await within(dialog).findByRole('region', { name: '当前团队协作图' })).toBeTruthy()
   expect(dialog.textContent).not.toContain('旧命令行进度')
   fireEvent.click(within(dialog).getByRole('button', { name: '协作列表' }))
   expect(within(dialog).getByRole('list', { name: '当前团队协作列表' })).toBeTruthy()
