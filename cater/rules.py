@@ -256,13 +256,11 @@ class RuleBook:
         for _ in range(5):
             head = self.log.head_hash()
             payload = self.current_snapshot(task_id)
-            prior = list(self.log.iter_events(task_id=task_id, event_types=("rules.applied",)))
+            candidate = self._existing_snapshot(task_id, payload)
             if self.log.head_hash() != head:
                 continue
-            if prior and prior[-1].payload.get("fingerprint") == payload["fingerprint"]:
-                return {**prior[-1].payload, "seq": prior[-1].seq}
-            if not prior and not payload["rules"]:
-                return {**payload, "seq": None}
+            if candidate is not None:
+                return candidate
             try:
                 event = self.log.emit(actor=Actor.system("rulebook"), type="rules.applied", task_id=task_id,
                                       payload=payload, expected_head=head)
@@ -270,3 +268,25 @@ class RuleBook:
             except HeadChanged:
                 continue
         raise RuleConflict("rules changed concurrently; retry the collaboration")
+
+    def _existing_snapshot(self, task_id, payload):
+        prior = [event for event in self.log.iter_events(task_id=task_id, event_types=("rules.applied",))
+                 if event.actor == Actor.system("rulebook")]
+        # Python equality aliases bool/int/float; a receipt must preserve JSON types.
+        if prior and json.dumps(prior[-1].payload, sort_keys=True) == json.dumps(payload, sort_keys=True):
+            return {**prior[-1].payload, "seq": prior[-1].seq}
+        if not prior and not payload["rules"]:
+            return {**payload, "seq": None}
+
+    def _record_snapshot(self, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Record trusted frozen guidance, without replacing it with newer live rules."""
+        candidate = self._existing_snapshot(task_id, payload)
+        if candidate is not None:
+            return candidate
+        with self.log.atomic():
+            candidate = self._existing_snapshot(task_id, payload)
+            if candidate is not None:
+                return candidate
+            event = self.log.emit(actor=Actor.system("rulebook"), type="rules.applied", task_id=task_id,
+                                  payload=payload)
+            return {**event.payload, "seq": event.seq}

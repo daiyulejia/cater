@@ -22,7 +22,8 @@ class TeamReviewCycleTests(TeamSupervisionTests):
         self.reviewer, self.observer = others[:2]
         self._exchange_number = 0
 
-    def exchange(self, role_id, *calls, task_id=None, source=None):
+    def exchange(self, role_id, *calls, task_id=None, source=None,
+                 expected_statuses=("waiting", "completed")):
         """Settle a native turn without consuming unrelated queued assignments."""
         task_id = task_id or self.task
         role = self.rt.team._role(role_id)
@@ -45,7 +46,7 @@ class TeamReviewCycleTests(TeamSupervisionTests):
         finished, = [event for event in self.rt.log.read(task_id=task_id)
                      if event.type == "team.run_finished"
                      and event.payload["run_id"] == started.payload["run_id"]]
-        self.assertIn(finished.payload["status"], {"waiting", "completed"}, finished.payload)
+        self.assertIn(finished.payload["status"], expected_statuses, finished.payload)
         self.assertEqual(self.protocol_errors, [])
         results = [event.payload["result"] for event in self.rt.log.read(task_id=task_id)
                    if event.type == "team.tool_finished"

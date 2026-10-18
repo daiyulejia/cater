@@ -3,8 +3,10 @@
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from cater.drivers import DriverUnavailable
+from cater.events import Actor
 from cater.team import HOST
 from cater.web import event_to_dict, task_api_payload
 import test_simple_team
@@ -22,7 +24,7 @@ class TeamTransportIssueTests(unittest.TestCase):
     setUp = test_simple_team.SimpleTeamTests.setUp
     events = test_simple_team.SimpleTeamTests.events
 
-    def run_failure(self, fields, *, expected, prefix=()):
+    def run_failure(self, fields, *, expected, prefix=(), global_task=None):
         error = DriverUnavailable(PRIVATE)
         error.__dict__.update(fields)
         error.headers = {"private_header": PRIVATE}
@@ -34,9 +36,19 @@ class TeamTransportIssueTests(unittest.TestCase):
             test_simple_team.turn("Unexpected follow-up", ("read_messages", {}))]
         message = self.rt.team.receive(self.task, "Local fake transport fault; no external diagnosis",
                                        request_id=f"transport-{before_calls}")
-        self.rt.team.run(self.task)
+        model_input = self.rt.team._model_input
+        snapshots = []
+        def capture(*args, **kwargs):
+            if global_task is not None:
+                self.rt.log.emit(type="task.progress_reported", actor=HOST, task_id=global_task,
+                                 payload={"text": "Unrelated task advances the global event cut"})
+            snapshots.append((self.rt.log.read()[-1], self.rt.rulebook.current_snapshot(self.task)))
+            return model_input(*args, **kwargs)
+        with patch.object(self.rt.team, "_model_input", side_effect=capture):
+            self.rt.team.run(self.task)
         self.assertEqual(len(self.driver.calls), before_calls + len(prefix) + 1)
         self.assertEqual(len(self.driver.steps[self.manager]), 1)
+        self.assertEqual(len(snapshots), len(prefix) + 1)
         events = self.rt.log.read(task_id=self.task)
         fresh = events[len(before_events):]
         starts = [e for e in fresh if e.type == "team.run_started"]
@@ -61,8 +73,48 @@ class TeamTransportIssueTests(unittest.TestCase):
         self.assertEqual(diagnostics, expected)
         self.assertEqual(set(finish.payload), {
             "message_seq", "role", "run_id", "status", "reason", "error_type", "failure_stage",
-            *expected,
+            "context_basis", *expected,
         })
+        basis = finish.payload["context_basis"]
+        self.assertIs(type(basis), dict)
+        self.assertEqual(set(basis), {"as_of_seq", "as_of_hash", "rule_fingerprint", "rule_snapshot_seq"})
+        self.assertIs(type(basis["as_of_seq"]), int)
+        self.assertGreater(basis["as_of_seq"], 0)
+        for key in ("as_of_hash", "rule_fingerprint"):
+            self.assertIs(type(basis[key]), str)
+            self.assertRegex(basis[key], r"\A[0-9a-f]{64}\Z")
+        head, rules = snapshots[-1]
+        self.assertEqual(basis["as_of_seq"], head.seq)
+        self.assertEqual(basis["as_of_hash"], head.hash)
+        cutoff, = [e for e in self.rt.log.read() if e.seq == basis["as_of_seq"]]
+        self.assertEqual(cutoff, head)
+        self.assertLess(cutoff.seq, finish.seq)
+        context = self.driver.calls[-1]["context"]
+        self.assertEqual(context["message"]["seq"], message.seq)
+        checkpoint = context["work_checkpoint"]
+        task_cutoff = [e for e in events if e.seq <= cutoff.seq][-1]
+        self.assertEqual(checkpoint["as_of_seq"], task_cutoff.seq)
+        self.assertEqual(checkpoint["as_of_hash"], task_cutoff.hash)
+        if global_task is not None:
+            self.assertEqual(cutoff.task_id, global_task)
+            self.assertGreater(basis["as_of_seq"], checkpoint["as_of_seq"])
+        self.assertEqual(basis["rule_fingerprint"], checkpoint["scope"]["rule_fingerprint"])
+        self.assertEqual(basis["rule_fingerprint"], rules["fingerprint"])
+        self.assertEqual(context["rules"], rules["rules"])
+        applied = [e for e in events if e.type == "rules.applied" and e.seq < finish.seq]
+        if applied:
+            receipt = applied[-1]
+            self.assertIs(type(basis["rule_snapshot_seq"]), int)
+            self.assertGreater(basis["rule_snapshot_seq"], 0)
+            self.assertEqual(basis["rule_snapshot_seq"], receipt.seq)
+            self.assertEqual(receipt.actor, Actor.system("rulebook"))
+            self.assertEqual(receipt.task_id, self.task)
+            self.assertEqual(receipt.payload, rules)
+            self.assertEqual(receipt.payload["rules"], context["rules"])
+            self.assertEqual(receipt.payload["fingerprint"], basis["rule_fingerprint"])
+        else:
+            self.assertIsNone(basis["rule_snapshot_seq"])
+            self.assertEqual(context["rules"], [])
         after_failure = [e for e in fresh if e.seq > finish.seq]
         self.assertFalse([e for e in after_failure if e.type in {
             "team.run_started", "team.model_called", "team.tool_started", "team.tool_finished",
@@ -133,6 +185,18 @@ class TeamTransportIssueTests(unittest.TestCase):
                           "transport_error": "tls_certificate_error",
                           "details": {"transport_issue": "connection_reset"}}, expected=fields)
         self.run_failure({"transport_issue": "dns_lookup_failed", "transport_phase": PRIVATE}, expected={})
+
+    def test_context_basis_uses_global_cut_and_reuses_frozen_rule_receipt(self):
+        self.rt.rulebook.record("Keep the local fake transport failure private", scope="task", task_id=self.task)
+        unrelated = self.rt.create_task("Independent local fixture task")
+        fields = {"failure_kind": "network_error", "transport_phase": "request",
+                  "transport_issue": "dns_lookup_failed"}
+        for _ in range(2):
+            self.run_failure({**fields, "context_basis": {
+                "as_of_seq": True, "as_of_hash": PRIVATE,
+                "rule_fingerprint": PRIVATE, "rule_snapshot_seq": True,
+                "provider_body": PRIVATE}}, expected=fields, global_task=unrelated)
+        self.assertEqual(len(self.events("rules.applied")), 1)
 
     def test_transport_failure_preserves_prior_artifact_without_follow_up_tools(self):
         publish = test_simple_team.turn("Local fixture stage record", ("publish_artifact", {

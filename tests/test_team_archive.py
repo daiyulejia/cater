@@ -23,9 +23,10 @@ class TeamArchiveTests(unittest.TestCase):
         self.addCleanup(self.f.doCleanups)
         self.project = self.f.bind_workspace()
 
-    def snapshot(self, paths, **changes):
+    def snapshot(self, paths, *, expected_statuses=("waiting", "completed"), **changes):
         result, = self.f.exchange(self.f.worker, ("publish_workspace_archive", {
-            "paths": paths, "filename": "project.zip", "summary": "Actual project snapshot", **changes}))
+            "paths": paths, "filename": "project.zip", "summary": "Actual project snapshot", **changes}),
+            expected_statuses=expected_statuses)
         return result
 
     def read(self, seq, **changes):
@@ -195,8 +196,10 @@ class TeamArchiveTests(unittest.TestCase):
             binding = self.f.rt.workspaces.view(self.f.task)
             self.f.rt.workspaces.bind(self.f.task, None, expected_revision=binding["revision"])
             return captured
+        calls = len(self.f.driver.calls)
         with patch.object(team_archive, "create_snapshot", side_effect=revoke):
-            result = self.snapshot(["ok.txt"])
+            result = self.snapshot(["ok.txt"], expected_statuses=("interrupted",))
+        self.assertEqual(len(self.f.driver.calls), calls + 1)
         self.assertEqual(result["status"], "error")
         self.assertEqual(self.f.rt.task(self.f.task).deliverables, [])
         self.assertEqual(self.f.rt.team._pending_operations(self.f.task), [])

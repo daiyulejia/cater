@@ -1462,6 +1462,7 @@ def make_handler(
             return self._not_found()
 
         def do_POST(self) -> None:
+            self._request_body_handled = False
             if not self._has_valid_request_host():
                 return self._forbidden("untrusted Host header")
             parsed = urlparse(self.path)
@@ -2158,6 +2159,22 @@ def make_handler(
             parsed = urlparse(origin)
             return parsed.scheme in {"http", "https"} and parsed.netloc == self.headers.get("Host", "")
 
+        def send_response(self, code: int, message: str | None = None) -> None:
+            if code >= 400 and not getattr(self, "_request_body_handled", True):
+                # Auth/CSRF/routing may reject a POST before _read_body runs.
+                # Claim the attempt before replying so errors never drain twice.
+                self._request_body_handled = True
+                self.close_connection = True
+                lengths = self.headers.get_all("Content-Length", [])
+                if len(lengths) == 1 and not self.headers.get_all("Transfer-Encoding", []):
+                    try:
+                        length = int(lengths[0])
+                    except ValueError:
+                        pass
+                    else:
+                        self._discard_rejected_body(length, limit=MAX_REJECT_DRAIN_BYTES)
+            super().send_response(code, message)
+
         def send_error(self, code: int, message: str | None = None, explain: str | None = None) -> None:
             self._sending_error = True
             try:
@@ -2201,6 +2218,7 @@ def make_handler(
             return data
 
         def _read_body(self) -> str | None:
+            self._request_body_handled = True
             raw_length = self.headers.get("Content-Length", "0") or "0"
             try:
                 length = int(raw_length)
@@ -2208,7 +2226,7 @@ def make_handler(
                 self._bad_request("invalid Content-Length")
                 return None
             if length < 0 or length > MAX_REQUEST_BYTES:
-                self._discard_near_limit_rejected_body(length)
+                self._discard_rejected_body(length, limit=MAX_REQUEST_BYTES + MAX_REJECT_DRAIN_BYTES)
                 self.close_connection = True
                 self._bad_request(f"request body exceeds {MAX_REQUEST_BYTES} byte limit")
                 return None
@@ -2218,20 +2236,27 @@ def make_handler(
                 self._bad_request("request body must be UTF-8")
                 return None
 
-        def _discard_near_limit_rejected_body(self, length: int) -> None:
-            """Let ordinary clients finish a just-over-limit upload before replying.
+        def _discard_rejected_body(self, length: int, *, limit: int) -> None:
+            """Let ordinary clients finish a bounded rejected upload before replying.
 
             Closing a Windows socket while its client is still sending can turn a
-            deliberate 400 into a connection-reset error.  Only drain a tiny
-            overage, under a short timeout; a clearly large or slow upload is
-            still rejected without consuming unbounded request data.
+            deliberate error response into a connection reset. Bound both total
+            bytes and elapsed time, even when a slow client keeps sending chunks.
             """
-            if length > MAX_REQUEST_BYTES + MAX_REJECT_DRAIN_BYTES:
+            if not 0 < length <= limit:
                 return
             previous_timeout = self.connection.gettimeout()
+            deadline = time.monotonic() + REJECT_DRAIN_TIMEOUT_SECONDS
             try:
-                self.connection.settimeout(REJECT_DRAIN_TIMEOUT_SECONDS)
-                self.rfile.read(length)
+                while length:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self.connection.settimeout(remaining)
+                    chunk = self.rfile.read1(min(length, MAX_REJECT_DRAIN_BYTES))
+                    if not chunk:
+                        break
+                    length -= len(chunk)
             except OSError:
                 pass
             finally:

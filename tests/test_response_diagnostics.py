@@ -8,7 +8,7 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import unittest
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from cater.team import HOST
 from cater.tool_protocol import (
@@ -241,9 +241,13 @@ class ResponseDiagnosticsTests(unittest.TestCase):
                 f.setUp()
                 try:
                     reply = simple.turn("", ("read_messages", {"limit": 1}))
-                    target, options = None, {}
-                    if stage in {"setup", "context_assembly", "tool_execution"}:
-                        target = {"setup": "_schemas", "context_assembly": "_context",
+                    host, target, options = f.rt.team, None, {}
+                    if stage == "setup":
+                        host, target = type(f.driver), "tool_turn"
+                        options = {"new_callable": PropertyMock,
+                                   "side_effect": ValueError(PRIVATE + " HTTP 429 timeout length")}
+                    elif stage in {"context_assembly", "tool_execution"}:
+                        target = {"context_assembly": "_context_snapshot",
                                   "tool_execution": "_invoke_tool"}[stage]
                         options = {"side_effect": ValueError(PRIVATE + " HTTP 429 timeout length")}
                     elif stage == "model_request":
@@ -256,7 +260,7 @@ class ResponseDiagnosticsTests(unittest.TestCase):
                         target, options = "_invoke_tool", {"return_value": BrokenResult()}
                     f.driver.steps[f.manager] = [reply]
                     if target:
-                        with patch.object(f.rt.team, target, **options):
+                        with patch.object(host, target, **options):
                             self.run_message(f)
                     else:
                         self.run_message(f)

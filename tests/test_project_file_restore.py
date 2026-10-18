@@ -354,18 +354,22 @@ class ProjectFileRestoreTests(unittest.TestCase):
                         self.f.rt.team.receive(target, f"@{role.name} changed request", request_id="restore-new-input")
                     return members
 
-                with patch.object(project_restore, "read_members", side_effect=mutate) as read:
-                    run = self.native_run(target, [archive_fixtures.fixtures.turn("", (TOOL, args)),
-                                                   archive_fixtures.fixtures.turn()])
-                result = self.pair(target)[1].payload["result"]
-                self.assertEqual(run.payload["status"],
-                                 "interrupted" if change in {"pause", "customer_input"} else "completed")
-                read.assert_called_once()
-                self.not_started(result)
-                self.assertEqual(self.disk(), {})
-                self.registry["workspaces"][1]["mode"] = "edit"
-                self.save_registry()
-                self.archive.rebind(delivery.task_id, self.f.project)
+                try:
+                    calls = len(self.f.driver.calls)
+                    with patch.object(project_restore, "read_members", side_effect=mutate) as read:
+                        run = self.native_run(target, [archive_fixtures.fixtures.turn("", (TOOL, args)),
+                                                       archive_fixtures.fixtures.turn()])
+                    result = self.pair(target)[1].payload["result"]
+                    interrupted = change in {"binding", "permission", "pause", "customer_input"}
+                    self.assertEqual(run.payload["status"], "interrupted" if interrupted else "completed")
+                    self.assertEqual(len(self.f.driver.calls), calls + (1 if interrupted else 2))
+                    read.assert_called_once()
+                    self.not_started(result)
+                    self.assertEqual(self.disk(), {})
+                finally:
+                    self.registry["workspaces"][1]["mode"] = "edit"
+                    self.save_registry()
+                    self.archive.rebind(delivery.task_id, self.f.project)
 
     def test_final_primitive_guard_rechecks_target_goal_and_control(self):
         delivery, artifact = self.archive.delivered()
