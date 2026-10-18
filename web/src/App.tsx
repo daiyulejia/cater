@@ -823,6 +823,7 @@ function App() {
   const focusTaskHeadingRef = useRef(false)
   const chatPaneRef = useRef<HTMLElement>(null)
   const [roles, setRoles] = useState<OrgRole[]>([])
+  const [rolesError, setRolesError] = useState('')
   const [organization, setOrganization] = useState<Organization | null>(null)
   const [pending, setPending] = useState<Set<string>>(new Set())
   const [showEvidence, setShowEvidence] = useState(false)
@@ -1127,9 +1128,13 @@ function App() {
     }
   }, [chooseTask, acceptControls, recoveryReady, pageReady])
   useEffect(() => {
-    void api<OrgRole[]>('/api/organization').then((nextRoles) => {
-      setRoles(nextRoles)
-    }).catch((err: unknown) => setError(userFacingError(err, '暂时无法读取团队信息。')))
+    const controller = new AbortController()
+    void api<OrgRole[]>('/api/organization', { signal: controller.signal }).then((nextRoles) => {
+      if (!controller.signal.aborted) { setRoles(nextRoles); setRolesError('') }
+    }).catch(() => {
+      if (!controller.signal.aborted) setRolesError('暂时无法读取备用伙伴名单，请稍后重试。')
+    })
+    return () => controller.abort()
   }, [])
   const refreshOrganization = useCallback(async () => {
     if (profileBusy.current) return
@@ -1516,7 +1521,7 @@ function App() {
           <span className="min-w-0"><strong className="block text-[19px] font-extrabold leading-5 text-[#713f34]">Cater</strong><span className="mt-1 block text-[11px] font-semibold text-[#a9604f]">有猫的工作间</span></span>
         </button>
         <div className="flex items-center gap-2 text-xs">
-          <TeamDirectory members={team} availability={organization?.availability} open={teamOpen} onOpenChange={setTeamOpen} refreshing={teamRefreshing} error={teamError} onRefresh={() => void refreshOrganization()} portrait={(id) => <Portrait id={id} size="xl" />} onMention={(name) => { if (task) setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${name} `); else setDraft((current) => `${current.trim()}${current.trim() ? ' ' : ''}@${name} `) }} />
+          <TeamDirectory members={team} availability={organization?.availability} open={teamOpen} onOpenChange={setTeamOpen} refreshing={teamRefreshing} error={teamError || (!organization ? rolesError : '')} onRefresh={() => void refreshOrganization()} portrait={(id) => <Portrait id={id} size="xl" />} onMention={(name) => { if (task) setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${name} `); else setDraft((current) => `${current.trim()}${current.trim() ? ' ' : ''}@${name} `) }} />
           <span className={`channel-mode max-w-32 shrink-0 rounded-md px-2.5 py-1.5 text-[11px] font-medium sm:max-w-none ${driverModeStyle(organization?.mode)}`} title={driverModeText(organization?.mode)}><span className="sr-only sm:not-sr-only">{driverModeText(organization?.mode)}</span><span className="sm:hidden" aria-hidden="true">{organization?.mode === 'external_driver' ? '外接' : organization?.mode === 'mixed_driver' ? '混合' : organization?.mode === 'local_demo' ? '演示' : '待确认'}</span></span>
           <button type="button" onClick={() => void verifyChain()} disabled={checkingChain} className={`inline-flex size-8 items-center justify-center rounded-md hover:bg-[#e7f0ec] sm:w-auto sm:gap-1 sm:px-2 ${chainStatus && !chainStatus.ok ? 'text-rose-700' : 'text-[#34786e]'}`} aria-label={checkingChain ? '正在核验事件链' : chainStatus ? chainStatus.ok ? `上次核验通过，共 ${chainStatus.checked} 条事件` : `事件链异常，事件 #${chainStatus.broken_at ?? '?'}` : '核验事件链'} title={chainStatus?.reason || '点击核验事件链；显示的是上次核验结果'}><ShieldCheck size={17} /><span className="hidden sm:inline">{checkingChain ? '正在核验' : chainStatus ? chainStatus.ok ? `已核验 ${chainStatus.checked} 条` : `链异常 · #${chainStatus.broken_at ?? '?'}` : '核验事件链'}</span></button>
         </div>

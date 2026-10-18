@@ -8,6 +8,17 @@ import App from '../src/App'
 const members = [{ id: 'product', name: '月亮' }, { id: 'design', name: '罐头' }]
 const available: TeamAvailability = { checked_at: '2026-10-14T03:00:00Z', all_available: true, members: members.map((member) => ({ role_id: member.id, status: 'available', reason: 'recent_success' })) }
 
+test('空伙伴页区分正在读取、读取失败和已读空名单', () => {
+  const props = { members: [], open: true, onOpenChange: vi.fn(), onRefresh: vi.fn(), onMention: vi.fn(), portrait: () => null }
+  const view = render(<TeamDirectory {...props} refreshing={false} error="暂时无法读取伙伴状态，请稍后重试。" />)
+  expect(screen.getByRole('status').textContent).toBe('伙伴名单暂未读取成功。')
+  expect(screen.queryByText('正在读取伙伴名单。')).toBeNull()
+  view.rerender(<TeamDirectory {...props} refreshing error="暂时无法读取伙伴状态，请稍后重试。" />)
+  expect(screen.getByRole('status').textContent).toBe('正在读取伙伴名单。')
+  view.rerender(<TeamDirectory {...props} refreshing={false} error="" />)
+  expect(screen.getByRole('status').textContent).toBe('暂时没有可显示的伙伴。')
+})
+
 function Directory({ state, refresh, mention }: { state?: TeamAvailability; refresh: () => void; mention: (name: string) => void }) {
   const [open, setOpen] = useState(false)
   return <><textarea aria-label="聊天草稿" defaultValue="留在这儿" /><TeamDirectory members={members} availability={state} open={open} onOpenChange={setOpen} refreshing={false} error="" onRefresh={refresh} onMention={mention} portrait={() => null} /></>

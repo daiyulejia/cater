@@ -54,7 +54,7 @@ export function TeamDirectory({ members, availability, open, onOpenChange, refre
               </article>
             })}
           </div>
-          {!unique.length && <p className="py-10 text-center text-sm text-[#829080]">正在读取伙伴名单。</p>}
+          {!unique.length && <p role="status" className="py-10 text-center text-sm text-[#829080]">{refreshing ? '正在读取伙伴名单。' : error ? '伙伴名单暂未读取成功。' : '暂时没有可显示的伙伴。'}</p>}
         </div>
       </Dialog.Content>
     </Dialog.Portal>
