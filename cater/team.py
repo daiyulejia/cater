@@ -518,6 +518,8 @@ class TeamService:
         messages = self._messages(task_id)
         reported = _reported_messages(messages)
         current_work = self.view(task_id)
+        checkpoint, work_states = self.recovery._capture(task_id)
+        outgoing_states = {row["seq"]: row for row in work_states}
         background = self.rt.conversation_background(task_id)
         revision = current_work["revision"]
         open_assignments = [{"seq": e.seq, "sender": e.actor.id, "text": e.payload["text"]} for e in messages
@@ -526,7 +528,10 @@ class TeamService:
                             and e.payload.get("revision") == revision and e.seq not in reported]
         runs = {r["message_seq"]: r for r in current_work["runs"]}
         outgoing = [{"seq": e.seq, "recipient": e.payload["recipient"], "text": e.payload["text"],
-                     "status": runs.get(e.seq, {}).get("status", "queued"),
+                     "status": outgoing_states.get(e.seq, runs.get(e.seq, {})).get("status", "queued"),
+                     **({"latest_message_seq": outgoing_states[e.seq]["latest_message_seq"]}
+                        if e.seq in outgoing_states and outgoing_states[e.seq]["latest_message_seq"] != e.seq else {}),
+                     **({"requires_return": True} if outgoing_states.get(e.seq, {}).get("requires_return") else {}),
                      "latest_update": next((other.payload["text"] for other in reversed(messages)
                          if other.actor.id == e.payload["recipient"] and other.payload.get("recipient") == role.id
                          and (other.payload.get("reply_to") == e.seq and other.payload.get("kind") == "progress"
@@ -546,7 +551,7 @@ class TeamService:
             **({"project_history": project_history} if project_history["available"] or project_history.get("reason") == "metadata_query_unavailable" else {}),
             "active_assignment": {"seq": assignment.seq, "sender": assignment.actor.id, **assignment.payload} if assignment else None,
             "open_assignments": open_assignments, "outgoing_work": outgoing,
-            "work_checkpoint": self.recovery.checkpoint(task_id),
+            "work_checkpoint": checkpoint,
             "delivery_index": self.delivery.index(task_id),
             **({"mcp_index": self.rt.mcp.index(**self.rt.mcp.scope(task_id, role.id))} if self.rt.mcp.configured else {}),
             "skills_index": self.rt.skills.index(**self._skill_scope(task_id, role, tool_names)),
