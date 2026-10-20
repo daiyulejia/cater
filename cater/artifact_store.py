@@ -232,6 +232,16 @@ def _verify(directory: Path, manifest: dict, bodies: dict[str, bytes]) -> None:
             raise ArtifactStoreError(f"artifact content tampering: {entry['path']}")
 
 
+def _extended_windows_path(path: Path) -> Path:
+    """Use one absolute Win32 namespace for all checks and I/O, without resolving links."""
+    value = os.path.abspath(path)
+    if value.startswith("\\\\?\\"):
+        return Path(value)
+    if value.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + value[2:])
+    return Path("\\\\?\\" + value)
+
+
 def materialize_team_artifact(root: str | os.PathLike[str], task_id: str, artifact: dict, *, body: bytes | None = None) -> str:
     """Save a ledger-derived team artifact without fabricating a legacy work submission."""
     _name(task_id)
@@ -249,12 +259,24 @@ def materialize_team_artifact(root: str | os.PathLike[str], task_id: str, artifa
     if (not _positive(artifact.get("seq")) or sha != artifact.get("content_sha256")
             or len(content) > limit):
         raise ArtifactStoreError("invalid team artifact")
-    base = Path(root).absolute()
+    base = Path(root)
+    if ".." in base.parts:
+        raise ArtifactStoreError("root must not contain parent traversal")
+    if os.name == "nt" and str(base).startswith("\\\\.\\"):
+        raise ArtifactStoreError("device namespace is not a supported artifact root")
+    if os.name == "nt" and any(part.endswith((".", " ")) for part in base.parts):
+        raise ArtifactStoreError("ambiguous trailing dot or space in artifact root")
+    base = base.absolute()
+    directory_name = "team-" + hashlib.sha256(task_id.encode()).hexdigest()
+    version_name = str(artifact["seq"]) + "-" + sha
+    if os.name == "nt" and len(str(base / directory_name / version_name / filename).encode(
+            "utf-16-le", errors="surrogatepass")) // 2 >= 248:
+        base = _extended_windows_path(base)
     _directories(base, create=True)
-    directory = base / ("team-" + hashlib.sha256(task_id.encode()).hexdigest())
+    directory = base / directory_name
     _directories(directory, create=True)
     with _lock(directory / ".publish.lock"):
-        version = directory / (str(artifact["seq"]) + "-" + sha)
+        version = directory / version_name
         _directories(version, create=True)
         path = version / filename
         if path.exists():
