@@ -128,6 +128,7 @@ class AcpSession:
         self, *, mcp_servers: list[dict] | None = None,
         client_capabilities: dict | None = None,
         on_update: Callable[[dict], None] | None = None,
+        service: Callable[[], None] | None = None,
     ) -> dict:
         servers = [] if mcp_servers is None else mcp_servers
         capabilities = {} if client_capabilities is None else client_capabilities
@@ -137,24 +138,26 @@ class AcpSession:
             raise ValueError("ACP client capabilities must be an object")
         if on_update is not None and not callable(on_update):
             raise ValueError("ACP update handler must be callable")
+        if service is not None and not callable(service):
+            raise ValueError("ACP service callback must be callable")
         # Validate before starting any configured executable.
         self._encode({"mcpServers": servers, "clientCapabilities": capabilities})
         with self._operation():
             if self.session_id is not None:
                 raise AcpUnavailable("ACP session is already open")
             try:
-                self._start()
+                self._start(service=service)
                 initialized = self._rpc("initialize", {
                     "protocolVersion": 1, "clientCapabilities": deepcopy(capabilities),
                     "clientInfo": {"name": "cater", "version": "0.1"},
-                })
+                }, service=service)
                 if type(initialized.get("protocolVersion")) is not int or initialized["protocolVersion"] != 1:
                     raise AcpProtocolError("ACP protocol version mismatch")
                 info = initialized.get("agentInfo", {})
                 if not isinstance(info, dict):
                     raise AcpProtocolError("Invalid ACP agent information")
                 self.agent_info = deepcopy(info)
-                result = self._rpc("session/new", {"cwd": self.cwd, "mcpServers": deepcopy(servers)})
+                result = self._rpc("session/new", {"cwd": self.cwd, "mcpServers": deepcopy(servers)}, service=service)
                 session_id = result.get("sessionId")
                 if not isinstance(session_id, str) or not session_id:
                     raise AcpProtocolError("ACP server did not provide a session ID")
@@ -175,11 +178,14 @@ class AcpSession:
                 self._abort()
                 raise
 
-    def prompt(self, text: str, *, on_update: Callable[[dict], None] | None = None) -> AcpPromptResult:
+    def prompt(self, text: str, *, on_update: Callable[[dict], None] | None = None,
+               service: Callable[[], None] | None = None) -> AcpPromptResult:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("ACP prompt must be nonempty text")
         if on_update is not None and not callable(on_update):
             raise ValueError("ACP update handler must be callable")
+        if service is not None and not callable(service):
+            raise ValueError("ACP service callback must be callable")
         with self._operation():
             if self.session_id is None:
                 raise AcpUnavailable("ACP session is not open")
@@ -211,7 +217,7 @@ class AcpSession:
                     if self._closed:
                         raise AcpUnavailable("ACP session is closed")
                 attempted = True
-                result = self._rpc("session/prompt", params, on_update=update)
+                result = self._rpc("session/prompt", params, on_update=update, service=service)
                 reason = result.get("stopReason")
                 if not isinstance(reason, str) or reason not in _STOP_REASONS:
                     raise AcpProtocolError("Invalid ACP stop reason")
@@ -257,7 +263,7 @@ class AcpSession:
             raise AcpProtocolError("ACP request exceeds frame limit")
         return data + b"\n"
 
-    def _start(self):
+    def _start(self, *, service=None):
         deadline = time.monotonic() + self.timeout
         try:
             with self._state_lock:
@@ -271,11 +277,11 @@ class AcpSession:
                 self._scope = ProcessScope(self._proc)
                 self._reader = threading.Thread(target=self._read_frames, daemon=True)
                 self._reader.start()
-            self._send(self.command, deadline)
-            if self._receive(deadline) != {"ready": True}:
-                raise AcpProtocolError("ACP process did not acknowledge startup")
         except (OSError, ValueError):
             raise AcpUnavailable("ACP process could not start safely") from None
+        self._send(self.command, deadline)
+        if self._receive(deadline, service=service) != {"ready": True}:
+            raise AcpProtocolError("ACP process did not acknowledge startup")
 
     def _offer(self, item):
         while not self._stopped.is_set():
@@ -301,16 +307,27 @@ class AcpSession:
         except (OSError, ValueError):
             self._offer(AcpUnavailable("ACP output pipe is unavailable"))
 
-    def _receive(self, deadline: float) -> dict:
+    def _receive(self, deadline: float, *, service=None) -> dict:
         if self._closed:
             raise AcpUnavailable("ACP session is closed")
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise AcpUnavailable("ACP response timed out")
-        try:
-            frame = self._frames.get(timeout=remaining)
-        except queue.Empty:
-            raise AcpUnavailable("ACP response timed out") from None
+        while True:
+            if time.monotonic() >= deadline:
+                raise AcpUnavailable("ACP response timed out")
+            # Host work stays on the runtime thread, even while the Agent waits
+            # for a separate MCP tool process. Streaming updates cannot starve it.
+            if service is not None:
+                service()
+            remaining = deadline - time.monotonic()
+            if self._closed:
+                raise AcpUnavailable("ACP session is closed")
+            if remaining <= 0:
+                raise AcpUnavailable("ACP response timed out")
+            try:
+                frame = self._frames.get(timeout=remaining if service is None else min(0.05, remaining))
+                break
+            except queue.Empty:
+                if service is None:
+                    raise AcpUnavailable("ACP response timed out") from None
         if self._closed:
             raise AcpUnavailable("ACP session is closed")
         if isinstance(frame, AcpError):
@@ -401,7 +418,7 @@ class AcpSession:
                 response["result"] = {"outcome": {"outcome": "cancelled"}}
             self._send(response, deadline)
 
-    def _rpc(self, method: str, params: dict, *, on_update=None) -> dict:
+    def _rpc(self, method: str, params: dict, *, on_update=None, service=None) -> dict:
         deadline = time.monotonic() + self.timeout
         self._next_id += 1
         request_id = "cater-" + str(self._next_id)
@@ -413,7 +430,7 @@ class AcpSession:
                     self._prompt_active = True
             self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}, deadline)
         while True:
-            message = self._receive(deadline)
+            message = self._receive(deadline, service=service)
             if message.get("jsonrpc") != "2.0":
                 raise AcpProtocolError("Invalid ACP JSON-RPC envelope")
             if "method" in message:

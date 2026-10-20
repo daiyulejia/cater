@@ -1,23 +1,31 @@
-"""Host MCP policy and receipts with stdlib fixtures and no subprocesses."""
+"""Offline MCP policy, owner-thread tools, and real stdio relay regressions."""
 
 from __future__ import annotations
 
 import copy
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
+import socket
+import sqlite3
+import struct
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
 from cater import mcp
+from cater import mcp_host
 from cater.drivers import DriverError
 from cater.events import Actor
-from cater.tool_protocol import json_utf8
+from cater.tool_protocol import ToolCall, json_utf8
+from cater.workspace_tools import WorkspaceExecutor, WorkspacePolicy
 
 
 SHA = "a" * 64
@@ -763,6 +771,760 @@ class McpHostTests(unittest.TestCase):
         self.configuration["servers"][0]["env"]["SYSTEMROOT"] = "HOST_FIXTURE_TOKEN"
         self.save()
         self.assertEqual(self.index()["configuration_status"], "unavailable")
+
+
+class McpToolBridgeTests(unittest.TestCase):
+    """Loopback sockets, isolated Python relays, and temporary workspace effects."""
+
+    def setUp(self):
+        self.calls = []
+        self.owner = threading.get_ident()
+        self.tools = [{
+            "name": "save_note", "description": "Save a fixture note",
+            "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}},
+        }]
+
+    def execute(self, call):
+        self.assertEqual(threading.get_ident(), self.owner)
+        self.calls.append(call)
+        return {"status": "ok", "receipt": call.arguments}
+
+    def bridge(self, **kwargs):
+        bridge = mcp_host.McpToolBridge(self.tools, kwargs.pop("execute", self.execute), **kwargs)
+        self.addCleanup(bridge.close)
+        return bridge
+
+    @staticmethod
+    def environment(bridge):
+        return {row["name"]: row["value"] for row in bridge.server_config()["env"]}
+
+    def peer(self, bridge):
+        env = self.environment(bridge)
+        connection = socket.create_connection(("127.0.0.1", int(env["CATER_MCP_PORT"])), timeout=5)
+        self.addCleanup(connection.close)
+        incoming = connection.makefile("rb")
+        self.addCleanup(incoming.close)
+        return connection, incoming
+
+    def run_io(self, bridge, operation, *, disconnect=False):
+        """Keep all pump calls on the test thread while bounded I/O runs elsewhere."""
+        results, failures, pump_errors = [], [], []
+
+        def run():
+            try:
+                results.append(operation())
+            except BaseException as exc:
+                failures.append(exc)
+
+        thread = threading.Thread(target=run, daemon=True, name="mcp-test-io")
+        thread.start()
+        deadline = time.monotonic() + 10
+        try:
+            while thread.is_alive() and time.monotonic() < deadline:
+                if pump_errors:
+                    thread.join(0.01)
+                    continue
+                try:
+                    bridge.pump(0.01)
+                except mcp_host.ToolBridgeError as exc:
+                    pump_errors.append(exc)
+            self.assertFalse(thread.is_alive(), "MCP fixture I/O timed out")
+            if failures:
+                raise failures[0]
+            if not disconnect and pump_errors:
+                raise pump_errors[0]
+            return results[0], pump_errors
+        finally:
+            if thread.is_alive():
+                bridge.close()
+            thread.join(6)
+            self.assertFalse(thread.is_alive(), "MCP fixture I/O thread leaked")
+
+    def exchange(self, bridge, peer, value, *, rejected=False):
+        connection, incoming = peer
+        body = value if isinstance(value, bytes) else json_utf8(value, allow_nan=False) + b"\n"
+
+        def transfer():
+            connection.sendall(body)
+            return incoming.readline(mcp_host.MAX_BYTES + 2)
+
+        reply, errors = self.run_io(bridge, transfer, disconnect=rejected)
+        if rejected:
+            self.assertEqual(reply, b"")
+            self.assertEqual(len(errors), 1)
+            return None
+        self.assertTrue(reply.endswith(b"\n"), "Missing host frame")
+        return json.loads(reply.decode("utf-8"))
+
+    @staticmethod
+    def request(identifier, method, **params):
+        return {"jsonrpc": "2.0", "id": identifier, "method": method, "params": params}
+
+    @staticmethod
+    def notification(method, **params):
+        return {"jsonrpc": "2.0", "method": method, "params": params}
+
+    def session(self, bridge, *, active=True):
+        peer = self.peer(bridge)
+        self.assertEqual(self.exchange(bridge, peer, {
+            "capability": self.environment(bridge)["CATER_MCP_CAPABILITY"],
+        }), {"authenticated": True})
+        initialized = self.exchange(bridge, peer, self.request(
+            "init", "initialize", protocolVersion="2025-06-18",
+            capabilities={}, clientInfo={"name": "offline-fixture", "version": "1"},
+        ))["response"]
+        self.assertEqual(initialized["result"]["protocolVersion"], "2025-06-18")
+        self.assertEqual(initialized["result"]["capabilities"], {"tools": {}})
+        self.assertEqual(self.exchange(bridge, peer, self.notification(
+            "notifications/initialized")), {"response": None})
+        if active:
+            bridge.activate()
+        return peer
+
+    def assert_closed(self, bridge):
+        with self.assertRaises(mcp_host.ToolBridgeError):
+            bridge.server_config()
+        with self.assertRaises(mcp_host.ToolBridgeError):
+            bridge.pump(0.01)
+        with self.assertRaises(mcp_host.ToolBridgeError):
+            bridge.activate()
+
+    def test_inactive_handshake_allows_listing_but_never_executes(self):
+        bridge = self.bridge()
+        peer = self.session(bridge, active=False)
+        listing = self.exchange(bridge, peer, self.request(1, "tools/list"))["response"]
+        self.assertEqual([tool["name"] for tool in listing["result"]["tools"]], ["save_note"])
+        denied = self.exchange(bridge, peer, self.request(
+            2, "tools/call", name="save_note"))["response"]
+        self.assertEqual(denied["error"]["code"], -32600)
+        self.assertEqual(self.calls, [])
+        bridge.activate()
+        accepted = self.exchange(bridge, peer, self.request(
+            3, "tools/call", name="save_note"))["response"]
+        self.assertFalse(accepted["result"]["isError"])
+        self.assertEqual([call.id for call in self.calls], ["mcp-1"])
+
+    def test_revoke_is_irreversible_before_and_after_activation(self):
+        for active in (False, True):
+            with self.subTest(active=active):
+                bridge = self.bridge()
+                peer = self.session(bridge, active=active)
+                bridge.revoke()
+                bridge.revoke()
+                with self.assertRaises(mcp_host.ToolBridgeError):
+                    bridge.activate()
+                for identifier in (1, 2):
+                    response = self.exchange(bridge, peer, self.request(
+                        identifier, "tools/call", name="save_note"))["response"]
+                    self.assertEqual(response["error"]["code"], -32600)
+                self.assertEqual(self.calls, [])
+                listing = self.exchange(bridge, peer, self.request(3, "tools/list"))["response"]
+                self.assertEqual(len(listing["result"]["tools"]), 1)
+
+    def test_only_owner_can_activate(self):
+        bridge = self.bridge()
+        failures = []
+        def activate():
+            try:
+                bridge.activate()
+            except BaseException as exc:
+                failures.append(exc)
+        thread = threading.Thread(target=activate)
+        thread.start()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], mcp_host.ToolBridgeError)
+        peer = self.session(bridge, active=False)
+        response = self.exchange(bridge, peer, self.request(
+            1, "tools/call", name="save_note"))["response"]
+        self.assertEqual(response["error"]["code"], -32600)
+        self.assertEqual(self.calls, [])
+
+    def test_stdio_config_has_private_ephemeral_environment_and_is_detached(self):
+        bridge, other = self.bridge(), self.bridge()
+        config = bridge.server_config("fixture")
+        self.assertEqual(set(config), {"name", "command", "args", "env"})
+        self.assertEqual(config["name"], "fixture")
+        self.assertEqual(config["command"], sys.executable)
+        self.assertEqual(config["args"][:3], ["-I", "-S", "-B"])
+        self.assertEqual(Path(config["args"][-1]).name, "_mcp_bridge_worker.py")
+        self.assertTrue(Path(config["args"][-1]).is_file())
+        self.assertTrue(all(set(row) == {"name", "value"} for row in config["env"]))
+        env = self.environment(bridge)
+        self.assertEqual(set(env), {"CATER_MCP_PORT", "CATER_MCP_CAPABILITY", "CATER_MCP_TIMEOUT"})
+        self.assertEqual(float(env["CATER_MCP_TIMEOUT"]), 30)
+        self.assertNotEqual(env["CATER_MCP_CAPABILITY"], self.environment(other)["CATER_MCP_CAPABILITY"])
+        self.assertNotIn(env["CATER_MCP_CAPABILITY"], json.dumps(config["args"]))
+        config["env"][0]["value"] = "0"
+        config["args"].clear()
+        self.assertEqual(self.environment(bridge), env)
+        for name in ("", "../fixture", "two words", "x" * 65):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                bridge.server_config(name)
+
+    def test_initialize_list_and_chinese_call_preserve_receipt_and_owner(self):
+        bridge = self.bridge()
+        self.tools[0]["input_schema"]["properties"].clear()
+        self.tools.append({"name": "injected", "description": "", "input_schema": {}})
+        peer = self.session(bridge)
+        listing = self.exchange(bridge, peer, self.request(1, "tools/list"))["response"]
+        self.assertEqual(listing, {"jsonrpc": "2.0", "id": 1, "result": {"tools": [{
+            "name": "save_note", "description": "Save a fixture note",
+            "inputSchema": {"type": "object", "properties": {"text": {"type": "string"}}},
+        }]}})
+        arguments = {"text": "\u4e2d\u6587\u56de\u6267", "nested": {"\u952e": ["\u503c", 7, True, None]}}
+        response = self.exchange(bridge, peer, self.request(
+            "\u8bf7\u6c42", "tools/call", name="save_note", arguments=arguments))["response"]
+        self.assertEqual(response["id"], "\u8bf7\u6c42")
+        self.assertFalse(response["result"]["isError"])
+        self.assertEqual(json.loads(response["result"]["content"][0]["text"]),
+                         {"status": "ok", "receipt": arguments})
+        self.assertEqual(self.calls, [ToolCall("mcp-1", "save_note", arguments)])
+
+    def test_initialization_and_tool_allowlist_gate_execution(self):
+        bridge = self.bridge()
+        bridge.activate()
+        peer = self.peer(bridge)
+        self.exchange(bridge, peer, {"capability": self.environment(bridge)["CATER_MCP_CAPABILITY"]})
+        call = lambda i: self.request(i, "tools/call", name="save_note", arguments={})
+        self.assertEqual(self.exchange(bridge, peer, call(1))["response"]["error"]["code"], -32600)
+        self.exchange(bridge, peer, self.request(2, "initialize", protocolVersion="2025-06-18"))
+        self.assertEqual(self.exchange(bridge, peer, call(3))["response"]["error"]["code"], -32600)
+        self.exchange(bridge, peer, self.notification("notifications/initialized"))
+        for identifier, params in enumerate((
+            {"name": "undeclared"}, {"name": "../save_note"}, {"name": "SAVE_NOTE"},
+            {"name": "save_note", "arguments": []}, {"name": "save_note", "arguments": None},
+        ), 4):
+            result = self.exchange(bridge, peer, self.request(identifier, "tools/call", **params))
+            self.assertEqual(result["response"]["error"]["code"], -32602)
+        self.assertEqual(self.calls, [])
+        self.assertFalse(self.exchange(bridge, peer, call(10))["response"]["result"]["isError"])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_pump_rejects_other_thread_and_reentrancy_but_close_is_cross_thread(self):
+        bridge = self.bridge()
+        errors = []
+
+        def wrong_thread():
+            try:
+                bridge.pump(0.01)
+            except BaseException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=wrong_thread)
+        thread.start()
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], mcp_host.ToolBridgeError)
+        peer = self.session(bridge)
+        def reentrant_execute(call):
+            with self.assertRaises(mcp_host.ToolBridgeError):
+                reentrant.pump(0.01)
+            return self.execute(call)
+        reentrant = self.bridge(execute=reentrant_execute)
+        reentrant_peer = self.session(reentrant)
+        result = self.exchange(reentrant, reentrant_peer, self.request(
+            1, "tools/call", name="save_note"))
+        self.assertFalse(result["response"]["result"]["isError"])
+        closer = threading.Thread(target=bridge.close)
+        closer.start()
+        closer.join(2)
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(peer[1].readline(), b"")
+        self.assert_closed(bridge)
+        bridge.close()
+
+    def test_unauthenticated_bad_frames_drop_only_that_connection(self):
+        bridge = self.bridge()
+        bridge.activate()
+        # A smaller bound exercises both complete and unterminated oversized frames.
+        with patch.object(mcp_host, "MAX_BYTES", 1024):
+            for payload in (
+                self.request(1, "tools/call", name="save_note"),
+                {"capability": "wrong"}, {"capability": "\u4f2a\u9020"},
+                {"capability": "\u4f2a\u9020\ud800"},
+                {"capability": None}, [], b"\xff\n",
+                b'{"capability":"one","capability":"two"}\n',
+                b"x" * 1025 + b"\n", b"x" * 1025,
+            ):
+                with self.subTest(payload_type=type(payload).__name__):
+                    peer = self.peer(bridge)
+                    body = payload if isinstance(payload, bytes) else json_utf8(payload) + b"\n"
+                    def transfer():
+                        peer[0].sendall(body)
+                        return peer[1].readline()
+                    reply, errors = self.run_io(bridge, transfer)
+                    self.assertEqual(reply, b"")
+                    self.assertEqual(errors, [])
+                    peer[1].close()
+                    peer[0].close()
+                    self.assertEqual(self.calls, [])
+                    bridge.server_config()
+        peer = self.session(bridge)
+        self.assertFalse(self.exchange(bridge, peer, self.request(
+            1, "tools/call", name="save_note"))["response"]["result"]["isError"])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_duplicate_call_id_closes_session_without_replay(self):
+        for identifier in (7, "same"):
+            with self.subTest(identifier=identifier):
+                bridge = self.bridge()
+                peer = self.session(bridge)
+                request = self.request(identifier, "tools/call", name="save_note")
+                before = len(self.calls)
+                self.exchange(bridge, peer, request)
+                self.exchange(bridge, peer, request, rejected=True)
+                self.assertEqual(len(self.calls), before + 1)
+                self.assert_closed(bridge)
+
+    def test_typed_ids_are_distinct_and_request_budget_stops_execution(self):
+        bridge = self.bridge()
+        peer = self.session(bridge)
+        with patch.object(mcp_host, "MAX_REQUESTS", 3):
+            for identifier in (1, "1"):
+                self.exchange(bridge, peer, self.request(identifier, "tools/call", name="save_note"))
+            self.exchange(bridge, peer, self.request(2, "tools/call", name="save_note"), rejected=True)
+        self.assertEqual([call.id for call in self.calls], ["mcp-1", "mcp-2"])
+
+    def assert_callback_exception_aborts(self, error):
+        calls = []
+
+        def execute(call):
+            self.assertEqual(threading.get_ident(), self.owner)
+            calls.append(call)
+            raise error
+
+        bridge = self.bridge(execute=execute)
+        peer = self.session(bridge)
+        # Pipeline a second call to prove the obsolete run cannot continue.
+        peer[0].sendall(b"".join(
+            json_utf8(self.request(identifier, "tools/call", name="save_note")) + b"\n"
+            for identifier in (1, 2)
+        ))
+        with self.assertRaises(type(error)) as raised:
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                bridge.pump(0.01)
+            self.fail("Executor exception did not reach the pump owner")
+        self.assert_closed(bridge)
+        self.assertEqual(calls, [ToolCall("mcp-1", "save_note", {})])
+        self.assertEqual(peer[1].readline(), b"", "Callback exception leaked onto the protocol")
+        self.assertIs(raised.exception, error)
+
+    def test_callback_base_exceptions_close_and_propagate_unchanged(self):
+        for error in (
+            RuntimeError("private-token private-arguments private-path"),
+            ValueError("private invalid execution state"),
+            OSError("private executor filesystem failure"),
+            mcp_host.ToolBridgeError("private executor control failure"),
+            KeyboardInterrupt("fixture interrupt"),
+            SystemExit(17),
+            GeneratorExit("fixture generator closed"),
+        ):
+            with self.subTest(exception_type=type(error).__name__):
+                self.assert_callback_exception_aborts(error)
+
+    def test_scope_changed_closes_bridge_and_never_executes_queued_call(self):
+        class ScopeChanged(Exception):
+            pass
+
+        self.assert_callback_exception_aborts(ScopeChanged("private obsolete scope"))
+
+    def test_invalid_receipt_is_redacted_with_unknown_effect_warning(self):
+        for mode in ("not_dict", "nan", "oversize"):
+            with self.subTest(mode=mode):
+                effects = []
+                def execute(call):
+                    effects.append(call)
+                    return {"not_dict": [], "nan": {"value": float("nan")},
+                            "oversize": {"status": "ok", "text": "x" * 2048}}[mode]
+                bridge = self.bridge(execute=execute)
+                peer = self.session(bridge)
+                with patch.object(mcp_host, "MAX_BYTES", 1024):
+                    response = self.exchange(bridge, peer, self.request(
+                        1, "tools/call", name="save_note", arguments={"secret": "private-arguments"}))
+                result = response["response"]["result"]
+                self.assertTrue(result["isError"])
+                message = result["content"][0]["text"]
+                self.assertIn("effects may have occurred", message)
+                self.assertIn("receipts before retrying", message)
+                for private in ("private-token", "private-arguments", "private-path",
+                                self.environment(bridge)["CATER_MCP_CAPABILITY"]):
+                    self.assertNotIn(private, json.dumps(response))
+                self.assertEqual(len(effects), 1)
+                self.exchange(bridge, peer, self.request(2, "ping"))
+                self.assertEqual(len(effects), 1)
+
+    def test_tool_error_receipt_remains_a_tool_result(self):
+        receipt = {"status": "error", "complete": False, "outcome": "effects_unknown",
+                   "message": "\u8bf7\u6838\u5bf9\u56de\u6267"}
+        bridge = self.bridge(execute=lambda call: receipt)
+        peer = self.session(bridge)
+        result = self.exchange(bridge, peer, self.request(
+            1, "tools/call", name="save_note"))["response"]["result"]
+        self.assertTrue(result["isError"])
+        self.assertEqual(json.loads(result["content"][0]["text"]), receipt)
+        self.assertEqual(self.exchange(bridge, peer, self.request(2, "ping"))["response"]["result"], {})
+        self.assertTrue(self.exchange(bridge, peer, self.request(
+            3, "tools/call", name="save_note"))["response"]["result"]["isError"])
+
+    def test_result_limit_includes_rpc_and_relay_envelopes(self):
+        limit = 1024
+        receipt = {"status": "ok", "text": ""}
+        result = {"content": [{"type": "text", "text": json_utf8(receipt).decode()}], "isError": False}
+        receipt["text"] = "x" * (limit - len(json_utf8(result)))
+        def execute(call):
+            self.execute(call)
+            return receipt
+        bridge = self.bridge(execute=execute)
+        peer = self.session(bridge)
+        # The result fits, but the complete wire frame needs additional bytes.
+        with patch.object(mcp_host, "MAX_BYTES", limit):
+            response = self.exchange(bridge, peer, self.request(
+                1, "tools/call", name="save_note"))["response"]
+        self.assertTrue(response["result"]["isError"])
+        self.assertIn("effects may have occurred", response["result"]["content"][0]["text"])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_request_byte_limit_accepts_exact_utf8_boundary_and_rejects_one_more(self):
+        bridge = self.bridge()
+        peer = self.session(bridge)
+        text = "\u4e2d" * 100
+        request = self.request(1, "tools/call", name="save_note", arguments={"text": text})
+        frame = json_utf8(request)
+        self.assertGreater(len(frame), len(frame.decode("utf-8")))
+        limit = 1024
+        with patch.object(mcp_host, "MAX_BYTES", limit):
+            exact = frame + b" " * (limit - len(frame)) + b"\n"
+            self.assertFalse(self.exchange(bridge, peer, exact)["response"]["result"]["isError"])
+            request["id"] = 2
+            frame = json_utf8(request)
+            oversized = frame + b" " * (limit + 1 - len(frame)) + b"\n"
+            self.exchange(bridge, peer, oversized, rejected=True)
+        self.assertEqual(self.calls, [ToolCall("mcp-1", "save_note", {"text": text})])
+
+    def test_revoke_during_execution_preserves_receipt_and_blocks_next_call(self):
+        def execute(call):
+            bridge.revoke()
+            return self.execute(call)
+        bridge = self.bridge(execute=execute)
+        peer = self.session(bridge)
+        first = self.exchange(bridge, peer, self.request(
+            1, "tools/call", name="save_note"))["response"]
+        self.assertFalse(first["result"]["isError"])
+        second = self.exchange(bridge, peer, self.request(
+            2, "tools/call", name="save_note"))["response"]
+        self.assertEqual(second["error"]["code"], -32600)
+        self.assertEqual(len(self.calls), 1)
+        with self.assertRaises(mcp_host.ToolBridgeError):
+            bridge.activate()
+
+    def test_cross_thread_close_during_execution_does_not_replay_effect(self):
+        effects, close_errors = [], []
+        def execute(call):
+            effects.append(call)
+            def close():
+                try:
+                    bridge.close()
+                except BaseException as exc:
+                    close_errors.append(exc)
+            thread = threading.Thread(target=close)
+            thread.start()
+            thread.join(2)
+            self.assertFalse(thread.is_alive())
+            return {"status": "ok", "saved": True}
+        bridge = self.bridge(execute=execute)
+        peer = self.session(bridge)
+        self.exchange(bridge, peer, self.request(
+            1, "tools/call", name="save_note"), rejected=True)
+        self.assertEqual(close_errors, [])
+        self.assertEqual(len(effects), 1)
+        self.assert_closed(bridge)
+
+    def test_authenticated_malformed_frames_close_without_execution(self):
+        invalid = (
+            b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"save_note","arguments":{"text":"\xff"}}}\n',
+            b'{"jsonrpc":"2.0","id":1,"id":2,"method":"tools/call","params":{"name":"save_note"}}\n',
+            b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"save_note","arguments":{"x":1,"x":2}}}\n',
+            b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"save_note","arguments":{"x":NaN}}}\n',
+            b"[]\n", b"x" * 1025 + b"\n", b"x" * 1025,
+        )
+        for index, frame in enumerate(invalid):
+            with self.subTest(case=index):
+                bridge = self.bridge()
+                peer = self.session(bridge)
+                with patch.object(mcp_host, "MAX_BYTES", 1024):
+                    self.exchange(bridge, peer, frame, rejected=True)
+                self.assert_closed(bridge)
+                self.assertEqual(self.calls, [])
+
+    def test_partial_frame_and_unauthenticated_disconnect_leave_no_executor_call(self):
+        bridge = self.bridge(timeout=0.05)
+        peer = self.peer(bridge)
+        peer[0].sendall(b'{"capability":')
+        reply, errors = self.run_io(bridge, lambda: peer[1].readline())
+        self.assertEqual((reply, errors), (b"", []))
+        peer = self.peer(bridge)
+        peer[1].close()
+        peer[0].close()
+        self.assertFalse(bridge.pump(0.01))
+        peer = self.session(bridge)
+        self.exchange(bridge, peer, b'{"jsonrpc":', rejected=True)
+        self.assertEqual(self.calls, [])
+        self.assert_closed(bridge)
+
+    def test_unauthenticated_tcp_reset_preserves_listener_for_normal_session(self):
+        bridge = self.bridge()
+        bridge.activate()
+        configuration = bridge.server_config()
+        peer = self.peer(bridge)
+        peer[0].sendall(b'{"capability":')
+        self.assertFalse(bridge.pump(0.01))
+        # Abort a real TCP connection, including any buffered partial auth frame.
+        linger = struct.pack("HH" if os.name == "nt" else "ii", 1, 0)
+        peer[0].setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)
+        peer[1].close()
+        peer[0].close()
+        observed = []
+        original_recv = socket.socket.recv
+
+        def recv(connection, *args, **kwargs):
+            try:
+                return original_recv(connection, *args, **kwargs)
+            except ConnectionResetError as exc:
+                observed.append(exc)
+                raise
+
+        with patch.object(socket.socket, "recv", recv):
+            self.assertFalse(bridge.pump(0.1))
+        self.assertEqual(len(observed), 1, "Fixture must exercise TCP RST, not graceful EOF")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(bridge.server_config(), configuration)
+        healthy = self.session(bridge)
+        response = self.exchange(bridge, healthy, self.request(
+            1, "tools/call", name="save_note", arguments={"text": "after reset"}))
+        self.assertFalse(response["response"]["result"]["isError"])
+        self.assertEqual(self.calls, [ToolCall("mcp-1", "save_note", {"text": "after reset"})])
+
+    def test_authenticated_disconnect_or_close_never_reopens_listener(self):
+        for action in ("disconnect", "close"):
+            with self.subTest(action=action):
+                bridge = self.bridge()
+                port = int(self.environment(bridge)["CATER_MCP_PORT"])
+                peer = self.session(bridge)
+                if action == "disconnect":
+                    peer[1].close()
+                    peer[0].close()
+                    with self.assertRaises(mcp_host.ToolBridgeError):
+                        bridge.pump(0.01)
+                else:
+                    bridge.close()
+                self.assert_closed(bridge)
+                with self.assertRaises(OSError):
+                    with socket.create_connection(("127.0.0.1", port), timeout=0.2):
+                        pass
+                self.assertEqual(self.calls, [])
+
+    def test_cancellation_queued_during_execution_cannot_retract_effect(self):
+        effects = []
+        def execute(call):
+            effects.append(call.arguments)
+            peer[0].sendall(json_utf8(self.notification(
+                "notifications/cancelled", requestId=1, reason="fixture cancellation")) + b"\n")
+            return {"status": "ok", "saved": True}
+        bridge = self.bridge(execute=execute)
+        peer = self.session(bridge)
+        result = self.exchange(bridge, peer, self.request(
+            1, "tools/call", name="save_note", arguments={"text": "persisted"}))
+        self.assertEqual(json.loads(result["response"]["result"]["content"][0]["text"]),
+                         {"status": "ok", "saved": True})
+        self.assertFalse(result["response"]["result"]["isError"])
+        # The notification may already have been pumped while the reader finished.
+        reply, errors = self.run_io(bridge, lambda: peer[1].readline())
+        self.assertEqual(json.loads(reply), {"response": None})
+        self.assertEqual(errors, [])
+        self.exchange(bridge, peer, self.request(2, "ping"))
+        self.assertEqual(effects, [{"text": "persisted"}])
+
+    def relay(self, bridge, frames):
+        config = bridge.server_config()
+        # No model credentials, user Python paths, or project runtime state.
+        env = {key: os.environ[key] for key in ("SystemRoot", "WINDIR", "TEMP", "TMP")
+               if key in os.environ}
+        env.update({row["name"]: row["value"] for row in config["env"]})
+        with tempfile.TemporaryDirectory() as cwd:
+            process = subprocess.Popen(
+                [config["command"], *config["args"]], env=env, cwd=cwd,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            try:
+                output, errors = self.run_io(
+                    bridge, lambda: process.communicate(input=frames, timeout=8), disconnect=True)
+                self.assertIsNotNone(process.poll())
+                return process.returncode, output[0], output[1], errors
+            finally:
+                # This fixture owns the subprocess, as ACP's ProcessScope does
+                # in production. Socket close alone cannot stop an idle stdin reader.
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=5)
+                for pipe in (process.stdin, process.stdout, process.stderr):
+                    pipe.close()
+
+    def transcript(self, *requests):
+        messages = [
+            self.request("init", "initialize", protocolVersion="2025-06-18",
+                         capabilities={}, clientInfo={"name": "offline-fixture", "version": "1"}),
+            self.notification("notifications/initialized"), *requests,
+        ]
+        return b"".join(json_utf8(message, allow_nan=False) + b"\n" for message in messages)
+
+    def test_real_relay_workspace_read_write_cas_and_owner_sqlite_audit(self):
+        temporary = self.enterContext(tempfile.TemporaryDirectory())
+        root = Path(temporary) / "workspace"
+        root.mkdir()
+        executor = WorkspaceExecutor(WorkspacePolicy.from_dict({"root": str(root), "mode": "edit"}))
+        self.tools = executor.schemas()
+        database = sqlite3.connect(Path(temporary) / "audit.db")
+        self.addCleanup(database.close)
+        database.execute("CREATE TABLE receipts (call_id TEXT, tool TEXT, receipt TEXT)")
+        original, updated = "\u4e2d\u6587\u521d\u7a3f\r\n", "\u4e2d\u6587\u4fee\u8ba2\n"
+        original_sha = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        updated_sha = hashlib.sha256(updated.encode("utf-8")).hexdigest()
+
+        def execute(call):
+            self.assertEqual(threading.get_ident(), self.owner)
+            self.calls.append(call)
+            receipt = executor.execute(call.name, call.arguments)
+            database.execute("INSERT INTO receipts VALUES (?, ?, ?)",
+                             (call.id, call.name, json.dumps(receipt)))
+            database.commit()
+            return receipt
+
+        bridge = self.bridge(execute=execute)
+        bridge.activate()
+        code, stdout, stderr, errors = self.relay(bridge, self.transcript(
+            self.request(1, "tools/list"),
+            self.request(2, "tools/call", name="workspace_write",
+                         arguments={"path": "note.txt", "content": original, "expected_sha256": None}),
+            self.request(3, "tools/call", name="workspace_read", arguments={"path": "note.txt"}),
+            self.request(4, "tools/call", name="workspace_write",
+                         arguments={"path": "note.txt", "content": updated, "expected_sha256": original_sha}),
+            self.request(5, "tools/call", name="workspace_write",
+                         arguments={"path": "note.txt", "content": "stale", "expected_sha256": original_sha}),
+            self.notification("notifications/cancelled", requestId=4),
+            self.request(6, "tools/call", name="workspace_read", arguments={"path": "note.txt"}),
+            self.request(7, "ping"),
+        ))
+        self.assertEqual((code, stderr), (0, b""))
+        rows = [json.loads(line) for line in stdout.splitlines()]
+        self.assertEqual([row["id"] for row in rows], ["init", 1, 2, 3, 4, 5, 6, 7])
+        self.assertEqual(rows[0]["result"]["protocolVersion"], "2025-06-18")
+        self.assertEqual(rows[1]["result"]["tools"], [
+            {"name": tool["name"], "description": tool["description"], "inputSchema": tool["input_schema"]}
+            for tool in executor.schemas()
+        ])
+        self.assertNotIn("workspace_run", {tool["name"] for tool in rows[1]["result"]["tools"]})
+        results = [row["result"] for row in rows[2:7]]
+        self.assertEqual([result["isError"] for result in results], [False, False, False, True, False])
+        receipts = [json.loads(result["content"][0]["text"]) for result in results]
+        self.assertTrue(receipts[0]["created"])
+        self.assertEqual(receipts[0]["sha256"], original_sha)
+        self.assertEqual(receipts[1]["content"], original)
+        self.assertEqual(receipts[1]["sha256"], original_sha)
+        self.assertEqual(receipts[1]["bytes"], len(original.encode("utf-8")))
+        self.assertFalse(receipts[2]["created"])
+        self.assertEqual(receipts[2]["sha256"], updated_sha)
+        self.assertEqual(receipts[3]["error"]["code"], "conflict")
+        self.assertEqual(receipts[4]["content"], updated)
+        self.assertEqual(receipts[4]["sha256"], updated_sha)
+        self.assertEqual((root / "note.txt").read_bytes(), updated.encode("utf-8"))
+        self.assertEqual(hashlib.sha256((root / "note.txt").read_bytes()).hexdigest(), updated_sha)
+        self.assertEqual(sorted(path.name for path in root.iterdir()), ["note.txt"])
+        self.assertEqual(rows[7]["result"], {})
+        self.assertIn("\u4e2d\u6587".encode("utf-8"), stdout)
+        with closing(sqlite3.connect(Path(temporary) / "audit.db")) as observer:
+            audit = observer.execute("SELECT call_id, tool, receipt FROM receipts ORDER BY rowid").fetchall()
+        self.assertEqual([row[:2] for row in audit], [
+            (f"mcp-{index}", name) for index, name in enumerate(
+                ("workspace_write", "workspace_read", "workspace_write", "workspace_write", "workspace_read"), 1)
+        ])
+        self.assertEqual([json.loads(row[2]) for row in audit], receipts)
+        self.assertEqual(len(self.calls), 5)
+        # EOF may be observed before communicate finishes or on the following pump.
+        if not errors:
+            with self.assertRaises(mcp_host.ToolBridgeError):
+                bridge.pump(0.1)
+        self.assert_closed(bridge)
+
+    def test_real_relay_large_chinese_receipt_does_not_expand_to_ascii(self):
+        text = "\u4e2d" * (mcp_host.MAX_BYTES // 4)
+        bridge = self.bridge(execute=lambda call: {"status": "ok", "text": text})
+        bridge.activate()
+        code, stdout, stderr, _ = self.relay(bridge, self.transcript(
+            self.request(1, "tools/call", name="save_note")))
+        self.assertEqual((code, stderr), (0, b""))
+        rows = stdout.splitlines()
+        self.assertEqual(len(rows), 2)
+        self.assertLessEqual(len(rows[1]), mcp_host.MAX_BYTES)
+        result = json.loads(rows[1])["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual(json.loads(result["content"][0]["text"])["text"], text)
+
+    def test_real_relay_duplicate_id_exits_without_replay_or_secret_output(self):
+        bridge = self.bridge()
+        bridge.activate()
+        capability = self.environment(bridge)["CATER_MCP_CAPABILITY"].encode()
+        call = self.request(1, "tools/call", name="save_note", arguments={"text": "once"})
+        code, stdout, stderr, _ = self.relay(bridge, self.transcript(call, call))
+        self.assertEqual((code, stderr), (1, b""))
+        self.assertEqual([json.loads(line)["id"] for line in stdout.splitlines()], ["init", 1])
+        self.assertNotIn(capability, stdout + stderr)
+        self.assertEqual(len(self.calls), 1)
+        self.assert_closed(bridge)
+
+    def test_real_relay_inactive_handshake_lists_tools_but_rejects_business_call(self):
+        bridge = self.bridge()
+        code, stdout, stderr, _ = self.relay(bridge, self.transcript(
+            self.request(1, "tools/list"), self.request(2, "tools/call", name="save_note")))
+        self.assertEqual((code, stderr), (0, b""))
+        rows = [json.loads(line) for line in stdout.splitlines()]
+        self.assertEqual([row["id"] for row in rows], ["init", 1, 2])
+        self.assertEqual(rows[1]["result"]["tools"][0]["name"], "save_note")
+        self.assertEqual(rows[2]["error"]["code"], -32600)
+        self.assertEqual(self.calls, [])
+
+    def test_real_relay_host_close_during_exchange_exits_without_retry_or_queued_execution(self):
+        def execute(call):
+            receipt = self.execute(call)
+            bridge.close()
+            return receipt
+        bridge = self.bridge(execute=execute)
+        bridge.activate()
+        code, stdout, stderr, _ = self.relay(bridge, self.transcript(
+            self.request(1, "tools/call", name="save_note"),
+            self.request(2, "tools/call", name="save_note")))
+        self.assertEqual((code, stderr), (1, b""))
+        self.assertEqual([json.loads(line)["id"] for line in stdout.splitlines()], ["init"])
+        self.assertEqual(len(self.calls), 1)
+        self.assert_closed(bridge)
+
+    def test_real_relay_rejects_invalid_utf8_duplicate_keys_and_oversize(self):
+        for index, frame in enumerate((
+            b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"save_note","arguments":{"x":"\xff"}}}\n',
+            b'{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"save_note","name":"other"}}\n',
+            b"x" * (mcp_host.MAX_BYTES + 1) + b"\n",
+            b'{"jsonrpc":"2.0"',
+        )):
+            with self.subTest(case=index):
+                bridge = self.bridge()
+                bridge.activate()
+                code, stdout, stderr, _ = self.relay(bridge, self.transcript() + frame)
+                self.assertEqual((code, stderr), (1, b""))
+                self.assertEqual([json.loads(line)["id"] for line in stdout.splitlines()], ["init"])
+                self.assertEqual(self.calls, [])
 
 
 if __name__ == "__main__":
