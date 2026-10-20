@@ -116,6 +116,11 @@ class TeamDelivery:
                 metadata["truncated"] = result["truncated"]
             if any(isinstance(result.get(key), dict) and result[key].get("truncated") is True for key in ("stdout", "stderr")):
                 metadata["truncated"] = True
+            encoding = {key: result[key]["utf8_valid"] for key in ("stdout", "stderr")
+                        if isinstance(result.get(key), dict) and "utf8_valid" in result[key]
+                        and (type(result[key]["utf8_valid"]) is bool or result[key]["utf8_valid"] is None)}
+            if encoding:
+                metadata["output_utf8_valid"] = encoding
             if name == "browser_check":
                 checked = result.get("checked_artifacts")
                 if (result.get("scope_current") is not True or result.get("artifacts_unchanged") is not True
@@ -233,6 +238,15 @@ class TeamDelivery:
                 lines += ["", "来源事件哈希：" + str(ref.get("source_hash", "")), ""]
                 if ref.get("truncated") is True:
                     lines += ["回执正文仅保留部分内容。", ""]
+                encoding = ref.get("output_utf8_valid")
+                if isinstance(encoding, dict):
+                    for stream, label in (("stdout", "标准输出"), ("stderr", "错误输出")):
+                        if stream not in encoding:
+                            continue
+                        if encoding[stream] is False:
+                            lines += [f"{label}包含无效 UTF-8 字节，显示可能有信息损失；不表示本段引文本身损坏，也不判定命令失败。原始编码未确定。", ""]
+                        elif encoding[stream] is None:
+                            lines += [f"{label}的 UTF-8 有效性尚未确定。", ""]
         return "\n".join(lines)
 
     def read(self, task_id, arguments):

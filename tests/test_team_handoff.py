@@ -185,6 +185,48 @@ class TeamHandoffTests(unittest.TestCase):
         schema = next(t for t in self.rt.team._schemas(self.rt.organization.leader, None) if t["name"] == "finish_work")
         self.assertIn("24KB", schema["input_schema"]["properties"]["handoff"]["description"])
 
+    def test_encoding_limits_survive_delivery_read_and_markdown_without_rejecting_ascii_quote(self):
+        capture = _Capture()
+        capture.drain(io.BytesIO(b"count 12\n" + b"x" * 20000 + b"\xff" + b"y" * 20000))
+        output = capture.summary(record_output=True)
+        self.assertNotIn("\ufffd", output["excerpt"] + output["tail_excerpt"])
+        receipt = self.receipt(result={"status": "ok", "exit_code": 0, "stdout": output,
+                                       "stderr": {"excerpt": "", "utf8_valid": None}})
+        result = self.finish(self.handoff([{"source_seq": receipt.seq, "quote": "count 12"}]))
+        self.assertEqual(result["status"], "ok")
+        event, = self.events("team.objective_completed")
+        note = self.rt.team.delivery.read(self.task, {})["delivery"]["handoff"]
+        ref, = note["evidence"]
+        self.assertEqual(ref["output_utf8_valid"], {"stdout": False, "stderr": None})
+        self.assertEqual((ref["status"], ref["exit_code"], ref["quote"]), ("ok", 0, "count 12"))
+        self.assertEqual(ref["source_hash"], receipt.hash)
+        rendered = self.rt.team.delivery.markdown(event)
+        self.assertIn("标准输出包含无效 UTF-8 字节", rendered)
+        self.assertIn("不表示本段引文本身损坏", rendered)
+        self.assertIn("错误输出的 UTF-8 有效性尚未确定", rendered)
+
+    def test_encoding_evidence_retains_true_without_backfilling_legacy_or_coercing_values(self):
+        for supplied, expected in (({}, None), ({"utf8_valid": "false"}, None),
+                                   ({"utf8_valid": 0}, None), ({"utf8_valid": []}, None),
+                                   ({"utf8_valid": True}, {"stdout": True}),
+                                   ({"utf8_valid": None}, {"stdout": None})):
+            with self.subTest(supplied=supplied):
+                receipt = self.receipt(result={"status": "ok", "stdout": {"excerpt": "value", **supplied}})
+                ref, = self.normalize(self.handoff([{"source_seq": receipt.seq, "quote": "value"}]))["evidence"]
+                if expected is None:
+                    self.assertNotIn("output_utf8_valid", ref)
+                else:
+                    self.assertEqual(ref["output_utf8_valid"], expected)
+
+    def test_valid_output_and_legacy_delivery_do_not_render_encoding_warning(self):
+        receipt = self.receipt(result={"status": "ok", "stdout": {"excerpt": "value", "utf8_valid": True}})
+        self.finish(self.handoff([{"source_seq": receipt.seq, "quote": "value"}]))
+        event, = self.events("team.objective_completed")
+        self.assertNotIn("UTF-8", self.rt.team.delivery.markdown(event))
+        legacy = copy.deepcopy(event)
+        del legacy.payload["handoff"]["evidence"][0]["output_utf8_valid"]
+        self.assertNotIn("UTF-8", self.rt.team.delivery.markdown(legacy))
+
     def test_untrusted_and_mismatched_receipts_are_not_sources(self):
         cases = [(Actor.system("other"), {}), (HOST, {"run_id": "other-run"}),
                  (HOST, {"role": self.manager}), (HOST, {"name": "workspace_write"}),

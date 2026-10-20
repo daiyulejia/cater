@@ -136,6 +136,10 @@ test('切换任务清除展开状态，同序号交付不会串用说明', async
 })
 
 const invalid = [null, [], '原始字符串', {}, { ...handoff(), version: 2 }, { ...handoff(), why: ' ' },
+  ...[null, undefined, false, [], 'false', { stdout: 'false' }, { stderr: 0 }, { stdout: undefined },
+    { stdout: false, stderr: [] }, { stdout: false, other: true }].map(output_utf8_valid => ({
+      ...handoff(), evidence: [{ ...handoff().evidence[1], output_utf8_valid }],
+    })),
   ...['changed', 'impact', 'alternatives', 'reproduce', 'limits', 'evidence'].flatMap((key) => [
     { ...handoff(), [key]: undefined }, { ...handoff(), [key]: {} }, { ...handoff(), [key]: [null] },
   ]),
@@ -211,4 +215,55 @@ test('历史失败与不完整工具记录照实展示，不因伙伴同意而�
   expect(screen.getByText(/记录状态：伙伴同意/)).toBeTruthy()
   expect(screen.getByText('这是伙伴的复核意见，不代表工具执行或验收通过。')).toBeTruthy()
   expect(container.textContent).not.toMatch(/记录状态：执行成功|所有检查已通过/)
+})
+
+test.each([
+  { stdout: false, stderr: null }, { stdout: null, stderr: false },
+  { stdout: true, stderr: false }, { stderr: null }, {},
+] as const)('交付按流展示编码限制，保留引用与执行状态：%j', output_utf8_valid => {
+  const saved = handoff()
+  Object.assign(saved.evidence[1], { output_utf8_valid, truncated: true, quote: 'count=13/32，合法替换字符：\uFFFD' })
+  const evidence = completion(10, saved)
+  expect(nativeHandoff(evidence)).toBe(saved)
+  const snapshot = JSON.stringify(evidence)
+  const { container } = render(<MessageDetails item={{ id: 10, kind: 'agent', evidence } as ChatItem} />)
+  const fold = container.querySelector('details')!
+  expect(fold.open).toBe(false)
+  fireEvent.click(fold.querySelector('summary')!)
+  const source = container.querySelectorAll('blockquote')[1].closest('li')!
+  for (const [key, name] of [['stdout', '标准输出'], ['stderr', '错误输出']] as const) {
+    const state = (output_utf8_valid as Record<string, unknown>)[key]
+    const hint = state === false ? '已采集输出含无效 UTF-8；不代表当前引用片段已损坏。'
+      : state === null ? '输出流的 UTF-8 有效性未知。' : undefined
+    if (hint) expect(within(source).getAllByText(`${name}：${hint}`)).toHaveLength(1)
+    else expect(source.textContent).not.toContain(`${name}：`)
+  }
+  expect(source.querySelector('blockquote')?.textContent).toBe(saved.evidence[1].quote)
+  expect(source.textContent).toContain('退出码：0')
+  expect(source.textContent).toContain('回执采集完整')
+  expect(source.textContent).toContain('回执正文仅保留部分内容。')
+  expect(source.textContent).not.toMatch(/进程失败|执行失败|GBK|CP936/)
+  expect(JSON.stringify(evidence)).toBe(snapshot)
+})
+
+test('历史缺失编码字段不回填，合法替换字符不触发警告', () => {
+  const saved = handoff()
+  saved.evidence[1].quote = '合法字符：\uFFFD'
+  const evidence = completion(10, saved)
+  expect(nativeHandoff(evidence)?.evidence[1]).not.toHaveProperty('output_utf8_valid')
+  const { container } = render(<MessageDetails item={{ id: 10, kind: 'agent', evidence } as ChatItem} />)
+  expect(container.textContent).not.toContain('UTF-8')
+})
+
+test('无效UTF-8与未完成采集同时展示，不暗示已取得完整输出', () => {
+  const saved = handoff()
+  Object.assign(saved.evidence[1], { complete: false, output_utf8_valid: { stdout: false } })
+  const evidence = completion(10, saved)
+  const { container } = render(<MessageDetails item={{ id: 10, kind: 'agent', evidence } as ChatItem} />)
+  fireEvent.click(container.querySelector('summary')!)
+  const source = container.querySelectorAll('blockquote')[1].closest('li')!
+  expect(within(source).getByText('标准输出：已采集输出含无效 UTF-8；不代表当前引用片段已损坏。')).toBeTruthy()
+  expect(within(source).getByText('回执采集未完成')).toBeTruthy()
+  expect(source.textContent).not.toMatch(/完整输出流|回执采集完整|执行失败/)
+  expect(source.querySelector('blockquote')?.textContent).toBe(saved.evidence[1].quote)
 })

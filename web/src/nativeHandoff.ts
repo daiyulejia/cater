@@ -14,6 +14,7 @@ export type HandoffEvidence = {
   exit_code?: number
   complete?: boolean
   truncated?: boolean
+  output_utf8_valid?: Partial<Record<'stdout' | 'stderr', boolean | null>>
 }
 
 export type NativeHandoff = {
@@ -31,6 +32,11 @@ const record = (value: unknown): value is Record<string, unknown> => value !== n
 const text = (value: unknown): value is string => typeof value === 'string' && value.trim().length > 0
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(text)
 
+export function isOutputUtf8Validity(value: unknown): value is NonNullable<HandoffEvidence['output_utf8_valid']> {
+  return record(value) && Object.entries(value).every(([key, state]) =>
+    ['stdout', 'stderr'].includes(key) && (state === null || typeof state === 'boolean'))
+}
+
 // The server owns source validation. Only read its saved completion, never a speaker's self-report.
 export function nativeHandoff(event: TeamEvent): NativeHandoff | undefined {
   if (event.type !== 'team.objective_completed' || !isTeamHost(event)) return undefined
@@ -46,6 +52,7 @@ export function nativeHandoff(event: TeamEvent): NativeHandoff | undefined {
       || ('exit_code' in evidence && !Number.isSafeInteger(evidence.exit_code))
       || ('complete' in evidence && typeof evidence.complete !== 'boolean')) return undefined
     if ('truncated' in evidence && typeof evidence.truncated !== 'boolean') return undefined
+    if ('output_utf8_valid' in evidence && !isOutputUtf8Validity(evidence.output_utf8_valid)) return undefined
   }
   return value as NativeHandoff
 }

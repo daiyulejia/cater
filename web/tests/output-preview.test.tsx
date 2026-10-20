@@ -130,7 +130,7 @@ test.each(['\n', '\r\n', '\r'])('多短行首尾双限制，高度受限且尾�
 })
 
 test('原生工具与旧工作区沿用折叠入口，紧凑尾部和两流均显示', () => {
-  const result = { status: 'error', outcome: 'failed', exit_code: 1, stdout: stream(), stderr: stream(false) }
+  const result = { status: 'error', outcome: 'failed', exit_code: 1, stdout: { ...stream(), utf8_valid: false }, stderr: { ...stream(false), utf8_valid: null } }
   const native = render(<TeamToolProgress events={[receipt('team.tool_finished', { name: 'workspace_run', result })]} names={{}} />)
   const fold = within(native.container).getByText('工具过程 · 1 项').closest('details')!
   expect(fold.open).toBe(false)
@@ -150,10 +150,14 @@ test('原生工具与旧工作区沿用折叠入口，紧凑尾部和两流均�
   fireEvent.click(legacyFold.querySelector('summary')!)
   expect(visible(legacyFold)).toContain('FATAL: 最后错误')
   expect(legacyFold.querySelectorAll('[role="group"]')).toHaveLength(2)
+  for (const consumer of [fold, legacyFold]) {
+    expect(within(consumer).getAllByText('已采集输出含无效 UTF-8；不代表当前引用片段已损坏。')).toHaveLength(1)
+    expect(within(consumer).getAllByText('输出流的 UTF-8 有效性未知。')).toHaveLength(1)
+  }
 })
 
 test('事件详情与交付保留可引用的尾部独立片段和采集/字节/SHA事实', () => {
-  const output = stream(false)
+  const output = { ...stream(false), utf8_valid: false }
   const audit = render(<EventDetails event={receipt('verification.completed', { stdout: output, stderr: stream(), outcome: 'failed', exit_code: 1 })} />)
   const tail = within(audit.container).getByLabelText('标准输出 · 已采集末尾（已保存片段）')
   expect(tail.textContent).toBe(output.tail_excerpt)
@@ -173,6 +177,44 @@ test('事件详情与交付保留可引用的尾部独立片段和采集/字节/
   const quote = delivery.container.querySelector('blockquote')!
   expect(quote.textContent).toBe('“FATAL: 最后错误”')
   expect(quote.textContent).not.toContain('HEAD')
+  for (const consumer of [audit.container, delivery.container]) {
+    expect(within(consumer).getAllByText('已采集输出含无效 UTF-8；不代表当前引用片段已损坏。')).toHaveLength(1)
+  }
+})
+
+test.each([false, null, true, undefined, 'false', 0, {}, []])('编码提示仅采信布尔或显式null，隐藏正文仍保留诊断：%j', utf8_valid => {
+  const output = { ...stream(false), excerpt: 'PRIVATE_HEAD\uFFFD', tail_excerpt: 'PRIVATE_TAIL', utf8_valid }
+  const expected = utf8_valid === false ? '已采集输出含无效 UTF-8；不代表当前引用片段已损坏。'
+    : utf8_valid === null ? '输出流的 UTF-8 有效性未知。' : undefined
+  expect(outputPreview(output).encodingHint).toBe(expected)
+  for (const hideBody of [true, false]) {
+    const lines = outputSummaryLines('标准输出', output, 8, hideBody)
+    expect(lines.filter(line => line.includes('UTF-8'))).toEqual(expected ? [`标准输出：${expected}`] : [])
+    if (hideBody) expect(lines.join('')).not.toMatch(/PRIVATE|\uFFFD/)
+    expect(lines.join('')).toContain('采集未完成')
+    expect(lines.join('')).toContain('已截断')
+  }
+  const view = render(<OutputPreview name="标准输出" output={output} limit={8} />)
+  expect(within(view.container).getByText('采集未完成。')).toBeTruthy()
+  expect(view.container.textContent).not.toContain('完整输出流')
+  if (expected) {
+    expect(within(view.container).getAllByText(expected)).toHaveLength(1)
+    fireEvent.click(within(view.container).getByText('已保存片段', { selector: 'summary' }))
+    expect(within(view.container).getAllByText(expected)).toHaveLength(1)
+  } else expect(view.container.textContent).not.toContain('UTF-8')
+  expect(outputPreview(output).parts.map(part => part.text)).toEqual([output.excerpt, output.tail_excerpt])
+})
+
+test.each([false, null])('空正文和交付浏览器隐藏正文仍显示编码诊断：%j', utf8_valid => {
+  const hint = utf8_valid === false ? '已采集输出含无效 UTF-8；不代表当前引用片段已损坏。' : '输出流的 UTF-8 有效性未知。'
+  const empty = render(<OutputPreview name="标准输出" output={{ bytes: 0, complete: true, utf8_valid }} />)
+  expect(within(empty.container).getByText(hint)).toBeTruthy()
+  const view = render(<DeliveryPanel taskId="mock" names={{}} delivery={{ status: 'accepted', digest: 'mock', reason: '检查完成', manifest: { sources: [], files: [] },
+    local_checks: [{ id: 'browser', status: 'passed', receipts: [{ receipt_seq: 12, attempt_seq: 10, at: '2026-10-21', outcome: 'passed', check_kind: 'browser',
+      stdout: { ...stream(), excerpt: 'PRIVATE_HEAD', tail_excerpt: 'PRIVATE_TAIL', utf8_valid } }] }],
+  }} />)
+  expect(within(view.container).getAllByText(hint)).toHaveLength(1)
+  expect(view.container.textContent).not.toMatch(/PRIVATE_HEAD|PRIVATE_TAIL|进程失败/)
 })
 
 test.each([undefined, null, { outcome: 'failed' }])('browser专用回执不会暴露首尾或原始JSON：%j', browser_report => {

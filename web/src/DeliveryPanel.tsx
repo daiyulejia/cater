@@ -3,7 +3,7 @@ import { request } from './request'
 import { Download, FileCheck2, PackageCheck, LoaderCircle } from 'lucide-react'
 import { OutputPreview } from './CommandOutputPreview'
 import type { CheckOutput } from './outputPreview'
-import { hasBrowserReceipt } from './outputPreview'
+import { hasBrowserReceipt, outputEncodingHint } from './outputPreview'
 import { BrowserReport } from './browserReport'
 
 type Evidence = { artifact_seq: number; quote: string }
@@ -31,11 +31,13 @@ const outcomeLabels: Record<string, string> = {
 }
 
 function ReceiptOutput({ name, output, hideBody = false }: { name: string; output?: CheckOutput; hideBody?: boolean }) {
+  const encodingHint = outputEncodingHint(output?.utf8_valid)
   return <div className="mt-2 min-w-0" role="group" aria-label={name}>
     <p className="font-semibold">{name} · {output?.bytes === undefined ? '字节数未记录' : `${output.bytes} 字节`}</p>
     <p className="break-all">SHA256：{output?.sha256 ?? '未记录'}</p>
     <p>采集：{output?.complete === undefined ? '未记录' : output.complete ? '完整' : '未完成'} · 预览截断：{output?.truncated === undefined ? '未记录' : output.truncated ? '是' : '否'}</p>
     {hideBody ? <p>正文以浏览器专用回执为准。</p> : <OutputPreview name={name} output={output} limit={1600} />}
+    {hideBody && encodingHint && <p>{encodingHint}</p>}
   </div>
 }
 

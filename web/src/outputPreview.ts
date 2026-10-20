@@ -1,6 +1,13 @@
 export type CheckOutput = {
   bytes?: number; sha256?: string; truncated?: boolean; complete?: boolean
   excerpt?: string; preview?: string; tail_excerpt?: string; preview_mode?: string
+  utf8_valid?: boolean | null
+}
+
+export function outputEncodingHint(value: unknown): string | undefined {
+  if (value === false) return '已采集输出含无效 UTF-8；不代表当前引用片段已损坏。'
+  if (value === null) return '输出流的 UTF-8 有效性未知。'
+  return undefined
 }
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -44,6 +51,7 @@ export function outputPreview(value: unknown, limit?: number) {
     : '输出正文未记录。'
   return {
     headTail, incomplete, clipped, emptyText,
+    encodingHint: outputEncodingHint(output.utf8_valid),
     partial: headTail || output.truncated === true || clipped,
     parts: shown,
   }
@@ -62,5 +70,6 @@ export function outputSummaryLines(name: string, value: unknown, limit = 800, hi
   }
   if (preview.incomplete) lines.push(`${name}采集未完成。`)
   if (output.truncated === true) lines.push(`${name}已截断，当前展示不是完整输出。`)
+  if (preview.encodingHint) lines.push(`${name}：${preview.encodingHint}`)
   return lines
 }

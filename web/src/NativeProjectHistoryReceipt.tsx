@@ -1,6 +1,8 @@
 import { nativeProjectHistoryReceiptStatus, projectHistoryArchiveReadEvent } from './conversationActivityState'
 import { NativeArtifactReceipt } from './NativeArtifactReceipt'
 import type { TeamEvent } from './team'
+import { isOutputUtf8Validity } from './nativeHandoff'
+import { outputEncodingHint } from './outputPreview'
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const text = (value: unknown, limit = 1200): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（显示已截断）' : '') : ''
@@ -47,9 +49,14 @@ function DeliveryContent({ content }: { content: string }) {
         <summary className="cursor-pointer">当时引用摘录 · 历史记录</summary>
         <ul className="max-h-64 space-y-2 overflow-auto">{handoff.evidence.slice(0, 16).map((value, index) => {
           const ref = record(value)
+          const validity = isOutputUtf8Validity(ref.output_utf8_valid) ? ref.output_utf8_valid : undefined
           return typeof ref.quote === 'string' ? <li key={index}>
             {typeof ref.source_seq === 'number' && Number.isSafeInteger(ref.source_seq) && ref.source_seq > 0 && <p>来源事件 #{ref.source_seq}</p>}
             <blockquote className="whitespace-pre-wrap">{text(ref.quote, 2000)}</blockquote>
+            {(['stdout', 'stderr'] as const).map(stream => {
+              const hint = outputEncodingHint(validity?.[stream])
+              return hint && <p key={stream}>{stream === 'stdout' ? '标准输出' : '错误输出'}：{hint}</p>
+            })}
           </li> : null
         })}</ul>
         {handoff.evidence.length > 16 && <p>引用摘录显示已截断。</p>}

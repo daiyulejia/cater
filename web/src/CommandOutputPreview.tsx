@@ -17,6 +17,7 @@ export function OutputPreview({ name, output, limit }: { name: string; output: u
   }
   return <div className="min-w-0 max-w-full space-y-1 [overflow-wrap:anywhere]">
     {body()}
+    {preview.encodingHint && <p>{preview.encodingHint}</p>}
     {preview.incomplete && <p>采集未完成。</p>}
     {preview.partial && !preview.headTail && <p>当前展示非完整原文。</p>}
     {preview.clipped && <details>

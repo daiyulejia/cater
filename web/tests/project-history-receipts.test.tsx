@@ -336,3 +336,28 @@ test('普通工具保留原有回执和开发者详情', () => {
   const audit = render(<EventDetails event={receipt} />)
   expect(within(audit.container).getByText('开发者详情').closest('details')?.open).toBe(false)
 })
+
+test.each([
+  { stdout: false, stderr: null }, { stdout: null, stderr: false }, { stdout: true }, {}, undefined,
+  null, [], { stdout: false, other: true }, { stdout: false, stderr: 'false' },
+])('历史引用编码诊断按流显示，畸形映射不伪造状态：%j', output_utf8_valid => {
+  const saved = delivery()
+  Object.assign(saved.handoff.evidence[0], { quote: 'count=13/32\uFFFD',
+    ...(output_utf8_valid === undefined ? {} : { output_utf8_valid }) })
+  for (const view of surfaces(body('delivery', JSON.stringify(saved)), start('delivery'))) {
+    const fold = within(view.container).getByText('当时引用摘录 · 历史记录').closest('details')!
+    expect(fold.open).toBe(false)
+    fireEvent.click(fold.querySelector('summary')!)
+    expect(fold.querySelector('blockquote')?.textContent).toBe('count=13/32\uFFFD')
+    const valid = output_utf8_valid && !Array.isArray(output_utf8_valid)
+      && Object.entries(output_utf8_valid).every(([key, state]) => ['stdout', 'stderr'].includes(key) && (state === null || typeof state === 'boolean'))
+    for (const [key, name] of [['stdout', '标准输出'], ['stderr', '错误输出']]) {
+      const state = valid ? (output_utf8_valid as Record<string, unknown>)[key] : undefined
+      const hint = state === false ? '已采集输出含无效 UTF-8；不代表当前引用片段已损坏。'
+        : state === null ? '输出流的 UTF-8 有效性未知。' : undefined
+      if (hint) expect(within(fold).getAllByText(`${name}：${hint}`)).toHaveLength(1)
+      else expect(fold.textContent).not.toContain(`${name}：`)
+    }
+    expect(fold.textContent).not.toMatch(/执行失败|CP936|GBK/)
+  }
+})

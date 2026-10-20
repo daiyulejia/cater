@@ -1,6 +1,7 @@
 import type { ChatItem } from './App'
 import { nativeHandoff } from './nativeHandoff'
 import type { HandoffEvidence } from './nativeHandoff'
+import { outputEncodingHint } from './outputPreview'
 
 const sourceLabels = { artifact: '成果原文', tool_receipt: '历史工具回执', peer_review: '伙伴复核意见' }
 const statusLabels: Record<string, string> = { ok: '正常返回', error: '返回错误', completed: '已结束', succeeded: '执行成功',
@@ -19,6 +20,10 @@ function SourceQuote({ source, name }: { source: HandoffEvidence; name?: (id: st
     {source.exit_code !== undefined && <p>退出码：{source.exit_code}</p>}
     {source.complete !== undefined && <p>{source.complete ? '回执采集完整' : '回执采集未完成'}</p>}
     {source.truncated === true && <p>回执正文仅保留部分内容。</p>}
+    {(['stdout', 'stderr'] as const).map(stream => {
+      const hint = outputEncodingHint(source.output_utf8_valid?.[stream])
+      return hint && <p key={stream}>{stream === 'stdout' ? '标准输出' : '错误输出'}：{hint}</p>
+    })}
     <blockquote className="whitespace-pre-wrap border-l-2 border-current pl-3">{source.quote}</blockquote>
     <details className="pt-1"><summary className="cursor-pointer">版本与事件标识</summary>
       {source.content_sha256 && <p>文件版本 SHA-256：{source.content_sha256}</p>}
