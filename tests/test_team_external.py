@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from cater.acp import AcpPromptResult
+from cater.acp import AcpPromptResult, AcpTimeout
 from cater.events import Actor, EventLog
 from cater.external_agent import ExternalAgentState, ExternalYield
 from cater.runtime import Runtime
@@ -352,6 +352,24 @@ class TeamExternalTests(unittest.TestCase):
         self.assertEqual(self.rt.team.view(self.task)["objective"], "New independently adopted objective")
         self.assertEqual(self.results("publish_artifact"), [])
         self.assertFalse([e for e in self.events("team.tool_started") if e.payload["role"] == self.worker])
+
+    def test_transport_failure_records_safe_code_without_replaying_prompt(self):
+        def failure(run):
+            self.publish(run, "Existing artifact before timeout\n")
+            raise AcpTimeout("PRIVATE_CREDENTIAL")
+        self.driver.scripts = {self.manager: [failure]}
+        self.receive("Fail once")
+        self.drain()
+        self.assertEqual(len(self.driver.runs), 1)
+        self.assertEqual(len(self.results("publish_artifact")), 1)
+        artifact, = self.rt.task(self.task).deliverables
+        self.assertEqual(Path(artifact["local_path"]).read_text(encoding="utf-8"),
+                         "Existing artifact before timeout\n")
+        finished, = self.events("team.run_finished")
+        self.assertEqual(finished.payload["external_failure_code"], "deadline_exceeded")
+        self.assertNotIn("PRIVATE_CREDENTIAL", json.dumps(finished.payload))
+        external, = self.events("team.external_run_finished")
+        self.assertEqual(external.payload["outcome"], "unknown")
 
     def test_failed_prompt_with_confirmed_cleanup_keeps_unknown_fact_but_allows_delivery(self):
         def failure(run):

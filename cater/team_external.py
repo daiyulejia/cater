@@ -8,6 +8,7 @@ import tempfile
 import time
 
 from .events import Actor
+from .acp import failure_code
 from .team_context import model_context
 from .tool_protocol import json_utf8
 from .usage import valid_token_count
@@ -169,8 +170,17 @@ class TeamExternal:
         except WorkConflict as exc:
             status, reason = "interrupted", str(exc)
         except Exception as exc:
-            status, reason = "failed", f"{role.name}的外部调用未完成；已有成果与工具回执保留，未自动重发请求。"
+            code = failure_code(exc)
+            detail = {
+                "deadline_exceeded": "本地等待时限已到，不代表远端已停止",
+                "process_exited": "客户端在返回结果前退出",
+                "request_rejected": "客户端或服务端拒绝了请求，具体原因尚未确认",
+                "protocol_error": "客户端通信格式不符合约定",
+                "transport_unavailable": "客户端连接不可用",
+            }.get(code, "原因待核查")
+            status, reason = "failed", f"{role.name}的外部调用未完成：{detail}；已有成果与工具回执保留，未自动重发请求。"
             failure = {**failure, "error_type": type(exc).__name__,
+                       "external_failure_code": code,
                        "failure_stage": run.state.phase if run is not None else "setup"}
             self.rt._driver_health.record_failure(role.driver)
         finally:

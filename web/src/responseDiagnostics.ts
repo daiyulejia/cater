@@ -79,6 +79,16 @@ export function requestFailureFields(payload: Record<string, unknown>): [string,
   const kind = known(get('failure_kind'), kinds)
   const code = get('status_code')
   const fields: [string, string][] = []
+  const externalCodes = {
+    deadline_exceeded: '本地等待时限已到，不代表远端已停止',
+    process_exited: '客户端在返回结果前退出',
+    request_rejected: '客户端或服务端拒绝了请求，具体原因尚未确认',
+    protocol_error: '客户端通信格式不符合约定',
+    transport_unavailable: '客户端连接不可用',
+    external_error: '外部调用未完成，原因待核查',
+  }
+  const external = known(get('external_failure_code'), externalCodes)
+  if (external) fields.push(['外部客户端诊断', externalCodes[external]])
   if (kind) fields.push(['请求诊断', kinds[kind]])
   if (typeof code === 'number' && Number.isInteger(code) && code >= 100 && code <= 599) {
     fields.push(['HTTP 状态', code === 429 ? 'HTTP 429（服务商限流）' : `HTTP ${code}`])

@@ -24,6 +24,44 @@ const event = (issue: unknown, kind = 'network_error'): DetailEvent => ({
     provider_body: 'PRIVATE_BODY' },
 })
 
+test.each([
+  ['deadline_exceeded', '不代表远端已停止'],
+  ['process_exited', '客户端在返回结果前退出'],
+  ['request_rejected', '具体原因尚未确认'],
+  ['protocol_error', '客户端通信格式不符合约定'],
+  ['transport_unavailable', '客户端连接不可用'],
+  ['external_error', '原因待核查'],
+])('external diagnosis %s is visible without exposing exception text', (code, label) => {
+  const source = event(undefined)
+  source.payload = { status: 'failed', failure_stage: 'failed', external_failure_code: code,
+    reason: 'PRIVATE_EXCEPTION', error_type: 'PRIVATE_CLASS' }
+  const view = render(<EventDetails event={source} />)
+  expect(view.container.textContent).toContain(label)
+  expect(view.container.textContent).toContain('诊断不代表允许重试')
+  expect(view.container.textContent).not.toMatch(/PRIVATE_/)
+})
+
+test('external codes must be known own fields and come from a host event', () => {
+  for (const value of ['PRIVATE_UNKNOWN', '__proto__', 'constructor', {}, null]) {
+    expect(requestFailureFields({ external_failure_code: value })).toEqual([])
+  }
+  expect(requestFailureFields(Object.create({ external_failure_code: 'deadline_exceeded' }))).toEqual([])
+  const source = event(undefined)
+  source.payload.external_failure_code = 'deadline_exceeded'
+  source.actor = { id: 'dev', kind: 'agent', role: 'dev' }
+  const view = render(<EventDetails event={source} />)
+  expect(view.container.textContent).not.toContain('外部客户端诊断')
+})
+
+test('legacy external errors do not acquire an inferred timeout category', () => {
+  const source = event(undefined)
+  source.payload = { status: 'failed', failure_stage: 'failed', error_type: 'AcpUnavailable',
+    reason: 'PRIVATE_EXCEPTION' }
+  const view = render(<EventDetails event={source} />)
+  expect(view.container.textContent).not.toMatch(/PRIVATE_|超时|时限|拒绝|外部客户端诊断/)
+  expect(view.container.textContent).toContain('消息处理失败')
+})
+
 test.each(cases)('%s only shows registered Chinese observations and directions', (issue, label, direction) => {
   const fetch = vi.fn()
   vi.stubGlobal('fetch', fetch)

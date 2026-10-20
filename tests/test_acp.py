@@ -18,6 +18,7 @@ from cater.acp import (
     AcpProtocolError,
     AcpSession,
     AcpUnavailable,
+    failure_code,
 )
 
 
@@ -344,9 +345,36 @@ class AcpTests(unittest.TestCase):
                     else:
                         client.open()
                 self.assertLess(time.monotonic() - started, 4)
+                self.assertEqual(failure_code(caught.exception), "deadline_exceeded")
                 self.assertIs(caught.exception.prompt_may_have_run, mode == "timeout")
                 self.assert_terminal(client)
                 self.assertEqual(len(self.requests(root, "session/prompt")), int(mode == "timeout"))
+
+    def test_failure_classification_preserves_uncertainty_without_private_text(self):
+        for mode, code in (("disconnect", "process_exited"), ("reject", "request_rejected")):
+            with self.subTest(mode=mode):
+                client, root = self.session(mode)
+                client.open()
+                with self.assertRaises(AcpUnavailable) as caught:
+                    client.prompt("Only one attempt")
+                self.assertEqual(failure_code(caught.exception), code)
+                self.assertTrue(caught.exception.prompt_may_have_run)
+                self.assertNotIn("PRIVATE_CREDENTIAL", str(caught.exception))
+                self.assertEqual(len(self.requests(root, "session/prompt")), 1)
+                self.assert_terminal(client)
+
+    def test_malformed_errors_are_protocol_failures_not_rejections(self):
+        for index in range(5):
+            with self.subTest(index=index):
+                client, root = self.session(f"bad-error:{index}")
+                client.open()
+                with self.assertRaises(AcpProtocolError) as caught:
+                    client.prompt("Only one attempt")
+                self.assertEqual(failure_code(caught.exception), "protocol_error")
+                self.assertTrue(caught.exception.prompt_may_have_run)
+                self.assertNotIn("PRIVATE_CREDENTIAL", str(caught.exception))
+                self.assertEqual(len(self.requests(root, "session/prompt")), 1)
+                self.assert_terminal(client)
 
     def test_cancel_from_other_thread_is_notification_and_not_prompt_completion(self):
         client, root = self.session("cancel")

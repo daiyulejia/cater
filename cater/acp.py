@@ -45,6 +45,30 @@ class AcpUnavailable(AcpError):
     pass
 
 
+class AcpTimeout(AcpUnavailable):
+    """The local transport deadline elapsed, not proof of remote cancellation."""
+
+
+class AcpProcessExited(AcpUnavailable):
+    pass
+
+
+class AcpRequestRejected(AcpUnavailable):
+    """The peer rejected an RPC; its private error text is intentionally omitted."""
+
+
+def failure_code(error):
+    """Return only host-owned classifications, never exception/server text."""
+    for kind, code in ((AcpTimeout, "deadline_exceeded"),
+                       (AcpProcessExited, "process_exited"),
+                       (AcpRequestRejected, "request_rejected"),
+                       (AcpProtocolError, "protocol_error"),
+                       (AcpUnavailable, "transport_unavailable")):
+        if isinstance(error, kind):
+            return code
+    return "external_error"
+
+
 @dataclass(frozen=True)
 class AcpPromptResult:
     text: str
@@ -298,7 +322,7 @@ class AcpSession:
             while not self._stopped.is_set():
                 frame = proc.stdout.readline(MAX_FRAME_BYTES + 2)
                 if not frame:
-                    self._offer(AcpUnavailable("ACP process exited before responding"))
+                    self._offer(AcpProcessExited("ACP process exited before responding"))
                     return
                 if len(frame) > MAX_FRAME_BYTES + 1 or not frame.endswith(b"\n"):
                     self._offer(AcpProtocolError("ACP output exceeds frame limit or is incomplete"))
@@ -312,7 +336,7 @@ class AcpSession:
             raise AcpUnavailable("ACP session is closed")
         while True:
             if time.monotonic() >= deadline:
-                raise AcpUnavailable("ACP response timed out")
+                raise AcpTimeout("ACP response timed out")
             # Host work stays on the runtime thread, even while the Agent waits
             # for a separate MCP tool process. Streaming updates cannot starve it.
             if service is not None:
@@ -321,13 +345,13 @@ class AcpSession:
             if self._closed:
                 raise AcpUnavailable("ACP session is closed")
             if remaining <= 0:
-                raise AcpUnavailable("ACP response timed out")
+                raise AcpTimeout("ACP response timed out")
             try:
                 frame = self._frames.get(timeout=remaining if service is None else min(0.05, remaining))
                 break
             except queue.Empty:
                 if service is None:
-                    raise AcpUnavailable("ACP response timed out") from None
+                    raise AcpTimeout("ACP response timed out") from None
         if self._closed:
             raise AcpUnavailable("ACP session is closed")
         if isinstance(frame, AcpError):
@@ -343,7 +367,7 @@ class AcpSession:
     def _send(self, value, deadline: float):
         data = self._encode(value)
         if not self._write_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
-            raise AcpUnavailable("ACP input pipe timed out")
+            raise AcpTimeout("ACP input pipe timed out")
         try:
             with self._state_lock:
                 proc = self._proc
@@ -365,7 +389,7 @@ class AcpSession:
             try:
                 error = output.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
-                raise AcpUnavailable("ACP input pipe timed out") from None
+                raise AcpTimeout("ACP input pipe timed out") from None
             writer.join(timeout=max(0.0, deadline - time.monotonic()))
             if not writer.is_alive():
                 with self._state_lock:
@@ -471,7 +495,11 @@ class AcpSession:
                 raise AcpProtocolError("Invalid ACP response envelope")
             if "error" in message:
                 # Server messages may contain prompts, paths or credentials.
-                raise AcpUnavailable("ACP server rejected the request")
+                error = message["error"]
+                if (not isinstance(error, dict) or type(error.get("code")) is not int
+                        or not isinstance(error.get("message"), str)):
+                    raise AcpProtocolError("Invalid ACP error response")
+                raise AcpRequestRejected("ACP server rejected the request")
             if not isinstance(message["result"], dict):
                 raise AcpProtocolError("ACP result must be an object")
             return message["result"]

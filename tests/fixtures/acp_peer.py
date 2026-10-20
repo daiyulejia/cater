@@ -134,6 +134,16 @@ def main():
                 continue
             if mode == "disconnect":
                 return
+            if mode == "reject":
+                send({"jsonrpc": "2.0", "id": request["id"],
+                      "error": {"code": -32000, "message": "PRIVATE_CREDENTIAL"}})
+                continue
+            if mode.startswith("bad-error:"):
+                errors = [None, {}, "PRIVATE_CREDENTIAL", {"code": True, "message": "PRIVATE_CREDENTIAL"},
+                          {"code": -32000, "message": {"secret": "PRIVATE_CREDENTIAL"}}]
+                send({"jsonrpc": "2.0", "id": request["id"],
+                      "error": errors[int(mode.split(":")[1])]})
+                continue
             if mode == "timeout":
                 wait_for(root / "release")
                 continue
