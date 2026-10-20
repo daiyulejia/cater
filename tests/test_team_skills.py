@@ -59,6 +59,25 @@ class TeamSkillsTests(unittest.TestCase):
         self.assertEqual(self.rt.team.view(self.task)["status"], "done")
         self.assertFalse([e for e in self.events("team.tool_finished") if e.payload["name"] == "read_skill"])
 
+    def test_builtin_review_guide_reaches_turn_without_granting_execution(self):
+        self.driver.steps[self.manager] = [
+            test_simple_team.turn("", ("read_skill", {"skill_id": "versioned-review"})),
+            test_simple_team.turn("阅读判断与运行证据分开说明。")]
+        self.rt.team.receive(self.task, "阅读独立复核指引", request_id="review-capability-001")
+        self.run_ok()
+        receipt = next(e for e in self.events("team.tool_finished") if e.payload["name"] == "read_skill")
+        result = receipt.payload["result"]
+        self.assertEqual(result["status"], "ok", result)
+        self.assertFalse(result["has_more"])
+        self.assertIn("写入检查脚本不等于执行检查", result["content"])
+        self.assertIn("不为取得新回执而原样写回", result["content"])
+        body = json.loads(self.driver.calls[-1]["history"][-1]["content"])
+        self.assertEqual(body["content"], result["content"])
+        for call in self.driver.calls:
+            self.assertNotIn("workspace_run", {tool["name"] for tool in call["tools"]})
+        self.assertEqual([e.payload["name"] for e in self.events("team.tool_started")], ["read_skill"])
+        self.assertEqual(self.events("team.objective_completed"), [])
+
     def test_invalid_unicode_in_unused_metadata_does_not_break_ordinary_model_context(self):
         self.register()
         config = json.loads(self.config.read_text(encoding="utf-8"))

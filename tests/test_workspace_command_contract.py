@@ -41,6 +41,19 @@ class WorkspaceCommandContractTests(unittest.TestCase):
         self.assertEqual(json.loads(result["stdout"]["excerpt"]), {"selected": args})
         self.assertEqual(list(self.root.iterdir()), [])
 
+    def test_write_schema_distinguishes_mutation_from_verification(self):
+        executor = self.executor("print('unused')")
+        schema = next(row for row in executor.schemas() if row["name"] == "workspace_write")
+        self.assertIn("not a verification tool", schema["description"])
+        self.assertIn("workspace_read", schema["description"])
+        self.assertIn("does not execute", schema["description"])
+        created = executor.execute("workspace_write", {
+            "path": "example.txt", "content": "before", "expected_sha256": None})
+        updated = executor.execute("workspace_write", {
+            "path": "example.txt", "content": "after", "expected_sha256": created["sha256"]})
+        self.assertEqual(updated["status"], "ok", updated)
+        self.assertEqual((self.root / "example.txt").read_text(), "after")
+
     def test_no_argument_program_rejects_target_without_running_it(self):
         executor = self.executor("import argparse; argparse.ArgumentParser().parse_args(); print('default checks')")
         result = executor.execute("workspace_run", {"command": "check", "args": ["test_extra.py"]})
