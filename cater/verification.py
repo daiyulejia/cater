@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import hashlib
 import math
 import json
@@ -22,7 +23,7 @@ PREVIEW_LIMIT = 8192
 
 def output_metadata(output: dict) -> dict:
     """Whitelist capture metadata where raw output must not be repeated."""
-    return {key: output[key] for key in ("bytes", "sha256", "truncated", "complete") if key in output}
+    return {key: output[key] for key in ("bytes", "sha256", "truncated", "complete", "utf8_valid") if key in output}
 
 
 def _decode_preview(value: bytearray, *, limit: int = PREVIEW_LIMIT, tail: bool = False) -> str:
@@ -39,6 +40,18 @@ class _Capture:
     tail: bytearray = field(default_factory=bytearray)
     complete: bool = False
     lock: threading.Lock = field(default_factory=threading.Lock)
+    _utf8_decoder: codecs.IncrementalDecoder = field(
+        default_factory=lambda: codecs.getincrementaldecoder("utf-8")(errors="strict"), repr=False)
+    _utf8_invalid: bool = False
+
+    def _validate_utf8(self, chunk: bytes, *, final: bool = False) -> None:
+        # Called under lock. Only the decoder's <=3 pending bytes survive each read.
+        if not self._utf8_invalid:
+            try:
+                self._utf8_decoder.decode(chunk, final=final)
+            except UnicodeDecodeError:
+                self._utf8_invalid = True
+                self._utf8_decoder.reset()
 
     def drain(self, stream: BinaryIO) -> None:
         try:
@@ -46,12 +59,14 @@ class _Capture:
                 with self.lock:
                     self.digest.update(chunk)
                     self.size += len(chunk)
+                    self._validate_utf8(chunk)
                     remaining = PREVIEW_LIMIT - len(self.preview)
                     if remaining > 0:
                         self.preview.extend(chunk[:remaining])
                     self.tail.extend(chunk)
                     del self.tail[:-(PREVIEW_LIMIT // 2)]
             with self.lock:
+                self._validate_utf8(b"", final=True)
                 self.complete = True
         finally:
             stream.close()
@@ -64,6 +79,8 @@ class _Capture:
                 "sha256": self.digest.hexdigest(),
                 "truncated": self.size > PREVIEW_LIMIT or decoded_size > PREVIEW_LIMIT,
                 "complete": self.complete,
+                # Full captured stream validity, not encoding detection or preview fidelity.
+                "utf8_valid": False if self._utf8_invalid else True if self.complete else None,
             }
             if record_output:
                 if result["truncated"]:

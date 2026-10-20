@@ -37,6 +37,7 @@ class CommandLogPreviewTests(unittest.TestCase):
                 capture = self.capture(body)
                 self.assertEqual(capture.summary(record_output=True), {
                     "bytes": len(body), "sha256": hashlib.sha256(body).hexdigest(),
+                    "utf8_valid": b"\xff" not in body,
                     "complete": True, "truncated": False, "excerpt": body.decode("utf-8", errors="replace")})
                 self.assertEqual(capture.preview_text(), body.decode("utf-8", errors="replace"))
 
@@ -63,7 +64,7 @@ class CommandLogPreviewTests(unittest.TestCase):
     def test_record_output_false_never_persists_either_private_segment(self):
         body = b"PRIVATE_HEAD" + b"x" * 30000 + b"PRIVATE_END"
         output = self.capture(body).summary(record_output=False)
-        self.assertEqual(set(output), {"bytes", "sha256", "complete", "truncated"})
+        self.assertEqual(set(output), {"bytes", "sha256", "complete", "truncated", "utf8_valid"})
         self.assertNotIn("PRIVATE_", str(output))
 
     def test_every_chunk_size_keeps_the_same_rolling_tail_and_digest(self):

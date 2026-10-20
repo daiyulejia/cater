@@ -38,6 +38,7 @@ def handoff_schema():
         "description": "可选的对客原因、复查与边界说明，不是私有思维。保存的完整说明（含宿主补充引用信息）总计不超过24KB UTF-8。quote从文件正文、回执stdout/stderr/content、浏览器实际观测或当前复核反馈逐字摘录，不引用计划标签作为执行证据。",
         "properties": {"why": {"type": "string", "maxLength": 4000},
             **{key: strings for key in ("changed", "impact", "alternatives", "reproduce", "limits")},
+            "reproduce": {**strings, "description": "按任务给出实际可用的复查步骤、工作目录和完整命令；不以统计代码、运行检查等占位词代替。区分已运行命令与未验证建议，不凭说明声称执行。"},
             "evidence": {"type": "array", "maxItems": 16, "items": {"type": "object", "additionalProperties": False,
                 "required": ["source_seq", "quote"], "properties": {
                     "source_seq": {"type": "integer", "minimum": 1,

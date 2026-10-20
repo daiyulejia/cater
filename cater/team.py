@@ -320,8 +320,9 @@ class TeamService:
             tools += [
                 _tool("set_objective", "采用顾客当前目标或更换实现方向。记录成功后再安排相应工作；普通追问不用更换目标。",
                       {"goal": string}, ["goal"]),
-                _tool("finish_work", "店长确认当前工作可以交付，说明实际验证与尚未验证的范围；不等同于宿主证明正确。",
-                      {"summary": string, "verification": string, "handoff": handoff_schema(),
+                _tool("finish_work", "店长确认当前工作可以交付。summary将直接作为顾客看到的最终答复，应给出实际答案而非完成宣言；说明实际验证与尚未验证的范围，不等同于宿主证明正确。",
+                      {"summary": {**string, "description": "直接回答顾客本次问题，包含必要结论、数字及口径或成果入口；即使中途说过也在这里收束。不要只写已核对、已报告、已完成，也不要让顾客翻内部记录拼答案。"},
+                       "verification": string, "handoff": handoff_schema(),
                        "artifact_seqs": {"type": "array", "maxItems": 128, "items": {"type": "integer", "minimum": 1},
                            "description": "可选：明确选择本次交付的文件事件序号，包括需要沿用的旧文件；空数组表示无文件。不填时只收本轮目标内每个文件名的最新发布，不自动带上旧目标文件。"}}, ["summary", "verification"]),
             ]
@@ -1209,9 +1210,12 @@ class TeamService:
                     current_work = self.view(task_id)
                     delivery = (completed.seq if completed and role.id == self.rt.organization.leader.id
                                 and current_work["status"] == "done" and current_work["revision"] == completed.seq else None)
+                    if delivery is not None:
+                        # Keep the customer reply consistent with the frozen delivery.
+                        final = completed.payload["summary"]
                     customer_facing = message.actor.kind == "human" or delivery is not None
                     self.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
-                        payload={"text": turn.text, "claim": turn.text[:180], "phase": "team",
+                        payload={"text": final, "claim": final[:180], "phase": "team",
                                  "run_id": started.payload["run_id"], "reply_to": message.seq,
                                  "response_kind": "progress" if any(call.name != "wait_for_reply" for call in turn.calls) else "reply",
                                  "audience": "customer" if customer_facing else "team",
