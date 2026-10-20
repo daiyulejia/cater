@@ -156,6 +156,14 @@ cater --drivers examples/openai_compatible_driver_config.json web
 `usage.total_tokens` 作为真实用量；缺失时会明确标记为未知。它不做不可靠的
 “存活探针”，首次实际任务才是端点、模型名和账户权限的完整验证。
 
+可在 `openai_compatible` 通道中选配 `"max_tokens": 4096`，或在供应商要求时使用
+`"max_completion_tokens": 4096`，两者只能设置一个，值必须为正整数。
+不配置时沿用供应商默认行为；Cater 不猜测模型支持的字段或上限，也不在失败后自动换字段或提高额度。
+该值限制单次请求的生成量，不限制输入、整个任务、重试总量或实际费用。
+部分模型会把推理 token 计入输出额度，具体含义以供应商文档为准。
+响应明确标记 `finish_reason: "length"` 时，不能当作完整文本或可执行的工具调用；
+请检查中断原因后再决定是否调整配置。此配置不会修改已有通道的累计 `token_budget`。
+
 如果想让内阁共用一个账号、执行层共用另一个账号，可成对使用
 [`layered_api_driver_config.json`](layered_api_driver_config.json) 与
 [`layered_api_roles.json`](layered_api_roles.json)：

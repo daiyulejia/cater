@@ -47,7 +47,8 @@ class TextRetryGuard:
 
     def _configuration(self):
         return {key: getattr(self.driver, key, None) for key in (
-            "endpoint", "model", "api_key_env", "max_tokens", "timeout", "version", "thinking", "temperature", "token_budget")}
+            "endpoint", "model", "api_key_env", "max_tokens", "max_completion_tokens",
+            "timeout", "version", "thinking", "temperature", "token_budget")}
 
     def _key_digest(self):
         key = os.environ.get(self.driver.api_key_env, "")

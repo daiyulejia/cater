@@ -308,7 +308,8 @@ def _tool_api_request(*, endpoint: str, body: dict, headers: dict, name: str,
 
 def _text_only_request(body: dict[str, Any]) -> bool:
     """Fail closed on tool declarations, tool history or new request capabilities."""
-    return (not set(body) - {"model", "messages", "system", "max_tokens", "stream", "thinking", "temperature"}
+    return (not set(body) - {"model", "messages", "system", "max_tokens", "max_completion_tokens",
+                            "stream", "thinking", "temperature"}
             and isinstance(body.get("messages"), list) and bool(body["messages"])
             and all(isinstance(message, dict) and set(message) <= {"role", "content"}
                     and message.get("role") in {"system", "user"} and isinstance(message.get("content"), str)
@@ -715,7 +716,14 @@ class OpenAICompatibleDriver:
         timeout: float = 120.0,
         temperature: float | None = None,
         token_budget: int | None = None,
+        max_tokens: int | None = None,
+        max_completion_tokens: int | None = None,
     ):
+        for field, value in (("max_tokens", max_tokens), ("max_completion_tokens", max_completion_tokens)):
+            if value is not None and (type(value) is not int or value <= 0):
+                raise ValueError(f"{field} must be a positive integer")
+        if max_tokens is not None and max_completion_tokens is not None:
+            raise ValueError("configure only one of max_tokens and max_completion_tokens")
         self.name = name
         self.endpoint = endpoint
         self.model = model
@@ -723,11 +731,22 @@ class OpenAICompatibleDriver:
         self.timeout = timeout
         self.temperature = temperature
         self.token_budget = token_budget
+        self.max_tokens = max_tokens
+        self.max_completion_tokens = max_completion_tokens
+
+    def _output_limit(self) -> dict[str, int]:
+        # Providers disagree on the field name; never silently switch or retry.
+        if self.max_tokens is not None:
+            return {"max_tokens": self.max_tokens}
+        if self.max_completion_tokens is not None:
+            return {"max_completion_tokens": self.max_completion_tokens}
+        return {}
 
     def tool_turn(self, *, role: str, prompt: str, history: list[dict], tools: list[dict]) -> ToolTurn:
         try:
             system, transcript, definitions, seen = prepare_tool_turn(role=role, prompt=prompt, history=history, tools=tools)
             payload = {"model": self.model, "stream": False, "messages": openai_history(system, prompt, transcript)}
+            payload.update(self._output_limit())
             if definitions:
                 payload["tools"] = [{"type": "function", "function": {
                     "name": t["name"], "description": t["description"], "parameters": t["input_schema"]}}
@@ -772,6 +791,7 @@ class OpenAICompatibleDriver:
         }
         if self.temperature is not None:
             payload["temperature"] = self.temperature
+        payload.update(self._output_limit())
         request = Request(
             self.endpoint,
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -809,18 +829,30 @@ class OpenAICompatibleDriver:
             raise DriverProtocolError(f"{self.name} API response is not valid JSON") from exc
         if not isinstance(data, dict):
             raise DriverProtocolError(f"{self.name} API response must be a JSON object")
-        text = _openai_response_text(data)
         usage = data.get("usage")
         tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
         reported = valid_token_count(tokens)
+        meta = {
+            "driver": self.name,
+            "mode": "openai_compatible",
+            "token_usage": "reported" if reported else "unavailable",
+        }
+        choices = data.get("choices")
+        if (isinstance(choices, list) and choices and isinstance(choices[0], dict)
+                and choices[0].get("finish_reason") == "length"):
+            notice = "模型输出被生成额度或上下文上限截断，未采用为成果；已有工作保留，未自动续试。"
+            return DriverResponse(
+                text=json.dumps({"stance": "challenge", "option_id": "output_limit", "claim": notice,
+                                 "text": notice, "evidence": ["finish_reason:length"]}, ensure_ascii=False),
+                tokens=tokens if reported else 0,
+                meta={**meta, "contained": True, "incomplete": True, "finish_reason": "length",
+                      "reason": "incomplete_stop", "display_reason": notice},
+            )
+        text = _openai_response_text(data)
         return DriverResponse(
             text=text,
             tokens=tokens if reported else 0,
-            meta={
-                "driver": self.name,
-                "mode": "openai_compatible",
-                "token_usage": "reported" if reported else "unavailable",
-            },
+            meta=meta,
         )
 
 
@@ -917,6 +949,8 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
             timeout=timeout,
             temperature=float(temperature_raw) if temperature_raw is not None else None,
             token_budget=_token_budget(data, name),
+            max_tokens=data.get("max_tokens"),
+            max_completion_tokens=data.get("max_completion_tokens"),
         )
     raise ValueError(f"unknown driver kind: {kind!r}")
 

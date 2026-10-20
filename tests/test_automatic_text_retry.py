@@ -169,6 +169,22 @@ class AutomaticTextRetryTests(unittest.TestCase):
         self.assertTrue(self.events(rt, task, 'work.failed')[-1].payload['uncertain'])
         self.assertEqual(rt.work.view(task)['items'][0]['status'], 'uncertain')
 
+    def test_changed_output_limit_cancels_wait_without_using_the_new_allowance(self):
+        for field in ("max_tokens", "max_completion_tokens"):
+            with self.subTest(field=field):
+                rt, task, api = self.runtime(OpenAICompatibleDriver)
+                setattr(api, field, 8)
+                def interrupt(_seconds):
+                    setattr(api, field, 8000)
+                with patch('cater.text_retry.RETRY_DELAY', 1), \
+                        patch('cater.text_retry.time.sleep', side_effect=interrupt), \
+                        patch(self.opener(OpenAICompatibleDriver), side_effect=TimeoutError('fixture')) as opened:
+                    rt.collaborate(task)
+                opened.assert_called_once()
+                self.assertEqual(json.loads(opened.call_args.args[0].data)[field], 8)
+                self.assertEqual(self.events(rt, task, 'driver.retry_finished')[-1].payload['status'], 'cancelled')
+                self.assertEqual(self.events(rt, task, 'deliverable.published'), [])
+
     def test_new_tool_results_or_source_capture_during_wait_keep_effects_uncertain(self):
         for kind in ('workspace.tool_finished', 'workspace.tool_reconciled', 'workspace.files_captured'):
             with self.subTest(kind=kind):
