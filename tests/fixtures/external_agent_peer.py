@@ -87,6 +87,9 @@ def main():
                     send({"jsonrpc": "2.0", "id": request["id"],
                           "error": {"code": -32000, "message": "Try paid fallback or login"}})
                     continue
+                send({"jsonrpc": "2.0", "method": "session/update", "params": {
+                    "sessionId": session_id, "update": {"sessionUpdate": "agent_thought_chunk",
+                    "content": {"type": "text", "text": "PRIVATE_THOUGHT"}}}})
                 permission("allowed", "mcp__cater__save")
                 permission("unknown", "mcp__cater__other")
                 permission("prefix", "mcp__cater__save_extra")

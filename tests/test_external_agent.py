@@ -101,6 +101,75 @@ class ExternalAgentTests(unittest.TestCase):
                 self.assertIsNotNone(session._proc.poll())
         self.assertTrue(all(b._closed and b._revoked for b in self.bridges))
 
+    def test_last_observations_advance_and_failed_tools_record_end(self):
+        with patch("cater.external_agent.time.monotonic", return_value=101.0) as clock:
+            fail = False
+            def execute(call):
+                clock.return_value += 1
+                if fail:
+                    raise ValueError("PRIVATE_TOOL_ERROR")
+                return {"status": "ok"}
+            run = self.new_run(execute=execute)
+            run._started_at = 100.0
+            run._phase = "prompting"
+            run._update({"sessionUpdate": "plan"})
+            first = run.state.observations
+            clock.return_value = 102.0
+            run._update({"sessionUpdate": "plan"})
+            facts = dict(run.state.observations)
+            self.assertEqual(facts["first_public_update_ms"], 1000)
+            self.assertEqual(facts["last_public_update_ms"], 2000)
+            self.assertEqual(dict(first)["last_public_update_ms"], 1000)
+            clock.return_value = 103.0
+            run._call(object())
+            self.assertEqual(dict(run.state.observations)["last_tool_end_ms"], 4000)
+            clock.return_value = 105.0
+            fail = True
+            with self.assertRaises(ValueError):
+                run._call(object())
+            facts = dict(run.state.observations)
+            self.assertEqual(facts["first_tool_ms"], 3000)
+            self.assertEqual(facts["last_tool_end_ms"], 6000)
+            self.assertEqual(facts["tool_elapsed_ms"], 2000)
+            self.assertEqual(facts["tool_calls"], 2)
+            self.assertNotIn("PRIVATE_TOOL_ERROR", str(facts))
+
+    def test_observations_are_frozen_host_timings_without_payloads(self):
+        updates = []
+        run = self.new_run(on_update=updates.append)
+        self.assertEqual(run.state.observations, ())
+        run.run("PRIVATE_PROMPT")
+        state = run.state
+        facts = dict(state.observations)
+        self.assertEqual(facts["tool_calls"], 2)
+        self.assertEqual(facts["public_updates"], 2)
+        self.assertLessEqual(facts["handshake_ms"], facts["prompt_attempt_ms"])
+        self.assertLessEqual(facts["prompt_attempt_ms"], facts["first_public_update_ms"])
+        self.assertLessEqual(facts["first_public_update_ms"], facts["first_tool_ms"])
+        self.assertLessEqual(facts["first_public_update_ms"], facts["last_public_update_ms"])
+        self.assertLessEqual(facts["last_public_update_ms"], facts["response_ms"])
+        self.assertLessEqual(facts["first_tool_ms"], facts["last_tool_end_ms"])
+        self.assertLessEqual(facts["last_tool_end_ms"], facts["response_ms"])
+        self.assertLessEqual(facts["first_tool_ms"], facts["response_ms"])
+        self.assertLessEqual(facts["response_ms"], facts["settled_ms"])
+        self.assertTrue(all(type(value) is int and value >= 0 for value in facts.values()))
+        self.assertNotIn("PRIVATE_PROMPT", str(facts))
+        self.assertNotIn("observed", str(facts))
+        self.assertNotIn("PRIVATE_THOUGHT", str(updates))
+        self.assertNotIn("PRIVATE_THOUGHT", str(state))
+        self.assertEqual(state.observations, run.state.observations)
+        self.assertIsNone(state.failure_phase)
+
+    def test_handshake_failure_observations_do_not_claim_prompt_or_tools(self):
+        self.mode = "identity"
+        run = self.new_run()
+        with self.assertRaises(AcpProtocolError):
+            run.run("PRIVATE_PROMPT")
+        self.assertEqual(run.state.failure_phase, "opening")
+        facts = dict(run.state.observations)
+        self.assertEqual(set(facts), {"failure_ms", "settled_ms"})
+        self.assertLessEqual(facts["failure_ms"], facts["settled_ms"])
+
     def test_exact_flags_lazy_construction_and_configuration_close(self):
         self.assertEqual(self.driver.command, [
             "never-launch-qoder", "--acp", "--model", "ExactModel", "--max-output-tokens", "2048",
@@ -220,6 +289,12 @@ class ExternalAgentTests(unittest.TestCase):
                     run.run("stop")
                 self.assertIs(caught.exception, signal)
                 self.assertEqual(len(self.calls) - before, 1)
+                self.assertEqual(run.state.failure_phase, "tool_execution")
+                facts = dict(run.state.observations)
+                self.assertEqual(facts["tool_calls"], 1)
+                self.assertIn("tool_elapsed_ms", facts)
+                self.assertLessEqual(facts["first_tool_ms"], facts["failure_ms"])
+                self.assertNotIn("response_ms", facts)
                 self.assertLess(self.events.index("revoke"), self.events.index("wire-cancel"))
                 self.assertLess(self.events.index("wire-cancel"), self.events.index("bridge-close"))
                 self.assert_stopped(run)
@@ -351,6 +426,10 @@ class ExternalAgentTests(unittest.TestCase):
         self.assertEqual(run.state.stop_reason, "end_turn")
         self.assertFalse(run.state.cleanup_complete)
         self.assertEqual(run.state.phase, "failed")
+        self.assertEqual(run.state.failure_phase, "cleanup")
+        facts = dict(run.state.observations)
+        self.assertLessEqual(facts["response_ms"], facts["failure_ms"])
+        self.assertLessEqual(facts["failure_ms"], facts["settled_ms"])
 
     def test_no_retry_login_or_fallback_after_transport_failure(self):
         for mode in ("reject", "disconnect"):
@@ -389,6 +468,13 @@ class ExternalAgentTests(unittest.TestCase):
         run = self.new_run()
         with self.assertRaises(AcpUnavailable):
             run.run("timeout")
+        self.assertEqual(run.state.failure_phase, "prompting")
+        facts = dict(run.state.observations)
+        self.assertLessEqual(facts["handshake_ms"], facts["prompt_attempt_ms"])
+        self.assertGreaterEqual(facts["failure_ms"], facts["prompt_attempt_ms"])
+        self.assertNotIn("first_public_update_ms", facts)
+        self.assertNotIn("first_tool_ms", facts)
+        self.assertNotIn("response_ms", facts)
         self.assertEqual(sum(row.get("method") == "session/prompt" for row in self.wire()), 1)
         self.assertIn("wire-cancel", self.events)
         self.assertEqual(self.calls, [])

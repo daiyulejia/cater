@@ -164,8 +164,11 @@ class TeamExternal:
                         self.rt.log.emit(type="team.model_called", actor=HOST, task_id=task_id, payload={
                             "role": role.id, "driver": role.driver, "run_id": started.payload["run_id"],
                             "external_started_seq": attempt.seq, "tokens": 0, "token_usage": "unavailable",
+                            "external_observations": dict(state.observations),
                             "context_basis": basis, "request_sizes": {"prompt_utf8_bytes": len(prompt.encode("utf-8"))}})
                     if not state.cleanup_complete:
+                        failure.update(external_observations=dict(state.observations),
+                                       failure_stage=state.failure_phase or "cleanup")
                         raise WorkConflict("外部客户端尚未确认清理完成，保留运行记录；请先核对进程，不重放旧工作。")
         except WorkConflict as exc:
             status, reason = "interrupted", str(exc)
@@ -181,7 +184,8 @@ class TeamExternal:
             status, reason = "failed", f"{role.name}的外部调用未完成：{detail}；已有成果与工具回执保留，未自动重发请求。"
             failure = {**failure, "error_type": type(exc).__name__,
                        "external_failure_code": code,
-                       "failure_stage": run.state.phase if run is not None else "setup"}
+                       "external_observations": dict(run.state.observations) if run is not None else {},
+                       "failure_stage": (run.state.failure_phase or run.state.phase) if run is not None else "setup"}
             self.rt._driver_health.record_failure(role.driver)
         finally:
             if attempt is not None and run is None:

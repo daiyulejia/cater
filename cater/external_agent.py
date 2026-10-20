@@ -12,6 +12,7 @@ import math
 import os
 import sys
 import threading
+import time
 
 from .acp import AcpPromptResult, AcpProtocolError, AcpSession
 from .mcp_host import McpToolBridge
@@ -32,6 +33,8 @@ class ExternalAgentState:
     cleanup_failures: tuple[BaseException, ...] = ()
     cancel_failed: bool = False
     cancel_failures: tuple[BaseException, ...] = ()
+    observations: tuple[tuple[str, int], ...] = ()
+    failure_phase: str | None = None
 
 
 class QoderAcpDriver:
@@ -115,6 +118,9 @@ class ExternalAgentRun:
         self._failure = None
         self._stopping = False
         self._start_lock = threading.Lock()
+        self._started_at = None
+        self._observations = {}
+        self._failure_phase = None
 
     @property
     def state(self):
@@ -122,7 +128,12 @@ class ExternalAgentRun:
             self._phase, self._prompt_attempted, self._cleanup_complete,
             self._session_id, self._stop_reason, self._text, tuple(self._cleanup_failures),
             bool(self._cancel_failures), tuple(self._cancel_failures),
+            tuple(self._observations.items()), self._failure_phase,
         )
+
+    def _mark(self, name, *, latest=False):
+        if self._started_at is not None and (latest or name not in self._observations):
+            self._observations[name] = max(0, int((time.monotonic() - self._started_at) * 1000))
 
     def revoke_tools(self):
         """Withdraw tool authority without cancelling or losing the current receipt.
@@ -143,9 +154,11 @@ class ExternalAgentRun:
             if not any(exc is item for item in self._cleanup_failures):
                 self._cleanup_failures.append(exc)
 
-    def _stop(self, error):
+    def _stop(self, error, *, phase=None):
         if self._failure is None:
             self._failure = error
+            self._failure_phase = phase or self._phase
+            self._mark("failure_ms")
         if self._stopping:
             return
         self._stopping = True
@@ -171,19 +184,37 @@ class ExternalAgentRun:
             raise
 
     def _call(self, call):
+        dispatched = False
         try:
             self._current()
             if self._tools_revoked:
                 raise ExternalYield("External tools have been revoked")
-            return self._execute(call)
+            self._mark("first_tool_ms")
+            dispatched = True
+            self._observations["tool_calls"] = self._observations.get("tool_calls", 0) + 1
+            started = time.monotonic()
+            try:
+                return self._execute(call)
+            finally:
+                self._observations["tool_elapsed_ms"] = self._observations.get("tool_elapsed_ms", 0) + max(
+                    0, int((time.monotonic() - started) * 1000))
+                self._mark("last_tool_end_ms", latest=True)
         except BaseException as exc:
             # Stop before McpToolBridge performs its own exception cleanup.
-            self._stop(exc)
+            self._stop(exc, phase="tool_execution" if dispatched else None)
             raise
 
     def _update(self, update):
         try:
             self._current()
+            # ACP already discards private thought chunks. Do not persist any
+            # update content or arbitrary client-provided category as telemetry.
+            if self._phase == "prompting" and update.get("sessionUpdate") in {
+                "agent_message_chunk", "tool_call", "tool_call_update", "plan",
+            }:
+                self._mark("first_public_update_ms")
+                self._mark("last_public_update_ms", latest=True)
+                self._observations["public_updates"] = self._observations.get("public_updates", 0) + 1
             if self._phase == "prompting" and update.get("sessionUpdate") == "agent_message_chunk":
                 content = update.get("content", {})
                 if content.get("type") == "text":
@@ -240,6 +271,7 @@ class ExternalAgentRun:
             if self._phase != "created":
                 raise RuntimeError("External runs are single-use; prompts cannot be replayed")
             self._phase = "opening"
+            self._started_at = time.monotonic()
         try:
             if not isinstance(prompt, str) or not prompt.strip():
                 raise ValueError("External prompt must be nonempty text")
@@ -270,12 +302,15 @@ class ExternalAgentRun:
             )
             self._session_id = self._session.session_id
             self._verify(opened)
+            self._mark("handshake_ms")
             self._current()
             if not self._tools_revoked:
                 self._bridge.activate()
             self._phase = "prompting"
             self._prompt_attempted = True
+            self._mark("prompt_attempt_ms")
             result = self._session.prompt(prompt, on_update=self._update, service=self._service)
+            self._mark("response_ms")
             self._text, self._stop_reason = result.text, result.stop_reason
             self._current()
             self._phase = "finished"
@@ -294,6 +329,10 @@ class ExternalAgentRun:
             if self._bridge is not None:
                 self._cleanup(self._bridge.close)
             self._cleanup_complete = not self._cleanup_failures
+            if self._failure is None and self._cleanup_failures:
+                self._failure_phase = "cleanup"
+                self._mark("failure_ms")
+            self._mark("settled_ms")
             if self._failure is None and self._cleanup_failures:
                 self._phase = "failed"
                 raise self._cleanup_failures[0]

@@ -356,6 +356,8 @@ class TeamExternalTests(unittest.TestCase):
     def test_transport_failure_records_safe_code_without_replaying_prompt(self):
         def failure(run):
             self.publish(run, "Existing artifact before timeout\n")
+            run.state = replace(run.state, observations=(("prompt_attempt_ms", 10),
+                ("first_tool_ms", 20), ("tool_calls", 1)), failure_phase="prompting")
             raise AcpTimeout("PRIVATE_CREDENTIAL")
         self.driver.scripts = {self.manager: [failure]}
         self.receive("Fail once")
@@ -367,6 +369,10 @@ class TeamExternalTests(unittest.TestCase):
                          "Existing artifact before timeout\n")
         finished, = self.events("team.run_finished")
         self.assertEqual(finished.payload["external_failure_code"], "deadline_exceeded")
+        self.assertEqual(finished.payload["failure_stage"], "prompting")
+        self.assertEqual(finished.payload["external_observations"]["tool_calls"], 1)
+        called, = self.events("team.model_called")
+        self.assertEqual(called.payload["external_observations"], finished.payload["external_observations"])
         self.assertNotIn("PRIVATE_CREDENTIAL", json.dumps(finished.payload))
         external, = self.events("team.external_run_finished")
         self.assertEqual(external.payload["outcome"], "unknown")
@@ -392,6 +398,23 @@ class TeamExternalTests(unittest.TestCase):
         artifact, = self.rt.task(self.task).deliverables
         self.assertEqual(Path(artifact["local_path"]).read_text(encoding="utf-8"),
                          "Published after confirmed local cleanup\n")
+
+    def test_handshake_cleanup_failure_persists_observations_without_model_call(self):
+        def failure(run):
+            run.cleanup_complete = False
+            run.state = replace(run.state, prompt_attempted=False, failure_phase="opening",
+                observations=(("failure_ms", 12), ("settled_ms", 20)))
+            raise RuntimeError("PRIVATE_FAILURE")
+        self.driver.scripts = {self.manager: [failure]}
+        self.receive("Observe handshake failure")
+        self.drain()
+        finished, = self.events("team.run_finished")
+        self.assertEqual(finished.payload["failure_stage"], "opening")
+        self.assertEqual(finished.payload["external_observations"], {"failure_ms": 12, "settled_ms": 20})
+        self.assertNotIn("PRIVATE_FAILURE", json.dumps(finished.payload))
+        self.assertEqual(self.events("team.model_called"), [])
+        self.assertEqual(len(self.rt.team.external_runs.pending(self.task)), 1)
+        self.assertEqual(len(self.driver.runs), 1)
 
     def test_unconfirmed_cleanup_stays_pending_and_blocks_finish(self):
         def failure(run):
