@@ -2593,7 +2593,7 @@ def _team_view(rt: Runtime, task_id: str) -> dict[str, Any] | None:
         # but keep this extra scan out of model context and scheduling projections.
         pending = team._pending_operations(task_id)
         count = len({row["started_seq"] for row in pending
-            if row["name"] in EXTERNAL_EFFECT_TOOLS and not read_only_call(row)
+            if (row["name"] in EXTERNAL_EFFECT_TOOLS or row["name"] == "external_agent") and not read_only_call(row)
             and (row["outcome"] == "unknown" or "finished_seq" in row)})
     except Exception:
         _LOGGER.warning("Cannot project unresolved operation state.")

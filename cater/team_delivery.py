@@ -15,6 +15,10 @@ HOST = Actor.system("team")
 class HandoffError(ValueError):
     """Controlled public diagnostics; never echo arbitrary source payloads."""
 
+    def __init__(self, message, *, diagnostics=None):
+        super().__init__(message)
+        self.diagnostics = list(diagnostics) if diagnostics is not None else []
+
 
 def _text(value, limit):
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
@@ -149,19 +153,31 @@ class TeamDelivery:
             raise HandoffError("交付引用需要至多16项来源。")
         sources = self._sources(task_id, artifacts, revision) if evidence else {}
         normalized = []
+        diagnostics = []
         seen = set()
-        for ref in evidence:
+        for evidence_index, ref in enumerate(evidence):
             if (not isinstance(ref, dict) or set(ref) != {"source_seq", "quote"}
                     or type(ref["source_seq"]) is not int or ref["source_seq"] < 1):
                 raise HandoffError("交付引用需要本群有效事件序号与原文摘录。")
             quote = _text(ref["quote"], 2000)
             source = sources.get(ref["source_seq"])
             if source is None or not any(quote in part for part in source[1]):
-                raise HandoffError("交付引用与当前成果、工具回执或版本复核原文不符，请读取实际来源后修正。")
+                diagnostics.append({
+                    "evidence_index": evidence_index, "source_seq": ref["source_seq"],
+                    "reason": "source_unavailable" if source is None else "quote_mismatch",
+                    "guidance": (
+                        "请读取本次选中成果、当前目标的工作区或浏览器工具回执，或当前复核 decision_seq 的 feedback；"
+                        "不要引用 record_review 工具回执或旧目标回执。" if source is None else
+                        "请重新读取该来源的正文、回执 stdout/stderr/content 或复核 feedback，逐字摘录可见原文；不要改写或拼接。"),
+                })
+                continue
             if (ref["source_seq"], quote) in seen:
                 continue
             seen.add((ref["source_seq"], quote))
             normalized.append({"source_seq": source[0].seq, "source_hash": source[0].hash, "quote": quote, **source[2]})
+        if diagnostics:
+            raise HandoffError("交付引用与当前成果、工具回执或版本复核原文不符，请读取实际来源后修正。",
+                               diagnostics=diagnostics)
         result["evidence"] = normalized
         if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 24000:
             raise HandoffError("交付说明超过24KB，请保留关键原因、步骤、边界及必要引用。")

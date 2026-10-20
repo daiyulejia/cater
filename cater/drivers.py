@@ -922,6 +922,10 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
     if kind == "anthropic":
         from .anthropic import AnthropicMessagesDriver
         return AnthropicMessagesDriver.from_config(name, data)
+    if kind == "qoder_acp":
+        from .external_agent import QoderAcpDriver
+        return QoderAcpDriver(name, executable=data.get("executable"), model=data.get("model"),
+                              timeout=data.get("timeout", 120), token_budget=_token_budget(data, name))
     if kind == "openai_compatible":
         endpoint = data.get("endpoint")
         model = data.get("model")

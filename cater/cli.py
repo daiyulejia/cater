@@ -744,6 +744,37 @@ def cmd_workspace(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_external_run(args: argparse.Namespace) -> int:
+    if args.reconcile is None:
+        if (args.expected_hash is not None or args.invocation_stopped
+                or args.reason is not None or args.retire_host_run):
+            raise ValueError("--expected-hash, --invocation-stopped, --reason and --retire-host-run require --reconcile")
+    elif (not args.expected_hash or not args.expected_hash.strip()
+          or not args.invocation_stopped or not args.reason or not args.reason.strip()):
+        raise ValueError("--reconcile requires --expected-hash, --invocation-stopped and a nonempty --reason")
+    with open_runtime(args) as rt:
+        if rt.task(args.task_id) is None:
+            raise KeyError(args.task_id)
+        runs = rt.team.external_runs
+        receipt = None
+        if args.reconcile is not None:
+            receipt = runs.reconcile(
+                args.task_id, args.reconcile, expected_hash=args.expected_hash,
+                invocation_stopped=args.invocation_stopped, note=args.reason,
+                retire_host_run=args.retire_host_run,
+            )
+        rows = runs.pending(args.task_id)
+        starts = {event.seq: event for event in rt.log.iter_events(
+            task_id=args.task_id, event_types=("team.external_run_started",))}
+        pending = [{**row, "started_hash": starts[row["started_seq"]].hash,
+                    "metadata": starts[row["started_seq"]].payload}
+                   for row in rows]
+        print(json.dumps({"task_id": args.task_id, "pending": pending,
+                          "reconciliation": event_to_dict(receipt) if receipt else None},
+                         ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cater")
     parser.add_argument("--version", action="version", version=f"cater {__version__}")
@@ -831,6 +862,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_workspace.add_argument("--expected-revision", type=int, help="绑定前查询得到的版本；首次绑定省略")
     p_workspace.add_argument("--reason", help="工具中断后的实际核对说明")
     p_workspace.set_defaults(func=cmd_workspace)
+
+    p_external = sub.add_parser("external-run", help="inspect pending external invocations or record operator reconciliation")
+    p_external.add_argument("task_id")
+    p_external.add_argument("--reconcile", type=int, help="external start event seq from the read command; never replays the invocation")
+    p_external.add_argument("--expected-hash", help="started_hash from the read command")
+    p_external.add_argument("--invocation-stopped", action="store_true",
+                            help="explicitly attest that the original invocation and its child processes have stopped")
+    p_external.add_argument("--reason", help="operator's actual inspection and reconciliation evidence")
+    p_external.add_argument("--retire-host-run", action="store_true",
+                            help="with full reconciliation attestation, mark only the bound orphan host run interrupted; no execution or notifications")
+    p_external.set_defaults(func=cmd_external_run)
 
     p_export = sub.add_parser("export", help="export replay data as JSON or JSONL")
     p_export.add_argument("task_id", nargs="?")

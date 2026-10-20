@@ -3255,6 +3255,8 @@ def _execution_fingerprint(config: RuntimeConfig, drivers: dict[str, Driver], br
             value = getattr(driver, key, None)
             if value is None or isinstance(value, (str, bool, int, float, list)):
                 channel[key] = value
+        if isinstance(getattr(driver, "execution_profile", None), str):
+            channel["execution_profile"] = driver.execution_profile
         channels[name] = channel
     payload = {"version": 1, "organization": _organization_fingerprint(config), "channels": channels,
                "browser_check_command": browser_checks.command}

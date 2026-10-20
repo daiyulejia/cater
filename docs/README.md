@@ -6,6 +6,7 @@
 - [架构复盘](architecture-review.md)：如何检查自身机制是否冗余、成本过高或能力不足。
 - [接入复盘](integration-review.md)：如何在把第三方工具包进 driver 边界前检查它。
 - [当前执行能力](capabilities.zh-CN.md)：模型、CLI、浏览器、本地工程与平台工具的实际支持范围。
+- [官方客户端接入](external-clients.zh-CN.md)：试验性 Qoder ACP 通道、本地配置、费用边界与异常核对。
 - [可读成果](artifacts.zh-CN.md)：如何发布正文、标明来源，并在对话中阅读、复制和下载。
 - [本机检查](local-verification.zh-CN.md)：显式命令核验的证据与进程运行边界。
 - [工程工作目录](workspaces.zh-CN.md)：绑定预配置目录，调用文件与命令工具，检查真实源码副本并核对中断。

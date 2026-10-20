@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 def team_availability(rt: Runtime) -> dict[str, Any]:
     totals: dict[str, int] = {}
     budgeted = {name for name, driver in rt.drivers.items() if valid_token_count(getattr(driver, "token_budget", None))}
-    for event in rt.log.iter_events(event_types=("msg.said", "msg.challenge", "question.finished", "conversation.finished", "collaboration.finished", "verification.planned", "workspace.model_called")) if budgeted else ():
+    for event in rt.log.iter_events(event_types=("msg.said", "msg.challenge", "question.finished", "conversation.finished", "collaboration.finished", "verification.planned", "workspace.model_called", "team.model_called")) if budgeted else ():
         name = event.payload.get("driver")
         if isinstance(name, str) and name in budgeted and event.payload.get("token_usage") == "reported" and valid_token_count(event.payload.get("tokens")):
             totals[name] = totals.get(name, 0) + event.payload["tokens"]
