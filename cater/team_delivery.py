@@ -40,7 +40,8 @@ def handoff_schema():
             **{key: strings for key in ("changed", "impact", "alternatives", "reproduce", "limits")},
             "evidence": {"type": "array", "maxItems": 16, "items": {"type": "object", "additionalProperties": False,
                 "required": ["source_seq", "quote"], "properties": {
-                    "source_seq": {"type": "integer", "minimum": 1},
+                    "source_seq": {"type": "integer", "minimum": 1,
+                        "description": "成果用artifact seq，工作区/浏览器检查用工具回执seq；伙伴复核用record_review返回或reviews中的decision_seq，不是review_seq/request_seq、message_seq或record_review工具回执seq。"},
                     "quote": {"type": "string", "maxLength": 2000}}}}}}
 
 

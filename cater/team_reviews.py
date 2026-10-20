@@ -143,7 +143,7 @@ class TeamReviews:
             message = self._request_message(task_id, row)
             if message is None:
                 raise WorkConflict("没有找到本次实际投递的复核委托。")
-            self.rt.log.emit(type="team.review_recorded", actor=HOST, task_id=task_id, payload={
+            decision = self.rt.log.emit(type="team.review_recorded", actor=HOST, task_id=task_id, payload={
                 "root_seq": row["root_seq"], "review_seq": row["request_seq"], "reviewer": role.id,
                 "verdict": verdict, "feedback": feedback, "run_id": tool_start.payload["run_id"]})
             text = ("复核通过。" if verdict == "approved" else "本轮需要修复，尚未验收。") + feedback
@@ -151,7 +151,8 @@ class TeamReviews:
                      f"\n请修改并发布新版后，调用request_review，review_seq={row['request_seq']}，仍交给我复核；不把修复自述当成验收。")
             sent = self.rt.team._send(task_id, role, row["author"], text, "report", reply_to=message.seq,
                                       visible=True, review_seq=row["request_seq"])
-            return {"status": "ok", "review_seq": row["request_seq"], "verdict": verdict, "message_seq": sent.seq}
+            return {"status": "ok", "review_seq": row["request_seq"], "decision_seq": decision.seq,
+                    "verdict": verdict, "message_seq": sent.seq}
 
     def _request_message(self, task_id, row):
         return next((e for e in self.rt.team._messages(task_id) if e.seq > row["request_seq"]
