@@ -343,9 +343,11 @@ class WorkspaceExecutor:
                                     "description": "Optional exact old text to replace once. Include enough context to match uniquely; no regex or whitespace normalization. content then contains only the replacement."}},
                                 ["path", "content", "expected_sha256"]))
         if self.policy.mode == "execute":
-            definitions.append(("workspace_run", "Run a trusted host program alias (not an OS sandbox or task acceptance). Long stdout/stderr previews have separate excerpt and tail_excerpt (preview_mode=head_tail); the missing middle is not saved. complete means capture finished, not that the preview is the full log.",
-                                {"command": {"type": "string", "enum": sorted(self.policy.commands)},
+            definitions.append(("workspace_run", "Run a trusted host program alias (not an OS sandbox or task acceptance). The alias selects a fixed host-configured argv prefix; args are appended as literal arguments, not interpreted by a shell. Supported arguments and test discovery depend on that program, not the alias name. A zero exit code or outcome=passed does not prove a requested script or newly added tests ran: check the receipt argv and reported test names/counts before claiming coverage. If the intended check did not run, report the missing capability instead of claiming success. Long stdout/stderr previews have separate excerpt and tail_excerpt (preview_mode=head_tail); the missing middle is not saved. complete means capture finished, not that the preview is the full log.",
+                                {"command": {"type": "string", "enum": sorted(self.policy.commands),
+                                             "description": "Configured host alias, not an executable path or a shell command. Do not infer its capabilities from its name."},
                                  "args": {"type": "array", "maxItems": 100,
+                                          "description": "Literal arguments appended to the configured argv prefix. They do not replace the program. That program may accept, reject, or ignore them; inspect actual execution evidence. Do not put a whole shell command in one argument.",
                                           "items": {**string, "maxLength": 8192}, "default": []}, "cwd": path,
                                  "timeout": {"type": "number", "exclusiveMinimum": 0, "maximum": self.policy.timeout,
                                              "default": self.policy.timeout}}, ["command"]))
