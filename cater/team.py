@@ -137,8 +137,8 @@ class TeamService:
         by_seq = {e.seq: e for e in events}
         members = {r.id for r in [self.rt.organization.leader, *self.rt.roles]}
         return [e for e in events if e.type == "team.message_received"
-                and (e.actor == Actor.human() or e.actor.kind == "agent" and e.actor.id in members
-                     or self.recovery.is_message(e, events, by_seq=by_seq))]
+                and (self.recovery.is_message(e, events, by_seq=by_seq) if e.payload.get("kind") == "recovery"
+                     else e.actor == Actor.human() or e.actor.kind == "agent" and e.actor.id in members)]
 
     def view(self, task_id):
         events = self.rt.log.read(task_id=task_id)
@@ -619,6 +619,11 @@ class TeamService:
                and e.payload["recipient"] == role.id for e in self._messages(task_id)):
             raise WorkConflict("收到顾客的新消息，先理解新的上下文；已有操作未重放。")
         source = next((e for e in self._messages(task_id) if e.seq == started.payload["message_seq"]), None)
+        if source is not None and source.payload.get("kind") == "recovery":
+            if self.recovery.superseded(task_id, source):
+                raise WorkConflict("顾客已补充新的输入，本轮分段监督让位；已有成果与原委托保留。")
+            if self.recovery.run_scope(task_id, started) is None:
+                raise WorkConflict("监督执行的目标、控制、规则或工程范围已变化，未继续旧请求或执行旧响应。")
         if source is not None and source.payload.get("kind") == "continuation" and self._waiting_assignment(task_id, source, role) is None:
             own_return = any(r.get("run_id") == started.payload["run_id"] and r.get("name") == "send_message"
                 and r.get("result", {}).get("status") == "ok" and any(
@@ -712,7 +717,8 @@ class TeamService:
             goal = _text(arguments["goal"], "目标", 12000)
             current_work = self.view(task_id)
             if current_work["objective"] != goal or current_work["status"] == "done":
-                self.rt.log.emit(type="team.objective_updated", task_id=task_id, actor=HOST, payload={"goal": goal})
+                self.rt.log.emit(type="team.objective_updated", task_id=task_id, actor=HOST,
+                                 payload={"goal": goal, "run_id": tool_start.payload["run_id"]})
             return {"status": "ok", "goal": goal}
         if name == "read_messages":
             after, limit, kind = arguments.get("after_seq", 0), arguments.get("limit", 20), arguments.get("kind", "all")
@@ -995,6 +1001,7 @@ class TeamService:
         status, reason, final = "completed", "", ""
         failure = {}
         failure_stage = "setup"
+        last_scope = None
         awaiting_customer = False
         revision = self.view(task_id)["revision"]
         assignment = self._waiting_assignment(task_id, message, role)
@@ -1046,7 +1053,8 @@ class TeamService:
                 "active_assignment若非空是你仍负责的原委托，收到子回报、进展或问题答复后结合它继续工作并向原委托人回报。"
                 "open_assignments列出你尚未交还的委托，收到新消息也不要遗忘它们；完成其中一份时可用send_message的reply_to明确交回原委托。"
                 "work_checkpoint是从持久事件重建的当前未关闭工作索引；read_checkpoint可分页读取完整原委托。"
-                "宿主发来的recovery是进程中断后的核对通知，不是新顾客需求；先读实际成果和回执，判断哪些已发生、哪些尚未完成。"
+                "宿主发来的recovery是进程中断或正常分段后的核对通知，不是新顾客需求；先读实际成果和回执，判断哪些已发生、哪些尚未完成。"
+                "trigger为turn_boundary表示上一轮正常到达分段检查点，不是进程崩溃；核对当前目标后继续安排剩余工作，不重复原工具操作。"
                 "继续自己原先发出的工作时，用send_message.continue_assignment_seq关联原委托并交代核对后的下一步；不重复delegate相同工作。"
                 "continuation只是原委托的补充输入，接收者仍完成原委托并向原委托人回报，不把它当成另一份独立工作。"
                 "成果用publish_artifact保存完整正文；操作和验证依据来自实际工具回执。"
@@ -1087,6 +1095,7 @@ class TeamService:
                 failure_stage = "context_assembly"
                 raw_context, next_workspace, next_binding, next_tools, basis = self._model_input(
                     task_id, message, role, run_id=started.payload["run_id"])
+                last_scope = dict(raw_context["work_checkpoint"]["scope"])
                 if binding is not None and (tools != next_tools or any(binding.get(key) != next_binding.get(key)
                         for key in ("available", "workspace_id", "revision", "fingerprint"))):
                     raise WorkConflict("工程范围或工具集合已变化，请核对当前工程后从原委托继续；未重放旧操作。")
@@ -1198,7 +1207,17 @@ class TeamService:
                     break
                 yield
             else:
-                status, reason = "interrupted", "这轮操作较长，已保留成果与回执，交回店长检查后继续安排。"
+                events = self.rt.log.read(task_id=task_id)
+                delivered = any(e.type == "team.objective_completed" and e.actor == HOST
+                                and e.payload.get("run_id") == started.payload["run_id"]
+                                for e in events)
+                returned = assignment is not None and any(e.type == "team.message_received" and e.seq > started.seq
+                    and e.actor == Actor.agent(role.id, role.role) and e.payload.get("kind") == "report"
+                    and e.payload.get("reply_to") == assignment.seq
+                    and e.payload.get("recipient") == assignment.actor.id for e in events)
+                if not delivered and not returned:
+                    status, reason = "interrupted", "本轮到达分段检查点，已有成果与回执保留；尚未宣告工作完成。"
+                    failure["interruption_kind"] = "turn_boundary"
         except WorkConflict as exc:
             status, reason = "interrupted", str(exc)
         except Exception as exc:
@@ -1225,12 +1244,20 @@ class TeamService:
                 reason = f"{role.name}本轮模型请求参数或接入配置未通过检查；已有成果和操作记录保留，需要核对配置及请求格式。"
         with self.rt.log.atomic():
             self._finish_message(task_id, message, role, started, revision, assignment,
-                                 status=status, reason=reason, final=final, failure=failure, awaiting_customer=awaiting_customer)
+                                 status=status, reason=reason, final=final, failure=failure,
+                                 awaiting_customer=awaiting_customer, last_scope=last_scope)
 
-    def _finish_message(self, task_id, message, role, started, revision, assignment, *, status, reason, final, failure, awaiting_customer):
-        self.rt.log.emit(type="team.run_finished", task_id=task_id, actor=HOST,
+    def _finish_message(self, task_id, message, role, started, revision, assignment, *, status, reason, final, failure, awaiting_customer,
+                        last_scope=None):
+        scope = (self.recovery.boundary_scope(task_id, message, started, last_scope)
+                 if assignment is None and failure.get("interruption_kind") == "turn_boundary" else None)
+        if scope is not None:
+            failure = {**failure, "recovery_of": started.seq, "recovery_scope": scope}
+        finished = self.rt.log.emit(type="team.run_finished", task_id=task_id, actor=HOST,
             payload={"message_seq": message.seq, "role": role.id, "run_id": started.payload["run_id"],
                      "status": status, "reason": reason, **failure})
+        if scope is not None:
+            self.recovery._notify(task_id, started, finished, scope, trigger="turn_boundary")
         already_reported = assignment is not None and any(e.actor.id == role.id
             and e.payload.get("kind") == "report" and e.payload.get("reply_to") == assignment.seq
             for e in self._messages(task_id))

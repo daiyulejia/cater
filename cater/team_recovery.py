@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from .activity_owner import activity_owner
 from .events import Actor
 from .work import WorkConflict
@@ -9,6 +11,11 @@ from .work import WorkConflict
 
 HOST = Actor.system("team")
 RECOVERY_CONTRACT = {"version": 1, "kind": "fresh_supervision"}
+
+
+def _same_scope(left, right):
+    return (type(left) is dict and type(right) is dict
+            and json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True))
 
 
 class TeamRecovery:
@@ -38,30 +45,90 @@ class TeamRecovery:
         p = event.payload
         if type(p.get("recovery_of")) is not int or type(p.get("interrupted_seq")) is not int:
             return False
+        boundary = p.get("trigger") == "turn_boundary"
+        if "trigger" in p and not boundary:
+            return False
         events = events if events is not None else self.rt.log.read(task_id=event.task_id)
         by_seq = by_seq if by_seq is not None else {e.seq: e for e in events}
         start, finish = by_seq.get(p["recovery_of"]), by_seq.get(p["interrupted_seq"])
         source = by_seq.get(start.payload.get("message_seq")) if start else None
+        scope = (finish.payload.get("recovery_scope") if boundary else start.payload.get("recovery_scope")) if start and finish else None
         return bool(start and finish and source and source.seq < start.seq < finish.seq < event.seq
             and start.actor == finish.actor == HOST and start.type == "team.run_started"
             and finish.type == "team.run_finished" and finish.payload.get("status") == "interrupted"
             and start.payload.get("recovery_contract") == RECOVERY_CONTRACT
             and type(start.payload["recovery_contract"].get("version")) is int
             and source.type == "team.message_received" and source.actor.kind in {"human", "agent"}
+            and source.payload.get("kind") != "recovery"
             and source.payload.get("recipient") == start.payload.get("role")
             and start.hash == p.get("recovery_hash") and finish.payload.get("recovery_of") == start.seq
+            and ((finish.payload.get("interruption_kind") == "turn_boundary") == boundary)
             and all(finish.payload.get(k) == start.payload.get(k) for k in ("message_seq", "role", "run_id"))
             and isinstance(start.payload.get("run_id"), str) and start.payload["run_id"].strip()
-            and p.get("scope") == start.payload.get("recovery_scope")
-            and p.get("revision") == start.payload.get("revision")
+            and _same_scope(p.get("scope"), scope)
+            and type(p.get("revision")) is int and p["revision"] == scope.get("revision")
             and not any(e.seq < event.seq and e.actor == HOST and e.type == "team.message_received"
                         and e.payload.get("kind") == "recovery" and e.payload.get("recovery_of") == start.seq
                         and e.payload.get("recovery_hash") == start.hash for e in events))
 
     def current(self, task_id, message):
-        scope = self.scope(task_id)
+        events = self.rt.log.read(task_id=task_id)
+        if not self.is_message(message, events):
+            return False
+        scope = self.scope(task_id, events=events)
         return (scope["control_state"] == "running" and not scope["done"]
-                and message.payload.get("scope") == scope)
+                and _same_scope(message.payload.get("scope"), scope)
+                and not self.superseded(task_id, message, events=events))
+
+    def superseded(self, task_id, message, *, events=None):
+        events = events if events is not None else self.rt.log.read(task_id=task_id)
+        original = message.payload.get("recovery_of")
+        return (message.payload.get("trigger") == "turn_boundary"
+                and type(original) is int
+                and any(e.actor == Actor.human() and e.type == "team.message_received"
+                        and e.seq > original for e in events))
+
+    def run_scope(self, task_id, start, *, observed=None, events=None):
+        events = events if events is not None else self.rt.log.read(task_id=task_id)
+        expected = observed if observed is not None else start.payload.get("recovery_scope")
+        if type(expected) is not dict or type(expected.get("revision")) is not int:
+            return None
+        expected = dict(expected)
+        cutoff = max(start.seq, expected["revision"])
+        for event in events:
+            if (event.seq <= cutoff or event.actor != HOST
+                    or event.type not in {"team.objective_updated", "team.objective_completed"}):
+                continue
+            if event.payload.get("run_id") != start.payload.get("run_id"):
+                return None
+            expected.update(revision=event.seq, done=event.type == "team.objective_completed")
+        scope = self.scope(task_id, events=events)
+        return scope if _same_scope(scope, expected) else None
+
+    def boundary_scope(self, task_id, source, start, observed):
+        """Only a durable root input may hand off one bounded supervision turn."""
+        contract = start.payload.get("recovery_contract")
+        if (source.actor.kind not in {"human", "agent"} or source.payload.get("kind") == "recovery"
+                or source.payload.get("recipient") != start.payload.get("role")
+                or contract != RECOVERY_CONTRACT or type(contract.get("version")) is not int):
+            return None
+        events = self.rt.log.read(task_id=task_id)
+        if any(e.actor == Actor.human() and e.type == "team.message_received" and e.seq > start.seq for e in events):
+            return None
+        scope = self.run_scope(task_id, start, observed=observed, events=events) if observed is not None else None
+        return scope if scope and scope["control_state"] == "running" and not scope["done"] else None
+
+    def _notify(self, task_id, start, finish, scope, *, trigger=None):
+        role = self.team._role(start.payload["role"])
+        cause = "本轮到达分段检查点" if trigger == "turn_boundary" else "上次执行进程中断"
+        return self.rt.log.emit(type="team.message_received", task_id=task_id, actor=HOST, payload={
+            "kind": "recovery", "recipient": self.rt.organization.leader.id,
+            "revision": scope["revision"], "scope": scope,
+            "recovery_of": start.seq, "recovery_hash": start.hash, "interrupted_seq": finish.seq,
+            **({"trigger": trigger} if trigger is not None else {}),
+            "text": (f"{role.name}处理消息 #{start.payload['message_seq']} 时{cause}。"
+                     "已有成果和操作记录已保留，请店长核对当前目标、成果和回执后安排剩余工作；"
+                     "这是新的监督输入，不是重放旧请求、旧操作或宣布工作完成。")})
 
     def retire(self, task_id):
         """Caller owns simple-team; closing and notification commit together."""
@@ -79,6 +146,7 @@ class TeamRecovery:
                 p = start.payload
                 source = sources.get(p.get("message_seq"))
                 eligible = (source is not None and source.seq < start.seq and source.actor.kind in {"human", "agent"}
+                    and source.payload.get("kind") != "recovery"
                     and p.get("role") in members
                     and source.payload.get("recipient") == p.get("role")
                     and p.get("recovery_contract") == RECOVERY_CONTRACT
@@ -91,12 +159,7 @@ class TeamRecovery:
                              "status": "interrupted", "recovery_of": start.seq,
                              "reason": "上次执行进程已结束，保留已有操作记录，未重放旧模型请求。"})
                 if eligible:
-                    self.rt.log.emit(type="team.message_received", task_id=task_id, actor=HOST, payload={
-                        "kind": "recovery", "recipient": self.rt.organization.leader.id,
-                        "revision": scope["revision"], "scope": scope,
-                        "recovery_of": start.seq, "recovery_hash": start.hash, "interrupted_seq": terminal.seq,
-                        "text": (f"{members[p['role']]}上次处理消息 #{p['message_seq']} 时执行进程中断。"
-                                 "已有成果和操作记录已保留，请店长核对现状后安排未完成的工作。")})
+                    self._notify(task_id, start, terminal, scope)
 
     def prepare(self, task_id):
         if self.rt.log.db.in_transaction:
