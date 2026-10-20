@@ -239,6 +239,17 @@ class TeamRecovery:
                 db.rollback()
 
     def read(self, task_id, arguments):
+        if "review_seq" in arguments:
+            seq = arguments["review_seq"]
+            if set(arguments) != {"review_seq"} or type(seq) is not int or seq < 1:
+                raise ValueError("复核原文读取只接受正整数review_seq，不能与分页混用。")
+            row = next((r for r in self.rt.team_reviews.view(task_id) if r["request_seq"] == seq), None)
+            if row is None:
+                raise ValueError("未找到本群该复核记录；请使用reviews索引中的request_seq。")
+            return {"status": "ok", "review": row,
+                    **({"scope_reason": "objective_changed",
+                        "scope_note": "stale表示该记录所属目标与当前目标不同，不表示它被同一复核的下一轮修订替代；历史反馈不证明当前目标或当前文件已通过。"}
+                       if row["status"] == "stale" else {})}
         after, limit = arguments.get("after_seq", 0), arguments.get("limit", 20)
         if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 50:
             raise ValueError("检查点读取需要非负序号和1至50条分页大小。")

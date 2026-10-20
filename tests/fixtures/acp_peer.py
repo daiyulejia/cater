@@ -42,12 +42,18 @@ def wait_for(path):
         time.sleep(0.01)
 
 
+def publish_port(root, port):
+    pending = root / "child-port.pending"
+    pending.write_text(str(port))
+    pending.replace(root / "child-port")
+
+
 def child(root):
     # A live socket observes descendant lifetime without PID reuse races.
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         listener.listen()
-        (root / "child-port").write_text(str(listener.getsockname()[1]))
+        publish_port(root, listener.getsockname()[1])
         while True:
             connection, _ = listener.accept()
             connection.close()

@@ -68,7 +68,7 @@ def _reference_inputs(context):
     if not changed:
         return context
     candidate["context_window"] = {**context["context_window"], "note": (
-        "聊天和工作索引可能是节选，不是完整要求或验收结论。关键正文及reviews完整保留；"
+        "聊天和工作索引可能是节选，不是完整要求或验收结论。关键正文及当前目标reviews完整保留；旧目标复核节选可按review_reader读回。"
         "text为null且带context_ref时，读取本轮同名字段的完整text，一跳引用而非省略；需要其他细节时读来源。")}
     return candidate if json_bytes(candidate) < json_bytes(context) else context
 
@@ -91,6 +91,9 @@ def model_context(context):
     result["outgoing_work"] = [_preview(_preview(row, "text", 1536), "latest_update", 1024)
                                for row in context["outgoing_work"]]
     result["notifications"] = [_preview(row, "text", 1536) for row in context["notifications"]]
+    result["reviews"] = [
+        _preview(_preview(row, "instruction", 512), "feedback", 512)
+        if row.get("status") == "stale" else row for row in context["reviews"]]
     rows = [row for row in context["conversation"] if _source_key(row, sources) is None]
     selected, total = [], 2
     for row in reversed(rows):
@@ -109,8 +112,9 @@ def model_context(context):
         "conversation_excerpt": True,
         "conversation_reader": {"name": "read_messages", "scope": "conversation"},
         "work_reader": "read_checkpoint", "receipt_reader": "read_receipts",
+        "review_reader": {"name": "read_checkpoint", "argument": "review_seq", "source": "reviews[].request_seq"},
         "artifact_versions_total": len(context["artifacts"]),
-        "note": "聊天和工作索引可能是节选，不是完整要求或验收结论。message、active_assignment、最新顾客消息及reviews保留原文；需要细节时读取来源。",
+        "note": "聊天和工作索引可能是节选，不是完整要求或验收结论。message、active_assignment、最新顾客消息及当前目标reviews保留原文；旧目标复核节选可按review_reader读回。",
     }
     return _reference_inputs(result)
 
