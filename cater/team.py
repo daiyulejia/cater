@@ -1226,6 +1226,7 @@ class TeamService:
                 history.append(turn.message)
                 waiting = False
                 operation_failed = False
+                check_unsettled = False
                 for call in turn.calls:
                     failure_stage = "tool_dispatch"
                     tool_start, result = self._dispatch_tool(task_id, message, role, started, revision,
@@ -1236,6 +1237,8 @@ class TeamService:
                     history_receipts.append({"call_id": call.id, "started_seq": tool_start.seq, "name": call.name,
                                              "status": result.get("status")})
                     operation_failed |= result.get("status") != "ok"
+                    check_unsettled |= result.get("complete") is False or result.get("outcome") in {
+                        "failed", "timeout", "effects_unknown"}
                     if call.name in {"set_objective", "finish_work"}:
                         revision = self.view(task_id)["revision"]
                     if call.name == "wait_for_reply" and result.get("status") == "ok":
@@ -1244,6 +1247,31 @@ class TeamService:
                         waiting = awaiting_customer = True
                     if call.name in {"request_review", "record_review"} and result.get("status") == "ok":
                         waiting = True
+                substantive = [call.name for call in turn.calls if call.name != "wait_for_reply"]
+                if (substantive and substantive[-1] == "finish_work" and not operation_failed
+                        and not check_unsettled and not awaiting_customer and role.id == self.rt.organization.leader.id):
+                    with self.rt.log.atomic():
+                        current_work = self.view(task_id)
+                        events = self.rt.log.read(task_id=task_id)
+                        completed = next((e for e in reversed(events)
+                            if e.type == "team.objective_completed" and e.actor == HOST
+                            and e.seq == current_work["revision"] and e.seq > started.seq
+                            and e.payload.get("run_id") == started.payload["run_id"]), None)
+                        if current_work["status"] == "done" and completed is not None and not self._pending_operations(task_id):
+                            self._current(task_id, started, role, revision)
+                            final = completed.payload["summary"]
+                            if not any(e.type == "msg.said" and e.actor == Actor.agent(role.id, role.role)
+                                       and e.payload.get("run_id") == started.payload["run_id"]
+                                       and e.payload.get("delivery_seq") == completed.seq for e in events):
+                                self.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
+                                    payload={"text": final, "claim": final[:180], "phase": "team",
+                                             "run_id": started.payload["run_id"], "reply_to": message.seq,
+                                             "response_kind": "reply", "audience": "customer", "recipient": "human",
+                                             "delivery_seq": completed.seq})
+                            self._finish_message(task_id, message, role, started, revision, assignment,
+                                status=status, reason=reason, final=final, failure=failure,
+                                awaiting_customer=awaiting_customer, last_scope=last_scope)
+                            return
                 if awaiting_customer or waiting and not operation_failed:
                     status = "waiting"
                     break

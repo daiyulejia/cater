@@ -86,7 +86,7 @@ class HandoffDiagnosticsTests(unittest.TestCase):
 
         self.driver.steps[self.manager] = [
             test_simple_team.turn("", ("finish_work", {**arguments, "handoff": invalid})),
-            repair, test_simple_team.turn("Delivered after correcting the citations."),
+            repair,
         ]
         self.rt.team.receive(self.task, "Deliver the selected source with exact citations")
         self.rt.collaborate(self.task)
@@ -109,7 +109,7 @@ class HandoffDiagnosticsTests(unittest.TestCase):
                          (artifact.seq, artifact.hash, "selected source"))
         self.assertEqual([e.seq for e in events if e.type == "deliverable.published"], [artifact.seq])
         self.assertEqual(self.rt.team.view(self.task)["status"], "done")
-        self.assertEqual(len(self.driver.calls), 3)
+        self.assertEqual(len(self.driver.calls), 2)
         self.assertEqual(self.driver.steps[self.manager], [])
         self.assertTrue(self.rt.verify_chain().ok)
 

@@ -2829,16 +2829,18 @@ class WebTests(unittest.TestCase):
             self.assertEqual(rt.log.read(task_id=task_id)[-1].type, "task.progress_reported")
 
     def test_artifact_body_is_available_in_detail_but_not_copied_into_task_list(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "artifact-body.db")
-            with Runtime(db) as rt:
-                task_id = rt.create_task("发布一份可读成果")
-                rt.collaborate(task_id)
-            base = start_test_web(self, db)
-            with urlopen(f"{base}/api/tasks", timeout=5) as response:
-                listed = json.load(response)
-            with urlopen(f"{base}/api/tasks/{task_id}", timeout=5) as response:
-                detail = json.load(response)
+        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        db = str(Path(tmp) / "artifact-body.db")
+        with Runtime(db) as rt:
+            task_id = rt.create_task("发布一份可读成果")
+            rt.collaborate(task_id)
+        base, server, _ = start_test_web(self, db, return_server=True)
+        # Join request handlers before the earlier-registered directory cleanup.
+        server.daemon_threads = False
+        with urlopen(f"{base}/api/tasks", timeout=5) as response:
+            listed = json.load(response)
+        with urlopen(f"{base}/api/tasks/{task_id}", timeout=5) as response:
+            detail = json.load(response)
         self.assertTrue(listed[0]["deliverables"])
         self.assertNotIn("content", listed[0]["deliverables"][0])
         artifact = detail["task"]["deliverables"][0]
