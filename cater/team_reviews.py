@@ -60,7 +60,15 @@ class TeamReviews:
     def _find(self, task_id, review_seq):
         _positive(review_seq)
         row = next((r for r in self.view(task_id) if r["request_seq"] == review_seq), None)
-        if row is None or row["status"] == "stale":
+        if row is None:
+            previous = next((e for e in self.rt.log.iter_events(task_id=task_id,
+                event_types=("team.review_requested",)) if e.seq == review_seq and e.actor == HOST), None)
+            if previous is None:
+                raise WorkConflict("本群没有对应的正式复核请求。review_seq应取request_review返回的review_seq或reviews[].request_seq，"
+                                   "不是普通委托、消息、成果或工具回执编号。若reviews为空，请让成果作者先发布实际版本并调用request_review；"
+                                   "可先向委托人反馈阅读意见，但这不等于正式批准。")
+            raise WorkConflict("这次复核请求已有后续提交，请读取reviews中的当前request_seq，不沿用旧请求编号。")
+        if row["status"] == "stale":
             raise WorkConflict("这次复核已被新的提交或目标替代，请读取reviews中的当前记录。")
         return row
 
