@@ -147,6 +147,16 @@ def _contained_reason(name, failure):
             f"{suffix}，计费情况仍以实际用量记录为准。")
 
 
+def _assignment_report(source, event):
+    return (source is not None and source.payload.get("kind") in {"assignment", "message"}
+            and event.payload.get("kind") == "report" and event.payload.get("reply_to") == source.seq
+            and event.actor.id == source.payload.get("recipient")
+            and event.payload.get("recipient") == source.actor.id
+            and (type(source.payload.get("review_seq")) is not int
+                 or type(event.payload.get("review_seq")) is int
+                 and event.payload["review_seq"] == source.payload["review_seq"]))
+
+
 def _reported_messages(messages):
     from .team_work_control import linked_inputs
 
@@ -156,9 +166,7 @@ def _reported_messages(messages):
         if event.payload.get("kind") != "report":
             continue
         source = by_seq.get(event.payload.get("reply_to"))
-        if (source is not None and source.payload.get("kind") in {"assignment", "message"}
-                and event.actor.id == source.payload.get("recipient")
-                and event.payload.get("recipient") == source.actor.id):
+        if _assignment_report(source, event):
             reported.add(source.seq)
     return linked_inputs(messages, reported, include_feedback=False)
 
@@ -499,8 +507,7 @@ class TeamService:
                 and parent.payload.get("recipient") == role.id
                 and parent.payload.get("revision") == self.view(task_id)["revision"]
                 and parent.seq not in inactive
-                and not any(e.payload.get("kind") == "report" and e.actor.id == role.id
-                            and e.payload.get("reply_to") == parent.seq for e in messages.values())):
+                and parent.seq not in _reported_messages(messages.values())):
             return parent
         if message.payload["kind"] == "message" and message.actor.kind == "agent":
             return message
@@ -907,9 +914,7 @@ class TeamService:
                     return {"status": "error", "code": "reply_work_inactive", "complete": True,
                         "outcome": "not_started", "message": "原工作已明确撤回或被新版复核替代，未将旧工作重新交回；请按当前实际工作回复。"}
                 reported = next((e for e in messages.values() if e.seq > original.seq
-                    and e.actor.kind == "agent" and e.actor.id == role.id and e.payload.get("kind") == "report"
-                    and e.payload.get("reply_to") == original.seq
-                    and e.payload.get("recipient") == arguments["recipient"]), None)
+                                 and _assignment_report(original, e)), None)
                 if reported is not None:
                     if _text(arguments["text"]) != reported.payload["text"]:
                         return {"status": "error", "code": "assignment_already_returned",
@@ -1383,6 +1388,8 @@ class TeamService:
             history, history_receipts = [], []
             tools, binding = None, None
             correction, correction_scope, correction_used = None, None, False
+            review_followup = None
+            review_followup_scope = None
 
             def tool_started():
                 nonlocal failure_stage
@@ -1399,11 +1406,15 @@ class TeamService:
                 last_scope = dict(raw_context["work_checkpoint"]["scope"])
                 if correction is not None and not _same_scope(correction_scope, last_scope):
                     raise WorkConflict("目标、规则、控制或工程范围已变化，未按旧响应启动格式纠正；已有成果与回执保留。")
+                if review_followup is not None and not _same_scope(review_followup_scope, last_scope):
+                    raise WorkConflict("复核补登记对应的工作范围已变化，未继续旧请求；已有成果与回执保留。")
                 if binding is not None and (tools != next_tools or any(binding.get(key) != next_binding.get(key)
                         for key in ("available", "workspace_id", "revision", "fingerprint"))):
                     raise WorkConflict("工程范围或工具集合已变化，请核对当前工程后从原委托继续；未重放旧操作。")
                 workspace, binding, tools = next_workspace, next_binding, next_tools
                 context = model_context(raw_context)
+                if review_followup is not None:
+                    context["review_followup"] = review_followup
                 wire_history, window = history_window(history, history_receipts, tools=tools)
                 context["tool_history_window"] = {**window, "run_id": started.payload["run_id"]}
                 if correction is not None:
@@ -1436,6 +1447,15 @@ class TeamService:
                     request_correction = {"correction_of": correction["correction_of"], "correction_attempt": 1}
                     # A new request failure must not inherit the old response's diagnosis.
                     failure = dict(request_correction)
+                if review_followup is not None:
+                    budget = getattr(driver, "token_budget", None)
+                    if valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget:
+                        raise WorkConflict("当前通道已达到顾客配置的用量上限，未继续调用。")
+                    if (self.rt.team_reviews.pending_for(task_id, role, assignment) is None
+                            or self._pending_operations(task_id)
+                            or not _same_scope(review_followup_scope, self.recovery.scope(task_id))):
+                        raise WorkConflict("复核状态或工作范围已变化，或存在待核对操作，未继续补登记请求。")
+                    self._current(task_id, started, role, revision)
                 try:
                     turn = driver.tool_turn(role=role.role, prompt=prompt, history=wire_history, tools=tools)
                 except DriverProtocolError as error:
@@ -1519,6 +1539,24 @@ class TeamService:
                                  "recipient": "human" if customer_facing else message.actor.id,
                                  **({"delivery_seq": delivery} if delivery is not None else {})})
                 if not turn.calls:
+                    pending_review = self.rt.team_reviews.pending_for(task_id, role, assignment)
+                    if pending_review is not None:
+                        budget = getattr(driver, "token_budget", None)
+                        can_continue = (turn_index + 1 < MAX_ACTOR_TURNS and not self._pending_operations(task_id)
+                            and not (valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget))
+                        self._current(task_id, started, role, revision)
+                        if can_continue and self.rt.team_reviews.followup(task_id, role, assignment, started, model_call.seq):
+                            review_followup_scope = dict(last_scope)
+                            review_followup = {"review_seq": pending_review["request_seq"], "previous_public_reply": turn.text,
+                                "instruction": "原正式复核仍待登记，你的普通文字答复没有替代验收结论。"
+                                    "保留当前文件与已完成核查，不用重复发布或重新申请复核。"
+                                    "请结合已读版本继续必要验证，用record_review给出approved或changes_requested及依据；"
+                                    "若仍需信息，可以实际提问或联系伙伴，不必勉强通过。"
+                                    "这是本次复核唯一一次自动补充提醒，不是新任务或替你选择结论。"}
+                            yield
+                            continue
+                        status, reason = "interrupted", "指定复核者尚未登记本次正式结论，原复核委托保留；请继续原版本核查并登记，不能由作者代签。"
+                        failure["interruption_kind"] = "review_decision_missing"
                     break
                 history.append(turn.message)
                 waiting = False
@@ -1626,6 +1664,9 @@ class TeamService:
 
     def _finish_message(self, task_id, message, role, started, revision, assignment, *, status, reason, final, failure, awaiting_customer,
                         last_scope=None):
+        if status == "completed" and self.rt.team_reviews.pending_for(task_id, role, assignment) is not None:
+            status, reason = "interrupted", "指定复核者尚未登记本次正式结论，原复核委托保留；请继续原版本核查并登记，不能由作者代签。"
+            failure = {**failure, "interruption_kind": "review_decision_missing"}
         scope = (self.recovery.boundary_scope(task_id, message, started, last_scope)
                  if assignment is None and failure.get("interruption_kind") == "turn_boundary" else None)
         if scope is not None:
@@ -1635,9 +1676,7 @@ class TeamService:
                      "status": status, "reason": reason, **failure})
         if scope is not None:
             self.recovery._notify(task_id, started, finished, scope, trigger="turn_boundary")
-        already_reported = assignment is not None and any(e.actor.id == role.id
-            and e.payload.get("kind") == "report" and e.payload.get("reply_to") == assignment.seq
-            for e in self._messages(task_id))
+        already_reported = assignment is not None and assignment.seq in _reported_messages(self._messages(task_id))
         if (status == "interrupted"
                 and any(e.seq > message.seq and e.actor == Actor.human() and e.payload["recipient"] == role.id
                         for e in self._messages(task_id))):

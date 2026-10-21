@@ -169,7 +169,12 @@ class TeamReviews:
             row = self._find(task_id, arguments["review_seq"])
             verdict, feedback = arguments["verdict"], _text(arguments["feedback"])
             if role.id != row["reviewer"] or role.id == row["author"]:
-                raise ValueError("只有本次指定的独立复核者可以登记验收。")
+                return {"status": "error", "code": "reviewer_mismatch", "complete": True,
+                        "outcome": "not_started", "review_seq": row["request_seq"],
+                        "expected_reviewer": row["reviewer"],
+                        "message": (f"本次复核由 {row['reviewer']} 负责，作者或其他伙伴不能代签。"
+                                    "请发消息给指定复核者，核对原 review_seq 的实际版本后，由对方登记结论；"
+                                    "不用重新发布相同文件或新建复核。")}
             if verdict not in {"changes_requested", "approved"}:
                 raise ValueError("复核需要明确通过或具体的修复要求。")
             if row["status"] not in {"pending"}:
@@ -187,6 +192,28 @@ class TeamReviews:
                                       visible=True, review_seq=row["request_seq"])
             return {"status": "ok", "review_seq": row["request_seq"], "decision_seq": decision.seq,
                     "verdict": verdict, "message_seq": sent.seq}
+
+    def pending_for(self, task_id, role, assignment):
+        if assignment is None or type(assignment.payload.get("review_seq")) is not int:
+            return None
+        if (self.rt.execution_control.view(task_id)["state"] != "running"
+                or assignment.seq in self.rt.team._inactive_messages(task_id)):
+            return None
+        return next((row for row in self.view(task_id)
+                     if row["request_seq"] == assignment.payload["review_seq"] and row["status"] == "pending"
+                     and row["reviewer"] == role.id and row.get("message_seq") == assignment.seq), None)
+
+    def followup(self, task_id, role, assignment, started, model_call_seq):
+        """Offer one recorded chance per exact review, without choosing its verdict."""
+        with self.rt.log.atomic():
+            self._guard(task_id, role, started)
+            row = self.pending_for(task_id, role, assignment)
+            if row is None or any(e.actor == HOST and e.payload.get("review_seq") == row["request_seq"]
+                    for e in self.rt.log.iter_events(task_id=task_id, event_types=("team.review_followup_requested",))):
+                return None
+            return self.rt.log.emit(type="team.review_followup_requested", actor=HOST, task_id=task_id, payload={
+                "review_seq": row["request_seq"], "message_seq": assignment.seq, "role": role.id,
+                "run_id": started.payload["run_id"], "model_call_seq": model_call_seq})
 
     def _request_message(self, task_id, row):
         return next((e for e in self.rt.team._messages(task_id) if e.seq > row["request_seq"]

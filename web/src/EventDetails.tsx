@@ -51,6 +51,7 @@ const titles: Record<string, string> = {
   'team.objective_updated': '团队目标已更新', 'team.objective_completed': '店长交付结论',
   'team.model_called': '团队模型用量', 'team.tool_started': '团队工具已发起', 'team.tool_finished': '团队工具回执',
   'team.response_correction_requested': '工具响应纠正安排',
+  'team.review_followup_requested': '复核结论补登记提醒',
   'team.tool_reconciled': '发布影响已核对',
   'task.created': '任务已创建', 'task.started': '任务已启动', 'task.interpreted': '任务理解',
   'task.routed': '协作安排', 'mission.created': '工作目标', 'task.decomposed': '任务分工',
@@ -195,6 +196,22 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
   if (!Object.hasOwn(titles, event.type)) return { fields, status, note: '已保存这条事件记录，暂无对应的中文摘要。' }
   if (event.type !== 'team.response_correction_requested' && !hasCorrectionReference(event)) add('工作项', p.work_item_id)
   switch (event.type) {
+    case 'team.review_followup_requested': {
+      const review = own(p, 'review_seq'), message = own(p, 'message_seq'), original = own(p, 'model_call_seq')
+      const role = own(p, 'role'), run = own(p, 'run_id')
+      status = '补登记提醒待核对'
+      if (!correctionHost(event) || !positiveSeq(event.seq) || !positiveSeq(review) || !positiveSeq(message)
+        || !positiveSeq(original) || !(review < message && message < original && original < event.seq)
+        || typeof role !== 'string' || !role.trim() || typeof run !== 'string' || !run.trim()) {
+        note = '来源或关联信息未通过核对，不能作为已安排提醒的依据。'
+        break
+      }
+      status = '已记录一次补登记提醒'
+      add('复核成员', member(role)); number('复核请求', review); number('原复核委托', message)
+      number('关联模型返回事件', original)
+      note = '原复核仍待正式结论；这不是新任务、批准或代签，也不证明后续模型请求已经发出。'
+      break
+    }
     case 'team.response_correction_requested': {
       const request = correctionRequest(event)
       status = '纠正安排待核对'
@@ -542,7 +559,7 @@ export function EventDetails({ event: original, actorName, contextEvents = [] }:
   const displaySeq = positiveSeq(event.seq) ? event.seq : '待核对'
   const developerBase = hasCorrectionReference(event) ? { seq: positiveSeq(event.seq) ? event.seq : null, type: event.type } : event
   // Model and run diagnostics never expose provider metadata or raw exceptions, even in developer details.
-  const developerEvent = event.type === 'team.response_correction_requested'
+  const developerEvent = ['team.response_correction_requested', 'team.review_followup_requested'].includes(event.type)
     ? { seq: positiveSeq(event.seq) ? event.seq : null, type: event.type, payload: { fields, status, note } }
     : event.type === 'team.model_called' ? { ...developerBase, payload: { ...usageSummary([event]).calls[0], ...correctionReference(event) } }
     : event.type === 'team.run_finished' ? { ...developerBase, payload: isTeamHost(event) ? { ...responseDiagnostics(event.payload, true), requestFailure: requestFailureFields(event.payload), ...correctionReference(event) } : {} } : event
