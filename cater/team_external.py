@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import tempfile
+import sqlite3
 import time
 
 from .events import Actor
@@ -13,6 +13,7 @@ from .team_context import model_context
 from .tool_protocol import json_utf8
 from .usage import valid_token_count
 from .work import WorkConflict
+from .external_scratch import LaunchDirectory
 
 
 HOST = Actor.system("team")
@@ -127,8 +128,9 @@ class TeamExternal:
                 + json.dumps(context, ensure_ascii=False))
             # Never load a customer's project-local client hooks/settings.
             # Actual workspace operations still use the bound host executor.
-            with tempfile.TemporaryDirectory(prefix="cater-agent-") as scratch:
-                run = driver.agent_run(cwd=scratch, tools=tools, execute=execute,
+            scratch = LaunchDirectory(self.rt.log, attempt)
+            try:
+                run = driver.agent_run(cwd=scratch.path, tools=tools, execute=execute,
                                        check_current=check, on_update=None)
                 try:
                     result = run.run(prompt)
@@ -170,6 +172,15 @@ class TeamExternal:
                         failure.update(external_observations=dict(state.observations),
                                        failure_stage=state.failure_phase or "cleanup")
                         raise WorkConflict("外部客户端尚未确认清理完成，保留运行记录；请先核对进程，不重放旧工作。")
+            finally:
+                # A local directory residue is not a failed model turn. It has
+                # its own durable receipt and cannot release process/tool holds.
+                try:
+                    scratch.close(client_stopped=run is None or run.state.cleanup_complete)
+                except (sqlite3.Error, OSError) as exc:
+                    # The created receipt stays unconfirmed. Preserve any
+                    # primary model/control error, or successful host handoff.
+                    failure["launch_directory_settlement_error"] = type(exc).__name__
         except WorkConflict as exc:
             status, reason = "interrupted", str(exc)
         except Exception as exc:

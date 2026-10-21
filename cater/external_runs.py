@@ -192,6 +192,10 @@ class ExternalRuns:
                          "run_ended": bool(ended), "replay_authorized": False})
         return rows
 
+    def launch_directories(self, task_id) -> list[dict]:
+        from .external_scratch import launch_directories
+        return launch_directories(self, task_id)
+
     def reconcile(self, task_id, started_seq, *, expected_hash, invocation_stopped, note,
                   retire_host_run=False) -> Event:
         """Trusted host/human API only; deliberately absent from model tool schemas."""

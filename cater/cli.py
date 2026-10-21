@@ -770,6 +770,7 @@ def cmd_external_run(args: argparse.Namespace) -> int:
                     "metadata": starts[row["started_seq"]].payload}
                    for row in rows]
         print(json.dumps({"task_id": args.task_id, "pending": pending,
+                          "launch_directories": runs.launch_directories(args.task_id),
                           "reconciliation": event_to_dict(receipt) if receipt else None},
                          ensure_ascii=False, indent=2))
     return 0

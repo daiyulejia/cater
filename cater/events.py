@@ -32,6 +32,8 @@ EVENT_CATEGORIES = {
     "team.external_run_started": "driver",
     "team.external_run_finished": "driver",
     "team.external_run_reconciled": "driver",
+    "team.external_directory_created": "driver",
+    "team.external_directory_settled": "driver",
     "team.tool_started": "execution",
     "team.tool_finished": "execution",
     "team.tool_reconciled": "execution",
