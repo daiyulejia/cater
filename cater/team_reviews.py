@@ -25,6 +25,47 @@ class TeamReviews:
     def __init__(self, runtime):
         self.rt = runtime
 
+    def superseded_assignments(self, task_id, *, events=None):
+        """Retire replaced review deliveries and their bound continuation/feedback inputs."""
+        events = events if events is not None else self.rt.log.read(task_id=task_id)
+        requests = [e for e in events if e.actor == HOST and e.type == "team.review_requested"]
+        latest = {e.payload.get("root_seq") or e.seq: e for e in requests}
+        messages = self.rt.team._messages(task_id, events=events)
+        deliveries = {}
+        for message in messages:
+            p = message.payload
+            if (message.actor.kind == "agent" and p.get("kind") == "assignment"
+                    and type(p.get("review_seq")) is int):
+                deliveries.setdefault((p["review_seq"], message.actor.id, p.get("recipient"), p.get("revision")), message)
+        superseded = set()
+        for request in requests:
+            previous = request.payload
+            current = latest[previous.get("root_seq") or request.seq]
+            if (current.seq <= request.seq or any(current.payload.get(key) != previous.get(key)
+                    for key in ("author", "reviewer", "revision"))):
+                continue
+            source = deliveries.get((request.seq, previous["author"], previous["reviewer"], previous["revision"]))
+            if source is not None and request.seq < source.seq < current.seq:
+                superseded.add(source.seq)
+        review_messages = set(superseded)
+        by_seq = {e.seq: e for e in messages}
+        for message in messages:
+            original = by_seq.get(message.payload.get("continue_assignment_seq"))
+            if (message.payload.get("kind") == "continuation" and original is not None
+                    and original.seq in superseded and original.seq < message.seq
+                    and message.actor == original.actor
+                    and all(message.payload.get(key) == original.payload.get(key)
+                            for key in ("recipient", "revision"))):
+                superseded.add(message.seq)
+            original = by_seq.get(message.payload.get("reply_to"))
+            if (message.payload.get("kind") in {"progress", "report"} and original is not None
+                    and original.seq in review_messages and original.seq < message.seq
+                    and message.actor.kind == "agent" and message.actor.id == original.payload["recipient"]
+                    and message.payload.get("recipient") == original.actor.id
+                    and message.payload.get("revision") == original.payload.get("revision")):
+                superseded.add(message.seq)
+        return superseded
+
     def _artifacts(self, task_id):
         return {a["seq"]: a for a in self.rt.task(task_id).deliverables if a.get("filename") and a.get("content_sha256")}
 

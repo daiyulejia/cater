@@ -178,6 +178,7 @@ class TeamRecovery:
         events = events if events is not None else self.rt.log.read(task_id=task_id)
         messages = self.team._messages(task_id, events=events)
         reported = _reported_messages(messages)
+        superseded = self.rt.team_reviews.superseded_assignments(task_id, events=events)
         revision = max((e.seq for e in events if e.actor == HOST
                         and e.type in {"team.objective_updated", "team.objective_completed"}), default=0)
         runs, continuations, interrupted_roots = {}, {}, set()
@@ -200,7 +201,8 @@ class TeamRecovery:
         rows = []
         for source in messages:
             if (source.actor.kind != "agent" or source.payload.get("kind") not in {"assignment", "message"}
-                    or source.payload.get("revision") != revision or source.seq in reported):
+                    or source.payload.get("revision") != revision or source.seq in reported
+                    or source.seq in superseded):
                 continue
             latest = continuations.get(source.seq, source)
             run = runs.get(latest.seq, {})

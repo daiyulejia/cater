@@ -172,8 +172,9 @@ class TeamService:
                     checkpoint = e.payload.get("reason", "本轮未完成，已有记录保留。")
         messages = self._messages(task_id)
         reported = _reported_messages(messages)
+        superseded = self.rt.team_reviews.superseded_assignments(task_id, events=events)
         pending = [e for e in messages if e.payload.get("kind") != "notification"
-                   and e.seq not in starts and e.seq not in reported
+                   and e.seq not in starts and e.seq not in reported and e.seq not in superseded
                    and (e.payload.get("kind") != "recovery" or self.recovery.current(task_id, e))]
         runs = [{"message_seq": seq, "role": e.payload["role"], "run_id": e.payload.get("run_id"), "revision": e.payload.get("revision", 0),
                  "reason": finishes[seq].payload.get("reason", "") if seq in finishes else "",
@@ -213,8 +214,9 @@ class TeamService:
             running = self.rt.execution_control.view(task_id)["state"] == "running"
             messages = self._messages(task_id)
             reported = _reported_messages(messages)
+            superseded = self.rt.team_reviews.superseded_assignments(task_id, events=events)
             pending = [e for e in messages if e.payload.get("kind") != "notification"
-                       and e.seq not in starts and e.seq not in reported
+                       and e.seq not in starts and e.seq not in reported and e.seq not in superseded
                        and e.payload["recipient"] not in busy
                        and (e.payload.get("kind") != "recovery" or self.recovery.current(task_id, e))
                        and (running or e.actor == Actor.human())]
@@ -575,6 +577,7 @@ class TeamService:
         messages = self._messages(task_id)
         reported = _reported_messages(messages)
         current_work = self.view(task_id)
+        superseded = self.rt.team_reviews.superseded_assignments(task_id, events=events)
         checkpoint, work_states = self.recovery._capture(task_id)
         outgoing_states = {row["seq"]: row for row in work_states}
         background = self.rt.conversation_background(task_id)
@@ -582,7 +585,8 @@ class TeamService:
         open_assignments = [{"seq": e.seq, "sender": e.actor.id, "text": e.payload["text"]} for e in messages
                             if e.actor.kind == "agent" and e.payload.get("recipient") == role.id
                             and e.payload.get("kind") in {"assignment", "message"}
-                            and e.payload.get("revision") == revision and e.seq not in reported]
+                            and e.payload.get("revision") == revision and e.seq not in reported
+                            and e.seq not in superseded]
         runs = {r["message_seq"]: r for r in current_work["runs"]}
         outgoing = [{"seq": e.seq, "recipient": e.payload["recipient"], "text": e.payload["text"],
                      "status": outgoing_states.get(e.seq, runs.get(e.seq, {})).get("status", "queued"),
@@ -594,7 +598,8 @@ class TeamService:
                          and (other.payload.get("reply_to") == e.seq and other.payload.get("kind") == "progress"
                               or other.payload.get("kind") == "notification" and other.payload.get("parent_assignment_seq") == e.seq)), None)}
                     for e in messages if e.actor.id == role.id and e.payload.get("kind") in {"assignment", "message"}
-                    and e.payload.get("revision") == revision and e.seq not in reported]
+                    and e.payload.get("revision") == revision and e.seq not in reported
+                    and e.seq not in superseded]
         notifications = [e for e in messages if e.payload.get("kind") == "notification" and e.payload.get("recipient") == role.id]
         receipts = [r for r in self._receipts(task_id)
                     if r.get("name") not in {"read_artifact", "read_messages", "workspace_read", "workspace_list", "workspace_search", PROJECT_HISTORY}]
@@ -629,6 +634,8 @@ class TeamService:
             "background": dialogue_background(background, reader="read_background") if background is not None else None}, rules
 
     def _current(self, task_id, started, role, revision):
+        if started.payload["message_seq"] in self.rt.team_reviews.superseded_assignments(task_id):
+            raise WorkConflict("这份复核委托已有同链新版请求，未继续旧版本工作；已有操作回执保留。")
         control = self.rt.execution_control.view(task_id)
         if control["seq"] != started.payload["control_seq"]:
             raise WorkConflict("执行已暂停或控制发生变化；已有成果与回执保留。")
@@ -1022,7 +1029,8 @@ class TeamService:
             if reviews:
                 return {"status": "error", "code": "review_pending", "reviews": reviews,
                         "message": "修复与复核尚未闭环，未结束工作。请让作者修正并发布新版，交回原复核者；通过后再交付。"}
-            messages = self._messages(task_id)
+            superseded = self.rt.team_reviews.superseded_assignments(task_id)
+            messages = [e for e in self._messages(task_id) if e.seq not in superseded]
             reported = _reported_messages(messages)
             authors = {a.get("actor") for a in self.rt.task(task_id).deliverables}
             current_reviews = {r["request_seq"] for r in current_work["reviews"] if r["status"] not in {"stale", "outdated"}}
