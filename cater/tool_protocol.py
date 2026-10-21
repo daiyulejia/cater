@@ -12,6 +12,19 @@ from typing import Any
 from .usage import valid_token_count
 
 
+TOOL_CALL_ISSUES = frozenset({
+    "calls_not_array", "invalid_call_shape", "unsupported_call_type", "invalid_function",
+    "invalid_call_id", "duplicate_call_id", "invalid_tool_name", "unregistered_tool",
+    "arguments_not_text", "invalid_arguments_json", "arguments_not_object", "invalid_arguments_value",
+})
+
+
+class _ToolCallIssue(ValueError):
+    def __init__(self, code: str):
+        self.code = code
+        super().__init__("Tool response validation failed")
+
+
 def json_utf8(value: Any, *, sort_keys: bool = False, allow_nan: bool = True) -> bytes:
     """Keep normal JSON bytes; escape lone surrogates without changing their values."""
     text = json.dumps(value, ensure_ascii=False, sort_keys=sort_keys, allow_nan=allow_nan)
@@ -78,15 +91,22 @@ def _json_value(value: Any) -> None:
 
 def _call(value: Any, names: set[str], seen: set[str]) -> ToolCall:
     if not isinstance(value, dict) or set(value) != {"id", "name", "arguments"}:
-        raise ValueError("Invalid tool call")
+        raise _ToolCallIssue("invalid_call_shape")
     call_id, name, arguments = value["id"], value["name"], value["arguments"]
-    if not isinstance(call_id, str) or not call_id.strip() or call_id in seen:
-        raise ValueError("Tool call IDs must be nonempty and unique")
-    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name) or name not in names:
-        raise ValueError("Invalid or unregistered tool name")
+    if not isinstance(call_id, str) or not call_id.strip():
+        raise _ToolCallIssue("invalid_call_id")
+    if call_id in seen:
+        raise _ToolCallIssue("duplicate_call_id")
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
+        raise _ToolCallIssue("invalid_tool_name")
+    if name not in names:
+        raise _ToolCallIssue("unregistered_tool")
     if not isinstance(arguments, dict):
-        raise ValueError("Tool arguments must be an object")
-    _json_value(arguments)
+        raise _ToolCallIssue("arguments_not_object")
+    try:
+        _json_value(arguments)
+    except ValueError:
+        raise _ToolCallIssue("invalid_arguments_value") from None
     seen.add(call_id)
     return ToolCall(call_id, name, deepcopy(arguments))
 
@@ -109,7 +129,9 @@ def _anthropic_blocks(blocks: Any, names: set[str], seen: set[str]) -> tuple[str
         kind = block.get("type")
         if kind == "text" and isinstance(block.get("text"), str):
             text.append(block["text"])
-        elif kind == "tool_use" and set(block) == {"type", "id", "name", "input"}:
+        elif kind == "tool_use":
+            if set(block) != {"type", "id", "name", "input"}:
+                raise _ToolCallIssue("invalid_call_shape")
             calls.append(_call({"id": block["id"], "name": block["name"], "arguments": block["input"]}, names, seen))
         elif (kind == "thinking" and isinstance(block.get("thinking"), str)
               and isinstance(block.get("signature"), str) and block["signature"]):
@@ -259,8 +281,10 @@ def _usage(data: dict, *, anthropic: bool, driver: str) -> tuple[int, dict]:
                     "token_usage": "reported" if reported else "unavailable", "usage": counts}
 
 
-def _contained(tokens: int, meta: dict, reason: str) -> ToolTurn:
+def _contained(tokens: int, meta: dict, reason: str, *, tool_issue: str | None = None) -> ToolTurn:
     meta.update(contained=True, incomplete=True, invocation_started=True, reason=reason)
+    if type(tool_issue) is str and tool_issue in TOOL_CALL_ISSUES:
+        meta["tool_issue"] = tool_issue
     return ToolTurn("", [], tokens, meta, _assistant("", []))
 
 
@@ -284,6 +308,10 @@ def contained_response_diagnostics(meta: object) -> dict[str, str]:
         stop = meta.get(field)
         if type(stop) is str and stop in allowed:
             result["response_stop"] = stop
+        issue = meta.get("tool_issue")
+        if (reason == ("invalid_tool_calls" if protocol == "openai_compatible" else "invalid_content")
+                and type(issue) is str and issue in TOOL_CALL_ISSUES):
+            result["response_tool_issue"] = issue
     return result
 
 
@@ -297,6 +325,8 @@ def anthropic_turn(data: dict, *, driver: str, names: set[str], seen: set[str]) 
         return _contained(tokens, meta, "incomplete_stop")
     try:
         text, calls = _anthropic_blocks(data.get("content"), names, set(seen))
+    except _ToolCallIssue as error:
+        return _contained(tokens, meta, "invalid_content", tool_issue=error.code)
     except ValueError:
         return _contained(tokens, meta, "invalid_content")
     if bool(calls) != (stop == "tool_use") or (not calls and not text.strip()):
@@ -331,20 +361,29 @@ def openai_turn(data: dict, *, driver: str, names: set[str], seen: set[str]) -> 
     if values is None:
         values = []
     if not isinstance(values, list):
-        return _contained(tokens, meta, "invalid_tool_calls")
+        return _contained(tokens, meta, "invalid_tool_calls", tool_issue="calls_not_array")
     calls = []
     used = set(seen)
     try:
         for value in values:
-            if (not isinstance(value, dict) or value.get("type") != "function"
-                    or not isinstance(value.get("function"), dict)):
-                raise ValueError("Only client function calls are supported")
+            if not isinstance(value, dict):
+                raise _ToolCallIssue("invalid_call_shape")
+            if value.get("type") != "function":
+                raise _ToolCallIssue("unsupported_call_type")
+            if not isinstance(value.get("function"), dict):
+                raise _ToolCallIssue("invalid_function")
             function = value["function"]
             arguments = function.get("arguments")
             if not isinstance(arguments, str):
-                raise ValueError("Function arguments must be JSON text")
+                raise _ToolCallIssue("arguments_not_text")
+            try:
+                parsed = strict_json(arguments)
+            except ValueError:
+                raise _ToolCallIssue("invalid_arguments_json") from None
             calls.append(_call({"id": value.get("id"), "name": function.get("name"),
-                                "arguments": strict_json(arguments)}, names, used))
+                                "arguments": parsed}, names, used))
+    except _ToolCallIssue as error:
+        return _contained(tokens, meta, "invalid_tool_calls", tool_issue=error.code)
     except ValueError:
         return _contained(tokens, meta, "invalid_tool_calls")
     if bool(calls) != (stop == "tool_calls") or (not calls and not text.strip()):

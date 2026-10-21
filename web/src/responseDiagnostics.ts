@@ -6,6 +6,20 @@ const reasons = {
   invalid_tool_calls: '响应中的工具请求格式无效',
 } as const
 const protocols = { openai_compatible: 'OpenAI 兼容协议', anthropic: 'Anthropic 协议' } as const
+const toolIssues = {
+  calls_not_array: '工具请求列表不是数组',
+  invalid_call_shape: '工具请求结构无效',
+  unsupported_call_type: '工具请求类型不受支持',
+  invalid_function: '工具函数定义无效',
+  invalid_call_id: '工具请求标识无效',
+  duplicate_call_id: '工具请求标识重复',
+  invalid_tool_name: '工具名称无效',
+  unregistered_tool: '请求了本轮未提供的工具',
+  arguments_not_text: '工具参数未使用 JSON 文本',
+  invalid_arguments_json: '工具参数不是有效且无歧义的 JSON',
+  arguments_not_object: '工具参数不是对象',
+  invalid_arguments_value: '工具参数值无效',
+} as const
 const openaiStops = {
   stop: '正常结束标记', tool_calls: '工具请求标记', length: '达到输出长度限制',
   content_filter: '内容过滤标记', function_call: '旧式函数请求标记',
@@ -36,6 +50,7 @@ export type ResponseDiagnostics = {
   responseStatus?: 'contained' | 'protocol_error'
   responseReason?: keyof typeof reasons
   responseProtocol?: keyof typeof protocols
+  responseToolIssue?: keyof typeof toolIssues
   responseStop?: keyof typeof openaiStops | keyof typeof anthropicStops
   responseClientToolsExecuted?: false
   failureStage?: keyof typeof stages
@@ -44,6 +59,11 @@ export type ResponseDiagnostics = {
 
 function known<T extends object>(value: unknown, allowed: T): keyof T | undefined {
   return typeof value === 'string' && Object.hasOwn(allowed, value) ? value as keyof T : undefined
+}
+
+function toolIssue(protocol: unknown, reason: unknown, value: unknown): keyof typeof toolIssues | undefined {
+  return protocol === 'openai_compatible' && reason === 'invalid_tool_calls'
+    || protocol === 'anthropic' && reason === 'invalid_content' ? known(value, toolIssues) : undefined
 }
 
 export function responseDiagnostics(payload: Record<string, unknown>, includeStage = false): ResponseDiagnostics {
@@ -55,6 +75,8 @@ export function responseDiagnostics(payload: Record<string, unknown>, includeSta
     const reason = known(get('response_reason'), reasons)
     const protocol = known(get('response_protocol'), protocols)
     if (reason) result.responseReason = reason
+    const issue = toolIssue(protocol, reason, get('response_tool_issue'))
+    if (issue) result.responseToolIssue = issue
     if (protocol) {
       result.responseProtocol = protocol
       const stop = protocol === 'anthropic' ? known(get('response_stop'), anthropicStops) : known(get('response_stop'), openaiStops)
@@ -124,6 +146,8 @@ export function responseDiagnosticFields(diagnostic: ResponseDiagnostics): [stri
   if (diagnostic.responseStatus === 'contained') {
     fields.push(['响应状态', '响应未通过完整性检查'], ['响应原因', diagnostic.responseReason ? reasons[diagnostic.responseReason] : '具体原因未记录'])
     if (diagnostic.responseProtocol) fields.push(['响应协议', protocols[diagnostic.responseProtocol]])
+    const issue = toolIssue(diagnostic.responseProtocol, diagnostic.responseReason, diagnostic.responseToolIssue)
+    if (issue) fields.push(['工具请求诊断', toolIssues[issue]])
     if (diagnostic.responseStop && diagnostic.responseProtocol) {
       const stops = diagnostic.responseProtocol === 'anthropic' ? anthropicStops : openaiStops
       if (Object.hasOwn(stops, diagnostic.responseStop)) fields.push(['响应结束状态', (stops as Record<string, string>)[diagnostic.responseStop]])
@@ -137,11 +161,12 @@ export function responseDiagnosticFields(diagnostic: ResponseDiagnostics): [stri
 
 export function commonResponseDiagnostics(a: ResponseDiagnostics, b: ResponseDiagnostics): ResponseDiagnostics {
   const result: ResponseDiagnostics = {}
-  for (const key of ['responseStatus', 'responseReason', 'responseProtocol', 'responseStop', 'responseClientToolsExecuted'] as const) {
+  const keys = ['responseStatus', 'responseReason', 'responseProtocol', 'responseStop', 'responseToolIssue', 'responseClientToolsExecuted'] as const
+  for (const key of keys) {
     if (a[key] !== undefined && a[key] === b[key]) Object.assign(result, { [key]: a[key] })
   }
   if (a.responseDiagnosticsConflict || b.responseDiagnosticsConflict
-    || ['responseStatus', 'responseReason', 'responseProtocol', 'responseStop', 'responseClientToolsExecuted'].some(key => a[key as keyof ResponseDiagnostics] !== b[key as keyof ResponseDiagnostics])) {
+    || keys.some(key => a[key] !== b[key])) {
     result.responseDiagnosticsConflict = true
   }
   return result

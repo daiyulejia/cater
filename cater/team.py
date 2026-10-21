@@ -67,6 +67,26 @@ def _contained_reason(name, failure):
         issue = ("本次响应达到输出长度上限，未完整返回" if stop in {"length", "max_tokens"}
                  else "服务报告本次上下文超出可处理范围" if stop == "model_context_window_exceeded"
                  else "服务返回了未能继续处理的结束状态")
+    tool_issue = failure.get("response_tool_issue")
+    diagnostic_matches = (failure.get("response_status") == "contained" and (
+        failure.get("response_protocol") == "openai_compatible" and reason == "invalid_tool_calls"
+        or failure.get("response_protocol") == "anthropic" and reason == "invalid_content"))
+    detail = {
+        "calls_not_array": "工具请求列表不是数组",
+        "invalid_call_shape": "单条工具请求的结构不完整",
+        "unsupported_call_type": "工具请求类型不是当前支持的客户端函数调用",
+        "invalid_function": "工具函数描述不是对象",
+        "invalid_call_id": "工具调用标识缺失或为空",
+        "duplicate_call_id": "工具调用标识重复",
+        "invalid_tool_name": "工具名称格式无效",
+        "unregistered_tool": "请求了本轮未提供的工具",
+        "arguments_not_text": "工具参数未按协议使用 JSON 文本",
+        "invalid_arguments_json": "工具参数不是有效且无歧义的 JSON",
+        "arguments_not_object": "工具参数不是对象",
+        "invalid_arguments_value": "工具参数包含 JSON 不支持的值",
+    }.get(tool_issue if diagnostic_matches and type(tool_issue) is str else None)
+    if detail:
+        issue += f"（{detail}）"
     return (f"{name}{issue}；宿主未执行这次响应中的工具请求，先前成果和操作记录保留。"
             "本轮未自动续试，计费情况仍以实际用量记录为准。")
 

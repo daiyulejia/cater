@@ -1,7 +1,7 @@
 import { isTeamHost, isTeamRecovery, teamMessageAudience, teamProgressMessages, teamSpeaker } from './team'
 import type { TeamEvent, TeamRun, TeamState } from './team'
 import { archiveEntries, portableArchivePart } from './archiveManifest'
-import { requestFailureFields } from './responseDiagnostics'
+import { commonResponseDiagnostics, requestFailureFields, responseDiagnosticFields, responseDiagnostics } from './responseDiagnostics'
 
 type TimedEvent = TeamEvent & { ts?: string }
 export type ConversationActivityInput = {
@@ -621,8 +621,13 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
     // Only the matched host receipt supplies diagnostics, never a role's prose.
     const fields = requestFailureFields(run.end.payload)
     const primary = fields.find(([name]) => name === '外部客户端诊断' || name === '请求诊断')?.[1]
-    if (!primary) return undefined
-    return [primary, ...fields.filter(([name]) => name === 'HTTP 状态' || name === '已记录连接类别')
+    const receipts = hosts.filter(event => event.seq === run.end!.seq && event.type === 'team.run_finished')
+      .map(event => responseDiagnostics(event.payload))
+    const responseFields = receipts.some(diagnostic => diagnostic.responseToolIssue)
+      ? responseDiagnosticFields(receipts.reduce(commonResponseDiagnostics))
+        .filter(([name]) => name === '工具请求诊断' || name === '响应诊断核对').map(([, value]) => value) : []
+    if (!primary && !responseFields.length) return undefined
+    return [...(primary ? [primary] : []), ...responseFields, ...fields.filter(([name]) => name === 'HTTP 状态' || name === '已记录连接类别')
       .map(([, value]) => value)].join(' · ')
   }
   const runs = new Map<string, Run>()

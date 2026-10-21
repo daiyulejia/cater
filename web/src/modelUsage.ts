@@ -51,6 +51,7 @@ const count = (value: unknown): number | null => typeof value === 'number' && Nu
 const label = (value: unknown): string | undefined => typeof value === 'string' && value.trim() ? value : undefined
 const emptyDetails = () => ({ input: null, output: null, inputKind: null, cacheRead: null, cacheWrite: null, reasoning: null })
 const emptySizes = () => ({ prompt: null, history: null, tools: null, omittedGroups: null })
+const priorProjection = ({ responseToolIssue: _issue, responseDiagnosticsConflict: _conflict, ...value }: UsageCall) => value
 
 function project(event: TeamEvent): UsageCall {
   const p = record(event.payload), usage = record(field(p, 'usage'))
@@ -129,6 +130,12 @@ export function usageSummary(events: TeamEvent[]): UsageSummary {
     const call = project(event), previous = bySeq.get(seq)
     if (!previous) bySeq.set(seq, call)
     else if (JSON.stringify(previous) !== JSON.stringify(call)) {
+      const prior = priorProjection(previous)
+      if (JSON.stringify(prior) === JSON.stringify(priorProjection(call))) {
+        // A new diagnostic disagreement does not erase identical existing usage.
+        bySeq.set(seq, { ...prior, ...commonResponseDiagnostics(previous, call) })
+        continue
+      }
       // Compare only public projections. Conflicting receipts never choose a winner.
       bySeq.set(seq, {
         seq, role: previous.role === call.role ? call.role : 'unknown',

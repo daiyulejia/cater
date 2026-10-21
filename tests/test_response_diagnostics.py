@@ -132,6 +132,10 @@ class ResponseDiagnosticsTests(unittest.TestCase):
                                 "response_protocol": mode}
                     if stop is not None:
                         expected["response_stop"] = stop
+                    if reason == "invalid_tool_calls":
+                        expected["response_tool_issue"] = "invalid_arguments_json"
+                    elif reason == "invalid_content" and stop == "tool_use":
+                        expected["response_tool_issue"] = "arguments_not_object"
                     self.assertEqual(contained_response_diagnostics(turn.meta), expected)
                     self.assertEqual(turn.meta["usage"], protocol.usage(cls))
                     with self.session(cls, [(200, data)]) as (f, _, requests):
