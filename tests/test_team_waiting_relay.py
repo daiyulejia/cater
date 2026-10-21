@@ -64,13 +64,17 @@ class WaitingRelayTests(unittest.TestCase):
         self.assertFalse([e for e in messages if e.payload["kind"] == "progress"])
         self.assertEqual(len(self.f.driver.calls), 6)
 
-    def test_explicit_text_is_still_sent_upstream_even_when_subwork_is_pending(self):
-        question = "Need the owner's answer about compatibility before I can finish."
-        messages = self.run_chain(final=question)
-        progress, = [e for e in messages if e.payload["kind"] == "progress"]
-        self.assertEqual(progress.payload["text"], question)
-        self.assertEqual(progress.payload["recipient"], self.f.manager)
-        self.assertTrue(any(c["context"]["message"]["seq"] == progress.seq for c in self.f.driver.calls))
+    def test_public_text_is_preserved_without_waking_parent_while_child_is_active(self):
+        text = "The compatibility evidence is being checked by the helper."
+        messages = self.run_chain(final=text)
+        notice, = [e for e in messages if e.payload["kind"] == "notification"]
+        self.assertEqual(notice.payload["text"], text)
+        self.assertEqual(notice.payload["recipient"], self.f.manager)
+        self.assertIsNone(notice.payload["reply_to"])
+        self.assertTrue(notice.payload["parent_assignment_seq"])
+        self.assertFalse(any(c["context"]["message"]["seq"] == notice.seq for c in self.f.driver.calls))
+        self.assertEqual([c["context"]["message"]["kind"] for c in self.f.driver.calls
+                          if c["context"]["you"]["id"] == self.f.manager], ["message", "report"])
 
     def test_customer_preempted_child_without_report_still_reaches_supervision(self):
         f, team = self.f, self.f.rt.team

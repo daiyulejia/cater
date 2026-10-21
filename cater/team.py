@@ -1222,6 +1222,7 @@ class TeamService:
                 "顾客要求你实际通知伙伴时，先取得消息投递回执再确认；不能只回复已记录而省略投递动作。"
                 "notifications是最近发给你的知会，不是开工委托；被截断时可用read_messages分页补读。"
                 "outgoing_work列出你已发出但尚未收回结果的工作；waiting只表示本轮等信息，不代表委托已经完成。"
+                "等待已安排的子工作时，公开进展只自动知会委托人；需要对方回答或处理时用send_message明确投递请求，不只在等待结束语里提问。"
                 "确认某份普通委托已重复、不再需要或只是多余收尾时，原发件人或店长可用withdraw_work说明原因撤回，"
                 "无需反复派人确认消息；撤回不等于完成、通过复核或取消已发生的操作，真实剩余工作仍须继续。"
                 "需要帮助、选方案或复核时直接联系合适伙伴。复核发现问题就具体反馈并安排修正，而不是等顾客催。"
@@ -1496,20 +1497,23 @@ class TeamService:
                 and e.payload.get("kind") == "notification" and e.payload.get("recipient") == assignment.actor.id
                 and e.payload.get("parent_assignment_seq") == assignment.seq for e in messages)
             artifacts = [a for a in self.rt.task(task_id).deliverables if a["seq"] > started.seq and a.get("actor") == role.id]
-            reported = _reported_messages(messages)
-            child_states = {run["message_seq"]: run["status"] for run in current_work["runs"]}
-            # Delegation already records the next action; an empty wait is not another upstream job.
-            waiting_on_child = not final.strip() and not artifacts and any(
-                e.seq > started.seq and e.actor == Actor.agent(role.id, role.role)
-                and e.payload.get("kind") in {"assignment", "message"}
-                and e.payload.get("parent_assignment_seq") == assignment.seq
-                and e.payload.get("revision") == revision and e.seq not in reported
-                and child_states.get(e.seq, "queued") in {"queued", "running", "waiting"} for e in messages)
+            children = {e.seq for e in messages if e.actor == Actor.agent(role.id, role.role)
+                        and e.payload.get("parent_assignment_seq") == assignment.seq}
+            # Use the latest effective child state, including continuations from earlier runs.
+            waiting_on_child = any(row["seq"] in children
+                and (row["status"] in {"queued", "running"}
+                     or row["status"] == "waiting" and row["latest_message_seq"] > started.seq)
+                for row in self.recovery.assignments(task_id))
             published = "；".join(f"{a.get('filename', a.get('title', '成果'))}（成果 #{a['seq']}）" for a in artifacts)
             text = ("本轮已保存：" + published + "。" if published else "")
             text += (final or "我已处理这轮消息，现在等待后续信息或安排。")
-            if not notified_parent and not waiting_on_child and (assignment.payload["kind"] == "assignment" or published):
-                self._send(task_id, role, assignment.actor.id, text, "progress", reply_to=assignment.seq)
+            if not notified_parent and (assignment.payload["kind"] == "assignment" or published):
+                if waiting_on_child:
+                    if final.strip() or artifacts:
+                        self._send(task_id, role, assignment.actor.id, text, "notification",
+                                   parent_assignment_seq=assignment.seq)
+                else:
+                    self._send(task_id, role, assignment.actor.id, text, "progress", reply_to=assignment.seq)
         if status != "waiting" and not already_reported and assignment is not None:
             self._send(task_id, role, assignment.actor.id, reason or final or "委托已处理，请查看本轮成果和工具记录。",
                        "report" if status == "completed" else "progress",

@@ -86,8 +86,8 @@ class WaitingBoundaryTests(unittest.TestCase):
     def upstream(self, original, *, kind="progress"):
         event, = [e for e in self.messages() if e.actor.id == self.worker
                   and e.payload["recipient"] == self.manager and e.payload["kind"] == kind]
-        self.assertEqual(event.payload["reply_to"], original.seq)
-        self.assertIsNone(event.payload["parent_assignment_seq"])
+        self.assertEqual(event.payload["reply_to"], None if kind == "notification" else original.seq)
+        self.assertEqual(event.payload["parent_assignment_seq"], original.seq if kind == "notification" else None)
         self.assertEqual(event.payload["revision"], original.payload["revision"])
         self.assertGreater(event.seq, original.seq)
         self.assert_open(original)
@@ -122,7 +122,7 @@ class WaitingBoundaryTests(unittest.TestCase):
         self.assert_pending()
         self.assert_open(claimed[0])
 
-    def test_native_publication_still_escalates_with_pending_child(self):
+    def test_native_publication_is_notified_while_child_is_pending(self):
         claimed = self.start()
         self.execute(claimed, self.wait("", self.delegate(), ("publish_artifact", {
             "filename": "boundary.txt", "content": "Published boundary evidence\n",
@@ -132,20 +132,27 @@ class WaitingBoundaryTests(unittest.TestCase):
         self.assertGreater(artifact["seq"], claimed[2].seq)
         self.assertEqual(artifact["actor"], self.worker)
         self.assertEqual(self.f.results("publish_artifact")[0]["status"], "ok")
-        progress = self.upstream(claimed[0])
-        self.assertIn("boundary.txt", progress.payload["text"])
-        self.assertIn(str(artifact["seq"]), progress.payload["text"])
+        notice = self.upstream(claimed[0], kind="notification")
+        self.assertIn("boundary.txt", notice.payload["text"])
+        self.assertIn(str(artifact["seq"]), notice.payload["text"])
         self.assertNotIn(child.seq, _reported_messages(self.messages()))
-        self.assert_pending(child, progress)
+        self.assert_pending(child)
 
     def test_native_explicit_question_survives_with_pending_child(self):
         claimed = self.start()
         question = "Which compatibility target should I use before finishing?"
-        self.execute(claimed, self.wait(question, self.delegate()))
+        self.execute(claimed, self.wait(question, self.delegate(), ("send_message", {
+            "recipient": self.manager, "text": question})))
         child = self.child(claimed[0])
-        progress = self.upstream(claimed[0])
-        self.assertEqual(progress.payload["text"], question)
-        self.assert_pending(child, progress)
+        addressed, = [e for e in self.messages() if e.actor.id == self.worker
+                      and e.payload["recipient"] == self.manager]
+        self.assertEqual(addressed.payload["kind"], "message")
+        self.assertEqual(addressed.payload["text"], question)
+        self.assertEqual(addressed.payload["parent_assignment_seq"], claimed[0].seq)
+        self.assertIsNone(addressed.payload["reply_to"])
+        self.assertTrue(addressed.payload["visible"])
+        self.assert_pending(child, addressed)
+        self.assert_open(claimed[0])
         said, = [e for e in self.f.events("msg.said") if e.actor.id == self.worker]
         self.assertEqual((said.payload["text"], said.payload["reply_to"]), (question, claimed[0].seq))
 
