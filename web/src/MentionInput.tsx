@@ -62,11 +62,16 @@ export function MentionInput({ id, value, label, placeholder, members, onChange,
       onCompositionStart={() => setComposing(true)} onCompositionEnd={(event) => { setComposing(false); readSelection(event.currentTarget) }}
       onKeyDown={(event) => {
         if (composing || event.nativeEvent.isComposing || event.keyCode === 229) return
-        if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); onSubmit(); return }
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault()
+          if (event.repeat) return
+          if (visible && candidates.length) choose(candidates[active])
+          else onSubmit()
+          return
+        }
         if (!visible) return
         if (event.key === 'Escape') { event.preventDefault(); setDismissed(true) }
         else if (candidates.length && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) { event.preventDefault(); setIndex((active + (event.key === 'ArrowDown' ? 1 : -1) + candidates.length) % candidates.length) }
-        else if (event.key === 'Enter' && candidates.length) { event.preventDefault(); choose(candidates[active]) }
       }} />
   </div>
 }

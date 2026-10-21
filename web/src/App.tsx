@@ -32,6 +32,7 @@ import { collaborationProjection, workTransfers } from './collaborationProjectio
 import type { WorkAssignment } from './collaborationProjection'
 import { readJsonResponse, request } from './request'
 import { TaskControlMenu } from './TaskControlMenu'
+import { DeleteConversationDialog } from './DeleteConversationDialog'
 import { ChatFilters } from './ChatFilters'
 import type { ChatFilter } from './ChatFilters'
 import { WorkspacePanel, WorkspaceToolProgress } from './WorkspacePanel'
@@ -803,6 +804,11 @@ function App() {
   const [newProject, setNewProject] = useState<{ id: string; name: string } | null>(null)
   const [newWorkspaceId, setNewWorkspaceId] = useState<string | undefined>()
   const [tasks, setTasks] = useState<TaskSummary[]>([])
+  const removedTasks = useRef(new Set<string>())
+  const removalRequests = useRef<Record<string, string>>({})
+  const [removeTarget, setRemoveTarget] = useState<{ id: string; title: string } | null>(null)
+  const [removeBusy, setRemoveBusy] = useState(false)
+  const [removeError, setRemoveError] = useState('')
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [detail, setDetail] = useState<TaskDetail | null>(null)
   const [drafts, setDrafts] = useState<Record<string, string>>({})
@@ -912,6 +918,7 @@ function App() {
   }
 
   const chooseTask = useCallback((id: string | null, remember = true) => {
+    if (id && removedTasks.current.has(id)) id = null
     focusTaskHeadingRef.current = false
     questionModeRef.current = false
     setQuestionMode(false)
@@ -1035,6 +1042,7 @@ function App() {
     if (team?.enabled) next = { ...next, task: { ...next.task, team, work: undefined,
       goal: team.objective || next.task.goal, status: team.status === 'done' ? 'done' : 'running' } }
     const id = next.task.id
+    if (removedTasks.current.has(id)) return
     const seq = next.events.at(-1)?.seq ?? 0
     const version = next.summary?.version ?? seq
     const base = { ...(next.summary ?? { id, goal: next.task.goal, project_id: next.task.project_id,
@@ -1073,20 +1081,24 @@ function App() {
       try {
         const result = await apiRead('/api/task-summaries', async (response) => {
           if (response.status === 304) return null
-          return { next: await readJsonResponse<{ tasks: TaskSummary[] }>(response), etag: response.headers.get('ETag') ?? '' }
+          return { next: await readJsonResponse<{ tasks: TaskSummary[]; removed?: { id: string; seq: number }[] }>(response), etag: response.headers.get('ETag') ?? '' }
         }, { signal, cache: 'no-store',
           headers: etag ? { 'If-None-Match': etag } : {} })
         if (cancelled || signal.aborted || !pageVisible()) return
         if (!result) { setTaskListError(''); return }
         const { next } = result
         if (!Array.isArray(next.tasks)) throw new Error('暂时无法读取任务列表，请稍后重试。')
-        const receivedTasks = next.tasks.map(task => ({ ...task, observation_order: order }))
+        if (next.removed !== undefined && (!Array.isArray(next.removed) || next.removed.some(item => !item || typeof item.id !== 'string'
+          || !Number.isSafeInteger(item.seq) || item.seq < 1))) throw new Error('对话列表状态暂时无法核对，请刷新。')
+        for (const item of next.removed ?? []) removedTasks.current.add(item.id)
+        if (selectedRef.current && removedTasks.current.has(selectedRef.current)) chooseTask(null)
+        const receivedTasks = next.tasks.filter(task => !removedTasks.current.has(task.id)).map(task => ({ ...task, observation_order: order }))
         etag = result.etag
         acceptControls(receivedTasks)
         setTaskListError('')
         setTasks((current) => {
           const received = new Map(receivedTasks.map((task) => [task.id, task]))
-          return [...current.map((task) => {
+          return [...current.filter(task => !removedTasks.current.has(task.id)).map((task) => {
             const item = received.get(task.id)
             received.delete(task.id)
             if (!item) return task
@@ -1495,6 +1507,36 @@ function App() {
     }
   }
 
+  const removeConversation = async () => {
+    const target = removeTarget
+    if (!target) return
+    const key = `$remove:${target.id}`
+    if (pendingRef.current.has(key)) return
+    const requestId = removalRequests.current[target.id] ?? creationRequestId()
+    removalRequests.current[target.id] = requestId
+    pendingRef.current.add(key)
+    setRemoveBusy(true); setRemoveError('')
+    try {
+      const result = await api<{ id: string; removed: boolean; removed_seq: number }>(`/api/tasks/${encodeURIComponent(target.id)}/remove`, {
+        method: 'POST', body: JSON.stringify({ request_id: requestId }),
+      })
+      if (result.id !== target.id || result.removed !== true || !Number.isSafeInteger(result.removed_seq) || result.removed_seq < 1) throw new Error('删除结果尚未确认，请沿用本次请求重试。')
+      removedTasks.current.add(target.id)
+      delete versionsRef.current[target.id]
+      delete conversationRequests.current[target.id]
+      setTasks(current => current.filter(task => !removedTasks.current.has(task.id)))
+      setDrafts(current => Object.fromEntries(Object.entries(current).filter(([id]) => ![target.id, `$question:${target.id}`, `$derive:${target.id}`].includes(id))))
+      if (selectedRef.current === target.id) { chooseTask(null); setDetail(null) }
+      delete removalRequests.current[target.id]
+      setRemoveTarget(null)
+    } catch (err) {
+      setRemoveError(userFacingError(err, '删除结果尚未确认，请重试核对。'))
+    } finally {
+      pendingRef.current.delete(key)
+      setRemoveBusy(false)
+    }
+  }
+
   const team = organization ? [...organization.workers, organization.leader, ...organization.cabinet] : roles
   const names = Object.fromEntries(Object.entries(identities).map(([id, member]) => [id, member.name]))
   const participants = task ? conversationParticipants(task, organization?.leader.id ?? 'store_manager', team.map((member) => member.id), [...(currentDetail?.questions ?? []), ...(currentDetail?.clarifications ?? [])].map((question) => question.role_id), currentDetail?.events) : []
@@ -1543,7 +1585,7 @@ function App() {
               <button className="grid size-9 place-items-center rounded-md border border-[#ead2c5] bg-white text-[#b15342] shadow-sm hover:bg-[#fff0e9]" title="新建任务" aria-label="新建任务" onClick={() => chooseTask(null)}><Plus size={18} /></button>
             </div>
           </div>
-          <TaskList tasks={tasks} selectedId={selectedId} drafts={drafts} collapsed={tasksCollapsed} searchOpen={taskSearchOpen} onChoose={id => { chooseTask(id); setTasksCollapsed(true); focusTaskHeadingRef.current = id !== selectedId }} statusLabel={(item) => executionLabel(executionControls[item.id]?.state) || (item.team?.enabled ? teamStatus(item.team, item.activity) : item.status_label)} />
+          <TaskList tasks={tasks} executionState={item => executionControls[item.id]?.state ?? item.execution_control?.state} selectedId={selectedId} drafts={drafts} collapsed={tasksCollapsed} searchOpen={taskSearchOpen} onChoose={id => { chooseTask(id); setTasksCollapsed(true); focusTaskHeadingRef.current = id !== selectedId }} statusLabel={(item) => executionLabel(executionControls[item.id]?.state) || (item.team?.enabled ? teamStatus(item.team, item.activity) : item.status_label)} />
         </aside>
         <section ref={chatPaneRef} className="chat-pane flex min-h-0 flex-col">
           {recovery && <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-[#eaded1] px-4 py-2 text-xs text-[#52766d] sm:px-7" role="status">
@@ -1573,7 +1615,7 @@ function App() {
                   }} />
                 {!task.team?.enabled && <button type="button" className="origin-tool" aria-label="提问" title={questionMode ? '取消提问，返回协作草稿' : '向当前对话提问'} aria-pressed={questionMode} disabled={loading} onClick={toggleQuestion}><CircleHelp size={17} aria-hidden="true" /></button>}
                 <button type="button" className="origin-tool" aria-label="基于此对话开新任务" title="基于此对话开新任务" aria-pressed={Boolean(derivation)} disabled={loading || Boolean(derivation)} onClick={beginDerivation}><GitFork size={17} aria-hidden="true" /></button>
-                <TaskControlMenu key={`control:${task.id}`} state={executionState} busy={controlBusy} disabled={loading} retry={sendErrors[controlKey] ? controlRequests[task.id]?.action : undefined} onAction={(action) => void controlTask(action)} />
+                <TaskControlMenu key={`control:${task.id}`} state={executionState} busy={controlBusy} disabled={loading} retry={sendErrors[controlKey] ? controlRequests[task.id]?.action : undefined} onAction={(action) => void controlTask(action)} onDelete={() => { setRemoveError(''); setRemoveTarget({ id: task.id, title: task.goal }) }} />
                 {task.team?.enabled || task.work?.items.length ? <button ref={graphTriggerRef} id="task-graph-trigger" type="button" aria-label="任务脉络" title="查看任务脉络" aria-haspopup="dialog" aria-expanded={graphOpen} onClick={openTaskGraph} className="origin-tool"><GitBranch size={17} aria-hidden="true" /></button> : null}
               </div>
             </div>
@@ -1590,7 +1632,7 @@ function App() {
             </div>}
             {graphLoaded && (task.team?.enabled || task.work?.items.length) ? <TaskGraphDialog open={graphOpen} onOpenChange={setGraphOpen} returnFocusRef={graphTriggerRef}
               description={task.team?.enabled ? '当前团队的只读消息与复核关系' : `当前任务 · ${task.work!.items.length} 个工作项`}>
-              <AsyncPanel fallback={<p role="status" className="task-graph-loading"><LoaderCircle size={20} aria-hidden="true" className="shrink-0 motion-safe:animate-spin" />正在读取任务脉络…</p>}><TaskGraph key={task.id} {...(task.team?.enabled ? { team: task.team, events: currentDetail?.events ?? [], statusLabel: currentStatusLabel } : { work: task.work! })} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></AsyncPanel>
+              <AsyncPanel fallback={<p role="status" className="task-graph-loading"><LoaderCircle size={20} aria-hidden="true" className="shrink-0 motion-safe:animate-spin" />正在读取任务脉络…</p>}><TaskGraph key={task.id} {...(task.team?.enabled ? { team: task.team, events: currentDetail?.events ?? [], statusLabel: currentStatusLabel, motionAllowed: executionState === 'running' && currentActivity?.active === true } : { work: task.work! })} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></AsyncPanel>
             </TaskGraphDialog> : null}
             <div className="relative flex min-h-0 flex-1 flex-col">
               <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>
@@ -1612,6 +1654,8 @@ function App() {
           {currentDetail ? <>{!task.team?.enabled && <><WorkItems work={task.work} names={names} /><DeliveryPanel key={task.id} taskId={task.id} delivery={task.work?.delivery} names={names} accessToken={accessToken} /><VerificationBoard items={task.verifications ?? []} /></>}<Workboard task={task} detail={currentDetail} activity={currentActivity} names={names} accessToken={accessToken} executionState={executionState} driverCoverage={organization?.worker_drivers} showEvidence={showEvidence} onToggleEvidence={() => setShowEvidence(!showEvidence)} />{Boolean(currentDetail.organization_memory?.length) && <details className="mt-5 border-t border-[#dce8e1] pt-4"><summary className="cursor-pointer text-xs font-semibold text-[#52766d]">猫咖记忆 · {currentDetail.organization_memory?.length} 项</summary><div className="mt-3"><MemoryBoard items={currentDetail.organization_memory ?? []} names={names} /></div></details>}</> : <p className="text-xs leading-6 text-[#74897d]">正在读取这件事的成果与过程。</p>}
         </WorkboardPanel>}
       </main>
+      {removeTarget && <DeleteConversationDialog title={removeTarget.title} busy={removeBusy} error={removeError}
+        onClose={() => setRemoveTarget(null)} onConfirm={() => void removeConversation()} />}
     </div>
     </ReloadContext.Provider>
   )

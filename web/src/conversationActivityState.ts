@@ -1,6 +1,7 @@
 import { isTeamHost, isTeamRecovery, teamMessageAudience, teamProgressMessages, teamSpeaker } from './team'
 import type { TeamEvent, TeamRun, TeamState } from './team'
 import { archiveEntries, portableArchivePart } from './archiveManifest'
+import { requestFailureFields } from './responseDiagnostics'
 
 type TimedEvent = TeamEvent & { ts?: string }
 export type ConversationActivityInput = {
@@ -615,6 +616,15 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       && (!source || currentSource(source)))
   })
   type Run = TeamRun & { start?: TeamEvent; end?: TeamEvent }
+  const requestFailure = (run?: Run) => {
+    if (!failed(run?.status) || !run?.end) return undefined
+    // Only the matched host receipt supplies diagnostics, never a role's prose.
+    const fields = requestFailureFields(run.end.payload)
+    const primary = fields.find(([name]) => name === '外部客户端诊断' || name === '请求诊断')?.[1]
+    if (!primary) return undefined
+    return [primary, ...fields.filter(([name]) => name === 'HTTP 状态' || name === '已记录连接类别')
+      .map(([, value]) => value)].join(' · ')
+  }
   const runs = new Map<string, Run>()
   const key = (message: unknown, role: unknown) => `${message}:${role}`
   for (const run of team.runs) {
@@ -650,7 +660,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   let message = sending ? '消息正在发送，尚未确认收到' : currentHuman
     ? customerQuestion ? `${label(recipient!)}在等你的补充` : deliveredResponse ? `${label(recipient!)}已确认本次交付` : answer ? `${label(recipient!)}已回应最新消息`
       : active(customerRun?.status) ? `${label(recipient!)}正在处理最新消息`
-        : failed(customerRun?.status) ? `最新消息答复待确认 · ${label(recipient!)}本轮处理未完成`
+        : failed(customerRun?.status) ? `最新消息答复待确认 · ${label(recipient!)}本轮处理未完成${requestFailure(customerRun) ? `：${requestFailure(customerRun)}` : ''}`
           : customerRun?.status === 'waiting' ? `最新消息尚待答复 · ${label(recipient!)}等待伙伴回复`
             : successful(customerRun?.status) ? '最新消息本轮处理已结束，尚未确认答复'
               : `最新消息已收到，等待${label(recipient!)}答复` : undefined
@@ -719,6 +729,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       : run?.status === 'waiting' ? '等待伙伴回复'
         : failed(run?.status) ? '本轮处理未完成，需核对过程'
           : successful(run?.status) ? '本轮消息处理已结束' : '执行结果待确认'
+    if (!awaitingCustomer && requestFailure(run)) text += `：${requestFailure(run)}`
     if (action && tool?.payload.name !== 'wait_for_reply' && !awaitingCustomer) text = `${action} · ${finished ? toolOutcome(finished, toolName) : '已发起，等待回执'}；${text}`
     if (finished && isFrozenArchiveReceipt(finished) && frozenArchiveReadEvent(finished)) {
       const result = object(finished.payload.result), source = object(result.source), snapshot = object(result.snapshot)

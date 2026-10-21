@@ -43,6 +43,7 @@ from .responses import load_response_object
 from .review_contract import receipt_context
 from .checkpoints import work_checkpoint
 from .execution_control import ExecutionControl
+from .conversation_list import ConversationList
 from .skills import SkillLibrary
 from .mcp import McpPool, McpService
 
@@ -235,6 +236,7 @@ class Runtime:
         self._artifact_root = None if self.log.path == ":memory:" else Path(db_path).absolute().parent / "artifacts"
         self.rulebook = RuleBook(self.log)
         self.execution_control = ExecutionControl(self)
+        self.conversation_list = ConversationList(self)
         self.work = WorkLedger(self.log, self.rulebook,
                                _execution_fingerprint(config, configured_drivers, self.browser_checks))
         from .workspaces import WorkspaceService
@@ -418,6 +420,8 @@ class Runtime:
             self._execution_control_authorization = previous_control
 
     def _check_execution_authorization(self, task_id: str, *, informational: bool = False) -> None:
+        if self.conversation_list.is_removed(task_id):
+            raise ExecutionScopeChanged("这段对话已从列表删除，不再启动新的模型或工具调用。")
         control = self.execution_control.view(task_id)
         if not informational and control["state"] != "running":
             raise ExecutionScopeChanged(control["reason"])

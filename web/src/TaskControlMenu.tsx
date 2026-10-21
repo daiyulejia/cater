@@ -1,10 +1,10 @@
 import { useEffect, useId, useRef, useState } from 'react'
-import { LoaderCircle, MoreHorizontal, Pause, Play, RefreshCw, Square } from 'lucide-react'
+import { LoaderCircle, MoreHorizontal, Pause, Play, RefreshCw, Square, Trash2 } from 'lucide-react'
 import { controlLabels } from './executionControl'
 import type { ControlAction, ExecutionControl } from './executionControl'
 
-export function TaskControlMenu({ state, busy, disabled, retry, onAction }: {
-  state: ExecutionControl['state']; busy: boolean; disabled: boolean; retry?: ControlAction; onAction: (action: ControlAction) => void
+export function TaskControlMenu({ state, busy, disabled, retry, onAction, onDelete }: {
+  state: ExecutionControl['state']; busy: boolean; disabled: boolean; retry?: ControlAction; onAction: (action: ControlAction) => void; onDelete?: () => void
 }) {
   const [open, setOpen] = useState(false)
   const root = useRef<HTMLDivElement>(null)
@@ -37,6 +37,8 @@ export function TaskControlMenu({ state, busy, disabled, retry, onAction }: {
       {retry && <button type="button" className={buttonClass} disabled={disabled || busy || (state === 'cancelled' && retry !== 'cancel')} onClick={() => choose(retry)} title="沿用原请求标识核对提交结果">
         <RefreshCw size={16} aria-hidden="true" />重试{controlLabels[retry]}
       </button>}
+      {onDelete && <button type="button" className={`${buttonClass} border-t border-[#e5ddd5] text-[#a94f43]`} disabled={disabled || busy}
+        onClick={() => { setOpen(false); trigger.current?.focus(); onDelete() }}><Trash2 size={16} aria-hidden="true" />删除对话</button>}
     </div>}
   </div>
 }

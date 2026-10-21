@@ -1,0 +1,75 @@
+.task-list-activity {
+  position: relative;
+  display: inline-block;
+  flex: 0 0 15px;
+  width: 15px;
+  height: 20px;
+  color: #74877f;
+}
+
+.task-list-activity-icon {
+  position: absolute;
+  top: 2px;
+  left: 0;
+}
+
+.task-list-activity[data-state="running"],
+.task-list-state-label[data-state="running"] { color: #28766b; }
+.task-list-activity[data-state="queued"] { color: #91662e; }
+.task-list-activity[data-state="waiting"] { color: #547c96; }
+.task-list-activity[data-state="paused"] { color: #8d7361; }
+.task-list-activity[data-state="failed"],
+.task-list-activity[data-state="blocked"] { color: #b24f4b; }
+.task-list-activity[data-state="uncertain"] { color: #91662e; }
+.task-list-activity[data-state="done"] { color: #348269; }
+
+.task-list-activity[data-state="running"] .task-list-activity-icon {
+  top: 0;
+  animation: task-list-cat-step 1.6s ease-in-out infinite;
+}
+
+.task-list-activity-light {
+  position: absolute;
+  top: 9px;
+  right: -2px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: #398b77;
+  animation: task-list-cat-breathe 1.6s ease-in-out infinite;
+}
+
+.task-list-activity-paw {
+  position: absolute;
+  bottom: 0;
+  stroke-width: 2.5;
+  animation: task-list-paw-step 1.6s ease-in-out infinite;
+}
+
+.task-list-activity-paw-left { left: 1px; }
+.task-list-activity-paw-right { right: 1px; animation-delay: -.8s; }
+
+@keyframes task-list-cat-step {
+  0%, 50%, 100% { transform: translateY(0); }
+  25%, 75% { transform: translateY(-1px); }
+}
+
+@keyframes task-list-cat-breathe {
+  0%, 100% { opacity: .65; box-shadow: 0 0 0 0 #398b7726; }
+  50% { opacity: 1; box-shadow: 0 0 0 2px #398b7726; }
+}
+
+@keyframes task-list-paw-step {
+  0%, 100% { opacity: .35; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .task-list-activity[data-state="running"] .task-list-activity-icon,
+  .task-list-activity-light,
+  .task-list-activity-paw {
+    animation: none;
+    transform: none;
+    opacity: 1;
+  }
+}

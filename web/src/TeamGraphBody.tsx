@@ -1,8 +1,8 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Background, BackgroundVariant, Handle, MarkerType, Position, ReactFlow } from '@xyflow/react'
+import { Background, BackgroundVariant, Handle, MarkerType, Position, ReactFlow, useReactFlow, useStore } from '@xyflow/react'
 import type { Edge, Node, NodeProps } from '@xyflow/react'
-import { Info, List, Network } from 'lucide-react'
+import { ArrowRight, Info, List, Network, UserRound } from 'lucide-react'
 import { focusTeamGraph, projectTeamGraph, teamGraphKinds } from './teamGraph'
 import type { TeamGraphEntry } from './teamGraph'
 import type { TeamEvent, TeamState } from './team'
@@ -10,19 +10,30 @@ import { teamStatus } from './team'
 import { layoutTaskGraph } from './taskGraphLayout'
 import { GraphControls } from './TaskGraphControls'
 import { ariaLabels, fitOptions, initialGraphView } from './taskGraphConfig'
+import { teamGraphMotion } from './graphMotion'
+import type { GraphMotion } from './graphMotion'
 
-type TeamNode = Node<{ entry: TeamGraphEntry; owner: string; current: boolean; avatar: ReactNode; choose: (id: string) => void }, 'team'>
+type TeamNode = Node<{ entry: TeamGraphEntry; owner: string; sender: string; current: boolean; avatar: ReactNode; motion: GraphMotion; choose: (id: string) => void }, 'team'>
 
 function TeamMessageNode({ data }: NodeProps<TeamNode>) {
   const entry = data.entry
   return <>
     <Handle type="target" position={Position.Left} isConnectable={false} aria-hidden="true" />
-    <button type="button" className="task-graph-node nodrag nopan" aria-pressed={data.current}
+    <button type="button" className="task-graph-node team-graph-node nodrag nopan" aria-pressed={data.current}
+      data-kind={entry.kind} data-historical={entry.historical} data-motion={data.motion}
       aria-label={`${teamGraphKinds[entry.kind]} #${entry.seq}：${entry.text}，${data.owner}，${entry.status}${entry.historical ? '，旧目标记录' : ''}`}
       onClick={event => { event.stopPropagation(); data.choose(entry.id) }}>
-      <span className="task-graph-node-top"><span className="task-graph-owner">{data.avatar}<strong>{data.owner}</strong></span><span>{teamGraphKinds[entry.kind]} #{entry.seq}</span></span>
+      <span className="team-graph-person">
+        <span className="team-graph-portrait" aria-hidden="true">{data.avatar ?? <UserRound size={26} />}</span>
+        <span className="team-graph-identity"><strong title={data.owner}>{data.owner}</strong>
+          <span className="team-graph-route" title={data.sender}><span>{data.sender}</span><ArrowRight size={12} aria-hidden="true" /></span>
+        </span>
+        <span className="team-graph-kind">{teamGraphKinds[entry.kind]}<span>#{entry.seq}</span></span>
+      </span>
       <span className="task-graph-objective">{entry.text || '内容未包含在当前记录中'}</span>
-      <span className="task-graph-team-status">{entry.historical ? '旧目标记录 · ' : ''}{entry.status}</span>
+      <span className="task-graph-team-status"><span className="team-graph-activity" aria-hidden="true" />
+        <span>{entry.historical ? '旧目标记录 · ' : ''}{entry.status}{data.motion !== 'idle' && entry.processing && entry.processing !== entry.status ? ` · ${entry.processing}` : ''}</span>
+      </span>
     </button>
     <Handle type="source" position={Position.Right} isConnectable={false} aria-hidden="true" />
   </>
@@ -31,13 +42,40 @@ const nodeTypes = { team: TeamMessageNode }
 const teamAriaLabels = { ...ariaLabels, 'node.a11yDescription.default': '协作记录', 'node.a11yDescription.keyboardDisabled': '协作记录',
   'edge.a11yDescription.default': '消息与复核关系', 'handle.ariaLabel': '协作连接点' }
 
-export function TeamGraphBody({ team, events, actorText, portrait, statusLabel }: {
-  team: TeamState; events: TeamEvent[]; actorText: (id: string) => string; portrait?: (id: string, size: 'sm' | 'md') => ReactNode; statusLabel?: string
-}) {
+function TeamGraphViewport({ active }: { active: boolean }) {
+  const { fitView, viewportInitialized } = useReactFlow()
+  const nodesInitialized = useStore(state => state.nodeLookup.size > 0
+    && [...state.nodeLookup.values()].every(node => !!node.measured.width && !!node.measured.height))
+  const width = useStore(state => state.width)
+  const height = useStore(state => state.height)
+  const domNode = useStore(state => state.domNode)
+  const fitted = useRef(false)
+  useEffect(() => {
+    // React Flow can consume its initial fit while the mobile canvas is hidden.
+    // Wait for the visible pane's real dimensions, then leave subsequent pan/zoom alone.
+    if (fitted.current || !active || !viewportInitialized || !nodesInitialized || width <= 0 || height <= 0
+      || !domNode || domNode.offsetWidth !== width || domNode.offsetHeight !== height) return
+    fitted.current = true
+    void fitView(fitOptions)
+  }, [active, viewportInitialized, nodesInitialized, width, height, domNode, fitView])
+  return null
+}
+
+type TeamGraphBodyProps = {
+  team: TeamState
+  events: TeamEvent[]
+  actorText: (id: string) => string
+  portrait?: (id: string, size: 'sm' | 'md') => ReactNode
+  statusLabel?: string
+  motionAllowed?: boolean
+}
+
+export function TeamGraphBody({ team, events, actorText, portrait, statusLabel, motionAllowed }: TeamGraphBodyProps) {
   const full = useMemo(() => projectTeamGraph(team, events), [team, events])
   const focused = useMemo(() => focusTeamGraph(full, events), [full, events])
   const [scope, setScope] = useState<'current' | 'all'>('current')
   const model = scope === 'current' ? focused : full
+  const motion = useMemo(() => teamGraphMotion(team, events, model, motionAllowed), [team, events, model, motionAllowed])
   const selectionKey = scope === 'current' ? `current:${focused.objectiveSeq ?? 'none'}` : 'all'
   const first = scope === 'current' ? model.nodes.find(entry => entry.seq === focused.triggerSeq)
     ?? model.nodes.find(entry => !entry.historical) ?? model.nodes[0] : model.nodes[0]
@@ -62,11 +100,14 @@ export function TeamGraphBody({ team, events, actorText, portrait, statusLabel }
   const nodes: TeamNode[] = graph.nodes.map(node => {
     const entry = model.nodes.find(item => item.id === node.id)!
     return { ...node, type: 'team', draggable: false, connectable: false, deletable: false, selectable: false, focusable: false,
-      data: { entry, owner: actorText(entry.recipient || entry.sender), avatar: portrait?.(entry.recipient || entry.sender, 'sm'), current: entry.id === selected?.id, choose } }
+      data: { entry, owner: actorText(entry.recipient || entry.sender), sender: actorText(entry.sender),
+        avatar: portrait?.(entry.recipient || entry.sender, 'md'), motion: motion.nodes.get(entry.id) ?? 'idle', current: entry.id === selected?.id, choose } }
   })
   const edges: Edge[] = model.edges.map(edge => ({ ...edge, type: 'smoothstep', animated: false, selectable: false, deletable: false, reconnectable: false, focusable: false,
     ariaLabel: `记录 #${model.nodes.find(entry => entry.id === edge.source)?.seq} → 记录 #${model.nodes.find(entry => entry.id === edge.target)?.seq}，${edge.label}`,
     domAttributes: { 'aria-roledescription': edge.label }, markerEnd: { type: MarkerType.ArrowClosed, color: '#628b80' },
+    className: ['team-graph-edge', motion.edges.has(edge.id) ? 'team-graph-edge-live' : '',
+      edge.source === selected?.id || edge.target === selected?.id ? 'task-graph-edge-current' : ''].filter(Boolean).join(' '),
   }))
   const related = selected ? model.edges.filter(edge => edge.source === selected.id || edge.target === selected.id) : []
   return <>
@@ -85,16 +126,19 @@ export function TeamGraphBody({ team, events, actorText, portrait, statusLabel }
           <button type="button" title="协作图" aria-pressed={view === 'graph'} onClick={() => setView('graph')}><Network size={16} />协作图</button>
           <button type="button" title="协作列表" aria-pressed={view === 'list'} onClick={() => setView('list')}><List size={16} />协作列表</button>
         </div>
-        <div className="task-graph-canvas" hidden={view !== 'graph'} role="region" aria-label="当前团队协作图">
-          <ReactFlow<TeamNode> key={`${selectionKey}:${nodes.length ? 'records' : 'empty'}`} nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView fitViewOptions={fitOptions}
-            onNodeClick={(_, node) => choose(node.id)}
-            minZoom={0.1} maxZoom={2} nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false}
-            elementsSelectable={false} nodesFocusable={false} edgesFocusable={false} deleteKeyCode={null}
-            selectionKeyCode={null} multiSelectionKeyCode={null} selectNodesOnDrag={false} selectionOnDrag={false}
-            autoPanOnNodeFocus={false} disableKeyboardA11y ariaLabelConfig={teamAriaLabels} zoomOnDoubleClick={false}
-            preventScrolling={false} aria-label="当前团队协作图">
-            <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="#c9dcd4" /><GraphControls />
-          </ReactFlow>
+        <div className="task-graph-canvas team-graph-canvas" hidden={view !== 'graph'} role="region" aria-label="当前团队协作图">
+          <div className="team-graph-surface">
+            <ReactFlow<TeamNode> key={`${selectionKey}:${nodes.length ? 'records' : 'empty'}`} nodes={nodes} edges={edges} nodeTypes={nodeTypes}
+              onNodeClick={(_, node) => choose(node.id)}
+              minZoom={0.1} maxZoom={2} nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false}
+              elementsSelectable={false} nodesFocusable={false} edgesFocusable={false} deleteKeyCode={null}
+              selectionKeyCode={null} multiSelectionKeyCode={null} selectNodesOnDrag={false} selectionOnDrag={false}
+              autoPanOnNodeFocus={false} disableKeyboardA11y ariaLabelConfig={teamAriaLabels} zoomOnDoubleClick={false}
+              preventScrolling={false} aria-label="当前团队协作图">
+              <TeamGraphViewport active={view === 'graph'} />
+              <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="#c9dcd4" /><GraphControls />
+            </ReactFlow>
+          </div>
         </div>
         <div className={view === 'graph' ? 'task-graph-list task-graph-sr-only' : 'task-graph-list'}>
           <ol aria-label="当前团队协作列表">{model.nodes.map(entry => <li key={entry.id}>

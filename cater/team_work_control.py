@@ -8,11 +8,15 @@ from .events import Actor
 HOST = Actor.system("team")
 
 
-def linked_inputs(messages, roots, *, include_feedback=True):
-    """Follow continuations and feedback resuming roots, never cancel child work."""
+def linked_inputs(messages, roots, *, include_feedback=True, direct_feedback_roots=None):
+    """Follow continuations and feedback resuming roots, never cancel child work.
+
+    Narrowing direct feedback roots never exempts feedback resuming a withdrawn parent.
+    """
     messages = sorted(messages, key=lambda event: event.seq)
     by_seq = {event.seq: event for event in messages}
     roots = set(roots)
+    direct_feedback_roots = roots if direct_feedback_roots is None else set(direct_feedback_roots) & roots
     continuations = set(roots)
     inactive = set(roots)
     for message in messages:
@@ -38,7 +42,7 @@ def linked_inputs(messages, roots, *, include_feedback=True):
             and parent.payload.get("recipient") == original.actor.id
             and parent.payload.get("revision") == original.payload.get("revision"))
         if (p.get("kind") in {"progress", "report"} and original is not None
-                and (original.seq in roots or resumes_root) and original.seq < message.seq
+                and (original.seq in direct_feedback_roots or resumes_root) and original.seq < message.seq
                 and message.task_id == original.task_id
                 and message.actor.kind == "agent"
                 and message.actor.id == original.payload.get("recipient")
@@ -106,11 +110,24 @@ class TeamWorkControl:
             rows.append({**p, "withdrawal_seq": event.seq})
         return rows
 
-    def inactive(self, task_id, events=None):
+    def inactive(self, task_id, events=None, *, started=None):
         events = list(events) if events is not None else self.rt.log.read(task_id=task_id)
         events = [e for e in events if e.task_id == task_id]
-        roots = {row["message_seq"] for row in self.view(task_id, events=events)}
-        return linked_inputs([e for e in events if e.type == "team.message_received"], roots)
+        withdrawals = self.view(task_id, events=events)
+        roots = {row["message_seq"] for row in withdrawals}
+        direct_feedback_roots = set(roots)
+        if (started is not None and started.task_id == task_id and started.actor == HOST
+                and started.type == "team.run_started"
+                and isinstance(started.payload.get("run_id"), str) and started.payload["run_id"].strip()):
+            # A sender may retire work while consuming its feedback. Only that
+            # existing run survives; roots, continuations and withdrawn parents do not.
+            direct_feedback_roots -= {row["message_seq"] for row in withdrawals
+                if row["run_id"] == started.payload["run_id"]
+                and row["requester"] == started.payload.get("role")
+                and row["revision"] == started.payload.get("revision")
+                and started.payload["message_seq"] < started.seq < row["withdrawal_seq"]}
+        return linked_inputs([e for e in events if e.type == "team.message_received"], roots,
+                             direct_feedback_roots=direct_feedback_roots)
 
     def execute(self, task_id, role, arguments, tool_start):
         """The native tool dispatcher owns the event/receipt transaction."""

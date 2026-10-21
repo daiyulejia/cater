@@ -37,9 +37,9 @@ class ExecutionControl:
             raise ValueError("需要有效的执行控制请求标识。")
         for _ in range(8):
             head = self.rt.log.head_hash()
-            for event in self.rt.log.iter_events(event_types=("task.execution_controlled",)):
+            for event in self.rt.log.iter_events(event_types=("task.execution_controlled", "task.removed_from_list")):
                 if event.actor == Actor.human() and event.payload.get("request_id") == request_id:
-                    if event.task_id != task_id or event.payload["action"] != action:
+                    if event.type != "task.execution_controlled" or event.task_id != task_id or event.payload["action"] != action:
                         raise WorkConflict("同一控制请求不能更换任务或动作。")
                     return event, False
             if not next(self.rt.log.iter_events(task_id=task_id, event_types=("task.created",)), None):

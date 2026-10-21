@@ -188,7 +188,7 @@ test('目标先到而消息随后同步时，空图适配首批记录并选择�
   expect(viewport()).not.toBe(emptyViewport)
   expect(within(details()).getByRole('heading', { name: '消息 #10' })).toBeTruthy()
   expect(screen.getByText('目标更新 #13 · 顾客输入 #10')).toBeTruthy()
-  expect(viewport().style.transform).not.toBe('translate(0px,0px) scale(1)')
+  await waitFor(() => expect(viewport().style.transform).not.toBe('translate(0px,0px) scale(1)'))
 })
 
 test('全部记录中追加新目标但节点未变时，保留有效历史选择、焦点与缩放', async () => {

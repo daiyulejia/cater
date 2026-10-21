@@ -74,6 +74,7 @@ EVENT_CATEGORIES = {
     "task.started": "lifecycle",
     "task.activation_requested": "lifecycle",
     "task.execution_controlled": "lifecycle",
+    "task.removed_from_list": "lifecycle",
     "activity.queued": "lifecycle",
     "activity.started": "lifecycle",
     "activity.completed": "lifecycle",

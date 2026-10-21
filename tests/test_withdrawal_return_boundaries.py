@@ -1,6 +1,8 @@
 """Return and withdrawal boundaries with real temporary Runtime fixtures."""
 
+import io
 import unittest
+import zipfile
 from unittest.mock import patch
 
 from cater.events import Actor
@@ -73,6 +75,146 @@ class WithdrawalReturnBoundaryTests(unittest.TestCase):
                 and e.payload.get('reply_to') == source.seq
                 and e.actor.id == source.payload['recipient']
                 and e.payload.get('recipient') == source.actor.id]
+
+    def test_failed_feedback_can_withdraw_then_publish_zip_and_request_review(self):
+        self.f.bind_workspace()
+        original = self.assign()
+        worker_run = self.start(original)
+        with patch.object(self.rt.team, '_current', side_effect=RuntimeError('Fixture failure')):
+            list(self.rt.team._run_message(
+                self.task, original, self.rt.team._role(self.f.worker), worker_run))
+        feedback, = [e for e in self.rt.team._messages(self.task)
+                     if e.payload.get('kind') == 'progress'
+                     and e.payload.get('reply_to') == original.seq]
+
+        def request_archive_review(context, history, tools):
+            artifact, = self.rt.task(self.task).deliverables
+            return self.f.native_turn('', ('request_review', {
+                'reviewer': self.f.reviewer, 'artifact_seqs': [artifact['seq']],
+                'instruction': 'Read the exact archive and verify both files.',
+            }))
+
+        started, running = self.run_steps(
+            feedback,
+            self.f.native_turn('', ('withdraw_work', {
+                'message_seq': original.seq, 'reason': 'The failed duplicate is no longer needed.',
+            }), ('workspace_write', {
+                'path': 'index.html', 'content': '<!doctype html><title>Checked result</title>',
+                'expected_sha256': None,
+            })),
+            self.f.native_turn('', ('workspace_write', {
+                'path': 'README.md', 'content': 'Open index.html in a browser. Fixture checks only.',
+                'expected_sha256': None,
+            }), ('publish_workspace_archive', {
+                'paths': ['index.html', 'README.md'], 'filename': 'project.zip',
+                'summary': 'Exact project for independent review',
+            })),
+            request_archive_review,
+        )
+        list(running)
+
+        finished, = [e for e in self.f.events('team.run_finished')
+                     if e.payload['run_id'] == started.payload['run_id']]
+        self.assertEqual(finished.payload['status'], 'waiting', finished.payload)
+        results = [e.payload for e in self.f.events('team.tool_finished')
+                   if e.payload['run_id'] == started.payload['run_id']]
+        self.assertEqual([r['name'] for r in results], [
+            'withdraw_work', 'workspace_write', 'workspace_write',
+            'publish_workspace_archive', 'request_review',
+        ])
+        self.assertTrue(all(r['result']['status'] == 'ok' for r in results), results)
+        self.assertIn(feedback.seq, self.rt.team._inactive_messages(self.task))
+        self.assertIsNone(self.rt.team._waiting_assignment(
+            self.task, feedback, self.rt.team._role(self.f.manager)))
+        self.assertEqual(self.reports_to(original), [])
+        self.assertEqual(self.f.finish()['code'], 'review_pending')
+        request = results[-1]['result']
+        decision = self.f.record(request['review_seq'], source=self.message(request['message_seq']))
+        self.assertEqual(decision['status'], 'ok', decision)
+        delivered, = self.f.exchange(self.f.manager, ('finish_work', {
+            'summary': 'Checked archive delivered.', 'verification': 'Fake driver fixture only.',
+        }), source=self.message(decision['message_seq']))
+        self.assertEqual(delivered['status'], 'ok', delivered)
+        with zipfile.ZipFile(io.BytesIO(self.rt.team.archive(self.task))) as delivery:
+            with zipfile.ZipFile(io.BytesIO(delivery.read('project.zip'))) as project:
+                self.assertEqual(set(project.namelist()), {'index.html', 'README.md'})
+        self.assertFalse(self.rt.team._pending_operations(self.task))
+
+    def test_external_withdrawal_stops_run_processing_direct_feedback(self):
+        original = self.assign(sender=self.f.worker, recipient=self.f.reviewer)
+        feedback = self.emit_message(self.f.reviewer, self.f.worker, 'progress', reply_to=original.seq)
+        started, running = self.run_steps(
+            feedback, self.f.native_turn('', ('read_receipts', {})),
+            self.f.native_turn('', ('publish_artifact', {
+                'filename': 'forbidden.txt', 'content': 'Must not execute.',
+                'summary': 'Cancelled output', 'format': 'text',
+            })),
+        )
+        next(running)
+        self.withdraw(original)
+        list(running)
+        self.assertEqual(self.rt.task(self.task).deliverables, [])
+        finished, = [e for e in self.f.events('team.run_finished')
+                     if e.payload['run_id'] == started.payload['run_id']]
+        self.assertEqual(finished.payload['status'], 'interrupted', finished.payload)
+
+    def test_own_child_withdrawal_does_not_mask_external_parent_withdrawal(self):
+        parent = self.assign()
+        child = self.assign(sender=self.f.worker, recipient=self.f.reviewer, source=parent)
+        feedback = self.emit_message(self.f.reviewer, self.f.worker, 'progress', reply_to=child.seq)
+        started, running = self.run_steps(feedback,
+            self.f.native_turn('', ('withdraw_work', {
+                'message_seq': child.seq, 'reason': 'This child is redundant.',
+            })), self.f.native_turn('', ('wait_for_reply', {})))
+        next(running)
+        role = self.rt.team._role(self.f.worker)
+        self.rt.team._current(self.task, started, role, started.payload['revision'])
+        self.withdraw(parent)
+        list(running)
+        finished, = [e for e in self.f.events('team.run_finished')
+                     if e.payload['run_id'] == started.payload['run_id']]
+        self.assertEqual(finished.payload['status'], 'interrupted', finished.payload)
+        self.assertEqual(self.reports_to(parent), [])
+
+    def test_self_withdrawal_does_not_keep_parent_feedback_or_work_inputs_alive(self):
+        for kind in ('progress', 'assignment', 'continuation'):
+            with self.subTest(kind=kind):
+                parent = self.assign(sender=self.f.worker, recipient=self.f.manager)
+                child = self.emit_message(self.f.manager, self.f.reviewer, 'assignment',
+                                          parent_assignment_seq=parent.seq)
+                feedback = self.emit_message(self.f.reviewer, self.f.manager, 'progress', reply_to=child.seq)
+                continuation = self.emit_message(self.f.worker, self.f.manager, 'continuation',
+                                                 continue_assignment_seq=parent.seq)
+                source = {'progress': feedback, 'assignment': parent, 'continuation': continuation}[kind]
+                started, running = self.run_steps(source,
+                    self.f.native_turn('', ('withdraw_work', {
+                        'message_seq': parent.seq, 'reason': 'Stop this parent request.',
+                    }), ('publish_artifact', {
+                        'filename': 'forbidden.txt', 'content': 'Must not execute.',
+                        'summary': 'Cancelled output', 'format': 'text',
+                    })))
+                list(running)
+                finished, = [e for e in self.f.events('team.run_finished')
+                             if e.payload['run_id'] == started.payload['run_id']]
+                self.assertEqual(finished.payload['status'], 'interrupted', finished.payload)
+        self.assertEqual(self.rt.task(self.task).deliverables, [])
+
+    def test_own_withdrawal_exemption_is_not_reused_by_a_later_feedback_run(self):
+        original = self.assign(sender=self.f.worker, recipient=self.f.reviewer)
+        feedback = self.emit_message(self.f.reviewer, self.f.worker, 'progress', reply_to=original.seq)
+        self.f.exchange(self.f.worker, ('withdraw_work', {
+            'message_seq': original.seq, 'reason': 'No longer needed.',
+        }), source=feedback)
+        withdrawal, = self.rt.team.work_control.view(self.task)
+        # Even reuse of the same run ID cannot revive a pre-withdrawal input.
+        replay = self.rt.log.emit(type='team.run_started', task_id=self.task, actor=HOST, payload={
+            'message_seq': feedback.seq, 'role': self.f.worker, 'run_id': withdrawal['run_id'],
+            'revision': self.rt.team.view(self.task)['revision'],
+            'control_seq': self.rt.execution_control.view(self.task)['seq'],
+        })
+        with self.assertRaises(WorkConflict):
+            self.rt.team._current(self.task, replay, self.rt.team._role(self.f.worker),
+                                  replay.payload['revision'])
 
     def test_side_return_allows_delivery_without_starting_queued_continuation(self):
         original = self.assign()

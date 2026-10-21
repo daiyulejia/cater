@@ -1,16 +1,69 @@
-import { CircleDot, FilePenLine, Search, X } from 'lucide-react'
+import { Cat, CheckCircle2, CircleHelp, CircleX, Clock3, FilePenLine, MessageCircle, Pause, PawPrint, Search, TriangleAlert, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
+import type { ExecutionControl } from './executionControl'
+import { executionLabel } from './executionControl'
+import type { TeamSummary } from './team'
+import './TaskList.css'
 
 type ListedTask = {
   id: string
   goal: string
   status: string
-  activity?: { active: boolean }
-  team?: { enabled: boolean; status: string } | null
+  activity?: { active: boolean; state?: string }
+  execution_control?: Pick<ExecutionControl, 'state'>
+  team?: Pick<TeamSummary, 'enabled' | 'status'> & Partial<TeamSummary> | null
 }
 type Filter = 'all' | 'unfinished' | 'done'
 
-export function TaskList<T extends ListedTask>({ tasks, selectedId, drafts, collapsed, searchOpen, onChoose, statusLabel }: {
+type ActivityState = 'running' | 'queued' | 'waiting' | 'paused' | 'cancelled' | 'failed' | 'blocked' | 'uncertain' | 'done' | 'idle'
+
+function listActivity(task: ListedTask, control?: ExecutionControl['state']): ActivityState {
+  if (control === 'paused' || control === 'cancelled') return control
+  const activity = task.activity
+  const team = task.team?.enabled ? task.team : undefined
+  const effects = team?.effects_pending_count
+  if (effects !== undefined && (effects === null || !Number.isSafeInteger(effects) || effects < 0)) return 'uncertain'
+  if (activity?.active && activity.state === 'queued') return 'queued'
+  if (activity?.active && activity.state === 'running') return 'running'
+  if (effects !== undefined && effects > 0) return 'uncertain'
+  if (activity?.state === 'failed') return 'failed'
+  // A live consumer with no reliable state cannot confirm old run records.
+  if (activity?.active) return 'uncertain'
+
+  const runs = (team?.runs ?? []).filter(run => run.revision === undefined || run.revision === team?.revision)
+  // Match teamStatus: inactive consumers make leftover running records uncertain.
+  if (runs.some(run => run.status === 'running' || run.status === 'started')) return activity?.active === false ? 'uncertain' : 'running'
+  const latest = runs.at(-1)?.status
+  if (latest === 'failed') return 'failed'
+  if ((team?.pending_count ?? 0) > 0) return 'waiting'
+  if (team?.status === 'done' || (!team && task.status === 'done' && !activity?.active)) return 'done'
+  if (team?.status === 'failed' || task.status === 'failed') return 'failed'
+  if (team?.status === 'blocked' || latest === 'blocked') return 'blocked'
+  if (latest === 'uncertain') return 'uncertain'
+  if (latest === 'interrupted') return 'uncertain'
+  if (latest === 'cancelled') return 'cancelled'
+  if (latest === 'waiting') return 'waiting'
+  return 'idle'
+}
+
+const activityIcons = {
+  running: Cat, queued: Clock3, waiting: MessageCircle, paused: Pause, cancelled: CircleX,
+  failed: TriangleAlert, blocked: TriangleAlert, uncertain: CircleHelp, done: CheckCircle2, idle: Cat,
+}
+
+function TaskActivity({ state }: { state: ActivityState }) {
+  const Icon = activityIcons[state]
+  return <span className="task-list-activity" data-state={state} aria-hidden="true">
+    <Icon size={15} className="task-list-activity-icon" />
+    {state === 'running' && <>
+      <span className="task-list-activity-light" />
+      <PawPrint size={5} className="task-list-activity-paw task-list-activity-paw-left" />
+      <PawPrint size={5} className="task-list-activity-paw task-list-activity-paw-right" />
+    </>}
+  </span>
+}
+
+export function TaskList<T extends ListedTask>({ tasks, selectedId, drafts, collapsed, searchOpen, onChoose, statusLabel, executionState }: {
   tasks: T[]
   selectedId: string | null
   drafts: Record<string, string>
@@ -18,6 +71,7 @@ export function TaskList<T extends ListedTask>({ tasks, selectedId, drafts, coll
   searchOpen: boolean
   onChoose: (id: string) => void
   statusLabel: (task: T) => string
+  executionState?: (task: T) => ExecutionControl['state'] | undefined
 }) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
@@ -44,10 +98,15 @@ export function TaskList<T extends ListedTask>({ tasks, selectedId, drafts, coll
     </div>
     {narrowed && <p role="status" className="shrink-0 px-3 pb-2 text-[11px] text-[#72877c]">找到 {matches.length} / {tasks.length} 件事</p>}
     <nav className="flex gap-2 overflow-x-auto px-3 pb-3 lg:min-h-0 lg:flex-1 lg:block lg:space-y-2 lg:overflow-x-hidden lg:overflow-y-auto" aria-label="任务列表">
-      {matches.map((item) => <button key={item.id} onClick={() => onChoose(item.id)} aria-current={item.id === selectedId ? 'page' : undefined} className={`task-item w-56 shrink-0 px-3 py-3 text-left lg:w-full ${item.id === selectedId ? 'is-active' : ''}`}>
-        <div className="flex items-start gap-2"><CircleDot size={15} className={`mt-0.5 shrink-0 ${(item.team?.enabled ? item.team.status === 'done' : item.status === 'done' && !item.activity?.active) ? 'text-emerald-600' : 'text-[#c2634d]'}`} /><span className="line-clamp-2 min-w-0 break-words text-[13px] font-semibold leading-5">{item.goal}</span></div>
-        <div className="mt-2 flex items-center gap-2 pl-[23px] text-[11px] text-[#7c918b]"><span>{statusLabel(item)}</span>{drafts[item.id]?.trim() && <span title="有未发送内容" role="img" aria-label="有未发送内容" className="text-[#b65f49]"><FilePenLine size={13} /></span>}</div>
-      </button>)}
+      {matches.map((item) => {
+        const control = executionState?.(item) ?? item.execution_control?.state
+        const state = listActivity(item, control)
+        const label = executionLabel(control) || statusLabel(item)
+        return <button key={item.id} onClick={() => onChoose(item.id)} aria-current={item.id === selectedId ? 'page' : undefined} className={`task-item w-56 shrink-0 px-3 py-3 text-left lg:w-full ${item.id === selectedId ? 'is-active' : ''}`}>
+          <div className="flex items-start gap-2"><TaskActivity state={state} /><span className="line-clamp-2 min-w-0 break-words text-[13px] font-semibold leading-5">{item.goal}</span></div>
+          <div className="mt-2 flex items-center gap-2 pl-[23px] text-[11px] text-[#7c918b]"><span className="task-list-state-label min-w-0 break-words" data-state={state}>{label}</span>{drafts[item.id]?.trim() && <span title="有未发送内容" role="img" aria-label="有未发送内容" className="shrink-0 text-[#b65f49]"><FilePenLine size={13} /></span>}</div>
+        </button>
+      })}
       {!matches.length && <div className="w-full py-3 text-xs leading-5 text-[#7b8a7a]">
         <p>{tasks.length ? '没有匹配的任务。' : '还没有任务，先和店长聊聊吧。'}</p>
         {narrowed && <button type="button" onClick={() => { setQuery(''); setFilter('all') }} className="mt-1 text-[#a55642] underline underline-offset-4">恢复全部任务</button>}

@@ -129,6 +129,8 @@ class TeamService:
         if request_id is not None and (not isinstance(request_id, str) or not 8 <= len(request_id) <= 128):
             raise ValueError("消息请求标识无效。")
         with self.rt.log.atomic():
+            if self.rt.conversation_list.is_removed(task_id):
+                raise WorkConflict("这段对话已从列表删除，不再接收新的消息。")
             if not self.enabled(task_id):
                 raise WorkConflict("本群尚未启用消息协作。")
             if request_id is not None:
@@ -150,10 +152,10 @@ class TeamService:
                 and (self.recovery.is_message(e, events, by_seq=by_seq) if e.payload.get("kind") == "recovery"
                      else e.actor == Actor.human() or e.actor.kind == "agent" and e.actor.id in members)]
 
-    def _inactive_messages(self, task_id, *, events=None):
+    def _inactive_messages(self, task_id, *, events=None, started=None):
         events = events if events is not None else self.rt.log.read(task_id=task_id)
         return (self.rt.team_reviews.superseded_assignments(task_id, events=events)
-                | self.work_control.inactive(task_id, events=events))
+                | self.work_control.inactive(task_id, events=events, started=started))
 
     def view(self, task_id):
         events = self.rt.log.read(task_id=task_id)
@@ -222,6 +224,8 @@ class TeamService:
     def _claim(self, task_id):
         durable = not self.rt.log.db.in_transaction
         with self.rt.log.atomic():
+            if self.rt.conversation_list.is_removed(task_id):
+                return None
             events = self.rt.log.read(task_id=task_id)
             starts = {e.payload["message_seq"]: e for e in events if e.type == "team.run_started" and e.actor == HOST}
             finished = {e.payload["message_seq"] for e in events if e.type == "team.run_finished" and e.actor == HOST}
@@ -662,7 +666,9 @@ class TeamService:
             "background": dialogue_background(background, reader="read_background") if background is not None else None}, rules
 
     def _current(self, task_id, started, role, revision):
-        if started.payload["message_seq"] in self._inactive_messages(task_id):
+        if self.rt.conversation_list.is_removed(task_id):
+            raise WorkConflict("对话已从列表删除；已有成果与在途回执保留，未启动后续操作。")
+        if started.payload["message_seq"] in self._inactive_messages(task_id, started=started):
             raise WorkConflict("这份工作输入已明确撤回或被同链新版复核替代，未继续旧工作；已有操作回执保留。")
         control = self.rt.execution_control.view(task_id)
         if control["seq"] != started.payload["control_seq"]:

@@ -227,6 +227,7 @@ class ActivityRunner:
         recovered = 0
         with self._lock:
             with self._runtime_factory() as runtime:
+                skipped_tasks.update(runtime.conversation_list.removed())
                 for event in runtime.log.iter_events(event_types=(
                         "activity.queued", "activity.completed", "activity.failed")):
                     activity_id = event.payload.get("activity_id")
@@ -1404,6 +1405,7 @@ def make_handler(
     summaries_lock = threading.Lock()
     summaries_head: str | None = None
     summaries_base: list[dict[str, Any]] = []
+    summaries_removed: list[dict[str, Any]] = []
     summaries_lease_version = 0.0
     summaries_deadline = float("inf")
 
@@ -1431,11 +1433,12 @@ def make_handler(
                 return self._get_rooms(path, parsed.query)
             if path == "/api/tasks":
                 with self._runtime() as rt:
+                    removed = rt.conversation_list.removed()
                     return self._send_json(
                         [
                             {**task_to_dict(task, include_content=False, team=_team_view(rt, task.id)),
                              "activity": activities.status(task.id)}
-                            for task in rt.tasks()
+                            for task in rt.tasks() if task.id not in removed
                         ]
                     )
             if path == "/api/projects":
@@ -1606,6 +1609,10 @@ def make_handler(
                 return self._unauthorized()
             if not self._is_same_origin_write():
                 return self._forbidden("cross-origin writes are not allowed")
+            if path.startswith("/tasks/"):
+                with self._runtime() as rt:
+                    if rt.conversation_list.is_removed(path.split("/")[2]):
+                        return self._conflict("这段对话已从列表删除，不再接收新的工作。")
             if path == "/api/rooms" or path.startswith("/api/rooms/"):
                 return self._post_rooms(path)
             if path in {"/api/projects", "/api/rules"} or path.startswith("/api/rules/"):
@@ -1679,6 +1686,8 @@ def make_handler(
                             **({"collaboration": data["collaboration"]} if "collaboration" in data else {}),
                             **({"workspace_id": data["workspace_id"]} if "workspace_id" in data else {}),
                         }, data.get("request_id"), default_team=default_team)
+                        if rt.conversation_list.is_removed(task_id):
+                            raise WorkConflict("原对话已从列表删除，请使用新的请求开始新对话。")
                     except WorkConflict as exc:
                         return self._conflict(str(exc))
                     except ValueError as exc:
@@ -1708,6 +1717,13 @@ def make_handler(
                     if rt.task(task_id) is None:
                         return self._not_found()
                     try:
+                        if action == "remove":
+                            if set(data) != {"request_id"}:
+                                return self._bad_request("删除对话只接收请求标识。")
+                            event = rt.conversation_list.remove(task_id, request_id=data["request_id"])
+                            return self._send_json({"id": task_id, "removed": True, "removed_seq": event.seq})
+                        if task_id in rt.conversation_list.removed():
+                            return self._conflict("这段对话已从列表删除，请新建对话；本机记录与已有文件仍保留。")
                         if action == "workspace":
                             if set(data) != {"workspace_id", "expected_revision"}:
                                 return self._bad_request("工作区绑定需要已配置目录和当前版本。")
@@ -1869,6 +1885,8 @@ def make_handler(
                                 "goal": data.get("goal", [""])[0], "acceptance": acceptance,
                                 "run": data.get("run_now", [""])[0] == "on",
                             }, data.get("request_id", [None])[0])
+                            if rt.conversation_list.is_removed(task_id):
+                                raise WorkConflict("原对话已从列表删除，请使用新的请求开始新对话。")
                             if intent is not None:
                                 activities.dispatch_activation(task_id, intent, background=False)
                             self._redirect(f"/tasks/{task_id}")
@@ -2078,7 +2096,7 @@ def make_handler(
                 return self._send_json(result, status=HTTPStatus.CREATED if result["created"] else HTTPStatus.OK)
 
         def _send_task_summaries(self) -> None:
-            nonlocal summaries_head, summaries_base, summaries_lease_version, summaries_deadline
+            nonlocal summaries_head, summaries_base, summaries_removed, summaries_lease_version, summaries_deadline
             # Cache only small rows. Stable requests read the indexed event head
             # and activity state, never task history or delivery manifests.
             with summaries_lock, self._runtime() as rt, _read_snapshot(rt):
@@ -2132,14 +2150,16 @@ def make_handler(
                     """):
                         stats.setdefault(row["task_id"], Counter())[(row["type"], row["phase"])] = row["n"]
                         latest[row["task_id"]] = max(latest.get(row["task_id"], 0), row["latest"])
+                    removed = rt.conversation_list.removed()
                     rows = [
                         _task_summary(task, version=version, latest_seq=latest[task.id],
                                       execution_control=rt.execution_control.view(task.id),
                                       team=_team_view(rt, task.id),
                                       conversation_count=_conversation_count(stats[task.id]))
-                        for task in rt.tasks()
+                        for task in rt.tasks() if task.id not in removed
                     ]
                     summaries_base, summaries_head = rows, head
+                    summaries_removed = [{"id": task_id, "seq": seq} for task_id, seq in removed.items()]
                     summaries_lease_version, summaries_deadline = lease_version, deadline
                 rows = [
                     _summary_activity(row, activity_rows.get(row["id"],
@@ -2150,7 +2170,8 @@ def make_handler(
                 if any(row.get("team", {}).get("effects_pending_count", 0) is None for row in rows):
                     # A transient diagnostic failure is not stable event-derived state.
                     etag = None
-            self._send_json({"tasks": rows}, etag=etag)
+                removed_rows = list(summaries_removed)
+            self._send_json({"tasks": rows, "removed": removed_rows}, etag=etag)
 
         def _task_payload(self, task_id: str, runner: ActivityRunner) -> dict[str, Any]:
             with self._runtime() as runtime:
@@ -2407,7 +2428,8 @@ def make_handler(
 
 def render_index(rt: Runtime) -> str:
     with rt:
-        tasks = rt.tasks()
+        removed = rt.conversation_list.removed()
+        tasks = [task for task in rt.tasks() if task.id not in removed]
         inbox = {item["task_id"] for item in rt.inbox()}
         profiles = rt.profiles()
         chain = rt.verify_chain()
