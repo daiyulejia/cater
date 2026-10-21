@@ -12,6 +12,7 @@
 @media (max-width: 760px) {
   .task-graph-dialog { inset: 0; border-radius: 0; max-height: 100dvh; }
   .task-graph-header { padding: 10px 14px; }
+  .task-graph-close { width: 44px; height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .task-graph-dialog *, .task-graph-dialog *::before, .task-graph-dialog *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }

@@ -38,6 +38,7 @@
 .task-graph-list li { border-bottom: 1px solid #e1e9e4; }
 .task-graph-list button { display: flex; flex-direction: column; gap: 7px; width: 100%; padding: 14px 8px; border: 0; background: transparent; text-align: left; color: inherit; overflow-wrap: anywhere; }
 .task-graph-list button[aria-pressed="true"] { background: #eff7f2; }
+.task-graph-list-preview { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 3; -webkit-box-orient: vertical; white-space: normal; }
 .task-graph-list-top { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; width: 100%; }
 .task-graph-list-top strong { min-width: 0; }
 .task-graph-details { min-width: 0; overflow-y: auto; padding: 18px 20px 30px; border-left: 1px solid #dce8e1; background: #fff; overflow-wrap: anywhere; scrollbar-width: thin; scrollbar-color: #c3d7ce transparent; }
@@ -70,5 +71,6 @@
   .task-graph-main { min-height: 360px; height: min(52dvh, 500px); }
   .task-graph-details { overflow: visible; border-left: 0; border-top: 1px solid #dce8e1; padding: 18px 16px calc(28px + env(safe-area-inset-bottom)); }
   .task-graph-view-switch { padding: 6px 12px; }
-  .task-graph-controls button { width: 42px; height: 42px; }
+  .task-graph-view-switch button { min-height: 44px; }
+  .task-graph-controls button { width: 44px; height: 44px; }
 }

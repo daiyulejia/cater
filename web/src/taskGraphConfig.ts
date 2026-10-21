@@ -8,3 +8,7 @@ export const ariaLabels: Partial<AriaLabelConfig> = {
   'minimap.ariaLabel': '任务缩略图', 'handle.ariaLabel': '依赖连接点',
 }
 export const fitOptions = { padding: 0.16, minZoom: 0.15, maxZoom: 1, duration: 0 }
+
+export function initialGraphView(): 'graph' | 'list' {
+  return typeof window !== 'undefined' && window.matchMedia?.('(max-width: 760px)').matches ? 'list' : 'graph'
+}

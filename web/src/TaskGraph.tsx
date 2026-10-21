@@ -10,7 +10,7 @@ import type { WorkState } from './WorkItems'
 import { layoutTaskGraph } from './taskGraphLayout'
 import { TeamGraphBody } from './TeamGraphBody'
 import { GraphControls } from './TaskGraphControls'
-import { ariaLabels, fitOptions } from './taskGraphConfig'
+import { ariaLabels, fitOptions, initialGraphView } from './taskGraphConfig'
 import { TaskGraphDialog } from './TaskGraphDialog'
 import type { TeamEvent, TeamState } from './team'
 import '@xyflow/react/dist/style.css'
@@ -117,7 +117,7 @@ function ItemDetails({ item, work, actorText, portrait, choose, headingRef }: Gr
 function GraphBody(props: GraphWorkProps) {
   const { work, actorText, portrait } = props
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [view, setView] = useState<'graph' | 'list'>('graph')
+  const [view, setView] = useState(initialGraphView)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const canvasRef = useRef<HTMLDivElement>(null)
   const selected = work.items.find(item => item.id === selectedId) ?? work.items[0]
@@ -180,7 +180,7 @@ function GraphBody(props: GraphWorkProps) {
           <ol aria-label="当前任务工作列表">{work.items.map((item, index) => <li key={item.id}>
             <button type="button" aria-pressed={selected?.id === item.id} onClick={() => choose(item.id)}>
               <span className="task-graph-list-top"><strong>工作 {index + 1} · {actorText(item.owner)}</strong><Status value={item.status} staleScope={work.scope_current === false} /></span>
-              <span>{item.objective}</span>
+              <span className="task-graph-list-preview">{item.objective}</span>
               <span className="task-graph-muted">{item.depends_on.length ? `前置：${[...new Set(item.depends_on)].map(id => {
                 const dependencyIndex = work.items.findIndex(entry => entry.id === id)
                 return dependencyIndex < 0 ? `${id}（当前计划未包含）` : `工作 ${dependencyIndex + 1}`

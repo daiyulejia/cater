@@ -9,7 +9,7 @@ import type { TeamEvent, TeamState } from './team'
 import { teamStatus } from './team'
 import { layoutTaskGraph } from './taskGraphLayout'
 import { GraphControls } from './TaskGraphControls'
-import { ariaLabels, fitOptions } from './taskGraphConfig'
+import { ariaLabels, fitOptions, initialGraphView } from './taskGraphConfig'
 
 type TeamNode = Node<{ entry: TeamGraphEntry; owner: string; current: boolean; avatar: ReactNode; choose: (id: string) => void }, 'team'>
 
@@ -42,7 +42,7 @@ export function TeamGraphBody({ team, events, actorText, portrait, statusLabel }
   const first = scope === 'current' ? model.nodes.find(entry => entry.seq === focused.triggerSeq)
     ?? model.nodes.find(entry => !entry.historical) ?? model.nodes[0] : model.nodes[0]
   const [selection, setSelection] = useState<{ key: string; id: string | null }>({ key: selectionKey, id: first?.id ?? null })
-  const [view, setView] = useState<'graph' | 'list'>('graph')
+  const [view, setView] = useState(initialGraphView)
   const headingRef = useRef<HTMLHeadingElement>(null)
   const selected = (selection.key === selectionKey ? model.nodes.find(entry => entry.id === selection.id) : undefined) ?? first
   if (selection.key !== selectionKey || selection.id !== (selected?.id ?? null)) {
@@ -100,7 +100,7 @@ export function TeamGraphBody({ team, events, actorText, portrait, statusLabel }
           <ol aria-label="当前团队协作列表">{model.nodes.map(entry => <li key={entry.id}>
             <button type="button" aria-pressed={entry.id === selected?.id} onClick={() => choose(entry.id)}>
               <span className="task-graph-list-top"><strong>{teamGraphKinds[entry.kind]} #{entry.seq} · {actorText(entry.sender)} → {entry.recipient ? actorText(entry.recipient) : '接收者未记录'}</strong><span>{entry.status}</span></span>
-              <span>{entry.text || '内容未包含在当前记录中'}</span>{entry.historical && <span className="task-graph-scope">旧目标记录</span>}
+              <span className="task-graph-list-preview">{entry.text || '内容未包含在当前记录中'}</span>{entry.historical && <span className="task-graph-scope">旧目标记录</span>}
             </button>
           </li>)}</ol>
         </div>
