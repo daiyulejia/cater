@@ -109,7 +109,7 @@ class TeamBrowser:
             raise BrowserInputError("检查文件总计超过32MiB。")
         return selected
 
-    def _inputs(self, task_id, arguments):
+    def _inputs(self, task_id, arguments, *, browser_paths=True):
         from .archive_members import read_members
 
         sources = self._files(task_id, arguments["artifact_seqs"])
@@ -148,7 +148,11 @@ class TeamBrowser:
         if len(selected) > 128 or total > 32 * 1024 * 1024 or any(a["bytes"] > 16 * 1024 * 1024 for a in selected):
             raise BrowserInputError("浏览器副本限128文件、单文件16MiB、总32MiB；请用archive_files选择实际页面依赖，不发布或检查节选文件。")
         relative = bool(archives)
-        if relative:
+        if not browser_paths:
+            from .workspace_archive import _paths
+
+            _paths([a["path"] for a in selected])
+        elif relative:
             validate_browser_paths([a["path"] for a in selected])
         files = []
         for source in sources:
