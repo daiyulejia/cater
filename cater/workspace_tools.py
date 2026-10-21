@@ -23,7 +23,6 @@ from pathlib import Path
 import re
 import stat
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -31,7 +30,7 @@ from types import MappingProxyType
 from typing import Iterator, Mapping
 import unicodedata
 
-from .processes import ProcessScope
+from .processes import ProcessScope, worker_python
 from .tool_protocol import strict_json
 from .verification import _Capture
 
@@ -735,7 +734,7 @@ class WorkspaceExecutor:
             result_path = Path(tmp) / "result.json"
             try:
                 process = subprocess.Popen(
-                    [sys.executable, "-I", str(Path(__file__).with_name("_verification_worker.py")), str(result_path)],
+                    [worker_python(), "-I", str(Path(__file__).with_name("_verification_worker.py")), str(result_path)],
                     cwd=directory, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     shell=False, start_new_session=os.name != "nt",
                 )

@@ -344,6 +344,7 @@ class AcpRejectionDetailsTests(unittest.TestCase):
         self.assertNotEqual(rt.team.view(task)["status"], "done")
         self.assert_private_absent(repr(events))
         self.assertTrue(rt.verify_chain().ok)
+        return finished
 
     def test_runtime_persists_safe_details_from_each_real_peer_stage(self):
         for method in METHODS:
@@ -391,8 +392,19 @@ class AcpRejectionDetailsTests(unittest.TestCase):
     def test_runtime_rejection_cannot_confirm_failed_cleanup(self):
         error = AcpRequestRejected(PRIVATE[0], prompt_may_have_run=True,
                                    rpc_code=-32000, rpc_method="session/prompt")
-        self.runtime_failure(error, {}, cleanup=False)
+        self.runtime_failure(error, {"external_rpc_code": -32000,
+                                    "external_rpc_method": "session/prompt"}, cleanup=False)
         self.assert_classification(error, uncertain=True)
+
+    def test_cleanup_failure_keeps_primary_code_without_claiming_execution_stopped(self):
+        for kind, code in ((AcpProtocolError, "protocol_error"), (AcpTimeout, "deadline_exceeded"),
+                           (RuntimeError, "external_error")):
+            with self.subTest(kind=kind.__name__):
+                error = kind(PRIVATE[0])
+                last = self.runtime_failure(error, {}, cleanup=False)
+                self.assertEqual(last.payload["external_failure_code"], code)
+                self.assertEqual(last.payload["error_type"], kind.__name__)
+                self.assertEqual(last.payload["status"], "interrupted")
 
 
 if __name__ == "__main__":

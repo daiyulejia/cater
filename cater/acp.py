@@ -11,7 +11,6 @@ import math
 import os
 import queue
 import subprocess
-import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -20,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .processes import ProcessScope
+from .processes import ProcessScope, worker_python
 from .tool_protocol import json_utf8, strict_json
 
 
@@ -330,7 +329,7 @@ class AcpSession:
                 if self._closed:
                     raise AcpUnavailable("ACP session is closed")
                 self._proc = subprocess.Popen(
-                    [sys.executable, "-I", str(Path(__file__).with_name("_driver_worker.py"))],
+                    [worker_python(), "-I", str(Path(__file__).with_name("_driver_worker.py"))],
                     cwd=self.cwd, env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL, start_new_session=os.name != "nt",
                 )

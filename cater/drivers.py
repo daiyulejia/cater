@@ -10,7 +10,6 @@ import re
 import socket
 import ssl
 import subprocess
-import sys
 import threading
 import time
 import uuid
@@ -24,7 +23,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from .processes import ProcessScope
+from .processes import ProcessScope, worker_python
 from .tool_protocol import (ToolTurn, json_utf8, openai_history, openai_turn, prepare_tool_turn,
                             strict_json, safe_tool_usage, _usage)
 from .usage import usage_source, valid_token_count
@@ -650,7 +649,7 @@ class CliDriver:
             self.close()
         try:
             self._proc = subprocess.Popen(
-                [sys.executable, "-I", str(Path(__file__).with_name("_driver_worker.py"))],
+                [worker_python(), "-I", str(Path(__file__).with_name("_driver_worker.py"))],
                 cwd=self.cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, text=True, encoding="utf-8", bufsize=1,
                 shell=False, start_new_session=os.name != "nt", env=self.env,

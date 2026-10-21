@@ -35,6 +35,12 @@ class TeamExternal:
         from .team import MAX_ACTOR_TURNS
         from .team_reply import TOOL as REPLY
 
+        def diagnostics(error):
+            code = ("execution_budget" if error.limit == "total" else "idle_timeout") if isinstance(
+                error, ExternalRunLimit) else failure_code(error)
+            return {"error_type": type(error).__name__, "external_failure_code": code,
+                    **rejection_details(error)}
+
         status, reason, final = "completed", "", ""
         failure, awaiting_customer = {}, False
         last_scope, attempt, run = None, None, None
@@ -167,6 +173,11 @@ class TeamExternal:
                         failure["interruption_kind"] = "turn_boundary"
                     elif stop_kind in {"delivered", "answered"}:
                         final = delivered_text
+                except Exception as exc:
+                    if not isinstance(exc, WorkConflict):
+                        # Cleanup may interrupt settlement, but must not erase the primary failure.
+                        failure.update(diagnostics(exc))
+                    raise
                 finally:
                     # The adapter closes the process/bridge before these facts
                     # settle. Missing settlement remains discoverable on restart.
@@ -196,8 +207,8 @@ class TeamExternal:
         except WorkConflict as exc:
             status, reason = "interrupted", str(exc)
         except Exception as exc:
-            code = ("execution_budget" if exc.limit == "total" else "idle_timeout") if isinstance(
-                exc, ExternalRunLimit) else failure_code(exc)
+            details = diagnostics(exc)
+            code = details["external_failure_code"]
             detail = {
                 "deadline_exceeded": "本地等待时限已到，不代表远端已停止",
                 "execution_budget": "本轮已达到配置的总执行预算，未据此认定接入故障",
@@ -208,9 +219,7 @@ class TeamExternal:
                 "transport_unavailable": "客户端连接不可用",
             }.get(code, "原因待核查")
             status, reason = "failed", f"{role.name}的外部调用未完成：{detail}；已有成果与工具回执保留，未自动重发请求。"
-            failure = {**failure, "error_type": type(exc).__name__,
-                       "external_failure_code": code,
-                       **rejection_details(exc),
+            failure = {**failure, **details,
                        "external_observations": dict(run.state.observations) if run is not None else {},
                        "failure_stage": (run.state.failure_phase or run.state.phase) if run is not None else "setup"}
             if code != "execution_budget":

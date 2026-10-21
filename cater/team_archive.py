@@ -64,7 +64,7 @@ def publish(team, task_id, role, arguments, workspace, binding, tool_start):
     scope()
     try:
         with rt.workspaces._owner(binding["root"]) as owned:
-            if not owned or rt.workspaces.pending(root=binding["root"]):
+            if not owned or rt.workspaces.pending(root=binding["root"], effects_only=True):
                 return _publication_rejected("workspace_pending", "目录仍有执行或影响待核对，未生成工程快照。")
             body, manifest = create_snapshot(workspace, arguments["paths"])
     except (ArchiveError, OSError):

@@ -22,6 +22,7 @@ from .work import WorkConflict
 HOST = Actor.system("workspace_gateway")
 MAX_TOOL_TURNS = 48
 MAX_HISTORY_BYTES = 512_000
+_READ_ONLY_TOOLS = frozenset({"workspace_read", "workspace_list", "workspace_search"})
 
 
 def load_workspaces(path):
@@ -109,13 +110,18 @@ class WorkspaceService:
         row = self.config.get(event.payload.get("workspace_id")) if event else None
         return row["fingerprint"] if row else None
 
-    def pending(self, *, root=None, task_id=None):
+    def pending(self, *, root=None, task_id=None, effects_only=False):
+        """Keep missing receipts; known built-in reads need no effect reconciliation."""
+        if type(effects_only) is not bool:
+            raise ValueError("effects_only must be a boolean")
         events = self.rt.log.read(task_id=task_id)
         team = Actor.system("team")
         starts = {e.seq: e for e in events if (e.type == "workspace.tool_started" and e.actor == HOST
                   or e.type == "team.tool_started" and e.actor == team
                   and isinstance(e.payload.get("name"), str) and e.payload["name"].startswith("workspace_"))
-                  and (root is None or e.payload.get("root") == root)}
+                  and (root is None or e.payload.get("root") == root)
+                  and not (effects_only and type(e.payload.get("name")) is str
+                           and e.payload["name"] in _READ_ONLY_TOOLS)}
         for event in events:
             if event.type not in {"workspace.tool_finished", "workspace.tool_reconciled", "team.tool_finished"}:
                 continue
@@ -167,7 +173,7 @@ class WorkspaceService:
         p = event.payload
         row = self.config.get(p.get("workspace_id"))
         available = bool(row and row["fingerprint"] == p.get("fingerprint"))
-        pending = self.pending(root=p.get("root")) if p.get("root") else []
+        pending = self.pending(root=p.get("root"), effects_only=True) if p.get("root") else []
         return {"revision": event.seq, "workspace_id": p.get("workspace_id"), "title": p.get("title"),
                 "root": p.get("root"), "mode": p.get("mode"), "fingerprint": p.get("fingerprint"),
                 "available": available, "reason": "" if available else self.config_error or "工作区未配置或权限已变化，需要重新绑定。",
@@ -188,7 +194,7 @@ class WorkspaceService:
             work = self.rt.work.view(task_id)
             if any(i.get("in_flight") for i in work["items"]):
                 raise WorkConflict("已有工作在途，需要结束或核对后再更换工作区。")
-            if self.pending(task_id=task_id):
+            if self.pending(task_id=task_id, effects_only=True):
                 raise WorkConflict("已有工具结果待核对，暂时不能更换工作区。")
             row = self.config.get(workspace_id)
             if row:
@@ -321,7 +327,7 @@ class WorkspaceService:
         with self._owner(binding["root"]) as owned:
             if not owned:
                 raise WorkConflict("同一工作目录已有执行者，稍后从现有检查点继续。")
-            if self.pending(root=binding["root"]):
+            if self.pending(root=binding["root"], effects_only=True):
                 raise WorkConflict("该工作目录有尚未核对的工具结果，未重放操作。")
             call_ids = set()
             for turn_index in range(MAX_TOOL_TURNS):
@@ -386,7 +392,7 @@ class WorkspaceService:
                                  "result": result})
                     history.append({"role": "tool", "tool_call_id": call.id, "is_error": result.get("status") != "ok",
                                     "content": json.dumps({"receipt_seq": finished.seq, **result}, ensure_ascii=False)})
-                    if any(e.seq == started.seq for e in self.pending(root=binding["root"])):
+                    if any(e.seq == started.seq for e in self.pending(root=binding["root"], effects_only=True)):
                         raise DriverUnavailable("工具未完整结束或执行超时，需要核对实际影响，未自动重试。")
             raise DriverUnavailable("本轮工程执行达到回合上限，已有文件与记录保留，需要核对进展后继续。")
 

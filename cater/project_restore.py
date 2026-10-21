@@ -108,7 +108,7 @@ def restore(team, task_id, role, arguments, workspace, binding, tool_start):
     attempted = False
     try:
         with rt.workspaces._owner(binding["root"]) as owned:
-            if not owned or any(e.seq != tool_start.seq for e in rt.workspaces.pending(root=binding["root"])):
+            if not owned or any(e.seq != tool_start.seq for e in rt.workspaces.pending(root=binding["root"], effects_only=True)):
                 return _rejected("workspace_pending", "目录有执行中或影响待核对的操作，未恢复文件；请先核对原操作。")
             guard()
             event = next(rt.log.iter_events(task_id=source["task_id"], event_types=("deliverable.published",),

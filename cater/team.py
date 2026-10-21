@@ -973,7 +973,7 @@ class TeamService:
             if not current["available"] or current["revision"] != binding["revision"] or current["fingerprint"] != binding["fingerprint"]:
                 raise WorkConflict("工作目录或权限已变化，未执行旧工具请求。")
             with self.rt.workspaces._owner(binding["root"]) as owned:
-                pending = [e for e in self.rt.workspaces.pending(root=binding["root"]) if e.seq != tool_start.seq]
+                pending = [e for e in self.rt.workspaces.pending(root=binding["root"], effects_only=True) if e.seq != tool_start.seq]
                 if not owned or pending and name in {"workspace_write", "workspace_run"}:
                     raise WorkConflict("工作目录有未结束或待核对操作，不能重复执行。")
                 if post_delivery and not self._post_delivery_command(task_id, role, tool_start):
@@ -1072,7 +1072,7 @@ class TeamService:
                 return {"status": "ok", "delivery_seq": current_work["revision"],
                         "note": "当前目标已有交付结论，不重复登记；普通补充可直接回复，确需新工作请先采用新目标。"}
             self.rt.team_reviews._guard(task_id, role, tool_start)
-            unknown = self.rt.workspaces.pending(task_id=task_id)
+            unknown = self.rt.workspaces.pending(task_id=task_id, effects_only=True)
             unknown_seqs = {e.seq for e in unknown}
             unknown_seqs.update(r["started_seq"] for r in self._pending_operations(task_id)
                                 if r["name"] in EXTERNAL_EFFECT_TOOLS and not read_only_call(r))

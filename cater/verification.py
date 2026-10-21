@@ -8,7 +8,6 @@ import math
 import json
 import os
 import subprocess
-import sys
 import tempfile
 import threading
 import time
@@ -17,6 +16,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from .processes import ProcessScope as _ProcessScope
+from .processes import worker_python
 
 PREVIEW_LIMIT = 8192
 
@@ -159,7 +159,7 @@ def run_check(
         status_path = Path(tmp) / "result.json"
         try:
             process = subprocess.Popen(
-                [sys.executable, "-I", str(Path(__file__).with_name("_verification_worker.py")), str(status_path)],
+                [worker_python(), "-I", str(Path(__file__).with_name("_verification_worker.py")), str(status_path)],
                 cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 shell=False, start_new_session=os.name != "nt", env=env,
             )

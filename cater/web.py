@@ -50,10 +50,15 @@ class ActivationSuperseded(WorkConflict):
     pass
 
 
+class _RecoveryStateUnreadable(RuntimeError):
+    pass
+
+
 class ActivityRunner:
     """Run long collaboration rounds off the request thread, one per task."""
 
-    _BINDING_KEYS = ("conversation_seq", "expected_scope", "finished_seq", "resume_seq", "activation_seq", "team_message_seq")
+    _BINDING_KEYS = ("conversation_seq", "expected_scope", "finished_seq", "resume_seq", "activation_seq", "team_message_seq",
+                     "recovery_retry_of")
 
     def __init__(self, runtime_factory: Callable[[], Runtime]):
         self._instance_id = uuid.uuid4().hex
@@ -217,6 +222,8 @@ class ActivityRunner:
         counts only interrupted execution activities, not question queues.
         """
         pending: dict[tuple[str, str], Event] = {}
+        skipped_tasks: set[str] = set()
+        deferred_native_tasks: set[str] = set()
         recovered = 0
         with self._lock:
             with self._runtime_factory() as runtime:
@@ -234,22 +241,32 @@ class ActivityRunner:
             # Recovery may be invoked again while this process owns live workers.
             for task_id, activity in self._activities.items():
                 if activity["state"] in {"queued", "running"}:
-                    with self._runtime_factory() as runtime:
-                        control = self._control_failure(runtime, task_id, activity)
-                        followup = activity.get("follow_up")
-                        followup_control = self._control_failure(runtime, task_id, followup) if followup else None
+                    try:
+                        with self._runtime_factory() as runtime:
+                            control = self._control_failure(runtime, task_id, activity)
+                            followup = activity.get("follow_up")
+                            followup_control = self._control_failure(runtime, task_id, followup) if followup else None
+                    except Exception:
+                        skipped_tasks.add(task_id)
+                        _LOGGER.exception("Cannot check recovery control for %s", task_id)
+                        continue
                     if activity["state"] == "running" or control is None:
                         pending.pop((task_id, activity["id"]), None)
                     if isinstance(followup, dict) and followup_control is None:
                         pending.pop((task_id, followup["id"]), None)
             for (task_id, activity_id), queued in pending.items():
+                if task_id in skipped_tasks:
+                    continue
                 action = str(queued.payload.get("action") or "run")
                 try:
                     result = self._recover_activity(task_id, queued)
                     if result is None:
                         continue
                     terminal, created = result
-                except Exception:
+                except Exception as exc:
+                    if isinstance(exc, _RecoveryStateUnreadable):
+                        skipped_tasks.add(task_id)
+                    deferred_native_tasks.add(task_id)
                     _LOGGER.exception("Cannot recover activity for %s at %s", task_id, activity_id)
                     continue
                 if not created:
@@ -270,7 +287,7 @@ class ActivityRunner:
                     "finished_at": terminal.ts,
                 }
                 self._revision += 1
-        self._recover_pending_questions()
+        self._recover_pending_questions(skip_tasks=skipped_tasks)
         with self._runtime_factory() as runtime:
             queued = {(event.task_id, event.payload.get("conversation_seq"))
                       for event in runtime.log.iter_events(event_types=("activity.queued",))
@@ -289,30 +306,40 @@ class ActivityRunner:
                         if event.task_id and event.actor == EventActor.human()}
             activations = list(runtime.log.iter_events(event_types=("task.activation_requested",)))
         for event in undispatched:
+            if event.task_id in skipped_tasks:
+                continue
             try:
                 self.dispatch_conversation(event.task_id, {**event.payload, "finish_seq": event.seq})
             except Exception:
                 _LOGGER.exception("Cannot recover conversation dispatch for %s at %s", event.task_id, event.seq)
         for event in resumes:
+            if event.task_id in skipped_tasks:
+                continue
             try:
                 self.dispatch_control(event.task_id, event)
             except Exception:
                 _LOGGER.exception("Cannot recover control dispatch for %s at %s", event.task_id, event.seq)
         for event in activations:
+            if event.task_id in skipped_tasks:
+                continue
             try:
                 self.dispatch_activation(event.task_id, event)
             except Exception:
                 _LOGGER.exception("Cannot recover task activation for %s at %s", event.task_id, event.seq)
-        for task_id in sorted(task_ids):
-            self.answer_conversations(task_id)
-        self._recover_native_teams()
+        for task_id in sorted(task_ids - skipped_tasks):
+            try:
+                self.answer_conversations(task_id)
+            except Exception:
+                skipped_tasks.add(task_id)
+                _LOGGER.exception("Cannot recover conversation queue for %s", task_id)
+        self._recover_native_teams(skip_tasks=skipped_tasks | deferred_native_tasks)
         return recovered
 
-    def _recover_native_teams(self) -> None:
+    def _recover_native_teams(self, *, skip_tasks: set[str] | None = None) -> None:
         with self._runtime_factory() as runtime:
             task_ids = {e.task_id for e in runtime.log.iter_events(event_types=("team.started",))
                         if e.actor == EventActor.system("team") and e.task_id}
-        for task_id in sorted(task_ids):
+        for task_id in sorted(task_ids - (skip_tasks or set())):
             try:
                 with self._runtime_factory() as runtime:
                     messages = runtime.team.recovery.prepare(task_id)
@@ -322,7 +349,7 @@ class ActivityRunner:
             except Exception:
                 _LOGGER.exception("Cannot prepare native team recovery for %s", task_id)
 
-    def _recover_pending_questions(self) -> None:
+    def _recover_pending_questions(self, *, skip_tasks: set[str] | None = None) -> None:
         """Wake pending question queues without replaying started/uncertain calls.
 
         Discover work from the log, not the previous process's thread registry.
@@ -332,7 +359,7 @@ class ActivityRunner:
             task_ids = {event.task_id for event in runtime.log.iter_events(event_types=("question.asked",))
                         if event.task_id and event.actor == EventActor.human()}
             pending_tasks = []
-            for task_id in sorted(task_ids):
+            for task_id in sorted(task_ids - (skip_tasks or set())):
                 try:
                     if runtime.questions.pending(task_id):
                         pending_tasks.append(task_id)
@@ -397,13 +424,17 @@ class ActivityRunner:
                 # Re-read after ownership: a worker may have finished since the scan.
                 if self._activity_terminal(runtime, task_id, activity_id) is not None:
                     return None
-                restored = self._restore_unstarted_activation(task_id, queued)
+                try:
+                    restored = self._restore_unstarted_activation(task_id, queued)
+                    if not restored:
+                        restored = self._restore_unclaimed_recovery(task_id, queued)
+                    if restored is None:
+                        return None
+                    failure = (self._control_failure(runtime, task_id, {**queued.payload, "queued_seq": queued.seq})
+                               if not restored else None)
+                except Exception as exc:
+                    raise _RecoveryStateUnreadable(f"Cannot read recovery state for {task_id}") from exc
                 if not restored:
-                    restored = self._restore_unclaimed_recovery(task_id, queued)
-                if restored is None:
-                    return None
-                if not restored:
-                    failure = self._control_failure(runtime, task_id, {**queued.payload, "queued_seq": queued.seq})
                     return self._record_failure(task_id, activity_id, str(queued.payload.get("action") or "run"),
                         **(failure or {"error_type": "InterruptedActivity",
                             "message": "Cater 服务在这轮协作结束前重启；请按最新方向重新启动。"}))
@@ -430,6 +461,11 @@ class ActivityRunner:
                 binding = {**queued.payload, "queued_seq": queued.seq}
                 if self._control_failure(runtime, task_id, binding):
                     return False
+                if "recovery_retry_of" in binding:
+                    try:
+                        self._recovery_retry_source(runtime, task_id, binding)
+                    except WorkConflict:
+                        return False
                 self._activities[task_id] = {"id": queued.payload["activity_id"], **queued.payload,
                     "queued_seq": queued.seq, "queued_at": queued.ts, "state": "queued"}
                 self._revision += 1
@@ -591,8 +627,75 @@ class ActivityRunner:
                 if any(event.actor == EventActor.system("orchestrator")
                        and event.payload.get("team_message_seq") == message.seq
                        for event in runtime.log.iter_events(task_id=task_id, event_types=("activity.queued",))):
-                    return self.status(task_id)
+                    return self._retry_unclaimed_team_recovery(task_id, message)
             return self._submit(task_id, "run", queue_after_current=True, binding=binding)
+
+    @staticmethod
+    def _recovery_retry_source(runtime: Runtime, task_id: str, binding: dict[str, Any]) -> Event:
+        """A failed dispatch is retryable only while its exact input is unclaimed."""
+        source = ActivityRunner._team_message(runtime, task_id, binding)
+        events = runtime.log.read(task_id=task_id)
+        if (source is None or not runtime.team.recovery.is_message(source, events)
+                or not runtime.team.recovery.current(task_id, source)
+                or any(e.actor == EventActor.human() and e.seq > source.seq for e in events)
+                or any(e.actor == EventActor.system("team") and e.type == "team.run_started"
+                       and e.payload.get("message_seq") == source.seq for e in events)):
+            raise WorkConflict("Recovery input has been claimed or its customer scope changed")
+        own_queue = next((e for e in events if e.seq == binding.get("queued_seq")
+                          and e.type == "activity.queued" and e.actor == EventActor.system("orchestrator")
+                          and all(e.payload.get(key) == binding.get(key) for key in
+                                  ("activity_id", "action", "team_message_seq", "recovery_retry_of"))), None)
+        if (("queued_seq" in binding and own_queue is None)
+                or (own_queue is None and any(e.type == "activity.queued"
+                    and e.actor == EventActor.system("orchestrator")
+                    and e.payload.get("activity_id") == binding.get("activity_id") for e in events))):
+            raise WorkConflict("Recovery retry must have its own durable queue identity")
+        pending, queues = {}, []
+        for event in events:
+            if event.actor != EventActor.system("orchestrator"):
+                continue
+            identity = event.payload.get("activity_id")
+            if event.type == "activity.queued":
+                pending[identity] = event
+                if (event.payload.get("team_message_seq") == source.seq
+                        and event != own_queue):
+                    queues.append(event)
+            elif event.type in {"activity.completed", "activity.failed"}:
+                pending.pop(identity, None)
+        previous = ActivityRunner._activity_terminal(runtime, task_id, queues[-1].payload["activity_id"]) if queues else None
+        if (previous is None or previous.type != "activity.failed"
+                or previous.payload.get("queued_seq") != queues[-1].seq
+                or previous.payload.get("team_message_seq") != source.seq
+                or type(binding.get("recovery_retry_of")) is not int
+                or binding["recovery_retry_of"] != previous.seq
+                or any(event != own_queue for event in pending.values())):
+            raise WorkConflict("Recovery dispatch is still pending or its failure was already superseded")
+        return previous
+
+    def _retry_unclaimed_team_recovery(self, task_id: str, message: Event) -> dict[str, Any]:
+        with self._lock:
+            current = self._activities.get(task_id)
+            if current and (current["state"] in {"queued", "running"} or current.get("follow_up")):
+                return self.status(task_id)
+            with self._runtime_factory() as runtime:
+                if not runtime.team.recovery.is_message(message):
+                    return self.status(task_id)
+                queues = [e for e in runtime.log.iter_events(task_id=task_id, event_types=("activity.queued",))
+                          if e.actor == EventActor.system("orchestrator")
+                          and e.payload.get("team_message_seq") == message.seq]
+                previous = self._activity_terminal(runtime, task_id, queues[-1].payload["activity_id"]) if queues else None
+                if previous is None or previous.type != "activity.failed":
+                    return self.status(task_id)
+            activity = {"id": "activity_" + uuid.uuid4().hex[:10], "action": "run", "state": "queued",
+                        "queued_at": _now_iso(), "team_message_seq": message.seq, "recovery_retry_of": previous.seq}
+            try:
+                self._record_queued(task_id, activity)
+            except WorkConflict:
+                return self.status(task_id)
+            self._activities[task_id] = activity
+            self._revision += 1
+        self._start(task_id, activity)
+        return self.status(task_id)
 
     def continue_after_current(self, task_id: str, action: str) -> dict[str, Any]:
         """Queue one follow-up round without racing the active one.
@@ -741,7 +844,7 @@ class ActivityRunner:
         after_activity_id: str | None = None,
         replaces_action: str | None = None,
     ) -> None:
-        with self._runtime_factory() as runtime:
+        with self._runtime_factory() as runtime, ExitStack() as ownership:
             if runtime.task(task_id) is None:
                 raise KeyError(task_id)
             payload: dict[str, Any] = {"activity_id": activity["id"], "action": activity["action"]}
@@ -753,9 +856,23 @@ class ActivityRunner:
                             if key in activity})
             source_key = next((key for key in ("conversation_seq", "resume_seq", "activation_seq", "team_message_seq")
                                if key in payload), None)
+            if "recovery_retry_of" in payload:
+                if source_key != "team_message_seq" or payload["action"] != "run":
+                    raise WorkConflict("Only native recovery inputs can retry a failed dispatch")
+                if not ownership.enter_context(activity_owner(runtime.log.path, task_id, "simple-team")):
+                    raise WorkConflict("Native team consumer is still live")
+                # A terminal write does not prove its worker has released ownership.
+                identities = {e.payload.get("activity_id") for e in runtime.log.iter_events(
+                    task_id=task_id, event_types=("activity.queued",))
+                    if e.actor == EventActor.system("orchestrator")}
+                for identity in sorted(value for value in identities if isinstance(value, str) and value):
+                    if not ownership.enter_context(activity_owner(runtime.log.path, task_id, identity)):
+                        raise WorkConflict("A previous activity owner is still live")
             if source_key is not None:
                 def claim():
-                    if any(event.actor == EventActor.system("orchestrator")
+                    if "recovery_retry_of" in payload:
+                        self._recovery_retry_source(runtime, task_id, payload)
+                    elif any(event.actor == EventActor.system("orchestrator")
                            and event.payload.get(source_key) == payload[source_key]
                            for event in runtime.log.iter_events(task_id=task_id, event_types=("activity.queued",))):
                         raise WorkConflict("这条消息已排队，不重复执行。")
@@ -853,6 +970,8 @@ class ActivityRunner:
                 control = self._control_failure(runtime, task_id, binding)
                 if control:
                     raise ExecutionScopeChanged(control["message"])
+                if "recovery_retry_of" in binding:
+                    self._recovery_retry_source(runtime, task_id, binding)
                 self._check_reconciliation(runtime, task_id, binding)
                 if "expected_scope" in binding and runtime.work.scope(task_id) != binding["expected_scope"]:
                     raise ExecutionScopeChanged("这条消息授权的任务方向已变化，本轮未开始执行；请确认最新方向后继续。")
