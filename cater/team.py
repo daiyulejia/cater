@@ -646,9 +646,44 @@ class TeamService:
             if view["revision"] != revision:
                 raise WorkConflict("店长已调整或结束当前工作，旧委托不再启动新的操作。")
 
+    def _post_delivery_command(self, task_id, role, tool_start):
+        """A new customer input may use existing execute authority, not revive old work."""
+        events = self.rt.log.read(task_id=task_id)
+        current = self.view(task_id)
+        revision = tool_start.payload.get("revision")
+        if current["status"] != "done" or current["revision"] != revision:
+            return False
+        delivery = next((e for e in events if e.seq == revision
+                         and e.type == "team.objective_completed" and e.actor == HOST), None)
+        run_id = tool_start.payload.get("run_id")
+        run = next((e for e in events if e.type == "team.run_started" and e.actor == HOST
+                    and e.payload["run_id"] == run_id), None)
+        source = next((e for e in self._messages(task_id, events=events)
+                       if e.seq == tool_start.payload.get("message_seq")), None)
+        control = self.rt.execution_control.view(task_id)
+        if (delivery is None or run is None or source is None
+                or tool_start.task_id != task_id or tool_start.actor != HOST
+                or tool_start.payload.get("name") != "workspace_run"
+                or tool_start.payload.get("role") != role.id
+                or source.actor != Actor.human() or source.payload.get("kind") != "message"
+                or source.payload.get("recipient") != role.id or source.seq <= delivery.seq
+                or run.payload["message_seq"] != source.seq or run.payload["role"] != role.id
+                or run.payload["revision"] != revision or not source.seq < run.seq < tool_start.seq
+                or control["state"] != "running" or control["seq"] != run.payload["control_seq"]):
+            return False
+        return not any((e.type == "team.run_finished" and e.actor == HOST
+                        and e.payload["run_id"] == run_id)
+                       or (e.type == "team.message_received" and e.actor == Actor.human()
+                           and e.seq > source.seq) for e in events)
+
     def _execute(self, task_id, role, name, arguments, workspace, binding, tool_start, assignment):
+        post_delivery = name == "workspace_run" and any(
+            e.seq == tool_start.payload.get("revision") and e.actor == HOST
+            for e in self.rt.log.iter_events(task_id=task_id, event_types=("team.objective_completed",)))
+        if post_delivery and not self._post_delivery_command(task_id, role, tool_start):
+            raise WorkConflict("交付后命令仅响应当前有效的顾客新输入；已有交付保留，未继续旧操作。")
         if self.view(task_id)["status"] == "done" and name in {
-                "delegate", "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "workspace_write", "workspace_run", PROJECT_RESTORE, MCP_CALL, "request_review", "record_review"}:
+                "delegate", "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "workspace_write", "workspace_run", PROJECT_RESTORE, MCP_CALL, "request_review", "record_review"} and not post_delivery:
             raise WorkConflict("当前工作已交付；如需继续修改，请先由店长采用新的工作目标。")
         if name == "wait_for_reply":
             return {"status": "ok", "waiting": True}
@@ -857,6 +892,8 @@ class TeamService:
                 pending = [e for e in self.rt.workspaces.pending(root=binding["root"]) if e.seq != tool_start.seq]
                 if not owned or pending and name in {"workspace_write", "workspace_run"}:
                     raise WorkConflict("工作目录有未结束或待核对操作，不能重复执行。")
+                if post_delivery and not self._post_delivery_command(task_id, role, tool_start):
+                    raise WorkConflict("顾客输入或执行范围已变化，未启动旧的交付后命令。")
                 return workspace.execute(name, arguments)
         raise ValueError("工具尚未接入。")
 
@@ -1118,6 +1155,9 @@ class TeamService:
                 "handoff.evidence用source_seq和逐字quote关联本次文件正文、原生workspace工具回执输出、browser_check实际观测或当前复核反馈；先读取来源，不编造摘录。"
                 "伙伴判断不等于执行证据；历史命令输出不证明文件后来没变化。建议运行步骤不会被说明字段自动执行。"
                 "delivery_index是保存的交付索引，read_delivery可读取完整原因、文件版本与步骤；追问为什么或如何打开时读原交付再解释，不重新开工。"
+                "顾客质疑已交付说明时，先读原成果与回执；确需新核验且有命令权限，可在本次顾客输入中直接workspace_run，无需重设目标。"
+                "命令仍是可能有副作用的宿主操作，不是只读沙箱；遵守顾客要求和权限，不为解释擅改工程。"
+                "依据实际核验直接向顾客纠错并给复查方法，区分事实与推断；普通说明无需发布报告、正式复核或再次finish_work。"
                 "receipt_index是最近工具回执的轻量索引，不是结论；可按role、message_seq、name查完整结果，run_id不是角色名。"
                 "pending_operations列出没有可信结算的操作；可用read_receipts的include_pending读取详情。"
                 "not_committed仅表示该版本契约下的本地事件未提交，不是外部命令或计费未发生；unknown需核对实际影响，不重放旧操作。"
