@@ -1270,7 +1270,8 @@ class TeamService:
                         artifacts=payload["artifacts"], revision=current_work["revision"])
                 except HandoffError as exc:
                     return {"status": "error", "code": "invalid_handoff", "message": str(exc),
-                            **({"diagnostics": exc.diagnostics} if getattr(exc, "diagnostics", None) else {})}
+                            **({"diagnostics": exc.diagnostics} if getattr(exc, "diagnostics", None) else {}),
+                            **exc.source_catalog}
             self.rt.log.emit(type="team.objective_completed", task_id=task_id, actor=HOST, payload=payload)
             return {"status": "ok", "note": "已记录店长交付结论，实际验证范围按原文保留。"}
 

@@ -15,9 +15,10 @@ HOST = Actor.system("team")
 class HandoffError(ValueError):
     """Controlled public diagnostics; never echo arbitrary source payloads."""
 
-    def __init__(self, message, *, diagnostics=None):
+    def __init__(self, message, *, diagnostics=None, source_catalog=None):
         super().__init__(message)
         self.diagnostics = list(diagnostics) if diagnostics is not None else []
+        self.source_catalog = dict(source_catalog) if source_catalog is not None else {}
 
 
 def _text(value, limit):
@@ -148,6 +149,40 @@ class TeamDelivery:
                     "kind": "peer_review", "role": review["reviewer"], "status": review["status"]})
         return sources
 
+    @staticmethod
+    def _source_catalog(sources):
+        ranks = {"artifact": 0, "peer_review": 1, "tool_receipt": 2}
+        usable = [source for source in sources.values() if source[2].get("kind") in ranks
+                  and any(isinstance(part, str) and part.strip() for part in source[1])]
+        usable.sort(key=lambda source: (ranks[source[2]["kind"]], -source[0].seq))
+        entries = []
+        for event, _parts, metadata in usable[:12]:
+            entry = {"source_seq": event.seq, "kind": metadata["kind"]}
+            for key, limit in (("filename", 256), ("role", 128), ("tool", 64)):
+                value = metadata.get(key)
+                if isinstance(value, str) and 0 < len(value) <= limit:
+                    entry[key] = value
+            status = metadata.get("status")
+            if isinstance(status, str) and status in {"ok", "error", "passed", "failed", "approved", "changes_requested"}:
+                entry["status"] = status
+            for key in ("complete", "truncated"):
+                if type(metadata.get(key)) is bool:
+                    entry[key] = metadata[key]
+            code = metadata.get("exit_code")
+            if type(code) is int and -(2 ** 31) <= code < 2 ** 32:
+                entry["exit_code"] = code
+            if entry["kind"] == "artifact":
+                entry.update(read_tool="read_artifact", read_args={"artifact_seq": event.seq})
+            elif entry["kind"] == "peer_review":
+                entry.update(read_tool="read_checkpoint", read_args={"review_seq": event.payload["review_seq"]})
+            else:
+                entry.update(read_tool="read_receipts", read_args={"before_seq": event.seq + 1, "limit": 1})
+            entries.append(entry)
+        return {"available_sources": entries, "available_sources_total": len(usable),
+                "available_sources_truncated": len(usable) > len(entries),
+                "available_sources_note": "这是本次选定版本与当前目标下可摘录的来源索引，不是检查通过或结论正确的证明。"
+                    "请按 read_tool/read_args 读取原文，再选择必要引文；未列全时仍可核对已有的其他合法来源。"}
+
     def normalize(self, task_id, value, *, artifacts, revision):
         allowed = {"why", "changed", "impact", "alternatives", "reproduce", "limits", "evidence"}
         if (not isinstance(value, dict) or set(value) - allowed
@@ -184,7 +219,7 @@ class TeamDelivery:
             normalized.append({"source_seq": source[0].seq, "source_hash": source[0].hash, "quote": quote, **source[2]})
         if diagnostics:
             raise HandoffError("交付引用与当前成果、工具回执或版本复核原文不符，请读取实际来源后修正。",
-                               diagnostics=diagnostics)
+                               diagnostics=diagnostics, source_catalog=self._source_catalog(sources))
         result["evidence"] = normalized
         if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 24000:
             raise HandoffError("交付说明超过24KB，请保留关键原因、步骤、边界及必要引用。")
