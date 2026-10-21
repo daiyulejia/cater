@@ -62,6 +62,33 @@ class AcpProcessExited(AcpUnavailable):
 class AcpRequestRejected(AcpUnavailable):
     """The peer rejected an RPC; its private error text is intentionally omitted."""
 
+    def __init__(self, message, *, prompt_may_have_run=False, rpc_code=None, rpc_method=None):
+        super().__init__(message, prompt_may_have_run=prompt_may_have_run)
+        self.rpc_code = rpc_code if type(rpc_code) is int and -(2**31) <= rpc_code < 2**31 else None
+        self.rpc_method = rpc_method if type(rpc_method) is str and rpc_method in (
+            "initialize", "session/new", "session/prompt") else None
+
+
+def rejection_details(error):
+    """Keep bounded RPC facts only, never server text or an inferred cause."""
+    if not isinstance(error, AcpRequestRejected):
+        return {}
+    fields = {}
+    # Diagnostics must not replace the original failure, including in driver subclasses.
+    try:
+        code = getattr(error, "rpc_code", None)
+    except Exception:
+        code = None
+    try:
+        method = getattr(error, "rpc_method", None)
+    except Exception:
+        method = None
+    if type(code) is int and -(2**31) <= code < 2**31:
+        fields["external_rpc_code"] = code
+    if type(method) is str and method in ("initialize", "session/new", "session/prompt"):
+        fields["external_rpc_method"] = method
+    return fields
+
 
 def failure_code(error):
     """Return only host-owned classifications, never exception/server text."""
@@ -509,7 +536,7 @@ class AcpSession:
                 if (not isinstance(error, dict) or type(error.get("code")) is not int
                         or not isinstance(error.get("message"), str)):
                     raise AcpProtocolError("Invalid ACP error response")
-                raise AcpRequestRejected("ACP server rejected the request")
+                raise AcpRequestRejected("ACP server rejected the request", rpc_code=error["code"], rpc_method=method)
             if not isinstance(message["result"], dict):
                 raise AcpProtocolError("ACP result must be an object")
             return message["result"]

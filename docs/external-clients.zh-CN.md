@@ -82,6 +82,12 @@ python -m cater --db .cater/client-trial.db --drivers .cater/config/drivers.json
 记录不保存服务端异常原文，不自动重发可能已执行的请求。
 旧记录没有分类时仍需核对，不能反推为超时。
 
+新的合法 RPC 拒绝记录可附带 `external_rpc_code`（32 位有符号整数）及
+`external_rpc_method`（初始化、建立会话或提交消息），供既有展开诊断核对。
+超出该范围的错误码只省略诊断值，不改变原有拒绝分类；旧记录不补填。
+这些是协议层观测，不是 HTTP 状态、CLI 独立运行的结果码、账号余额或可重试许可，
+也不会触发模型切换。远端错误的正文、附加数据及私密上下文仍不记录或展示。
+
 - 未配置 `max_run_seconds`（或为 `null`）：`timeout` 是每个 ACP 请求的固定等待期限，
   期间进展不会重置它；不是空闲超时，也不是整个任务时限。
 - 显式配置 `max_run_seconds`：握手、初始化与取消仍使用 `timeout`；仅 prompt 阶段

@@ -91,6 +91,19 @@ export function requestFailureFields(payload: Record<string, unknown>): [string,
   }
   const external = known(get('external_failure_code'), externalCodes)
   if (external) fields.push(['外部客户端诊断', externalCodes[external]])
+  if (external === 'request_rejected') {
+    const rpcCode = get('external_rpc_code')
+    const methods = {
+      initialize: '初始化连接（initialize）',
+      'session/new': '创建会话（session/new）',
+      'session/prompt': '提交会话请求（session/prompt）',
+    }
+    const method = known(get('external_rpc_method'), methods)
+    const validCode = typeof rpcCode === 'number' && Number.isInteger(rpcCode) && rpcCode >= -2147483648 && rpcCode <= 2147483647
+    if (validCode) fields.push(['ACP RPC 错误码', String(rpcCode)])
+    if (method) fields.push(['ACP RPC 方法', methods[method]])
+    if (validCode || method) fields.push(['ACP RPC 诊断边界', 'RPC 码不代表 HTTP 状态码或 CLI 结果码，也不代表余额、额度或允许重试；未知数字不据此推断根因。'])
+  }
   if (kind) fields.push(['请求诊断', kinds[kind]])
   if (typeof code === 'number' && Number.isInteger(code) && code >= 100 && code <= 599) {
     fields.push(['HTTP 状态', code === 429 ? 'HTTP 429（服务商限流）' : `HTTP ${code}`])

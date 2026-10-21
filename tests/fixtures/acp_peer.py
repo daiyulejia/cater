@@ -89,6 +89,39 @@ def main():
         except EOFError:
             return
         method = request.get("method")
+        if mode.startswith("rejection-details:"):
+            _, rejected_method, case = mode.split(":", 2)
+            if method == rejected_method:
+                codes = {
+                    "known": -32000, "method-not-found": -32601,
+                    "unknown": 123456789, "zero": 0,
+                    "minimum": -(2**31), "maximum": 2**31 - 1,
+                    "positive-overflow": 2**31, "negative-overflow": -(2**31) - 1,
+                    "huge": 2**1000, "true": True, "false": False,
+                    "float": -32000.0, "string": "-32000",
+                }
+                error = {
+                    "code": codes.get(case, -32000),
+                    "message": "PRIVATE_REJECTION_MESSAGE",
+                    "rpc_method": "session/new" if method != "session/new" else "initialize",
+                    "data": {"credential": "PRIVATE_REJECTION_DATA", "thought": THOUGHT,
+                             "external_rpc_code": 7, "external_rpc_method": "remote/private",
+                             "external_failure_code": "deadline_exceeded"},
+                }
+                if case == "missing-code":
+                    error.pop("code")
+                elif case == "missing-message":
+                    error.pop("message")
+                elif case == "non-string-message":
+                    error["message"] = {"private": "PRIVATE_REJECTION_MESSAGE"}
+                elif case == "null-error":
+                    error = None
+                response = {"jsonrpc": "2.0", "id": request["id"], "error": error}
+                record({"event": "rejection-sent", "response": response})
+                if method in {"session/new", "session/prompt"}:
+                    message(THOUGHT, "agent_thought_chunk")
+                send(response)
+                continue
         if method == "initialize":
             if mode == "initialize-timeout":
                 wait_for(root / "release")

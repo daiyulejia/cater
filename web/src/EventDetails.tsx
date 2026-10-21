@@ -1,5 +1,5 @@
 import { BrowserReport, NativeBrowserReceipt } from './browserReport'
-import { isTeamHost, isTeamRecovery } from './team'
+import { isTeamHost, isTeamRecovery, teamRunStatus } from './team'
 import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, nativeMcpToolTitle, nativeProjectHistoryReceiptStatus, nativeProjectRestoreReceiptStatus, projectHistoryReadArguments } from './conversationActivityState'
 import { NativeSkillReceipt } from './TeamProgressPanel'
 import { usageSummary } from './modelUsage'
@@ -186,10 +186,10 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       break
     case 'team.run_started': case 'team.run_finished': {
       const diagnostic = event.type === 'team.run_finished' && isTeamHost(event) ? responseDiagnostics(p, true) : {}
-      const hasDiagnostic = event.type === 'team.run_finished' && ['response_status', 'failure_stage'].some(key => Object.hasOwn(p, key))
-      status = event.type === 'team.run_started' ? '正在处理消息' : label(p.status, { done: '消息处理完成', completed: '消息处理完成', finished: '消息处理完成', succeeded: '消息处理完成', waiting: '等待伙伴回复', interrupted: '消息处理中断', failed: '消息处理失败', blocked: '消息处理受阻', cancelled: '消息处理已取消' }, '消息处理结果待确认')
+      const hasDiagnostic = event.type === 'team.run_finished' && ['response_status', 'failure_stage', 'external_failure_code', 'external_rpc_code', 'external_rpc_method'].some(key => Object.hasOwn(p, key))
+      status = event.type === 'team.run_started' ? '正在处理消息' : label(p.status, { done: '消息处理完成', completed: '消息处理完成', finished: '消息处理完成', succeeded: '消息处理完成', waiting: teamRunStatus('waiting'), interrupted: '消息处理中断', failed: '消息处理失败', blocked: '消息处理受阻', cancelled: '消息处理已取消' }, '消息处理结果待确认')
       number('关联消息', p.message_seq); add('处理成员', member(p.role))
-      if (!hasDiagnostic) add('原因', p.reason)
+      if (!hasDiagnostic && Object.hasOwn(p, 'reason')) add('原因', p.reason)
       if (diagnostic.responseStatus === 'contained') status = '响应未通过完整性检查'
       for (const [name, value] of responseDiagnosticFields(diagnostic)) add(name, value)
       const requestFailure = event.type === 'team.run_finished' && isTeamHost(event) ? requestFailureFields(p) : []

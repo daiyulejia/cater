@@ -8,7 +8,7 @@ import sqlite3
 import time
 
 from .events import Actor
-from .acp import failure_code
+from .acp import failure_code, rejection_details
 from .team_context import model_context
 from .tool_protocol import json_utf8
 from .usage import valid_token_count
@@ -210,6 +210,7 @@ class TeamExternal:
             status, reason = "failed", f"{role.name}的外部调用未完成：{detail}；已有成果与工具回执保留，未自动重发请求。"
             failure = {**failure, "error_type": type(exc).__name__,
                        "external_failure_code": code,
+                       **rejection_details(exc),
                        "external_observations": dict(run.state.observations) if run is not None else {},
                        "failure_stage": (run.state.failure_phase or run.state.phase) if run is not None else "setup"}
             if code != "execution_budget":
