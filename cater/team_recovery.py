@@ -178,7 +178,7 @@ class TeamRecovery:
         events = events if events is not None else self.rt.log.read(task_id=task_id)
         messages = self.team._messages(task_id, events=events)
         reported = _reported_messages(messages)
-        superseded = self.rt.team_reviews.superseded_assignments(task_id, events=events)
+        superseded = self.team._inactive_messages(task_id, events=events)
         revision = max((e.seq for e in events if e.actor == HOST
                         and e.type in {"team.objective_updated", "team.objective_completed"}), default=0)
         runs, continuations, interrupted_roots = {}, {}, set()
@@ -190,7 +190,15 @@ class TeamRecovery:
                 if run and all(run.get(k) == e.payload.get(k) for k in ("role", "run_id")):
                     run.update(e.payload)
         by_seq = {e.seq: e for e in messages}
+        delegated = set()
         for e in messages:
+            parent = by_seq.get(e.payload.get("parent_assignment_seq"))
+            if (parent is not None and parent.seq < e.seq and e.actor.kind == "agent"
+                    and e.payload.get("kind") in {"assignment", "message"}
+                    and parent.payload.get("kind") in {"assignment", "message"}
+                    and parent.payload.get("recipient") == e.actor.id
+                    and parent.payload.get("revision") == e.payload.get("revision") == revision):
+                delegated.add(parent.seq)
             source = by_seq.get(e.payload.get("continue_assignment_seq"))
             if (e.payload.get("kind") == "continuation" and source and source.seq < e.seq
                     and e.actor == source.actor and e.payload.get("recipient") == source.payload.get("recipient")
@@ -209,6 +217,7 @@ class TeamRecovery:
             rows.append({"seq": source.seq, "sender": source.actor.id, "recipient": source.payload["recipient"],
                          "text": source.payload["text"], "latest_message_seq": latest.seq,
                          "requires_return": source.seq in interrupted_roots,
+                         "has_delegated_work": source.seq in delegated,
                          "status": run.get("status", "queued"), "reason": run.get("reason", ""),
                          "run_id": run.get("run_id")})
         return rows
@@ -226,6 +235,9 @@ class TeamRecovery:
         try:
             events = self.rt.log.read(task_id=task_id)
             assignments = self.assignments(task_id, events=events)
+            from .team_context import _preview
+
+            withdrawals = self.team.work_control.view(task_id, events=events)
             objectives = [e for e in events if e.actor == HOST and e.type == "team.objective_updated"]
             objective = objectives[-1].payload["goal"] if objectives else self.rt.task(task_id).goal
             checkpoint = {"as_of_seq": events[-1].seq if events else 0,
@@ -233,6 +245,8 @@ class TeamRecovery:
                 "scope": self.scope(task_id, events=events), "objective": objective,
                 "open_work": [{k: v for k, v in row.items() if k != "text"} for row in assignments[-20:]],
                 "open_work_count": len(assignments), "open_work_truncated": len(assignments) > 20,
+                "withdrawals": [_preview(row, "reason", 512) for row in withdrawals[-5:]],
+                "withdrawals_truncated": len(withdrawals) > 5,
                 "pending_operation_count": len(self.team._pending_operations(task_id)),
                 "note": "从持久事件重建的当前事实，不是恢复旧模型历史、重放操作或宣告验收的授权。"}
             return checkpoint, assignments

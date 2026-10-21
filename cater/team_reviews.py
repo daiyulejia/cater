@@ -47,24 +47,9 @@ class TeamReviews:
             source = deliveries.get((request.seq, previous["author"], previous["reviewer"], previous["revision"]))
             if source is not None and request.seq < source.seq < current.seq:
                 superseded.add(source.seq)
-        review_messages = set(superseded)
-        by_seq = {e.seq: e for e in messages}
-        for message in messages:
-            original = by_seq.get(message.payload.get("continue_assignment_seq"))
-            if (message.payload.get("kind") == "continuation" and original is not None
-                    and original.seq in superseded and original.seq < message.seq
-                    and message.actor == original.actor
-                    and all(message.payload.get(key) == original.payload.get(key)
-                            for key in ("recipient", "revision"))):
-                superseded.add(message.seq)
-            original = by_seq.get(message.payload.get("reply_to"))
-            if (message.payload.get("kind") in {"progress", "report"} and original is not None
-                    and original.seq in review_messages and original.seq < message.seq
-                    and message.actor.kind == "agent" and message.actor.id == original.payload["recipient"]
-                    and message.payload.get("recipient") == original.actor.id
-                    and message.payload.get("revision") == original.payload.get("revision")):
-                superseded.add(message.seq)
-        return superseded
+        from .team_work_control import linked_inputs
+
+        return linked_inputs(messages, superseded)
 
     def _artifacts(self, task_id):
         return {a["seq"]: a for a in self.rt.task(task_id).deliverables if a.get("filename") and a.get("content_sha256")}

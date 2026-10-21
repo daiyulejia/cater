@@ -60,6 +60,10 @@ class TeamSettlementTests(unittest.TestCase):
             "request_questions": {"title": "Fixture choice", "questions": [
                 {"id": "kind", "question": "Which direction?", "selection": "single", "options": []}]},
         }.get(name)
+        if name == "withdraw_work":
+            original = self.rt.team._send(task, self.rt.organization.leader, self.worker,
+                "Superseded fixture request", "assignment")
+            arguments = {"message_seq": original.seq, "reason": "This fixture request is no longer needed."}
         if name in {"request_review", "record_review"}:
             author = self.manager if name == "request_review" else self.worker
             payload, = normalize_deliverables([{"filename": "result.txt", "title": "Fixture", "summary": "Fixture",
