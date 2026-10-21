@@ -6,6 +6,7 @@ import { Info, List, Network } from 'lucide-react'
 import { focusTeamGraph, projectTeamGraph, teamGraphKinds } from './teamGraph'
 import type { TeamGraphEntry } from './teamGraph'
 import type { TeamEvent, TeamState } from './team'
+import { teamStatus } from './team'
 import { layoutTaskGraph } from './taskGraphLayout'
 import { GraphControls } from './TaskGraphControls'
 import { ariaLabels, fitOptions } from './taskGraphConfig'
@@ -30,8 +31,8 @@ const nodeTypes = { team: TeamMessageNode }
 const teamAriaLabels = { ...ariaLabels, 'node.a11yDescription.default': '协作记录', 'node.a11yDescription.keyboardDisabled': '协作记录',
   'edge.a11yDescription.default': '消息与复核关系', 'handle.ariaLabel': '协作连接点' }
 
-export function TeamGraphBody({ team, events, actorText, portrait }: {
-  team: TeamState; events: TeamEvent[]; actorText: (id: string) => string; portrait?: (id: string, size: 'sm' | 'md') => ReactNode
+export function TeamGraphBody({ team, events, actorText, portrait, statusLabel }: {
+  team: TeamState; events: TeamEvent[]; actorText: (id: string) => string; portrait?: (id: string, size: 'sm' | 'md') => ReactNode; statusLabel?: string
 }) {
   const full = useMemo(() => projectTeamGraph(team, events), [team, events])
   const focused = useMemo(() => focusTeamGraph(full, events), [full, events])
@@ -70,6 +71,7 @@ export function TeamGraphBody({ team, events, actorText, portrait }: {
   const related = selected ? model.edges.filter(edge => edge.source === selected.id || edge.target === selected.id) : []
   return <>
     <div className="task-graph-summary"><span>{scope === 'current' ? '当前目标' : '全部记录'} · {model.nodes.length} / {full.nodes.length} 条协作记录 · 只读</span><span className="inline-flex items-center gap-2">委托 · 回报 · 复核<span role="img" aria-label="协作关系说明" title="连线表示委托、回报与复核关系，不代表严格任务依赖。"><Info size={14} aria-hidden="true" /></span></span>
+      <span>当前任务 · {statusLabel ?? teamStatus(team)}</span>
       {scope === 'current' && <span>{focused.objectiveSeq === undefined ? '尚无目标更新记录，显示全部记录。'
         : `目标更新 #${focused.objectiveSeq} · ${focused.triggerSeq === undefined ? '触发顾客输入的关联待核对' : `顾客输入 #${focused.triggerSeq}`}`}</span>}
     </div>
@@ -115,7 +117,7 @@ export function TeamGraphBody({ team, events, actorText, portrait }: {
           <p className="task-graph-record-text">原因：{selected.withdrawal.reason}</p>
           <p>撤回事件 #{selected.withdrawal.withdrawal_seq}</p>
         </section>}
-        {selected.processing && <section><h4>消息处理</h4><p>{selected.processing}</p>{selected.reason && <p className="task-graph-record-text">{selected.reason}</p>}</section>}
+        {selected.processing && <section><h4>最近一次处理记录</h4><p>{selected.processing}</p>{selected.reason && <p className="task-graph-record-text">{selected.reason}</p>}</section>}
         {selected.artifacts && <section><h4>本次复核版本</h4><ul>{selected.artifacts.map(artifact => <li key={artifact.seq}>{artifact.filename} · 成果 #{artifact.seq}</li>)}</ul></section>}
         <section><h4>关联记录</h4>{related.length ? <ul className="task-graph-related">{related.map(edge => {
           const entry = model.nodes.find(item => item.id === (edge.source === selected.id ? edge.target : edge.source))!

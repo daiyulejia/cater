@@ -22,7 +22,7 @@ type GraphWorkProps = {
   actorText: (id: string) => string
   portrait?: (id: string, size: 'sm' | 'md') => ReactNode
 }
-type GraphTeamProps = Omit<GraphWorkProps, 'work'> & { team: TeamState; events: TeamEvent[] }
+type GraphTeamProps = Omit<GraphWorkProps, 'work'> & { team: TeamState; events: TeamEvent[]; statusLabel?: string }
 type GraphContentsProps = (GraphWorkProps & { team?: never; events?: never }) | (GraphTeamProps & { work?: never })
 export type TaskGraphProps = GraphContentsProps & {
   open: boolean; onOpenChange: (open: boolean) => void

@@ -1232,6 +1232,7 @@ function App() {
   const controlBusy = pending.has(controlKey)
   const executionControl = selectedId ? executionControls[selectedId] : undefined
   const executionState = executionControl?.state ?? 'running'
+  const currentStatusLabel = task ? loading ? '读取对话' : executionLabel(executionState) || taskListStatus(task, currentActivity) : undefined
   const clarificationBlocked = controlBusy || executionState !== 'running'
   const clarificationBlockedReason = executionState === 'cancelled' ? '任务已取消，继续执行需新建任务。仍可直接聊天。'
     : executionState === 'paused' ? '任务已暂停，提交澄清前需恢复执行。仍可直接聊天。' : '正在确认执行控制请求，请稍候再提交澄清。仍可直接聊天。'
@@ -1553,7 +1554,7 @@ function App() {
           {task ? <>
             <div className="chat-heading flex items-start justify-between gap-3 px-4 py-3 sm:px-7 sm:py-4" style={{ backgroundImage: `linear-gradient(90deg, #fffaf5 0%, rgba(255,250,245,.98) 55%, rgba(255,250,245,.78) 100%), url(${cafeWelcome})` }}>
               <div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 tabIndex={-1} className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div>
-              <div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${executionState === 'running' && currentActivity?.active && currentActivity.state === executionState ? 'is-running' : ''}`}>{loading ? '读取对话' : executionLabel(executionState) || taskListStatus(task, currentActivity)}</span><button id="workboard-trigger" onClick={() => setShowMobileBoard(true)} aria-label="打开成果与过程" title="打开成果与过程" aria-haspopup="dialog" aria-expanded={showMobileBoard} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div>
+              <div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${executionState === 'running' && currentActivity?.active && currentActivity.state === executionState ? 'is-running' : ''}`}>{currentStatusLabel}</span><button id="workboard-trigger" onClick={() => setShowMobileBoard(true)} aria-label="打开成果与过程" title="打开成果与过程" aria-haspopup="dialog" aria-expanded={showMobileBoard} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div>
             </div>
             <div className="filter-strip flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-7"><ChatFilters value={chatFilter} onChange={setChatFilter} />
               <div className="chat-tools flex max-w-full flex-wrap items-center gap-2">
@@ -1589,7 +1590,7 @@ function App() {
             </div>}
             {graphLoaded && (task.team?.enabled || task.work?.items.length) ? <TaskGraphDialog open={graphOpen} onOpenChange={setGraphOpen} returnFocusRef={graphTriggerRef}
               description={task.team?.enabled ? '当前团队的只读消息与复核关系' : `当前任务 · ${task.work!.items.length} 个工作项`}>
-              <AsyncPanel fallback={<p role="status" className="task-graph-loading"><LoaderCircle size={20} aria-hidden="true" className="shrink-0 motion-safe:animate-spin" />正在读取任务脉络…</p>}><TaskGraph key={task.id} {...(task.team?.enabled ? { team: task.team, events: currentDetail?.events ?? [] } : { work: task.work! })} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></AsyncPanel>
+              <AsyncPanel fallback={<p role="status" className="task-graph-loading"><LoaderCircle size={20} aria-hidden="true" className="shrink-0 motion-safe:animate-spin" />正在读取任务脉络…</p>}><TaskGraph key={task.id} {...(task.team?.enabled ? { team: task.team, events: currentDetail?.events ?? [], statusLabel: currentStatusLabel } : { work: task.work! })} actorText={(id) => names[id] ?? actorText(id)} portrait={(id, size) => <Portrait id={id} size={size} />} /></AsyncPanel>
             </TaskGraphDialog> : null}
             <div className="relative flex min-h-0 flex-1 flex-col">
               <div ref={streamRef} className="chat-stream min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-5 sm:px-7" aria-label="聊天记录" aria-busy={loading} onScroll={(event) => { const stream = event.currentTarget; followRef.current = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 60; if (followRef.current) setUnread(0) }}>

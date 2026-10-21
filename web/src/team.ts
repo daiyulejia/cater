@@ -262,7 +262,7 @@ export const teamRunStatus = (status?: string) => ({
   done: '消息处理完成', finished: '消息处理完成', completed: '消息处理完成', succeeded: '消息处理完成',
   failed: '消息处理失败', blocked: '消息处理受阻', cancelled: '消息处理已取消', uncertain: '消息处理结果待确认',
   interrupted: '消息处理中断',
-  waiting: '等待伙伴回复',
+  waiting: '本次处理结束，待后续信息',
 }[status ?? ''] ?? '消息处理结果待确认')
 
 export function teamRuns(team: TeamState, events: TeamEvent[]): TeamRun[] {
