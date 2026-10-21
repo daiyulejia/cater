@@ -58,7 +58,15 @@ class _ProgressBudget:
     def settled(self, call, result):
         if self.expired() is not None:
             return False
-        if (not isinstance(result, dict) or result.get("status") != "ok" or result.get("complete") is False
+        if not isinstance(result, dict):
+            return False
+        # A completed failing command is debugging evidence, not idle time or acceptance.
+        command_failed = (call.name == "workspace_run" and result.get("status") == "error"
+                          and result.get("outcome") == "failed" and result.get("complete") is True
+                          and result.get("timed_out") is False and type(result.get("exit_code")) is int
+                          and result["exit_code"] != 0 and isinstance(result.get("error"), dict)
+                          and result["error"].get("code") == "failed")
+        if not command_failed and (result.get("status") != "ok" or result.get("complete") is False
                 or result.get("outcome") in ("failed", "timeout", "effects_unknown")):
             return False
         key = hashlib.sha256(json_utf8([call.name, call.arguments], sort_keys=True, allow_nan=False)).digest()
