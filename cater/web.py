@@ -1140,7 +1140,11 @@ def serve(
     audit_keys: Mapping[str, str | bytes] | None = None,
     allow_remote: bool = False,
     access_token: str | None = None,
+    web_assets: str | Path | None = None,
+    recover_on_startup: bool = True,
 ) -> None:
+    if type(recover_on_startup) is not bool:
+        raise ValueError("recover_on_startup must be a boolean")
     if access_token is not None and not access_token.strip():
         raise ValueError("web access token must not be empty")
     is_loopback = _is_loopback_host(host)
@@ -1175,7 +1179,8 @@ def serve(
             audit_key=audit_key,
             audit_key_id=audit_key_id,
             audit_keys=audit_keys,
-            static_dir=_workroom_dist(),
+            static_dir=web_assets if web_assets is not None else _workroom_dist(),
+            recover_on_startup=recover_on_startup,
             shared_drivers=driver_owner.drivers,
             shared_driver_health=driver_health,
             shared_mcp_pool=driver_owner.mcp.pool,
@@ -1183,7 +1188,9 @@ def serve(
         )
         server = ThreadingHTTPServer((host, port), handler)
         resources.callback(server.server_close)
-        print(f"Cater web listening on http://{host}:{port}")
+        print(f"Cater web listening on http://{host}:{server.server_port}")
+        if not recover_on_startup:
+            print("启动自动续接已关闭；新的顾客操作仍可调用模型和工具。")
         try:
             server.serve_forever()
         except KeyboardInterrupt:
@@ -1238,7 +1245,10 @@ def make_handler(
     shared_driver_health: DriverHealth | None = None,
     shared_mcp_pool: McpPool | None = None,
     access_token: str | None = None,
+    recover_on_startup: bool = True,
 ):
+    if type(recover_on_startup) is not bool:
+        raise ValueError("recover_on_startup must be a boolean")
     if access_token is not None and not access_token.strip():
         raise ValueError("web access token must not be empty")
     static_assets = capture_web_assets(static_dir) if static_dir is not None else None
@@ -1267,7 +1277,8 @@ def make_handler(
         )
 
     activities = ActivityRunner(build_runtime)
-    activities.recover_interrupted()
+    if recover_on_startup:
+        activities.recover_interrupted()
     summaries_lock = threading.Lock()
     summaries_head: str | None = None
     summaries_base: list[dict[str, Any]] = []
