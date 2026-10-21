@@ -32,6 +32,7 @@ from typing import Iterator, Mapping
 import unicodedata
 
 from .processes import ProcessScope
+from .tool_protocol import strict_json
 from .verification import _Capture
 
 MAX_FILE_BYTES = 1024 * 1024
@@ -704,8 +705,16 @@ class WorkspaceExecutor:
         timeout = self.policy.timeout if timeout is None else _timeout(timeout)
         if timeout > self.policy.timeout:
             _deny("invalid_arguments", "Timeout exceeds workspace policy.")
-        directory = self._path(cwd)
-        _inspect(directory, True)
+        try:
+            directory = self._path(cwd)
+            _inspect(directory, True)
+        except (_Denied, OSError) as exc:
+            # Only directory validation is covered: no program has been launched here.
+            return {"status": "error", "complete": True, "outcome": "not_started",
+                    "invalid_fields": ["cwd"], "error": {
+                        "code": exc.code if isinstance(exc, _Denied) else "cwd_unavailable",
+                        "message": str(exc) if isinstance(exc, _Denied) else
+                            "工作目录不存在或不可访问，命令尚未启动；请核对cwd相对路径后修正。"}}
         env = {"PATH": os.defpath, "TEMP": tempfile.gettempdir(), "TMP": tempfile.gettempdir()}
         if os.name == "nt":
             for key in ("SystemRoot", "WINDIR"):
@@ -730,6 +739,7 @@ class WorkspaceExecutor:
                     cwd=directory, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     shell=False, start_new_session=os.name != "nt",
                 )
+                outcome = "effects_unknown"
                 scope = ProcessScope(process)
                 readers = [threading.Thread(target=capture.drain, args=(stream,), daemon=True)
                            for capture, stream in ((stdout, process.stdout), (stderr, process.stderr))]
@@ -740,13 +750,19 @@ class WorkspaceExecutor:
                 process.wait(timeout=max(0.001, timeout - (time.monotonic() - started)))
                 # Worker errors are intentionally not echoed: they may include host secrets.
                 with result_path.open("rb") as stream:
-                    result = json.loads(stream.read(8193))
-                if result.get("launch_error") is None and type(result.get("exit_code")) is int:
+                    body = stream.read(8193)
+                if len(body) > 8192 or process.returncode != 0:
+                    raise ValueError("Untrusted command result")
+                result = strict_json(body)
+                if isinstance(result, dict) and set(result) == {"exit_code"} and type(result["exit_code"]) is int:
                     exit_code = result["exit_code"]
                     outcome = "passed" if exit_code == 0 else "failed"
+                elif (isinstance(result, dict) and set(result) == {"exit_code", "launch_error"}
+                        and result["exit_code"] is None and isinstance(result["launch_error"], str)):
+                    outcome = "launch_error"
             except subprocess.TimeoutExpired:
                 outcome = "timeout"
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 pass
             finally:
                 if process is not None:
@@ -789,6 +805,6 @@ class WorkspaceExecutor:
                   "process_scope": scope.kind if scope is not None else None}
         result["output"] = out_meta["excerpt"] + err_meta["excerpt"]
         if not ok:
-            result["error"] = {"code": outcome if not cleanup_failed and complete else "process_failed",
+            result["error"] = {"code": outcome if not cleanup_failed and complete and exit_code is not None else "process_failed",
                                "message": "Workspace command did not complete successfully."}
         return result
