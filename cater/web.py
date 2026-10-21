@@ -454,10 +454,12 @@ class ActivityRunner:
                     source = self._team_message(runtime, task_id, queued.payload)
                 except WorkConflict:
                     return False
-                if (source is None or not runtime.team.recovery.is_message(source)
-                        or not runtime.team.recovery.current(task_id, source)
-                        or any(e.actor == EventActor.system("team") and e.payload.get("message_seq") == source.seq
-                               for e in runtime.log.iter_events(task_id=task_id, event_types=("team.run_started",)))):
+                events = runtime.log.read(task_id=task_id)
+                unhandled = source is not None and source.seq in runtime.team.recovery.unhandled_inputs(task_id, events)
+                if (source is None or not (unhandled or runtime.team.recovery.is_message(source, events)
+                        and runtime.team.recovery.current(task_id, source)
+                        and not any(e.actor == EventActor.system("team") and e.type == "team.run_started"
+                                    and e.payload.get("message_seq") == source.seq for e in events))):
                     return False
                 binding = {**queued.payload, "queued_seq": queued.seq}
                 if self._control_failure(runtime, task_id, binding):
@@ -633,14 +635,15 @@ class ActivityRunner:
 
     @staticmethod
     def _recovery_retry_source(runtime: Runtime, task_id: str, binding: dict[str, Any]) -> Event:
-        """A failed dispatch is retryable only while its exact input is unclaimed."""
+        """Retry only an unclaimed notice or a provably unstarted customer input."""
         source = ActivityRunner._team_message(runtime, task_id, binding)
         events = runtime.log.read(task_id=task_id)
-        if (source is None or not runtime.team.recovery.is_message(source, events)
-                or not runtime.team.recovery.current(task_id, source)
-                or any(e.actor == EventActor.human() and e.seq > source.seq for e in events)
-                or any(e.actor == EventActor.system("team") and e.type == "team.run_started"
-                       and e.payload.get("message_seq") == source.seq for e in events)):
+        unhandled = source is not None and source.seq in runtime.team.recovery.unhandled_inputs(task_id, events)
+        if (source is None or not (unhandled or runtime.team.recovery.is_message(source, events)
+                and runtime.team.recovery.current(task_id, source)
+                and not any(e.actor == EventActor.human() and e.seq > source.seq for e in events)
+                and not any(e.actor == EventActor.system("team") and e.type == "team.run_started"
+                            and e.payload.get("message_seq") == source.seq for e in events))):
             raise WorkConflict("Recovery input has been claimed or its customer scope changed")
         own_queue = next((e for e in events if e.seq == binding.get("queued_seq")
                           and e.type == "activity.queued" and e.actor == EventActor.system("orchestrator")
@@ -664,7 +667,8 @@ class ActivityRunner:
             elif event.type in {"activity.completed", "activity.failed"}:
                 pending.pop(identity, None)
         previous = ActivityRunner._activity_terminal(runtime, task_id, queues[-1].payload["activity_id"]) if queues else None
-        if (previous is None or previous.type != "activity.failed"
+        terminal_types = {"activity.failed", "activity.completed"} if unhandled else {"activity.failed"}
+        if (previous is None or previous.type not in terminal_types
                 or previous.payload.get("queued_seq") != queues[-1].seq
                 or previous.payload.get("team_message_seq") != source.seq
                 or type(binding.get("recovery_retry_of")) is not int
@@ -679,13 +683,15 @@ class ActivityRunner:
             if current and (current["state"] in {"queued", "running"} or current.get("follow_up")):
                 return self.status(task_id)
             with self._runtime_factory() as runtime:
-                if not runtime.team.recovery.is_message(message):
+                unhandled = message.seq in runtime.team.recovery.unhandled_inputs(task_id, runtime.log.read(task_id=task_id))
+                if not unhandled and not runtime.team.recovery.is_message(message):
                     return self.status(task_id)
                 queues = [e for e in runtime.log.iter_events(task_id=task_id, event_types=("activity.queued",))
                           if e.actor == EventActor.system("orchestrator")
                           and e.payload.get("team_message_seq") == message.seq]
                 previous = self._activity_terminal(runtime, task_id, queues[-1].payload["activity_id"]) if queues else None
-                if previous is None or previous.type != "activity.failed":
+                terminal_types = {"activity.failed", "activity.completed"} if unhandled else {"activity.failed"}
+                if previous is None or previous.type not in terminal_types:
                     return self.status(task_id)
             activity = {"id": "activity_" + uuid.uuid4().hex[:10], "action": "run", "state": "queued",
                         "queued_at": _now_iso(), "team_message_seq": message.seq, "recovery_retry_of": previous.seq}

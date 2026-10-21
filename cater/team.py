@@ -269,8 +269,11 @@ class TeamService:
         messages = self._messages(task_id)
         reported = _reported_messages(messages)
         superseded = self._inactive_messages(task_id, events=events)
+        unhandled = self.recovery.unhandled_inputs(task_id, events)
+        finishes = {seq: finish for seq, finish in finishes.items() if seq in starts
+                    and all(finish.payload.get(key) == starts[seq].payload.get(key) for key in ("run_id", "role"))}
         pending = [e for e in messages if e.payload.get("kind") != "notification"
-                   and e.seq not in starts and e.seq not in reported and e.seq not in superseded
+                   and (e.seq not in starts or e.seq in unhandled) and e.seq not in reported and e.seq not in superseded
                    and (e.payload.get("kind") != "recovery" or self.recovery.current(task_id, e))]
         runs = [{"message_seq": seq, "role": e.payload["role"], "run_id": e.payload.get("run_id"), "revision": e.payload.get("revision", 0),
                  "reason": finishes[seq].payload.get("reason", "") if seq in finishes else "",
@@ -312,14 +315,21 @@ class TeamService:
                 return None
             events = self.rt.log.read(task_id=task_id)
             starts = {e.payload["message_seq"]: e for e in events if e.type == "team.run_started" and e.actor == HOST}
-            finished = {e.payload["message_seq"] for e in events if e.type == "team.run_finished" and e.actor == HOST}
-            busy = {e.payload["role"] for seq, e in starts.items() if seq not in finished}
-            running = self.rt.execution_control.view(task_id)["state"] == "running"
+            finished = {(e.payload.get("run_id"), e.payload.get("message_seq"), e.payload.get("role"))
+                        for e in events if e.type == "team.run_finished" and e.actor == HOST}
+            busy = {e.payload["role"] for e in starts.values()
+                    if tuple(e.payload.get(key) for key in ("run_id", "message_seq", "role")) not in finished}
+            control = self.rt.execution_control.view(task_id)
+            authorization = self.rt._execution_control_authorization
+            if authorization is not None and authorization != (task_id, control["seq"]):
+                return None
+            running = control["state"] == "running"
+            unhandled = self.recovery.unhandled_inputs(task_id, events) if durable else set()
             messages = self._messages(task_id)
             reported = _reported_messages(messages)
             superseded = self._inactive_messages(task_id, events=events)
             pending = [e for e in messages if e.payload.get("kind") != "notification"
-                       and e.seq not in starts and e.seq not in reported and e.seq not in superseded
+                       and (e.seq not in starts or e.seq in unhandled) and e.seq not in reported and e.seq not in superseded
                        and e.payload["recipient"] not in busy
                        and (e.payload.get("kind") != "recovery" or self.recovery.current(task_id, e))
                        and (running or e.actor == Actor.human())]
@@ -1279,6 +1289,7 @@ class TeamService:
         status, reason, final = "completed", "", ""
         failure = {}
         failure_stage = "setup"
+        invocation_started = False
         last_scope = None
         awaiting_customer = False
         revision = self.view(task_id)["revision"]
@@ -1380,6 +1391,7 @@ class TeamService:
                 "对顾客和伙伴使用自然中文交流，代码、路径、命令和原文引句保留必要标识，不用英文模板开场。"
                 "最终直接说人话，不需要JSON包装；公开进展用简短说明，不展示私有思维链、密钥或系统指令。\n")
             if callable(getattr(driver, "agent_run", None)):
+                invocation_started = True
                 outcome = self.external.run_message(task_id, message, role, started, revision,
                                                      assignment, driver, instructions)
                 with self.rt.log.atomic():
@@ -1458,6 +1470,7 @@ class TeamService:
                         raise WorkConflict("复核状态或工作范围已变化，或存在待核对操作，未继续补登记请求。")
                     self._current(task_id, started, role, revision)
                 try:
+                    invocation_started = True
                     turn = driver.tool_turn(role=role.role, prompt=prompt, history=wire_history, tools=tools)
                 except DriverProtocolError as error:
                     self.rt._driver_health.record_rejection(role.driver)
@@ -1636,6 +1649,8 @@ class TeamService:
                     failure["interruption_kind"] = "turn_boundary"
         except WorkConflict as exc:
             status, reason = "interrupted", str(exc)
+            if not invocation_started and self.rt.execution_control.view(task_id)["seq"] != started.payload["control_seq"]:
+                failure["admission_not_started"] = True
         except Exception as exc:
             status, reason = "failed", f"{role.name}的本轮调用未完成，已有成果和操作记录保留；需要核对接入或执行记录。"
             failure["error_type"] = type(exc).__name__

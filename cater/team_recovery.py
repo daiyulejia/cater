@@ -80,6 +80,85 @@ class TeamRecovery:
                 and _same_scope(message.payload.get("scope"), scope)
                 and not self.superseded(task_id, message, events=events))
 
+    def unhandled_inputs(self, task_id, events):
+        """A control transition must not consume a customer input before admission."""
+        control = next((e for e in reversed(events)
+                        if e.type == "task.execution_controlled" and e.actor == Actor.human()), None)
+        if control is None or control.payload.get("state") != "running" or control.payload.get("action") != "resume":
+            return set()
+        controls = {e.seq: e for e in events if e.type == "task.execution_controlled" and e.actor == Actor.human()}
+        transition = control
+        while True:
+            previous = controls.get(transition.payload.get("previous_seq"))
+            if previous is None or previous.seq >= transition.seq:
+                return set()
+            if previous.payload.get("state") == "paused":
+                break
+            if previous.payload.get("state") != "running" or previous.payload.get("action") != "resume":
+                return set()
+            transition = previous
+        starts, finishes, entered, latest = {}, {}, set(), {}
+        for event in events:
+            p = event.payload
+            if event.actor == HOST and event.type == "team.run_started":
+                starts.setdefault(p.get("message_seq"), []).append(event)
+            elif event.actor == HOST and event.type == "team.run_finished":
+                finishes[(p.get("run_id"), p.get("message_seq"), p.get("role"))] = event
+            elif event.actor == HOST and event.type in {"team.external_run_started", "team.model_called", "team.tool_started"}:
+                entered.add(p.get("run_id"))
+            if event.type == "team.message_received" and event.actor == Actor.human():
+                latest[p.get("recipient")] = event.seq
+        if not starts or not latest:
+            return set()
+        scope = self.scope(task_id, events=events)
+        if scope["control_state"] != "running" or scope["control_seq"] != control.seq:
+            return set()
+        members = {r.id: r for r in [self.rt.organization.leader, *self.rt.roles]}
+        unhandled = set()
+        for source in events:
+            p = source.payload
+            if (source.type != "team.message_received" or source.actor != Actor.human()
+                    or p.get("kind") != "message" or latest.get(p.get("recipient")) != source.seq
+                    or p.get("recipient") not in members or source.seq <= scope["revision"]):
+                continue
+            attempts = starts.get(source.seq, [])
+            if not attempts or attempts[-1].payload.get("control_seq") == scope["control_seq"]:
+                continue
+            if isinstance(p.get("questionnaire"), dict) and p.get("revision") != scope["revision"]:
+                continue
+            role = members[p["recipient"]]
+            # Older built-in ACP runs durably begin BEFORE even creating a client.
+            # Absence of a model receipt is not equivalent proof for old native APIs.
+            from .external_agent import QoderAcpDriver
+            legacy_external = type(self.rt.drivers.get(role.driver)) is QoderAcpDriver
+            eligible = True
+            for start in attempts:
+                sp = start.payload
+                key = (sp.get("run_id"), sp.get("message_seq"), sp.get("role"))
+                finish = finishes.get(key)
+                expected = sp.get("recovery_scope")
+                contract = sp.get("recovery_contract")
+                if (finish is None or not source.seq < start.seq < finish.seq
+                        or type(sp.get("message_seq")) is not int or sp["message_seq"] != source.seq
+                        or type(sp.get("revision")) is not int
+                        or sp.get("role") != p["recipient"] or not isinstance(sp.get("run_id"), str)
+                        or not sp["run_id"].strip() or sp["run_id"] in entered
+                        or finish.payload.get("status") != "interrupted"
+                        or contract != RECOVERY_CONTRACT or type(contract.get("version")) is not int
+                        or type(expected) is not dict or expected.get("control_seq") != sp.get("control_seq")
+                        or expected.get("revision") != sp.get("revision")
+                        or not (finish.payload.get("admission_not_started") is True
+                                or "admission_not_started" not in finish.payload and legacy_external)):
+                    eligible = False
+                    break
+                expected = {**expected, "control_seq": scope["control_seq"], "control_state": scope["control_state"]}
+                if not _same_scope(expected, scope):
+                    eligible = False
+                    break
+            if eligible:
+                unhandled.add(source.seq)
+        return unhandled
+
     def superseded(self, task_id, message, *, events=None):
         events = events if events is not None else self.rt.log.read(task_id=task_id)
         original = message.payload.get("recovery_of")
@@ -180,7 +259,9 @@ class TeamRecovery:
             self.retire(task_id)
             events = self.rt.log.read(task_id=task_id)
             started = {e.payload.get("message_seq") for e in events if e.actor == HOST and e.type == "team.run_started"}
-            return [e for e in events if e.seq not in started and self.is_message(e, events) and self.current(task_id, e)]
+            unhandled = self.unhandled_inputs(task_id, events)
+            return [e for e in events if e.seq in unhandled
+                    or e.seq not in started and self.is_message(e, events) and self.current(task_id, e)]
 
     def assignments(self, task_id, *, events=None):
         from .team import _reported_messages

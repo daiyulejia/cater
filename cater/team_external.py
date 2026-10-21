@@ -209,6 +209,8 @@ class TeamExternal:
                     failure["launch_directory_settlement_error"] = type(exc).__name__
         except WorkConflict as exc:
             status, reason = "interrupted", str(exc)
+            if attempt is None and self.rt.execution_control.view(task_id)["seq"] != started.payload["control_seq"]:
+                failure["admission_not_started"] = True
         except Exception as exc:
             details = diagnostics(exc)
             code = details["external_failure_code"]
