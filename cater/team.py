@@ -236,6 +236,10 @@ class TeamService:
                 and (self.recovery.is_message(e, events, by_seq=by_seq) if e.payload.get("kind") == "recovery"
                      else e.actor == Actor.human() or e.actor.kind == "agent" and e.actor.id in members)]
 
+    def _revision(self, task_id):
+        return max((e.seq for e in self.rt.log.iter_events(task_id=task_id,
+                    event_types=("team.objective_updated", "team.objective_completed")) if e.actor == HOST), default=0)
+
     def _inactive_messages(self, task_id, *, events=None, started=None):
         events = events if events is not None else self.rt.log.read(task_id=task_id)
         return (self.rt.team_reviews.superseded_assignments(task_id, events=events)
@@ -784,8 +788,7 @@ class TeamService:
             if not own_return:
                 raise WorkConflict("原委托已经交回或失效，未将旧接续当作新的独立工作。")
         if role.id != self.rt.organization.leader.id:
-            view = self.view(task_id)
-            if view["revision"] != revision:
+            if self._revision(task_id) != revision:
                 raise WorkConflict("店长已调整或结束当前工作，旧委托不再启动新的操作。")
 
     def _post_delivery_command(self, task_id, role, tool_start):

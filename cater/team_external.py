@@ -76,7 +76,7 @@ class TeamExternal:
                 self.team._current(task_id, started, role, revision)
                 if getattr(driver, "closed", False):
                     raise WorkConflict("外部通道正在关闭，本轮停止接收新操作。")
-                if self.team.view(task_id)["revision"] != revision:
+                if self.team._revision(task_id) != revision:
                     raise WorkConflict("当前目标已变化，外部伙伴停止旧方案并保留已有成果。")
                 live = self.rt.workspaces.view(task_id)
                 if any(live.get(key) != binding.get(key)
