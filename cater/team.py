@@ -14,12 +14,13 @@ from .activity_owner import activity_owner
 from .events import Actor
 from .drivers import DriverProtocolError, tool_failure_diagnostics, tool_protocol_error_usage
 from .room_dialogue import addressed_role
-from .team_recovery import RECOVERY_CONTRACT, TeamRecovery
+from .team_recovery import RECOVERY_CONTRACT, TeamRecovery, _same_scope
 from .team_delivery import HandoffError, TeamDelivery, handoff_schema
 from .team_browser import BROWSER_CONTRACT, TeamBrowser, browser_schema
 from .team_context import history_window, json_bytes, model_context
 from .tool_protocol import contained_response_diagnostics, safe_tool_usage
 from .usage import valid_token_count
+from .team_response_correction import correctable, correction_context
 from .mcp import CALL as MCP_CALL, LIST as MCP_LIST, read_only_call
 from .project_history import ProjectHistory, TOOL as PROJECT_HISTORY
 from .project_restore import TOOL as PROJECT_RESTORE, public_arguments as restore_arguments
@@ -87,8 +88,11 @@ def _contained_reason(name, failure):
     }.get(tool_issue if diagnostic_matches and type(tool_issue) is str else None)
     if detail:
         issue += f"（{detail}）"
+    corrected = (type(failure.get("correction_of")) is int and failure["correction_of"] > 0
+                 and type(failure.get("correction_attempt")) is int and failure["correction_attempt"] == 1)
+    suffix = "本轮已尝试一次格式纠正，未继续追加调用" if corrected else "本轮未自动续试"
     return (f"{name}{issue}；宿主未执行这次响应中的工具请求，先前成果和操作记录保留。"
-            "本轮未自动续试，计费情况仍以实际用量记录为准。")
+            f"{suffix}，计费情况仍以实际用量记录为准。")
 
 
 def _reported_messages(messages):
@@ -1326,12 +1330,13 @@ class TeamService:
                 return
             history, history_receipts = [], []
             tools, binding = None, None
+            correction, correction_scope, correction_used = None, None, False
 
             def tool_started():
                 nonlocal failure_stage
                 failure_stage = "tool_execution"
 
-            for _ in range(MAX_ACTOR_TURNS):
+            for turn_index in range(MAX_ACTOR_TURNS):
                 self._current(task_id, started, role, revision)
                 budget = getattr(driver, "token_budget", None)
                 if valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget:
@@ -1340,6 +1345,8 @@ class TeamService:
                 raw_context, next_workspace, next_binding, next_tools, basis = self._model_input(
                     task_id, message, role, run_id=started.payload["run_id"])
                 last_scope = dict(raw_context["work_checkpoint"]["scope"])
+                if correction is not None and not _same_scope(correction_scope, last_scope):
+                    raise WorkConflict("目标、规则、控制或工程范围已变化，未按旧响应启动格式纠正；已有成果与回执保留。")
                 if binding is not None and (tools != next_tools or any(binding.get(key) != next_binding.get(key)
                         for key in ("available", "workspace_id", "revision", "fingerprint"))):
                     raise WorkConflict("工程范围或工具集合已变化，请核对当前工程后从原委托继续；未重放旧操作。")
@@ -1347,6 +1354,8 @@ class TeamService:
                 context = model_context(raw_context)
                 wire_history, window = history_window(history, history_receipts, tools=tools)
                 context["tool_history_window"] = {**window, "run_id": started.payload["run_id"]}
+                if correction is not None:
+                    context["response_correction"] = correction_context(correction["correction_of"], correction["issue"])
                 prompt = instructions + json.dumps(context, ensure_ascii=False)
                 request_sizes = {"prompt_utf8_bytes": len(prompt.encode("utf-8")),
                                  "history_json_bytes": json_bytes(wire_history), "tools_json_bytes": json_bytes(tools),
@@ -1357,6 +1366,21 @@ class TeamService:
                        for key in ("available", "workspace_id", "revision", "fingerprint")):
                     raise WorkConflict("工程范围已变化，未用旧目录上下文启动模型请求；请核对当前工程。")
                 failure_stage = "model_request"
+                request_correction = {}
+                if correction is not None:
+                    if not correctable(driver, correction["turn"]) or self._pending_operations(task_id):
+                        raise WorkConflict("格式纠正已关闭或存在尚未核对的操作影响，未启动新的纠正请求。")
+                    if not _same_scope(correction_scope, self.recovery.scope(task_id)):
+                        raise WorkConflict("格式纠正请求前工作范围已变化，未继续旧响应。")
+                    budget = getattr(driver, "token_budget", None)
+                    if valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget:
+                        raise WorkConflict("当前通道已达到顾客配置的用量上限，未继续调用。")
+                    # Scope/usage reads may interleave with a newly committed input.
+                    # This is the last admission check, not a lock across network I/O.
+                    self._current(task_id, started, role, revision)
+                    request_correction = {"correction_of": correction["correction_of"], "correction_attempt": 1}
+                    # A new request failure must not inherit the old response's diagnosis.
+                    failure = dict(request_correction)
                 try:
                     turn = driver.tool_turn(role=role.role, prompt=prompt, history=wire_history, tools=tools)
                 except DriverProtocolError as error:
@@ -1366,7 +1390,8 @@ class TeamService:
                     if counts is not None:
                         self.rt.log.emit(type="team.model_called", actor=HOST, task_id=task_id, payload={
                             "role": role.id, "driver": role.driver, "run_id": started.payload["run_id"],
-                            **counts, "request_sizes": request_sizes, "context_basis": basis, "response_status": "protocol_error"})
+                            **counts, "request_sizes": request_sizes, "context_basis": basis, "response_status": "protocol_error",
+                            **request_correction})
                     raise
                 except Exception:
                     failure["context_basis"] = basis
@@ -1374,16 +1399,36 @@ class TeamService:
                 failure_stage = "response_handling"
                 meta = turn.meta or {}
                 response_diagnostics = contained_response_diagnostics(meta)
-                self.rt.log.emit(type="team.model_called", actor=HOST, task_id=task_id, payload={
+                model_call = self.rt.log.emit(type="team.model_called", actor=HOST, task_id=task_id, payload={
                     "role": role.id, "driver": role.driver, "run_id": started.payload["run_id"],
                     "tokens": turn.tokens if valid_token_count(turn.tokens) else 0,
                     "token_usage": meta.get("token_usage", "unavailable"), "request_sizes": request_sizes, "context_basis": basis,
                     "usage": safe_tool_usage(meta.get("usage")), **response_diagnostics,
-                    **({"response_client_tools_executed": False} if response_diagnostics else {})})
+                    **({"response_client_tools_executed": False} if response_diagnostics else {}), **request_correction})
                 if meta.get("contained"):
                     failure.update(response_diagnostics)
                     failure["response_client_tools_executed"] = False
+                    if (not correction_used and turn_index + 1 < MAX_ACTOR_TURNS
+                            and correctable(driver, turn)):
+                        self._current(task_id, started, role, revision)
+                        if correction_scope is None:
+                            correction_scope = dict(last_scope)
+                        if not _same_scope(correction_scope, self.recovery.scope(task_id)) or correction_scope.get("done"):
+                            raise WorkConflict("工作范围已变化或已经交付，未自动纠正旧响应。")
+                        if self._pending_operations(task_id):
+                            raise WorkConflict("存在尚未核对的操作影响，未启动新的格式纠正请求。")
+                        budget = getattr(driver, "token_budget", None)
+                        if valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget:
+                            raise WorkConflict("当前通道已达到顾客配置的用量上限，未继续调用。")
+                        correction_used = True
+                        correction = {"correction_of": model_call.seq, "issue": response_diagnostics["response_tool_issue"], "turn": turn}
+                        self.rt.log.emit(type="team.response_correction_requested", actor=HOST, task_id=task_id, payload={
+                            "role": role.id, "run_id": started.payload["run_id"], "message_seq": message.seq,
+                            "revision": revision, "model_call_seq": model_call.seq, "issue": correction["issue"], "attempt": 1})
+                        yield
+                        continue
                     raise ValueError("模型本轮没有完整返回，已有操作记录保留。")
+                correction = None
                 if window["omitted_groups"] and {call.id for call in turn.calls} & {
                         call["id"] for row in history if row["role"] == "assistant"
                         for call in row.get("tool_calls", [])}:

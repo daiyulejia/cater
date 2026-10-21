@@ -89,7 +89,7 @@ export function responseDiagnostics(payload: Record<string, unknown>, includeSta
   return result
 }
 
-export const containedNote = '已保留先前成果，宿主停止后未自动续试。先前操作及本次响应的远端或驱动内部执行、计费仍需核对回执与服务商账单。'
+export const containedNote = '已保留先前成果，本次响应未执行宿主工具；格式纠正情况以关联记录为准。先前操作及本次响应的远端或驱动内部执行、计费仍需核对回执与服务商账单。'
 export const stageNote = '阶段仅表示错误浮现的位置，不代表根因或允许重试。'
 
 export function requestFailureFields(payload: Record<string, unknown>): [string, string][] {

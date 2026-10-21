@@ -166,6 +166,11 @@ cater --drivers examples/openai_compatible_driver_config.json web
 响应明确标记 `finish_reason: "length"` 时，不能当作完整文本或可执行的工具调用；
 请检查中断原因后再决定是否调整配置。此配置不会修改已有通道的累计 `token_budget`。
 
+原生 `openai_compatible` 与 `anthropic` 通道默认允许每次成员运行最多一次工具响应格式纠正，
+可设置 `"tool_response_corrections": 0` 关闭，或设为 `1` 开启；不接受其他值。
+纠正会产生一次新的模型请求，仍计入既有用量保护，不提高额度。仅纠正未执行的工具响应，
+不重放已经成功的动作；网络异常、输出截断、未知操作影响和暂停不据此自动续试。
+
 如果想让内阁共用一个账号、执行层共用另一个账号，可成对使用
 [`layered_api_driver_config.json`](layered_api_driver_config.json) 与
 [`layered_api_roles.json`](layered_api_roles.json)：

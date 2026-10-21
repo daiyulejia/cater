@@ -717,7 +717,10 @@ class OpenAICompatibleDriver:
         token_budget: int | None = None,
         max_tokens: int | None = None,
         max_completion_tokens: int | None = None,
+        tool_response_corrections: int = 1,
     ):
+        if type(tool_response_corrections) is not int or tool_response_corrections not in (0, 1):
+            raise ValueError("tool_response_corrections must be an integer 0 or 1")
         for field, value in (("max_tokens", max_tokens), ("max_completion_tokens", max_completion_tokens)):
             if value is not None and (type(value) is not int or value <= 0):
                 raise ValueError(f"{field} must be a positive integer")
@@ -732,6 +735,7 @@ class OpenAICompatibleDriver:
         self.token_budget = token_budget
         self.max_tokens = max_tokens
         self.max_completion_tokens = max_completion_tokens
+        self.tool_response_corrections = tool_response_corrections
 
     def _output_limit(self) -> dict[str, int]:
         # Providers disagree on the field name; never silently switch or retry.
@@ -955,6 +959,7 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
             token_budget=_token_budget(data, name),
             max_tokens=data.get("max_tokens"),
             max_completion_tokens=data.get("max_completion_tokens"),
+            tool_response_corrections=data.get("tool_response_corrections", 1),
         )
     raise ValueError(f"unknown driver kind: {kind!r}")
 

@@ -29,6 +29,7 @@ EVENT_CATEGORIES = {
     "team.objective_updated": "planning",
     "team.objective_completed": "outcome",
     "team.model_called": "driver",
+    "team.response_correction_requested": "driver",
     "team.external_run_started": "driver",
     "team.external_run_finished": "driver",
     "team.external_run_reconciled": "driver",

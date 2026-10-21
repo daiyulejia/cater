@@ -50,6 +50,7 @@ const titles: Record<string, string> = {
   'team.message_received': '团队收到消息', 'team.questions_requested': '等待顾客补充', 'team.run_started': '开始处理消息', 'team.run_finished': '消息处理结果',
   'team.objective_updated': '团队目标已更新', 'team.objective_completed': '店长交付结论',
   'team.model_called': '团队模型用量', 'team.tool_started': '团队工具已发起', 'team.tool_finished': '团队工具回执',
+  'team.response_correction_requested': '工具响应纠正安排',
   'team.tool_reconciled': '发布影响已核对',
   'task.created': '任务已创建', 'task.started': '任务已启动', 'task.interpreted': '任务理解',
   'task.routed': '协作安排', 'mission.created': '工作目标', 'task.decomposed': '任务分工',
@@ -115,6 +116,41 @@ const reviewStates = { accepted: '阶段验收通过', submitted: '等待补齐�
 const deliveryStates = { accepted: '整体验收通过', needs_evidence: '等待补齐验收依据', rework: '需要返工',
   stale: '版本已变化', invalid: '复核记录无效', blocked: '复核受阻', uncertain: '复核结果待确认' }
 
+// This event carries an issue code, but no response protocol or provider diagnostics.
+const correctionIssues = {
+  calls_not_array: '工具请求列表不是数组', invalid_call_shape: '工具请求结构无效',
+  unsupported_call_type: '工具请求类型不受支持', invalid_function: '工具函数定义无效',
+  invalid_call_id: '工具请求标识无效', duplicate_call_id: '工具请求标识重复',
+  invalid_tool_name: '工具名称无效', unregistered_tool: '请求了本轮未提供的工具',
+  arguments_not_text: '工具参数未使用 JSON 文本', invalid_arguments_json: '工具参数不是有效且无歧义的 JSON',
+  arguments_not_object: '工具参数不是对象', invalid_arguments_value: '工具参数值无效',
+}
+
+const own = (payload: Record<string, unknown>, key: string): unknown => Object.hasOwn(payload, key) ? payload[key] : undefined
+const positiveSeq = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+const correctionHost = (event: DetailEvent) => ['id', 'role', 'kind'].every(key => Object.hasOwn(event.actor, key)) && isTeamHost(event)
+const hasCorrectionReference = (event: DetailEvent) => ['team.model_called', 'team.run_finished'].includes(event.type)
+  && ['correction_of', 'correction_attempt'].some(key => Object.hasOwn(event.payload, key))
+
+function correctionReference(event: DetailEvent) {
+  const original = own(event.payload, 'correction_of')
+  return correctionHost(event) && positiveSeq(event.seq) && positiveSeq(original) && original < event.seq
+    && own(event.payload, 'correction_attempt') === 1 ? { correction_of: original, correction_attempt: 1 } : undefined
+}
+
+function correctionRequest(event: DetailEvent) {
+  const p = event.payload
+  const role = own(p, 'role'), run = own(p, 'run_id'), message = own(p, 'message_seq')
+  const revision = own(p, 'revision'), original = own(p, 'model_call_seq')
+  if (!correctionHost(event) || !positiveSeq(event.seq) || !positiveSeq(original) || original >= event.seq
+    || !positiveSeq(message) || message >= original || own(p, 'attempt') !== 1
+    || typeof role !== 'string' || !role.trim() || typeof run !== 'string' || !run.trim()
+    || typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return undefined
+  return { role, message, revision, original, issue: label(own(p, 'issue'), correctionIssues, '') }
+}
+
+const correctionReferenceNote = '纠正关联仅为原模型调用的引用，不代表纠正成功、工具执行或任务完成，也不代表免除计费。'
+
 function describe(event: DetailEvent, actorName?: (id: string) => string) {
   const p = event.payload
   const fields: Field[] = []
@@ -157,8 +193,22 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
 
   // Only known event contracts select fields; unrecognized payloads stay in developer details.
   if (!Object.hasOwn(titles, event.type)) return { fields, status, note: '已保存这条事件记录，暂无对应的中文摘要。' }
-  add('工作项', p.work_item_id)
+  if (event.type !== 'team.response_correction_requested' && !hasCorrectionReference(event)) add('工作项', p.work_item_id)
   switch (event.type) {
+    case 'team.response_correction_requested': {
+      const request = correctionRequest(event)
+      status = '纠正安排待核对'
+      if (!request) {
+        note = '来源或关联信息未通过核对，不能作为纠正安排依据。'
+        break
+      }
+      status = '已安排一次纠正'
+      add('处理成员', member(request.role)); number('关联消息', request.message); number('目标版本', request.revision)
+      number('被拒绝的模型调用事件', request.original); number('纠正次数', 1)
+      add('工具请求诊断', request.issue)
+      note = '仅安排一次纠正，不代表模型请求已发送或已成功返回，也不代表工具执行或任务完成；远端处理和计费仍需核对回执与服务商账单。'
+      break
+    }
     case 'team.message_received':
       if (p.kind === 'recovery') {
         if (!isTeamRecovery(event)) {
@@ -189,7 +239,7 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       const hasDiagnostic = event.type === 'team.run_finished' && ['response_status', 'failure_stage', 'external_failure_code', 'external_rpc_code', 'external_rpc_method'].some(key => Object.hasOwn(p, key))
       status = event.type === 'team.run_started' ? '正在处理消息' : label(p.status, { done: '消息处理完成', completed: '消息处理完成', finished: '消息处理完成', succeeded: '消息处理完成', waiting: teamRunStatus('waiting'), interrupted: '消息处理中断', failed: '消息处理失败', blocked: '消息处理受阻', cancelled: '消息处理已取消' }, '消息处理结果待确认')
       number('关联消息', p.message_seq); add('处理成员', member(p.role))
-      if (!hasDiagnostic && Object.hasOwn(p, 'reason')) add('原因', p.reason)
+      if (!hasDiagnostic && !hasCorrectionReference(event) && Object.hasOwn(p, 'reason')) add('原因', p.reason)
       if (diagnostic.responseStatus === 'contained') status = '响应未通过完整性检查'
       for (const [name, value] of responseDiagnosticFields(diagnostic)) add(name, value)
       const requestFailure = event.type === 'team.run_finished' && isTeamHost(event) ? requestFailureFields(p) : []
@@ -198,6 +248,13 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       if (diagnostic.responseStatus === 'contained') note += containedNote
       if (diagnostic.failureStage) note += stageNote
       if (requestFailure.length) note += '已有成果和操作记录保留；远端是否已处理或计费需核对回执与服务商账单，诊断不代表允许重试。'
+      if (event.type === 'team.run_finished') {
+        const correction = correctionReference(event)
+        if (correction) {
+          number('纠正原模型调用事件', correction.correction_of); number('纠正次数', correction.correction_attempt)
+          note += correctionReferenceNote
+        }
+      }
       break
     }
     case 'team.tool_reconciled':
@@ -236,6 +293,11 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       note = '缓存和推理细项不重复叠加到总量；未报告不等于未消耗。字节不是 token，实际费用以服务商账单为准。'
       if (call.responseStatus === 'protocol_error') note = `响应格式无效，工作未继续；已报告用量仍保留。${note}`
       if (call.responseStatus === 'contained') note = `${containedNote}${note}`
+      const correction = correctionReference(event)
+      if (correction) {
+        number('纠正原模型调用事件', correction.correction_of); number('纠正次数', correction.correction_attempt)
+        note += correctionReferenceNote
+      }
       break
     }
     case 'team.tool_started': case 'team.tool_finished':
@@ -477,9 +539,13 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
 export function EventDetails({ event: original, actorName, contextEvents = [] }: EventDetailsProps) {
   const event = projectHistoryReadArguments(frozenReadArguments(original, contextEvents), contextEvents)
   const { fields, status, note } = describe(event, actorName)
+  const displaySeq = positiveSeq(event.seq) ? event.seq : '待核对'
+  const developerBase = hasCorrectionReference(event) ? { seq: positiveSeq(event.seq) ? event.seq : null, type: event.type } : event
   // Model and run diagnostics never expose provider metadata or raw exceptions, even in developer details.
-  const developerEvent = event.type === 'team.model_called' ? { ...event, payload: usageSummary([event]).calls[0] ?? {} }
-    : event.type === 'team.run_finished' ? { ...event, payload: isTeamHost(event) ? { ...responseDiagnostics(event.payload, true), requestFailure: requestFailureFields(event.payload) } : {} } : event
+  const developerEvent = event.type === 'team.response_correction_requested'
+    ? { seq: positiveSeq(event.seq) ? event.seq : null, type: event.type, payload: { fields, status, note } }
+    : event.type === 'team.model_called' ? { ...developerBase, payload: { ...usageSummary([event]).calls[0], ...correctionReference(event) } }
+    : event.type === 'team.run_finished' ? { ...developerBase, payload: isTeamHost(event) ? { ...responseDiagnostics(event.payload, true), requestFailure: requestFailureFields(event.payload), ...correctionReference(event) } : {} } : event
   const title = label(event.type, titles, '事件记录')
   const recorder = resolvedName(event.actor.id, actorName) || label(event.actor.kind, { human: '用户', system: '系统', agent: '成员' }, '记录来源待核对')
   const nativeBrowser = ['team.tool_started', 'team.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'browser_check'
@@ -491,9 +557,9 @@ export function EventDetails({ event: original, actorName, contextEvents = [] }:
   const browser = nativeBrowser || event.type === 'verification.completed' && hasBrowserReceipt(event.payload)
   const outputs = event.type === 'verification.completed' ? event.payload
     : ['team.tool_finished', 'workspace.tool_finished'].includes(event.type) && (event.payload.name ?? event.payload.tool) === 'workspace_run' ? record(event.payload.result) : undefined
-  return <section aria-label={`事件 #${event.seq} 详情`} className="min-w-0 space-y-3 text-xs leading-5 text-[#52695e] [overflow-wrap:anywhere]">
+  return <section aria-label={`事件 #${displaySeq} 详情`} className="min-w-0 space-y-3 text-xs leading-5 text-[#52695e] [overflow-wrap:anywhere]">
     <header className="flex flex-wrap items-start justify-between gap-2">
-      <div className="min-w-0"><h3 className="text-sm font-semibold text-[#294a40]">{title}</h3><p className="text-[#728679]">事件 #{event.seq} · {recorder}</p></div>
+      <div className="min-w-0"><h3 className="text-sm font-semibold text-[#294a40]">{title}</h3><p className="text-[#728679]">事件 #{displaySeq} · {recorder}</p></div>
       <span className="shrink-0 font-semibold">{status}</span>
     </header>
     {fields.length > 0 && <dl className="space-y-2">{fields.map((field, index) => <div key={index} className="min-w-0 sm:grid sm:grid-cols-[7rem_minmax(0,1fr)] sm:gap-3">
@@ -517,7 +583,7 @@ export function EventDetails({ event: original, actorName, contextEvents = [] }:
         {event.payload.evidence.filter((entry) => entry && Number.isInteger(entry.artifact_seq) && entry.artifact_seq > 0 && typeof entry.quote === 'string')
           .map((entry, index) => <blockquote key={index} className="mt-2 whitespace-pre-wrap">成果 #{entry.artifact_seq}：{entry.quote}</blockquote>)}
       </details>}
-    {!skillTool(event) && !browser && !nativeMcp && !projectHistory && !projectRestore && !artifactRead && !frozenArchive && <details key={`${event.seq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
+    {!skillTool(event) && !browser && !nativeMcp && !projectHistory && !projectRestore && !artifactRead && !frozenArchive && <details key={`${displaySeq}:${event.type}`} className="border-t border-[#dce8e1] pt-2">
       <summary className="cursor-pointer text-[#728679]">开发者详情</summary>
       <pre tabIndex={0} aria-label={developerEvent === event ? '原始事件 JSON' : '安全事件 JSON'} className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px]">{JSON.stringify(developerEvent, null, 2)}</pre>
     </details>}

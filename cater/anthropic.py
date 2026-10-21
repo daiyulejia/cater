@@ -23,7 +23,9 @@ class AnthropicMessagesDriver:
     def __init__(self, name: str, *, endpoint: str, model: str, api_key_env: str,
                  max_tokens: int = 4096, timeout: float = 60.0,
                  version: str = "2023-06-01", token_budget: int | None = None,
-                 thinking: str | None = None):
+                 thinking: str | None = None, tool_response_corrections: int = 1):
+        if type(tool_response_corrections) is not int or tool_response_corrections not in (0, 1):
+            raise ValueError("tool_response_corrections must be an integer 0 or 1")
         parsed = urlparse(endpoint)
         if not _safe_api_endpoint(endpoint) or parsed.username or parsed.password or parsed.fragment:
             raise ValueError("anthropic endpoint must use HTTPS without embedded credentials")
@@ -46,6 +48,7 @@ class AnthropicMessagesDriver:
         self.max_tokens, self.timeout, self.version = max_tokens, timeout, version
         self.token_budget = token_budget
         self.thinking = thinking
+        self.tool_response_corrections = tool_response_corrections
 
     @classmethod
     def from_config(cls, name: str, data: dict[str, Any]) -> AnthropicMessagesDriver:
@@ -55,7 +58,7 @@ class AnthropicMessagesDriver:
         return cls(name, endpoint=endpoint, model=data.get("model"), api_key_env=data.get("api_key_env"),
                    max_tokens=data.get("max_tokens", 4096), timeout=data.get("timeout", 60.0),
                    version=data.get("version", "2023-06-01"), token_budget=_token_budget(data, name),
-                   thinking=data.get("thinking"))
+                   thinking=data.get("thinking"), tool_response_corrections=data.get("tool_response_corrections", 1))
 
     def tool_turn(self, *, role: str, prompt: str, history: list[dict], tools: list[dict]) -> ToolTurn:
         try:

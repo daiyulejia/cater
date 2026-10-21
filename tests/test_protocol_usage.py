@@ -55,7 +55,8 @@ def malformed(cls):
 
 class ProtocolUsageTests(unittest.TestCase):
     @contextmanager
-    def session(self, cls, replies):
+    def session(self, cls, replies, *, tool_response_corrections=0):
+        # Legacy containment cases explicitly exercise the supported strict mode.
         fixture = simple.SimpleTeamTests()
         fixture.setUp()
         requests = []
@@ -86,7 +87,8 @@ class ProtocolUsageTests(unittest.TestCase):
                 resources.callback(server.shutdown)
                 resources.enter_context(patch.dict(os.environ, {KEY: "synthetic-only-key"}))
                 driver = cls("team_test", endpoint=f"http://127.0.0.1:{server.server_port}/fixture",
-                             model="synthetic-only", api_key_env=KEY, timeout=2)
+                             model="synthetic-only", api_key_env=KEY, timeout=2,
+                             tool_response_corrections=tool_response_corrections)
                 fixture.rt.drivers["team_test"] = driver
                 yield fixture, driver, requests
         finally:
