@@ -195,7 +195,12 @@ class TeamExternal:
             if stop_kind == "delivered" and run is not None and not run.state.cleanup_complete:
                 final += "\n\n已发布成果可下载；外部客户端清理尚未确认，需核对进程，不能将本次交付理解为所有执行均已停止。"
             current = self.team.view(task_id)
-            delivery = current["revision"] if stop_kind == "delivered" and current["status"] == "done" else None
+            completed = next((event for event in reversed(self.rt.log.read(task_id=task_id))
+                              if event.type == "team.objective_completed" and event.actor == HOST
+                              and event.seq == current["revision"] and event.seq > started.seq
+                              and event.payload.get("run_id") == started.payload["run_id"]), None)
+            delivery = (completed.seq if stop_kind == "delivered" and current["status"] == "done"
+                        and role.id == self.rt.organization.leader.id and completed is not None else None)
             customer = message.actor.kind == "human" or delivery is not None
             self.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
                 payload={"text": final, "claim": final[:180], "phase": "team", "run_id": started.payload["run_id"],

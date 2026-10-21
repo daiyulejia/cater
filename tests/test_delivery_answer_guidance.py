@@ -68,6 +68,33 @@ class DeliveryAnswerGuidanceTests(unittest.TestCase):
         self.assertEqual([e.payload["text"] for e in visible], [answer])
         self.assertEqual(f.events("team.run_finished")[-1].payload["status"], "completed")
 
+    def test_external_followup_using_idempotent_finish_does_not_replace_original_delivery(self):
+        f = external.TeamExternalTests()
+        f.setUp()
+        self.addCleanup(f.doCleanups)
+        manager = f.rt.organization.leader.id
+        original = "工程已交付，测试范围见说明。"
+        explanation = "解压后进入目录，运行 python -m unittest -v。"
+        f.driver.scripts[manager] = [
+            lambda run: run.call("finish_work", summary=original, verification="Fixture only."),
+            lambda run: run.call("finish_work", summary=explanation, verification="Explanation only."),
+        ]
+        task = f.rt.create_task("交付后追问")
+        f.rt.team.enable(task)
+        f.rt.team.receive(task, "交付已有结果")
+        f.rt.collaborate(task)
+        f.rt.team.receive(task, "我在 Windows 上怎么运行？")
+        f.rt.collaborate(task)
+        events = f.rt.log.read(task_id=task)
+        delivery, = [e for e in events if e.type == "team.objective_completed"]
+        messages = [e for e in events if e.type == "msg.said"]
+        self.assertEqual([e.payload["text"] for e in messages], [original, explanation])
+        self.assertEqual([e.payload["text"] for e in messages if e.payload.get("delivery_seq") == delivery.seq], [original])
+        self.assertEqual(messages[-1].payload["audience"], "customer")
+        self.assertEqual(delivery.payload["summary"], original)
+        self.assertEqual(len(f.driver.runs), 2)
+        self.assertEqual(f.driver.errors, [])
+
     def test_delivery_skill_is_read_back_without_becoming_a_gate(self):
         f = self.f
         f.driver.steps[f.manager] = [simple.turn("", ("read_skill", {"skill_id": "explanatory-delivery"})),
