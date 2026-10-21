@@ -1180,7 +1180,7 @@ def serve(
             audit_key_id=audit_key_id,
             audit_keys=audit_keys,
             static_dir=web_assets if web_assets is not None else _workroom_dist(),
-            recover_on_startup=recover_on_startup,
+            recover_on_startup=False,
             shared_drivers=driver_owner.drivers,
             shared_driver_health=driver_health,
             shared_mcp_pool=driver_owner.mcp.pool,
@@ -1188,6 +1188,9 @@ def serve(
         )
         server = ThreadingHTTPServer((host, port), handler)
         resources.callback(server.server_close)
+        if recover_on_startup:
+            # A failed bind must not dispatch old work before the UI can start.
+            handler._recover_interrupted()
         print(f"Cater web listening on http://{host}:{server.server_port}")
         if not recover_on_startup:
             print("启动自动续接已关闭；新的顾客操作仍可调用模型和工具。")
@@ -1286,6 +1289,8 @@ def make_handler(
     summaries_deadline = float("inf")
 
     class CaterHandler(BaseHTTPRequestHandler):
+        _recover_interrupted = staticmethod(activities.recover_interrupted)
+
         def do_GET(self) -> None:
             if not self._has_valid_request_host():
                 return self._forbidden("untrusted Host header")

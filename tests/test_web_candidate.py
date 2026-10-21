@@ -218,7 +218,8 @@ class WebCandidateTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "Cater web listening on http://127.0.0.1:43210\n")
         default.assert_called_once_with()
         self.assertIsNone(make.call_args.kwargs["static_dir"])
-        self.assertIs(make.call_args.kwargs["recover_on_startup"], True)
+        self.assertIs(make.call_args.kwargs["recover_on_startup"], False)
+        make.return_value._recover_interrupted.assert_called_once_with()
         server.server_close.assert_called_once_with()
         owner.close.assert_called_once_with()
 
