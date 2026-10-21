@@ -8,18 +8,65 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import hashlib
 import math
 import os
 import sys
 import threading
 import time
 
-from .acp import AcpPromptResult, AcpProtocolError, AcpSession
+from .acp import AcpPromptResult, AcpProtocolError, AcpSession, AcpTimeout
 from .mcp_host import McpToolBridge
+from .tool_protocol import json_utf8
 
 
 class ExternalYield(Exception):
     """The host has successfully waited/delivered and wants this run to stop."""
+
+
+class ExternalRunLimit(AcpTimeout):
+    """An explicit local execution budget expired, not a remote verdict."""
+
+    def __init__(self, limit):
+        if limit not in {"idle", "total"}:
+            raise ValueError("Unknown external execution limit")
+        self.limit = limit
+        super().__init__("External execution idle limit" if limit == "idle" else "External execution total limit")
+
+
+class _ProgressBudget:
+    """Checked between synchronous callbacks; not a tool preemption mechanism."""
+
+    def __init__(self, idle, total):
+        self.idle, self.total = idle, total
+        self.started = self.progress_at = time.monotonic()
+        self.seen = set()
+
+    def expired(self):
+        now = time.monotonic()
+        idle_deadline = self.progress_at + self.idle
+        total_deadline = self.started + self.total
+        if now >= min(idle_deadline, total_deadline):
+            return ExternalRunLimit("total" if total_deadline <= idle_deadline else "idle")
+        return None
+
+    def check(self):
+        error = self.expired()
+        if error is not None:
+            raise error
+
+    def settled(self, call, result):
+        if self.expired() is not None:
+            return False
+        if (not isinstance(result, dict) or result.get("status") != "ok" or result.get("complete") is False
+                or result.get("outcome") in ("failed", "timeout", "effects_unknown")):
+            return False
+        key = hashlib.sha256(json_utf8([call.name, call.arguments], sort_keys=True, allow_nan=False)).digest()
+        if key in self.seen:
+            return False
+        self.seen.add(key)
+        self.progress_at = time.monotonic()
+        return True
 
 
 @dataclass(frozen=True)
@@ -40,7 +87,7 @@ class ExternalAgentState:
 class QoderAcpDriver:
     execution_profile = "qoder-managed-v1"
 
-    def __init__(self, name, executable, model, timeout=120, token_budget=None):
+    def __init__(self, name, executable, model, timeout=120, token_budget=None, max_run_seconds=None):
         try:
             executable = os.fspath(executable)
         except TypeError:
@@ -48,13 +95,17 @@ class QoderAcpDriver:
         for label, value in (("name", name), ("executable", executable), ("model", model)):
             if not isinstance(value, str) or not value.strip() or "\0" in value:
                 raise ValueError(f"Invalid Qoder {label}")
-        if (type(timeout) not in {int, float} or not math.isfinite(timeout)
-                or not 0 < timeout <= 3600):
+        if (type(timeout) not in {int, float} or not 0 < timeout <= 3600
+                or not math.isfinite(timeout)):
             raise ValueError("Qoder timeout must be between zero and one hour")
         if token_budget is not None and (type(token_budget) is not int or token_budget < 0):
             raise ValueError("Token budget must be a non-negative integer")
+        if max_run_seconds is not None and (type(max_run_seconds) not in {int, float}
+                or not timeout <= max_run_seconds <= 3600 or not math.isfinite(max_run_seconds)):
+            raise ValueError("max_run_seconds must be finite, at least timeout, and at most one hour")
         self.name, self.model = name, model
         self.token_budget, self.timeout = token_budget, timeout
+        self.max_run_seconds = max_run_seconds
         self._command = (
             executable, "--acp", "--model", model, "--max-output-tokens", "2048",
             "--max-model-request-retries", "0", "--tools", "", "--strict-mcp-config",
@@ -104,6 +155,8 @@ class ExternalAgentRun:
             raise ValueError("Update observer must be callable")
         self._command, self._model = driver.command, driver.model
         self._timeout, self._cwd = driver.timeout, cwd
+        self._max_run_seconds = driver.max_run_seconds
+        self._budget = None
         self._tools = deepcopy(tools)
         self._execute, self._check_current, self._on_update = execute, check_current, on_update
         self._session = self._bridge = None
@@ -155,6 +208,9 @@ class ExternalAgentRun:
                 self._cleanup_failures.append(exc)
 
     def _stop(self, error, *, phase=None):
+        if (self._budget is not None and isinstance(error, AcpTimeout)
+                and not isinstance(error, ExternalRunLimit) and error.phase == "response"):
+            error = self._budget.expired() or error
         if self._failure is None:
             self._failure = error
             self._failure_phase = phase or self._phase
@@ -178,7 +234,11 @@ class ExternalAgentRun:
     def _service(self):
         try:
             self._current()
+            if self._budget is not None:
+                self._budget.check()
             self._bridge.pump(0.01)
+            if self._budget is not None:
+                self._budget.check()
         except BaseException as exc:
             self._stop(exc)
             raise
@@ -189,12 +249,18 @@ class ExternalAgentRun:
             self._current()
             if self._tools_revoked:
                 raise ExternalYield("External tools have been revoked")
+            if self._budget is not None:
+                self._budget.check()
             self._mark("first_tool_ms")
             dispatched = True
             self._observations["tool_calls"] = self._observations.get("tool_calls", 0) + 1
             started = time.monotonic()
             try:
-                return self._execute(call)
+                result = self._execute(call)
+                if self._budget is not None and self._budget.settled(call, result):
+                    self._observations["progress_receipts"] = len(self._budget.seen)
+                    self._mark("last_progress_ms", latest=True)
+                return result
             finally:
                 self._observations["tool_elapsed_ms"] = self._observations.get("tool_elapsed_ms", 0) + max(
                     0, int((time.monotonic() - started) * 1000))
@@ -309,7 +375,12 @@ class ExternalAgentRun:
             self._phase = "prompting"
             self._prompt_attempted = True
             self._mark("prompt_attempt_ms")
-            result = self._session.prompt(prompt, on_update=self._update, service=self._service)
+            if self._max_run_seconds is None:
+                result = self._session.prompt(prompt, on_update=self._update, service=self._service)
+            else:
+                self._budget = _ProgressBudget(self._timeout, self._max_run_seconds)
+                result = self._session.prompt(prompt, on_update=self._update, service=self._service,
+                                              timeout=self._max_run_seconds)
             self._mark("response_ms")
             self._text, self._stop_reason = result.text, result.stop_reason
             self._current()

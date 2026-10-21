@@ -81,6 +81,8 @@ export function requestFailureFields(payload: Record<string, unknown>): [string,
   const fields: [string, string][] = []
   const externalCodes = {
     deadline_exceeded: '本地等待时限已到，不代表远端已停止',
+    execution_budget: '本轮已达到配置的总执行预算，未据此认定接入故障',
+    idle_timeout: '等待新的有效工具结果已超时，不代表远端已停止',
     process_exited: '客户端在返回结果前退出',
     request_rejected: '客户端或服务端拒绝了请求，具体原因尚未确认',
     protocol_error: '客户端通信格式不符合约定',

@@ -21,7 +21,7 @@ HOST = Actor.system("team")
 
 def driver_fingerprint(driver):
     data = {"implementation": type(driver).__module__ + "." + type(driver).__qualname__}
-    for key in ("command", "model", "execution_profile"):
+    for key in ("command", "model", "execution_profile", "timeout", "max_run_seconds"):
         data[key] = getattr(driver, key, None)
     return hashlib.sha256(json_utf8(data, sort_keys=True, allow_nan=False)).hexdigest()
 
@@ -31,7 +31,7 @@ class TeamExternal:
         self.team, self.rt = team, team.rt
 
     def run_message(self, task_id, message, role, started, revision, assignment, driver, instructions):
-        from .external_agent import ExternalYield
+        from .external_agent import ExternalYield, ExternalRunLimit
         from .team import MAX_ACTOR_TURNS
         from .team_reply import TOOL as REPLY
 
@@ -196,9 +196,12 @@ class TeamExternal:
         except WorkConflict as exc:
             status, reason = "interrupted", str(exc)
         except Exception as exc:
-            code = failure_code(exc)
+            code = ("execution_budget" if exc.limit == "total" else "idle_timeout") if isinstance(
+                exc, ExternalRunLimit) else failure_code(exc)
             detail = {
                 "deadline_exceeded": "本地等待时限已到，不代表远端已停止",
+                "execution_budget": "本轮已达到配置的总执行预算，未据此认定接入故障",
+                "idle_timeout": "等待新的有效工具结果已超时，不代表远端已停止",
                 "process_exited": "客户端在返回结果前退出",
                 "request_rejected": "客户端或服务端拒绝了请求，具体原因尚未确认",
                 "protocol_error": "客户端通信格式不符合约定",
@@ -209,7 +212,8 @@ class TeamExternal:
                        "external_failure_code": code,
                        "external_observations": dict(run.state.observations) if run is not None else {},
                        "failure_stage": (run.state.failure_phase or run.state.phase) if run is not None else "setup"}
-            self.rt._driver_health.record_failure(role.driver)
+            if code != "execution_budget":
+                self.rt._driver_health.record_failure(role.driver)
         finally:
             if attempt is not None and run is None:
                 self.team.external_runs.finish(attempt, phase="setup", prompt_attempted=False,

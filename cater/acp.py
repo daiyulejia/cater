@@ -48,6 +48,12 @@ class AcpUnavailable(AcpError):
 class AcpTimeout(AcpUnavailable):
     """The local transport deadline elapsed, not proof of remote cancellation."""
 
+    def __init__(self, message, *, prompt_may_have_run=False, phase=None):
+        if phase not in (None, "input", "response"):
+            raise ValueError("Invalid ACP timeout phase")
+        super().__init__(message, prompt_may_have_run=prompt_may_have_run)
+        self.phase = phase
+
 
 class AcpProcessExited(AcpUnavailable):
     pass
@@ -203,13 +209,16 @@ class AcpSession:
                 raise
 
     def prompt(self, text: str, *, on_update: Callable[[dict], None] | None = None,
-               service: Callable[[], None] | None = None) -> AcpPromptResult:
+               service: Callable[[], None] | None = None, timeout: float | None = None) -> AcpPromptResult:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("ACP prompt must be nonempty text")
         if on_update is not None and not callable(on_update):
             raise ValueError("ACP update handler must be callable")
         if service is not None and not callable(service):
             raise ValueError("ACP service callback must be callable")
+        if timeout is not None and (type(timeout) not in {int, float} or timeout <= 0
+                or timeout > threading.TIMEOUT_MAX or not math.isfinite(timeout)):
+            raise ValueError("ACP prompt timeout must be finite and positive")
         with self._operation():
             if self.session_id is None:
                 raise AcpUnavailable("ACP session is not open")
@@ -241,7 +250,7 @@ class AcpSession:
                     if self._closed:
                         raise AcpUnavailable("ACP session is closed")
                 attempted = True
-                result = self._rpc("session/prompt", params, on_update=update, service=service)
+                result = self._rpc("session/prompt", params, on_update=update, service=service, timeout=timeout)
                 reason = result.get("stopReason")
                 if not isinstance(reason, str) or reason not in _STOP_REASONS:
                     raise AcpProtocolError("Invalid ACP stop reason")
@@ -336,7 +345,7 @@ class AcpSession:
             raise AcpUnavailable("ACP session is closed")
         while True:
             if time.monotonic() >= deadline:
-                raise AcpTimeout("ACP response timed out")
+                raise AcpTimeout("ACP response timed out", phase="response")
             # Host work stays on the runtime thread, even while the Agent waits
             # for a separate MCP tool process. Streaming updates cannot starve it.
             if service is not None:
@@ -345,13 +354,13 @@ class AcpSession:
             if self._closed:
                 raise AcpUnavailable("ACP session is closed")
             if remaining <= 0:
-                raise AcpTimeout("ACP response timed out")
+                raise AcpTimeout("ACP response timed out", phase="response")
             try:
                 frame = self._frames.get(timeout=remaining if service is None else min(0.05, remaining))
                 break
             except queue.Empty:
                 if service is None:
-                    raise AcpTimeout("ACP response timed out") from None
+                    raise AcpTimeout("ACP response timed out", phase="response") from None
         if self._closed:
             raise AcpUnavailable("ACP session is closed")
         if isinstance(frame, AcpError):
@@ -367,7 +376,7 @@ class AcpSession:
     def _send(self, value, deadline: float):
         data = self._encode(value)
         if not self._write_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
-            raise AcpTimeout("ACP input pipe timed out")
+            raise AcpTimeout("ACP input pipe timed out", phase="input")
         try:
             with self._state_lock:
                 proc = self._proc
@@ -389,7 +398,7 @@ class AcpSession:
             try:
                 error = output.get(timeout=max(0.0, deadline - time.monotonic()))
             except queue.Empty:
-                raise AcpTimeout("ACP input pipe timed out") from None
+                raise AcpTimeout("ACP input pipe timed out", phase="input") from None
             writer.join(timeout=max(0.0, deadline - time.monotonic()))
             if not writer.is_alive():
                 with self._state_lock:
@@ -442,8 +451,8 @@ class AcpSession:
                 response["result"] = {"outcome": {"outcome": "cancelled"}}
             self._send(response, deadline)
 
-    def _rpc(self, method: str, params: dict, *, on_update=None, service=None) -> dict:
-        deadline = time.monotonic() + self.timeout
+    def _rpc(self, method: str, params: dict, *, on_update=None, service=None, timeout=None) -> dict:
+        deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         self._next_id += 1
         request_id = "cater-" + str(self._next_id)
         with self._turn_lock:
@@ -452,7 +461,8 @@ class AcpSession:
                     self._turn += 1
                     self._cancelled = False
                     self._prompt_active = True
-            self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}, deadline)
+            send_deadline = min(deadline, time.monotonic() + self.timeout)
+            self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}, send_deadline)
         while True:
             message = self._receive(deadline, service=service)
             if message.get("jsonrpc") != "2.0":
