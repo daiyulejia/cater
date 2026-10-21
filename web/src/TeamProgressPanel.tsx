@@ -18,6 +18,7 @@ import { NativeFrozenArchiveReceipt } from './NativeFrozenArchiveReceipt'
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const excerpt = (value: unknown, limit = 800): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（仅显示部分内容）' : '') : ''
 const toolNames: Record<string, string> = { workspace_run: '运行命令', workspace_read: '读取文件', workspace_write: '写入文件', workspace_search: '查找文件', workspace_list: '列出目录',
+  reply_to_customer: '答复顾客',
   workspace_restore_project_file: '恢复历史工程文件',
   publish_workspace_archive: '发布工程包',
   list_skills: '查看工作指引目录', read_skill: '阅读工作指引', read_project_history: '读取同项目历史', browser_check: '浏览器检查', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果', read_background: '读取来源材料', read_receipts: '核对执行回执', read_messages: '补读历史消息', read_checkpoint: '读取工作检查点', read_delivery: '读取交付说明', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件', set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复', request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论' }

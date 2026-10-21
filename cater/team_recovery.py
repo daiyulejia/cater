@@ -132,6 +132,8 @@ class TeamRecovery:
 
     def retire(self, task_id):
         """Caller owns simple-team; closing and notification commit together."""
+        from .team_reply import committed_reply
+
         with self.rt.log.atomic():
             events = self.rt.log.read(task_id=task_id)
             finished = {(e.payload.get("run_id"), e.payload.get("message_seq"), e.payload.get("role"))
@@ -145,6 +147,14 @@ class TeamRecovery:
                     continue
                 p = start.payload
                 source = sources.get(p.get("message_seq"))
+                answer = committed_reply(self.team, start, events)
+                if answer is not None:
+                    self.rt.log.emit(type="team.run_finished", task_id=task_id, actor=HOST,
+                        payload={**{key: p.get(key) for key in ("message_seq", "role", "run_id", "revision")},
+                                 "status": "completed", "recovery_of": start.seq,
+                                 "recovered_customer_reply_seq": answer.seq,
+                                 "reason": "顾客答复及工具回执已原子保存，未重复回答；进程及工具影响仍按各自记录核对。"})
+                    continue
                 eligible = (source is not None and source.seq < start.seq and source.actor.kind in {"human", "agent"}
                     and source.payload.get("kind") != "recovery"
                     and p.get("role") in members

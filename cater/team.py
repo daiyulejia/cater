@@ -29,11 +29,11 @@ from .work import WorkConflict
 HOST = Actor.system("team")
 MAX_ACTOR_TURNS = 32
 LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "set_objective", "request_questions",
-                               "request_review", "record_review", "finish_work", "withdraw_work"})
+                               "request_review", "record_review", "finish_work", "withdraw_work", "reply_to_customer"})
 LOCAL_EVENT_CONTRACT = {"version": 1, "kind": "atomic_local_events", "receipt": "same_transaction"}
 EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", PROJECT_RESTORE, "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "browser_check", MCP_CALL})
 PAUSED_TOOLS = frozenset({"read_artifact", "read_receipts", "read_messages", "read_background", "read_checkpoint",
-                          "read_delivery", "list_skills", "read_skill", "wait_for_reply", PROJECT_HISTORY})
+                          "read_delivery", "list_skills", "read_skill", "wait_for_reply", "reply_to_customer", PROJECT_HISTORY})
 
 
 class _RejectedLocalTool(Exception):
@@ -319,6 +319,8 @@ class TeamService:
                    "format": {"type": "string", "enum": ["code", "markdown", "text"]}},
                   ["filename", "content", "summary", "format"]),
         ]
+        from .team_reply import schema as reply_schema
+        tools.append(reply_schema())
         if has_project_history:
             tools.append(_tool(PROJECT_HISTORY, "按需读取明确同项目的历史交付背景，不读任意群聊。section=index分页查目录，后续页带as_of_seq与next_before_seq；delivery用delivery_seq读当时说明和完整文件引用；artifact再加artifact_seq读持久正文。工程ZIP不填path读取清单（不分页），填path读取确切成员；文本按offset/length分页，二进制只核对字节与摘要，不执行。后续页保持as_of_seq。历史文件不是当前磁盘状态、目标或验收凭证，不自动纳入新交付。",
                 {"section": {"type": "string", "enum": ["index", "delivery", "artifact"]},
@@ -579,6 +581,8 @@ class TeamService:
             tools = self._schemas(role, workspace, has_background=self.rt.conversation_background(task_id) is not None,
                                   workspace_id=binding.get("workspace_id") if binding["available"] else None,
                                   has_project_history=self.project_history.available(task_id))
+            if message.actor != Actor.human() or self._waiting_assignment(task_id, message, role) is not None:
+                tools = [tool for tool in tools if tool["name"] != "reply_to_customer"]
             if self.rt.execution_control.view(task_id)["state"] != "running":
                 tools = [tool for tool in tools if tool["name"] in PAUSED_TOOLS]
             context, rules = self._context_snapshot(task_id, message, role, run_id=run_id,
@@ -726,6 +730,9 @@ class TeamService:
             raise WorkConflict("当前工作已交付；如需继续修改，请先由店长采用新的工作目标。")
         if name == "wait_for_reply":
             return {"status": "ok", "waiting": True}
+        if name == "reply_to_customer":
+            from .team_reply import reply
+            return reply(self, task_id, role, arguments, tool_start, assignment)
         if name == PROJECT_HISTORY:
             expected = tool_start.payload.get("project_scope")
             if not isinstance(expected, str) or not expected:
@@ -871,7 +878,7 @@ class TeamService:
                     raise ValueError("只有工程ZIP可以按path读取文件。")
                 from .team_archive import read_member
 
-                return read_member(self.rt.log, artifact, arguments)
+                return read_member(self.rt.log, artifact, arguments, guide_missing=True)
             if "offset" in arguments or "length" in arguments:
                 offset, length = arguments.get("offset", 0), arguments.get("length", 8000)
                 if (type(offset) is not int or offset < 0 or type(length) is not int or not 1 <= length <= 16000):
@@ -1261,6 +1268,14 @@ class TeamService:
                 "顾客质疑已交付说明时，先读原成果与回执；确需新核验且有命令权限，可在本次顾客输入中直接workspace_run，无需重设目标。"
                 "命令仍是可能有副作用的宿主操作，不是只读沙箱；遵守顾客要求和权限，不为解释擅改工程。"
                 "依据实际核验直接向顾客纠错并给复查方法，区分事实与推断；普通说明无需发布报告、正式复核或再次finish_work。"
+                "核验交付代码时加载实际文件中的函数，不用自己重写的实现代替它证明交付正确；演算示例与实际运行分别说明。"
+                "辅助核验脚本出错时先检查脚本和真实回执、修正后再验证，不猜测异常原因，也不用另一项通过掩盖该项尚未验证。"
+                "核对测试的业务断言和运行结果；退出码0、测试数量、assert函数名或同一个hash本身都不足以证明测试没有变弱。"
+                "测试期望是否正确要回到顾客需求、规范或独立可算的例子；错误的测试也可能被某个实现满足，不能因改实现后变绿就断定测试必然正确。"
+                "要确认文件没被改弱或改动，应把发布版本与修改前的确切版本或workspace_read历史回执比较；只比当前两个副本的hash，不能证明它们与修前一致。"
+                "工具回执argv描述宿主配置的命令别名；其固定参数、路径或隔离模式不代表顾客普通终端也有同样设置。"
+                "给顾客的命令说明运行位置和前提，别把受管核验环境的限制推广为顾客必然遇到的问题。"
+                "工具列表有reply_to_customer时，完成普通问答后用它发送完整答案，与此前公开过程分开；它不代表任务或委托完成。"
                 "receipt_index是最近工具回执的轻量索引，不是结论；可按role、message_seq、name查完整结果，run_id不是角色名。"
                 "pending_operations列出没有可信结算的操作；可用read_receipts的include_pending读取详情。"
                 "not_committed仅表示该版本契约下的本地事件未提交，不是外部命令或计费未发生；unknown需核对实际影响，不重放旧操作。"
@@ -1356,7 +1371,8 @@ class TeamService:
                     if delivery is not None:
                         # Keep the customer reply consistent with the frozen delivery.
                         final = completed.payload["summary"]
-                    customer_facing = message.actor.kind == "human" or delivery is not None
+                    customer_facing = ((message.actor.kind == "human" or delivery is not None)
+                                       and not any(call.name == "reply_to_customer" for call in turn.calls))
                     self.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
                         payload={"text": final, "claim": final[:180], "phase": "team",
                                  "run_id": started.payload["run_id"], "reply_to": message.seq,
@@ -1368,6 +1384,7 @@ class TeamService:
                     break
                 history.append(turn.message)
                 waiting = False
+                answered = False
                 operation_failed = False
                 check_unsettled = False
                 for call in turn.calls:
@@ -1384,12 +1401,21 @@ class TeamService:
                         "failed", "timeout", "effects_unknown"}
                     if call.name in {"set_objective", "finish_work"}:
                         revision = self.view(task_id)["revision"]
+                    if call.name == "reply_to_customer" and result.get("status") == "ok":
+                        final, answered = call.arguments["text"].strip(), True
+                        break
                     if call.name == "wait_for_reply" and result.get("status") == "ok":
                         waiting = True
                     if call.name == "request_questions" and result.get("status") == "ok":
                         waiting = awaiting_customer = True
                     if call.name in {"request_review", "record_review"} and result.get("status") == "ok":
                         waiting = True
+                if answered:
+                    with self.rt.log.atomic():
+                        self._finish_message(task_id, message, role, started, revision, assignment,
+                            status=status, reason=reason, final=final, failure=failure,
+                            awaiting_customer=False, last_scope=last_scope)
+                    return
                 substantive = [call.name for call in turn.calls if call.name != "wait_for_reply"]
                 if (substantive and substantive[-1] == "finish_work" and not operation_failed
                         and not check_unsettled and not awaiting_customer and role.id == self.rt.organization.leader.id):

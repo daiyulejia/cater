@@ -57,6 +57,7 @@ class TeamSettlementTests(unittest.TestCase):
             "send_message": {"recipient": self.worker, "text": "Inspect this result"},
             "set_objective": {"goal": "Adopted new fixture goal"},
             "finish_work": {"summary": "Fixture delivered", "verification": "Text only"},
+            "reply_to_customer": {"text": "Fixture answer; no task completion claimed."},
             "request_questions": {"title": "Fixture choice", "questions": [
                 {"id": "kind", "question": "Which direction?", "selection": "single", "options": []}]},
         }.get(name)

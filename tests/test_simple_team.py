@@ -162,7 +162,7 @@ class SimpleTeamTests(unittest.TestCase):
     def test_paused_group_can_answer_but_has_no_execution_tools(self):
         self.rt.execution_control.change(self.task, "pause", request_id="pause-simple-team")
         def answer(context, history, tools):
-            self.assertEqual({t["name"] for t in tools}, {"read_artifact", "read_receipts", "read_messages", "read_checkpoint", "read_delivery", "list_skills", "read_skill", "wait_for_reply"})
+            self.assertEqual({t["name"] for t in tools}, {"read_artifact", "read_receipts", "read_messages", "read_checkpoint", "read_delivery", "list_skills", "read_skill", "wait_for_reply", "reply_to_customer"})
             return turn("当前已暂停，已有文件保留。")
         self.driver.steps[self.manager] = [answer]
         self.rt.team.receive(self.task, "现在什么情况", request_id="paused-progress")

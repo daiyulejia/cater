@@ -33,11 +33,13 @@ class TeamExternal:
     def run_message(self, task_id, message, role, started, revision, assignment, driver, instructions):
         from .external_agent import ExternalYield
         from .team import MAX_ACTOR_TURNS
+        from .team_reply import TOOL as REPLY
 
         status, reason, final = "completed", "", ""
         failure, awaiting_customer = {}, False
         last_scope, attempt, run = None, None, None
         stop_kind, delivered_text = None, ""
+        public_chars = 0
         calls = 0
         last_check = 0.0
         terminal = "failed"
@@ -82,8 +84,15 @@ class TeamExternal:
                 last_check = now
 
             def execute(call):
-                nonlocal revision, calls, stop_kind, awaiting_customer, last_scope, delivered_text
+                nonlocal revision, calls, stop_kind, awaiting_customer, last_scope, delivered_text, public_chars
                 check(force=True)
+                if call.name == REPLY:
+                    public = run.state.text
+                    if public[public_chars:].strip():
+                        self.rt.log.emit(type="msg.said", actor=Actor.agent(role.id, role.role), task_id=task_id,
+                            payload={"text": public[public_chars:], "phase": "team", "run_id": started.payload["run_id"],
+                                     "reply_to": message.seq, "response_kind": "progress", "audience": "team"})
+                    public_chars = len(public)
                 _, result = self.team._dispatch_tool(task_id, message, role, started, revision,
                     call, tools, workspace, binding, context, assignment,
                     external_started_seq=attempt.seq)
@@ -95,6 +104,9 @@ class TeamExternal:
                     if call.name == "finish_work":
                         stop_kind = "delivered"
                         delivered_text = call.arguments["summary"]
+                    elif call.name == REPLY:
+                        stop_kind = "answered"
+                        delivered_text = call.arguments["text"].strip()
                     elif call.name in {"wait_for_reply", "request_questions", "request_review", "record_review"}:
                         stop_kind = "waiting"
                         awaiting_customer = call.name == "request_questions"
@@ -143,7 +155,7 @@ class TeamExternal:
                         status, reason = "interrupted", "外部伙伴本轮回复结束，但尚未正式交回原委托；需根据成果和回执继续交接。"
                     self.rt._driver_health.record_success(role.driver)
                 except ExternalYield:
-                    if stop_kind not in {"waiting", "checkpoint", "delivered", "returned"}:
+                    if stop_kind not in {"waiting", "checkpoint", "delivered", "returned", "answered"}:
                         raise WorkConflict("外部运行停止，但没有对应的宿主交接记录；保留原委托，不按完成处理。")
                     terminal = "yielded"
                     final = run.state.text
@@ -153,7 +165,7 @@ class TeamExternal:
                     elif stop_kind == "checkpoint":
                         status, reason = "interrupted", "本轮到达工具检查点，已有成果和回执保留，接下来核对并继续剩余工作。"
                         failure["interruption_kind"] = "turn_boundary"
-                    elif stop_kind == "delivered":
+                    elif stop_kind in {"delivered", "answered"}:
                         final = delivered_text
                 finally:
                     # The adapter closes the process/bridge before these facts
@@ -202,7 +214,7 @@ class TeamExternal:
             if attempt is not None and run is None:
                 self.team.external_runs.finish(attempt, phase="setup", prompt_attempted=False,
                                                cleanup_complete=True, result="failed")
-        if final.strip():
+        if final.strip() and stop_kind != "answered":
             if stop_kind == "delivered" and run is not None and not run.state.cleanup_complete:
                 final += "\n\n已发布成果可下载；外部客户端清理尚未确认，需核对进程，不能将本次交付理解为所有执行均已停止。"
             current = self.team.view(task_id)

@@ -184,7 +184,7 @@ class TeamBackgroundTests(unittest.TestCase):
         self.rt.collaborate(child)
         self.assertEqual(self.results(child)[0]["content"], "制作 doc 转 PDF 工具")
         self.assertEqual({t["name"] for t in self.driver.calls[0]["tools"]},
-                         {"read_artifact", "read_receipts", "read_messages", "read_background", "read_checkpoint", "read_delivery", "list_skills", "read_skill", "wait_for_reply"})
+                         {"read_artifact", "read_receipts", "read_messages", "read_background", "read_checkpoint", "read_delivery", "list_skills", "read_skill", "wait_for_reply", "reply_to_customer"})
         self.assertEqual(self.rt.execution_control.view(child)["state"], "paused")
 
     def test_nested_derivation_keeps_unique_frozen_sources_not_live_parent_updates(self):

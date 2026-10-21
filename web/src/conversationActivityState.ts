@@ -32,6 +32,7 @@ const string = (value: unknown) => typeof value === 'string' ? value : undefined
 const object = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const timestamp = (event?: TimedEvent) => event?.ts ? Date.parse(event.ts) : NaN
 const tools: Record<string, string> = {
+  reply_to_customer: '答复顾客',
   publish_workspace_archive: '发布工程包',
   workspace_read: '读取文件', workspace_run: '运行命令', workspace_write: '写入文件', workspace_search: '查找文件',
   workspace_list: '列出目录', browser_check: '浏览器检查', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果',

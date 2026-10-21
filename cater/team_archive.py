@@ -95,14 +95,21 @@ def publish(team, task_id, role, arguments, workspace, binding, tool_start):
     return result
 
 
-def read_member(log, artifact, arguments):
+def read_member(log, artifact, arguments, *, guide_missing=False):
     from .archive_members import read_members
     from .workspace_archive import portable_path
 
+    if guide_missing:
+        manifest = artifact.get("archive")
+        validate_manifest(manifest)
     path = portable_path(arguments["path"])
     offset, length = arguments.get("offset", 0), arguments.get("length", 8000)
     if type(offset) is not int or offset < 0 or type(length) is not int or not 1 <= length <= 16000:
         raise ValueError("工程文本分页需要非负offset和1到16000的length，单位为Unicode字符。")
+    if guide_missing and path not in {entry["path"] for entry in manifest["files"]}:
+        return {"status": "error", "code": "archive_member_not_listed", "complete": True,
+                "outcome": "not_started", "artifact_seq": artifact["seq"],
+                "message": "所选版本已保存的manifest文件清单中没有这个成员。请仅传artifact_seq调用read_artifact查看文件清单，再用清单中的精确相对路径作为path读取。"}
     member, = read_members(log, artifact, [path], max_files=1,
         max_member_bytes=32 * 1024 * 1024, max_total_bytes=32 * 1024 * 1024)
     body = member.pop("body")
