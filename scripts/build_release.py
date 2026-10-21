@@ -20,7 +20,7 @@ sys.path.insert(0, str(ROOT))
 
 from cater.artifact_store import _directories, _inspect, _open
 from cater.verification import run_check
-from cater.web_assets import MANIFEST_NAME, capture_web_assets
+from cater.web_assets import MANIFEST_NAME, MAX_MANIFEST_BYTES, capture_web_assets
 from scripts.release_validation import validate_wheel
 
 MAX_BYTES = 64 * 1024 * 1024
@@ -62,7 +62,31 @@ def _pattern(value: object) -> str:
     return value
 
 
-def source_snapshot(root: Path) -> SourceSnapshot:
+def _fingerprint(files) -> str:
+    digest = hashlib.sha256()
+    for name, body in sorted(files.items()):
+        encoded = name.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big") + encoded + len(body).to_bytes(8, "big") + body)
+    return digest.hexdigest()
+
+
+def _ui_root_snapshot(root: Path) -> dict:
+    def signature(info):
+        return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+    entries = {".": signature(_inspect(root, True))}
+    allowed = {"index.html", "favicon.svg", "assets", MANIFEST_NAME}
+    for count, path in enumerate(root.iterdir(), 1):
+        if count > MAX_FILES:
+            raise ReleaseError("UI root file count exceeds limit")
+        info = _inspect(path, path.name == "assets")
+        if path.name not in allowed:
+            raise ReleaseError("Workroom contains unregistered root resources")
+        entries[path.name] = signature(info)
+    return entries
+
+
+def source_snapshot(root: Path, *, web_assets: Path | None = None) -> SourceSnapshot:
     root = root.absolute()
     _directories(root)
     files = {"pyproject.toml": _read(root / "pyproject.toml")}
@@ -92,9 +116,23 @@ def source_snapshot(root: Path) -> SourceSnapshot:
         raise ReleaseError("Package data must be an explicit bounded list")
     package_root = root / "cater"
     _directories(package_root)
-    selected = set(path for path in package_root.rglob("*.py") if "__pycache__" not in path.parts)
+    bundled_ui = package_root / "static/workroom"
+    if web_assets is None:
+        selected = set(path for path in package_root.rglob("*.py") if "__pycache__" not in path.parts)
+    else:
+        # Prune the old bundle before traversal, including protected build caches.
+        selected = set()
+        for directory, children, names in os.walk(package_root):
+            parent = Path(directory)
+            children[:] = [name for name in children if name != "__pycache__" and parent / name != bundled_ui]
+            selected.update(parent / name for name in names if Path(name).match("*.py"))
     for pattern in patterns:
-        for path in package_root.glob(_pattern(pattern)):
+        pattern = _pattern(pattern)
+        if web_assets is not None and pattern.startswith("static/workroom/"):
+            continue
+        for path in package_root.glob(pattern):
+            if web_assets is not None and path.is_relative_to(bundled_ui):
+                continue
             info = _inspect(path, stat.S_ISDIR(path.lstat().st_mode))
             if stat.S_ISREG(info.st_mode):
                 selected.add(path)
@@ -108,15 +146,33 @@ def source_snapshot(root: Path) -> SourceSnapshot:
         body = _read(path)
         package[path.relative_to(root).as_posix()] = body
         size += len(body)
+    ui = bundled_ui
+    manifest_name = "cater/static/workroom/" + MANIFEST_NAME
+    if web_assets is not None:
+        ui = Path(web_assets)
+        if ".." in ui.parts:
+            raise ReleaseError("UI asset root must not contain parent traversal")
+        ui = ui.absolute()
+        _directories(ui)
+        ui_root_before = _ui_root_snapshot(ui)
+        if _inspect(ui / MANIFEST_NAME, False).st_size > MAX_MANIFEST_BYTES:
+            raise ReleaseError("UI manifest exceeds byte limit")
+        manifest_bytes = _read(ui / MANIFEST_NAME)
+        assets = capture_web_assets(ui)
+        captured = {**assets.files, "/" + MANIFEST_NAME: manifest_bytes}
+        if _fingerprint(captured) != assets.version:
+            raise ReleaseError("Workroom manifest changed while capturing source")
+        package.update({"cater/static/workroom" + name: body for name, body in captured.items()})
+        if len(package) > MAX_FILES:
+            raise ReleaseError("Package source file count is invalid")
     files.update(package)
     files.update({name: _read(root / name) for name in ("README.md", "LICENSE")})
     if sum(map(len, files.values())) > MAX_BYTES:
         raise ReleaseError("Release source exceeds byte limit")
-    ui = package_root / "static/workroom"
-    manifest_name = "cater/static/workroom/" + MANIFEST_NAME
     if manifest_name not in package:
         raise ReleaseError("Build the workroom first: its manifest is required")
-    assets = capture_web_assets(ui)
+    if web_assets is None:
+        assets = capture_web_assets(ui)
     if _read(ui / MANIFEST_NAME) != package[manifest_name]:
         raise ReleaseError("Workroom manifest changed while capturing source")
     manifest = json.loads(package[manifest_name])
@@ -131,11 +187,10 @@ def source_snapshot(root: Path) -> SourceSnapshot:
         raise ReleaseError("Workroom contains missing or unregistered files; rebuild instead of shipping stale assets")
     if any(package["cater/static/workroom" + name] != body for name, body in assets.files.items()):
         raise ReleaseError("Workroom changed while capturing source")
-    digest = hashlib.sha256()
-    for name, body in sorted(files.items()):
-        encoded = name.encode("utf-8")
-        digest.update(len(encoded).to_bytes(4, "big") + encoded + len(body).to_bytes(8, "big") + body)
-    return SourceSnapshot(files, package, "cater", version, assets.version, digest.hexdigest())
+    if web_assets is not None:
+        if capture_web_assets(ui).version != assets.version or _ui_root_snapshot(ui) != ui_root_before:
+            raise ReleaseError("Workroom changed while capturing source")
+    return SourceSnapshot(files, package, "cater", version, assets.version, _fingerprint(files))
 
 
 def build_environment() -> dict[str, str]:
@@ -155,21 +210,29 @@ def _step(label: str, command: list[str], *, cwd: Path, output: Path, timeout: f
     return result
 
 
-def build_release(root: Path, output: Path, *, timeout: float = 120) -> dict:
+def build_release(root: Path, output: Path, *, timeout: float = 120, web_assets: Path | None = None) -> dict:
     root, output = root.absolute(), output.absolute()
     if any(part == ".." for part in (*root.parts, *output.parts)):
         raise ReleaseError("Source and output paths must not contain parent traversal")
     if output == root or any(output.is_relative_to(root / name) for name in ("cater", "web", ".git", "scripts", "tests")):
         raise ReleaseError("Output must not replace source, package, frontend, tests or repository metadata")
+    if web_assets is not None:
+        web_assets = Path(web_assets)
+        if ".." in web_assets.parts:
+            raise ReleaseError("UI asset root must not contain parent traversal")
+        web_assets = web_assets.absolute()
+        if output.is_relative_to(web_assets) or output.resolve().is_relative_to(web_assets.resolve()):
+            raise ReleaseError("Output must not be inside the selected UI asset tree")
     if output.exists():
         raise ReleaseError("Output already exists; choose a fresh directory (old evidence is never overwritten)")
-    snapshot = source_snapshot(root)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    _directories(output.parent)
+    snapshot = source_snapshot(root, web_assets=web_assets)
+    _directories(output.parent, create=True)
     output.mkdir()
     report = {"status": "building", "name": snapshot.name, "version": snapshot.version,
               "source_sha256": snapshot.fingerprint, "ui_version": snapshot.ui_version,
               "package_files": len(snapshot.package), "runtime_dependencies": []}
+    if web_assets is not None:
+        report["web_assets"] = str(web_assets)
     report_path = output / "release.json"
     try:
         stage, wheels, install, smoke = (output / name for name in ("source", "wheels", "installed", "smoke"))
@@ -203,7 +266,7 @@ def build_release(root: Path, output: Path, *, timeout: float = 120) -> dict:
         smoke_report = json.loads((smoke / "installed-check.json").read_text(encoding="utf-8"))
         if smoke_report.get("status") != "verified" or smoke_report.get("ui_version") != snapshot.ui_version:
             raise ReleaseError("Installed verification did not confirm this exact build")
-        if source_snapshot(root).fingerprint != snapshot.fingerprint:
+        if source_snapshot(root, web_assets=web_assets).fingerprint != snapshot.fingerprint:
             raise ReleaseError("Source changed during build; snapshot preserved, but release was not accepted")
         report.update(status="verified", wheel=wheel.relative_to(output).as_posix(),
                       wheel_sha256=checked["wheel_sha256"], checks=smoke_report["checks"],
@@ -219,6 +282,7 @@ def build_release(root: Path, output: Path, *, timeout: float = 120) -> dict:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="从干净快照构建并安装验证 Cater；不下载依赖、不访问模型、不覆盖旧产物。")
     parser.add_argument("--source", type=Path, default=ROOT, help="Cater 源码目录，默认本仓库")
+    parser.add_argument("--web-assets", type=Path, help="选用已构建的独立 UI 目录，仅核对产物字节，不证明来自最新前端源码")
     parser.add_argument("--output", type=Path, help="必须尚不存在的产物目录；默认 dist/releases 下新建独立目录")
     parser.add_argument("--timeout", type=float, default=120, help="每个受控构建/安装/验证进程的超时秒数，最多600")
     args = parser.parse_args(argv)
@@ -226,7 +290,7 @@ def main(argv=None) -> int:
         parser.error("timeout must be between 0 and 600 seconds")
     output = args.output or args.source / "dist/releases" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8])
     try:
-        report = build_release(args.source, output, timeout=args.timeout)
+        report = build_release(args.source, output, timeout=args.timeout, web_assets=args.web_assets)
     except (ValueError, OSError) as exc:
         print(f"构建验证未通过：{exc}", file=sys.stderr)
         return 1
