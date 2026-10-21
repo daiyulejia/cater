@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { Background, BackgroundVariant, Handle, MarkerType, Position, ReactFlow } from '@xyflow/react'
 import type { Edge, Node, NodeProps } from '@xyflow/react'
 import { Info, List, Network } from 'lucide-react'
-import { projectTeamGraph, teamGraphKinds } from './teamGraph'
+import { focusTeamGraph, projectTeamGraph, teamGraphKinds } from './teamGraph'
 import type { TeamGraphEntry } from './teamGraph'
 import type { TeamEvent, TeamState } from './team'
 import { layoutTaskGraph } from './taskGraphLayout'
@@ -33,22 +33,31 @@ const teamAriaLabels = { ...ariaLabels, 'node.a11yDescription.default': '协作�
 export function TeamGraphBody({ team, events, actorText, portrait }: {
   team: TeamState; events: TeamEvent[]; actorText: (id: string) => string; portrait?: (id: string, size: 'sm' | 'md') => ReactNode
 }) {
-  const model = useMemo(() => projectTeamGraph(team, events), [team, events])
-  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const full = useMemo(() => projectTeamGraph(team, events), [team, events])
+  const focused = useMemo(() => focusTeamGraph(full, events), [full, events])
+  const [scope, setScope] = useState<'current' | 'all'>('current')
+  const model = scope === 'current' ? focused : full
+  const selectionKey = scope === 'current' ? `current:${focused.objectiveSeq ?? 'none'}` : 'all'
+  const first = scope === 'current' ? model.nodes.find(entry => entry.seq === focused.triggerSeq)
+    ?? model.nodes.find(entry => !entry.historical) ?? model.nodes[0] : model.nodes[0]
+  const [selection, setSelection] = useState<{ key: string; id: string | null }>({ key: selectionKey, id: first?.id ?? null })
   const [view, setView] = useState<'graph' | 'list'>('graph')
   const headingRef = useRef<HTMLHeadingElement>(null)
-  const selected = model.nodes.find(entry => entry.id === selectedId) ?? model.nodes[0]
+  const selected = (selection.key === selectionKey ? model.nodes.find(entry => entry.id === selection.id) : undefined) ?? first
+  if (selection.key !== selectionKey || selection.id !== (selected?.id ?? null)) {
+    setSelection({ key: selectionKey, id: selected?.id ?? null })
+  }
   const topology = JSON.stringify(model.nodes.map(entry => ({ id: entry.id,
     depends_on: model.edges.filter(edge => edge.target === entry.id).map(edge => edge.source) })))
   // Only topology affects positions; polling statuses leaves the viewport and selection alone.
   const graph = useMemo(() => layoutTaskGraph(JSON.parse(topology) as { id: string; depends_on: string[] }[]), [topology])
   const choose = useCallback((id: string) => {
-    setSelectedId(id)
+    setSelection({ key: selectionKey, id })
     requestAnimationFrame(() => {
       headingRef.current?.focus({ preventScroll: true })
       if (window.matchMedia('(max-width: 760px)').matches) headingRef.current?.scrollIntoView({ block: 'start', behavior: 'instant' })
     })
-  }, [])
+  }, [selectionKey])
   const nodes: TeamNode[] = graph.nodes.map(node => {
     const entry = model.nodes.find(item => item.id === node.id)!
     return { ...node, type: 'team', draggable: false, connectable: false, deletable: false, selectable: false, focusable: false,
@@ -60,7 +69,14 @@ export function TeamGraphBody({ team, events, actorText, portrait }: {
   }))
   const related = selected ? model.edges.filter(edge => edge.source === selected.id || edge.target === selected.id) : []
   return <>
-    <div className="task-graph-summary"><span>{model.nodes.length} 条协作记录 · 只读</span><span className="inline-flex items-center gap-2">委托 · 回报 · 复核<span role="img" aria-label="协作关系说明" title="连线表示委托、回报与复核关系，不代表严格任务依赖。"><Info size={14} aria-hidden="true" /></span></span></div>
+    <div className="task-graph-summary"><span>{scope === 'current' ? '当前目标' : '全部记录'} · {model.nodes.length} / {full.nodes.length} 条协作记录 · 只读</span><span className="inline-flex items-center gap-2">委托 · 回报 · 复核<span role="img" aria-label="协作关系说明" title="连线表示委托、回报与复核关系，不代表严格任务依赖。"><Info size={14} aria-hidden="true" /></span></span>
+      {scope === 'current' && <span>{focused.objectiveSeq === undefined ? '尚无目标更新记录，显示全部记录。'
+        : `目标更新 #${focused.objectiveSeq} · ${focused.triggerSeq === undefined ? '触发顾客输入的关联待核对' : `顾客输入 #${focused.triggerSeq}`}`}</span>}
+    </div>
+    <div className="task-graph-view-switch" role="group" aria-label="协作记录范围">
+      <button type="button" aria-pressed={scope === 'current'} onClick={() => setScope('current')}>当前目标</button>
+      <button type="button" aria-pressed={scope === 'all'} onClick={() => setScope('all')}>全部记录</button>
+    </div>
     <div className="task-graph-layout">
       <div className="task-graph-main">
         <div className="task-graph-view-switch" role="group" aria-label="协作展示方式">
@@ -68,7 +84,7 @@ export function TeamGraphBody({ team, events, actorText, portrait }: {
           <button type="button" title="协作列表" aria-pressed={view === 'list'} onClick={() => setView('list')}><List size={16} />协作列表</button>
         </div>
         <div className="task-graph-canvas" hidden={view !== 'graph'} role="region" aria-label="当前团队协作图">
-          <ReactFlow<TeamNode> nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView fitViewOptions={fitOptions}
+          <ReactFlow<TeamNode> key={`${selectionKey}:${nodes.length ? 'records' : 'empty'}`} nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView fitViewOptions={fitOptions}
             onNodeClick={(_, node) => choose(node.id)}
             minZoom={0.1} maxZoom={2} nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false}
             elementsSelectable={false} nodesFocusable={false} edgesFocusable={false} deleteKeyCode={null}
@@ -105,7 +121,8 @@ export function TeamGraphBody({ team, events, actorText, portrait }: {
           const entry = model.nodes.find(item => item.id === (edge.source === selected.id ? edge.target : edge.source))!
           return <li key={edge.id}><button type="button" onClick={() => choose(entry.id)}>{edge.label} · {teamGraphKinds[entry.kind]} #{entry.seq}</button></li>
         })}</ul> : <p>当前记录没有可核对的关联来源。</p>}</section>
-      </aside> : <aside className="task-graph-details"><p>尚无协作消息或复核记录。</p></aside>}
+      </aside> : <aside className="task-graph-details"><p>{scope === 'current' && focused.objectiveSeq !== undefined
+        ? '当前目标尚无协作记录，可切换全部记录查看历史。' : '尚无协作消息或复核记录。'}</p></aside>}
     </div>
   </>
 }

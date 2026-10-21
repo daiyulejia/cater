@@ -5,7 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+
+class _RejectRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise HTTPError(req.full_url, code, msg, headers, fp)
 
 
 def _headers(access_token: str | None, *, json_body: bool = False) -> dict[str, str]:
@@ -22,13 +28,13 @@ def post_json(base_url: str, path: str, payload: dict, *, access_token: str | No
         method="POST",
         headers=_headers(access_token, json_body=True),
     )
-    with urlopen(request, timeout=10) as response:
+    with build_opener(_RejectRedirects()).open(request, timeout=10) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
 def get_json(base_url: str, path: str, *, access_token: str | None = None) -> dict:
     request = Request(base_url.rstrip("/") + path, headers=_headers(access_token))
-    with urlopen(request, timeout=10) as response:
+    with build_opener(_RejectRedirects()).open(request, timeout=10) as response:
         return json.loads(response.read().decode("utf-8"))
 
 

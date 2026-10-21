@@ -8,6 +8,7 @@ export type TeamGraphEntry = {
   withdrawal?: TeamWithdrawal
 }
 export type TeamGraphEdge = { id: string; source: string; target: string; label: string }
+export type TeamGraph = { nodes: TeamGraphEntry[]; edges: TeamGraphEdge[] }
 
 const text = (value: unknown) => typeof value === 'string' ? value : ''
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -18,6 +19,34 @@ export const teamGraphKinds: Record<string, string> = {
 }
 const reviewStatuses: Record<string, string> = {
   pending: '待复核', changes_requested: '待修复', approved: '该版本复核通过', outdated: '版本已变化，待重新复核', stale: '历史复核',
+}
+
+function objectiveScope(events: readonly TeamEvent[]) {
+  const objective = events.filter(event => isTeamHost(event) && event.type === 'team.objective_updated')
+    .sort((a, b) => a.seq - b.seq).at(-1)
+  const runId = text(objective?.payload.run_id).trim()
+  const starts = objective && runId ? events.filter(event => isTeamHost(event) && event.type === 'team.run_started'
+    && event.payload.run_id === runId && event.seq < objective.seq) : []
+  const start = starts.length === 1 ? starts[0] : undefined
+  const trigger = start && !events.some(event => isTeamHost(event) && event.type === 'team.run_finished'
+    && event.payload.run_id === runId && event.seq > start.seq && event.seq < objective!.seq)
+    ? events.find(event => event.seq === start.payload.message_seq && event.seq < start.seq
+      && event.type === 'team.message_received' && event.actor.kind === 'human' && event.payload.kind === 'message'
+      && text(start.payload.role).trim() && event.payload.recipient === start.payload.role) : undefined
+  return { objective, trigger }
+}
+
+export function focusTeamGraph(graph: TeamGraph, events: readonly TeamEvent[]) {
+  const { objective, trigger } = objectiveScope(events)
+  const current = new Set(graph.nodes.filter(node => !objective || node.seq >= objective.seq || node.seq === trigger?.seq).map(node => node.id))
+  const visible = new Set(current)
+  // Keep direct, verified historical sources, without walking their old conversations.
+  for (const edge of graph.edges) if (current.has(edge.target)) visible.add(edge.source)
+  return {
+    nodes: graph.nodes.filter(node => visible.has(node.id)),
+    edges: graph.edges.filter(edge => visible.has(edge.source) && visible.has(edge.target)),
+    objectiveSeq: objective?.seq, triggerSeq: trigger?.seq,
+  }
 }
 
 function messageWithdrawal(event: TeamEvent, rows: unknown): TeamWithdrawal | undefined {
@@ -38,7 +67,7 @@ function messageWithdrawal(event: TeamEvent, rows: unknown): TeamWithdrawal | un
 }
 
 // Edges describe recorded communication, never task prerequisites or inferred role hierarchy.
-export function projectTeamGraph(team: TeamState, input: readonly TeamEvent[]) {
+export function projectTeamGraph(team: TeamState, input: readonly TeamEvent[]): TeamGraph {
   const events = [...input].sort((a, b) => a.seq - b.seq)
   const bySeq = new Map(events.map(event => [event.seq, event]))
   const messages = events.filter(event => event.type === 'team.message_received'
@@ -55,7 +84,7 @@ export function projectTeamGraph(team: TeamState, input: readonly TeamEvent[]) {
       && event.payload.root_seq === root(request) && event.payload.reviewer === request.payload.reviewer
       && ['approved', 'changes_requested'].includes(text(event.payload.verdict))
   })
-  const latestObjective = events.filter(event => isTeamHost(event) && event.type === 'team.objective_updated').at(-1)
+  const { objective: latestObjective, trigger } = objectiveScope(events)
   const runs = teamRuns(team, events)
   const edges: TeamGraphEdge[] = []
   const connect = (source: number, target: number, label: string) => {
@@ -129,11 +158,11 @@ export function projectTeamGraph(team: TeamState, input: readonly TeamEvent[]) {
     const request = decision ? requestBySeq.get(Number(p.review_seq))! : event
     const snapshot = (team.reviews ?? []).find(entry => entry.request_seq === request.seq)
     const superseded = (review || decision) && requests.some(entry => entry.seq > request.seq && root(entry) === root(request))
-    const historical = Boolean(latestObjective && event.seq < latestObjective.seq
-      && (event.actor.kind === 'agent' || review || decision))
+    const historical = Boolean(latestObjective && ((event.seq < latestObjective.seq && event.seq !== trigger?.seq)
+      || decision && request.seq < latestObjective.seq))
     const run = runs.find(entry => entry.message_seq === event.seq && entry.role === p.recipient)
     const verdict = decisions.filter(entry => entry.payload.review_seq === request.seq).at(-1)
-    const reviewStatus = snapshot?.status ?? (historical ? 'stale' : text(verdict?.payload.verdict) || 'pending')
+    const reviewStatus = historical ? 'stale' : snapshot?.status ?? (text(verdict?.payload.verdict) || 'pending')
     const kind = review ? 'review' : decision ? 'decision' : text(p.kind)
     const messageStatus = p.kind === 'report' ? '回报已投递' : p.kind === 'progress' ? '进展已投递'
       : p.kind === 'notification' ? '知会已投递'

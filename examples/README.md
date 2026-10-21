@@ -56,6 +56,8 @@ python examples/api_client.py
 `X-Cater-Access-Token`；令牌不需要也不应出现在命令行参数中。需要使用不同环境变量名时，可传入
 `--access-token-env YOUR_TOKEN_ENV`。
 
+示例的 GET/POST 拒绝自动 HTTP/HTTPS 跳转，避免令牌随请求转发到另一个地址；跳转响应会保留为 `HTTPError`，不会先删除令牌再跟随。请显式填写可信的最终 `--base-url`。普通认证头、JSON 读取和标准库代理行为保持不变；这不是网络沙箱，远程连接仍需 HTTPS 或等效保护。
+
 ## NDJSON Driver 协议
 
 CLI driver 每行读取一个 JSON 请求，并且每行写入一个 JSON 响应。探针请求与响应如下：
