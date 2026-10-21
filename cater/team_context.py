@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import json
+
 from .tool_protocol import json_utf8, prepare_tool_turn
 
 
 CONVERSATION_BYTES = 16000
 HISTORY_BYTES = 96000
 INPUT_SOURCES = ("message", "active_assignment", "latest_customer_message")
+
+
+def model_json(value):
+    """Compact newly assembled model data, never opaque provider replay blocks."""
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def json_bytes(value):

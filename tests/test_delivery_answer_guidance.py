@@ -179,8 +179,16 @@ class DeliveryAnswerGuidanceTests(unittest.TestCase):
             f.run_ok()
         self.assertEqual(len(f.driver.calls), 2)
         self.assertEqual(len(f.events("team.objective_completed")), 1)
-        self.assertTrue(any('"outcome": "failed"' in row.get("content", "")
-                            for row in f.driver.calls[-1]["history"] if row["role"] == "tool"))
+        started, = [e for e in f.events("team.tool_started") if e.payload["name"] == "read_delivery"]
+        finished, = [e for e in f.events("team.tool_finished")
+                     if e.payload["started_seq"] == started.seq]
+        returned, = [row for row in f.driver.calls[-1]["history"]
+                     if row["role"] == "tool" and row["tool_call_id"] == started.payload["call_id"]]
+        expected = {"status": "ok", "outcome": "failed", "complete": True,
+                    "note": "Simulated check envelope."}
+        self.assertEqual(finished.payload["result"], expected)
+        self.assertEqual(json.loads(returned["content"]), expected)
+        self.assertFalse(returned["is_error"], "An ok envelope still carries the actual failed outcome")
 
     def test_new_customer_message_after_finish_preempts_terminal_reply(self):
         f = self.f

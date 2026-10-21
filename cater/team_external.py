@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import sqlite3
 import time
 
 from .events import Actor
 from .acp import failure_code, rejection_details
-from .team_context import model_context
+from .team_context import model_context, model_json
 from .tool_protocol import json_utf8
 from .usage import valid_token_count
 from .work import WorkConflict
@@ -136,14 +135,15 @@ class TeamExternal:
             attempt = self.team.external_runs.begin(task_id, role, started, basis=basis,
                 binding=binding, tool_names=[tool["name"] for tool in tools],
                 driver_fingerprint=fingerprint)
-            prompt = (instructions
+            prompt_instructions = (instructions
                 + "本轮通过受管外部客户端执行，实际工作只使用Cater提供的工具。"
                   "客户端工作目录是临时启动目录，不是顾客工程；工程路径与权限以workspace及工具回执为准。"
                   "完成原委托时用send_message明确recipient与reply_to正式交回；仅输出结束语不算交还。"
                   "wait_for_reply、提问、复核、正式交还或finish_work成功后，本轮立即让出执行机会，"
                   "不继续修改刚交回的成果；下一份输入会包含最新上下文。"
-                  "工具错误先读实际回执，不能因为通信失败就重复执行。\n"
-                + json.dumps(context, ensure_ascii=False))
+                  "工具错误先读实际回执，不能因为通信失败就重复执行。\n")
+            context_text = model_json(context)
+            prompt = prompt_instructions + context_text
             # Never load a customer's project-local client hooks/settings.
             # Actual workspace operations still use the bound host executor.
             scratch = LaunchDirectory(self.rt.log, attempt)
@@ -190,7 +190,10 @@ class TeamExternal:
                             "role": role.id, "driver": role.driver, "run_id": started.payload["run_id"],
                             "external_started_seq": attempt.seq, "tokens": 0, "token_usage": "unavailable",
                             "external_observations": dict(state.observations),
-                            "context_basis": basis, "request_sizes": {"prompt_utf8_bytes": len(prompt.encode("utf-8"))}})
+                            "context_basis": basis, "request_sizes": {
+                                "prompt_utf8_bytes": len(prompt.encode("utf-8")),
+                                "instructions_utf8_bytes": len(prompt_instructions.encode("utf-8")),
+                                "context_json_bytes": len(context_text.encode("utf-8"))}})
                     if not state.cleanup_complete:
                         failure.update(external_observations=dict(state.observations),
                                        failure_stage=state.failure_phase or "cleanup")

@@ -17,7 +17,7 @@ from .room_dialogue import addressed_role
 from .team_recovery import RECOVERY_CONTRACT, TeamRecovery, _same_scope
 from .team_delivery import HandoffError, TeamDelivery, handoff_schema
 from .team_browser import BROWSER_CONTRACT, TeamBrowser, browser_schema
-from .team_context import history_window, json_bytes, model_context
+from .team_context import history_window, json_bytes, model_context, model_json
 from .tool_protocol import contained_response_diagnostics, safe_tool_usage
 from .usage import valid_token_count
 from .team_response_correction import correctable, correction_context
@@ -1356,8 +1356,11 @@ class TeamService:
                 context["tool_history_window"] = {**window, "run_id": started.payload["run_id"]}
                 if correction is not None:
                     context["response_correction"] = correction_context(correction["correction_of"], correction["issue"])
-                prompt = instructions + json.dumps(context, ensure_ascii=False)
+                context_text = model_json(context)
+                prompt = instructions + context_text
                 request_sizes = {"prompt_utf8_bytes": len(prompt.encode("utf-8")),
+                                 "instructions_utf8_bytes": len(instructions.encode("utf-8")),
+                                 "context_json_bytes": len(context_text.encode("utf-8")),
                                  "history_json_bytes": json_bytes(wire_history), "tools_json_bytes": json_bytes(tools),
                                  "history_omitted_groups": window["omitted_groups"]}
                 self._current(task_id, started, role, revision)
@@ -1466,7 +1469,7 @@ class TeamService:
                         call, tools, workspace, binding, context, assignment, on_started=tool_started)
                     failure_stage = "tool_result_recording"
                     history.append({"role": "tool", "tool_call_id": call.id, "is_error": result.get("status") != "ok",
-                                    "content": json.dumps(result, ensure_ascii=False)})
+                                    "content": model_json(result)})
                     history_receipts.append({"call_id": call.id, "started_seq": tool_start.seq, "name": call.name,
                                              "status": result.get("status")})
                     operation_failed |= result.get("status") != "ok"
