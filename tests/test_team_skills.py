@@ -71,12 +71,37 @@ class TeamSkillsTests(unittest.TestCase):
         self.assertFalse(result["has_more"])
         self.assertIn("写入检查脚本不等于执行检查", result["content"])
         self.assertIn("不为取得新回执而原样写回", result["content"])
+        self.assertIn("文档和策划可以通过原文、独立算术与情境核对验收", result["content"])
+        self.assertIn("判断是必须修正的缺陷、待核实的风险，还是非阻塞建议", result["content"])
+        self.assertIn("提出矛盾前对照实际原句和回执", result["content"])
         body = json.loads(self.driver.calls[-1]["history"][-1]["content"])
         self.assertEqual(body["content"], result["content"])
         for call in self.driver.calls:
             self.assertNotIn("workspace_run", {tool["name"] for tool in call["tools"]})
         self.assertEqual([e.payload["name"] for e in self.events("team.tool_started")], ["read_skill"])
         self.assertEqual(self.events("team.objective_completed"), [])
+
+    def test_scope_guidance_reaches_native_turn_without_removing_tools_or_requiring_reviews(self):
+        self.bind()
+        prompts = []
+        original = self.driver.tool_turn
+
+        def capture(**kwargs):
+            prompts.append(kwargs["prompt"])
+            return original(**kwargs)
+
+        self.driver.tool_turn = capture
+        self.driver.steps[self.manager] = [test_simple_team.turn("", ("reply_to_customer", {
+            "text": "先按两个人、两小时和预算整理清单，不额外做软件项目。"}))]
+        self.rt.team.receive(self.task, "只讨论社区活动清单的最小范围", request_id="scope-guidance-001")
+        self.run_ok()
+        self.assertEqual(len(prompts), 1)
+        self.assertIn("按当前任务类型和顾客范围选择方法", prompts[0])
+        self.assertIn("不把偏好或假设升级成新验收条件", prompts[0])
+        self.assertIn("workspace_run", {tool["name"] for tool in self.driver.calls[0]["tools"]})
+        self.assertEqual([e.payload["name"] for e in self.events("team.tool_started")], ["reply_to_customer"])
+        self.assertEqual(self.events("team.objective_completed"), [])
+        self.assertEqual(self.events("team.review_requested"), [])
 
     def test_invalid_unicode_in_unused_metadata_does_not_break_ordinary_model_context(self):
         self.register()
