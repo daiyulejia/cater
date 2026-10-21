@@ -155,8 +155,9 @@ cater --drivers examples/openai_compatible_driver_config.json web
 ```
 
 不把密钥写进 JSON、角色卡或任务消息。该 adapter 只把 provider 已返回的
-`usage.total_tokens` 作为真实用量；缺失时会明确标记为未知。它不做不可靠的
-“存活探针”，首次实际任务才是端点、模型名和账户权限的完整验证。
+合法 `usage.total_tokens` 作为已报告总量，原生调用另保留可用的输入、输出与缓存明细；
+缺失时明确标记为未知，不把缓存或推理子集再次加入总数。它不会为了刷新状态调用模型探针，
+首次实际任务才会验证端点、模型与本次调用能力，不能据此保证未来请求、余额或交付质量。
 
 可在 `openai_compatible` 通道中选配 `"max_tokens": 4096`，或在供应商要求时使用
 `"max_completion_tokens": 4096`，两者只能设置一个，值必须为正整数。
@@ -204,12 +205,16 @@ python -B -m cater --db :memory: --roles examples/single_api_roles.json --driver
 
 准备实际接入时，将 `endpoint` 换成供应商公开的完整 Chat Completions HTTPS URL（通常以
 `/v1/chat/completions` 结尾，不能只填 base URL），将 `model` 换成模型 ID；模板的 `.invalid`
-地址不可用于真实请求。驱动使用 Bearer 认证，读取 `choices[0].message.content`，模型需按提示返回
-Cater 所需的 JSON。在本机安全设置 `CATER_SHARED_API_KEY`，再启动：
+地址不可用于真实请求。驱动使用 Bearer 认证；在本机安全设置 `CATER_SHARED_API_KEY`，再启动：
 
 ```powershell
 python -B -m cater --roles examples/single_api_roles.json --drivers examples/single_api_driver_config.json web --port 8766
 ```
+
+网页的消息协作使用原生工具调用：Cater 发送工具定义，读取模型的 `tool_calls`，
+由宿主执行获准动作并将回执交回模型；最终对话可以是自然文本，不要求顾客手写 JSON。
+所选模型和服务商必须支持这一协议，只支持文本聊天或返回正文中的代码并不等于能实际执行工具。
+旧式结构化规划等入口仍使用 `complete` 的 JSON 响应契约，两种执行方式不要混淆。
 
 密钥不要写入 JSON、仓库或聊天。实际运行任务会调用模型并可能收费，第一轮接入验收见
 [模型试跑说明](../docs/model-trial.zh-CN.md)。本模板未设置 `token_budget`；如自行添加，

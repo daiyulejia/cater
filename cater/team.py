@@ -6,8 +6,11 @@ import io
 import json
 import uuid
 import zipfile
+from collections.abc import Mapping
 from contextlib import closing, contextmanager, nullcontext
 from dataclasses import asdict
+from inspect import getattr_static
+from types import WrapperDescriptorType
 
 from .artifacts import MAX_CONTENT_BYTES, normalize_deliverables, safe_filename
 from .activity_owner import activity_owner
@@ -35,6 +38,55 @@ LOCAL_EVENT_CONTRACT = {"version": 1, "kind": "atomic_local_events", "receipt": 
 EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", PROJECT_RESTORE, "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "browser_check", MCP_CALL})
 PAUSED_TOOLS = frozenset({"read_artifact", "read_receipts", "read_messages", "read_background", "read_checkpoint",
                           "read_delivery", "list_skills", "read_skill", "wait_for_reply", "reply_to_customer", PROJECT_HISTORY})
+_MISSING_RETURN_FIELD = object()
+_DYNAMIC_RETURN_FIELD = object()
+
+
+def _model_return_field(value, name):
+    accessor = getattr_static(type(value), "__getattribute__", None)
+    if not isinstance(accessor, WrapperDescriptorType):
+        return _DYNAMIC_RETURN_FIELD
+    field = getattr_static(value, name, _MISSING_RETURN_FIELD)
+    if field is _MISSING_RETURN_FIELD:
+        return (_DYNAMIC_RETURN_FIELD if getattr_static(type(value), "__getattr__", None) is not None
+                else _MISSING_RETURN_FIELD)
+    return (_DYNAMIC_RETURN_FIELD if getattr_static(type(field), "__get__", None) is not None else field)
+
+
+def _usable_model_return(turn):
+    """Inspect stored fields for health without invoking response descriptors."""
+    try:
+        fields = [_model_return_field(turn, name) for name in ("text", "calls", "meta", "tokens")]
+        if any(field is _DYNAMIC_RETURN_FIELD for field in fields):
+            return None
+        if any(field is _MISSING_RETURN_FIELD for field in fields):
+            return False
+        text, calls, meta, _tokens = fields
+        meta = {} if meta is None else meta
+        if not isinstance(text, str) or not isinstance(calls, (list, tuple)) or not isinstance(meta, Mapping):
+            return False
+        # Custom mappings may execute code on reads; observation must not consume it.
+        if type(meta) is not dict:
+            return None
+        if meta.get("incomplete"):
+            return False
+        if calls:
+            message = _model_return_field(turn, "message")
+            if message is _DYNAMIC_RETURN_FIELD:
+                return None
+            if message is _MISSING_RETURN_FIELD:
+                return False
+        for call in calls:
+            fields = [_model_return_field(call, name) for name in ("id", "name", "arguments")]
+            if any(field is _DYNAMIC_RETURN_FIELD for field in fields):
+                return None
+            if not (isinstance(fields[0], str) and isinstance(fields[1], str) and isinstance(fields[2], dict)):
+                return False
+        return True
+    except WorkConflict:
+        return None
+    except Exception:
+        return False
 
 
 class _RejectedLocalTool(Exception):
@@ -1387,6 +1439,7 @@ class TeamService:
                 try:
                     turn = driver.tool_turn(role=role.role, prompt=prompt, history=wire_history, tools=tools)
                 except DriverProtocolError as error:
+                    self.rt._driver_health.record_rejection(role.driver)
                     failure["context_basis"] = basis
                     failure_stage = "response_handling"
                     counts = tool_protocol_error_usage(error)
@@ -1396,11 +1449,20 @@ class TeamService:
                             **counts, "request_sizes": request_sizes, "context_basis": basis, "response_status": "protocol_error",
                             **request_correction})
                     raise
-                except Exception:
+                except Exception as error:
+                    if not isinstance(error, WorkConflict):
+                        self.rt._driver_health.record_rejection(role.driver)
                     failure["context_basis"] = basis
                     raise
                 failure_stage = "response_handling"
+                usable_return = _usable_model_return(turn)
+                if usable_return is False:
+                    self.rt._driver_health.record_rejection(role.driver)
                 meta = turn.meta or {}
+                if usable_return is True and meta.get("contained"):
+                    self.rt._driver_health.record_rejection(role.driver)
+                elif usable_return is True:
+                    self.rt._driver_health.record_success(role.driver)
                 response_diagnostics = contained_response_diagnostics(meta)
                 model_call = self.rt.log.emit(type="team.model_called", actor=HOST, task_id=task_id, payload={
                     "role": role.id, "driver": role.driver, "run_id": started.payload["run_id"],
