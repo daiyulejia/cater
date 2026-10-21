@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import TaskGraph from '../src/TaskGraph'
 import { layoutTaskGraph } from '../src/taskGraphLayout'
 import type { WorkState } from '../src/WorkItems'
-import type { TeamEvent, TeamState } from '../src/team'
+import type { TeamEvent, TeamState, TeamWithdrawal } from '../src/team'
 
 const actorText = (id: string) => ({ dev: '米寇', test: '三角' }[id] ?? id)
 const item = (id: string, depends_on: string[] = [], status = 'planned'): WorkState['items'][number] => ({
@@ -88,6 +88,75 @@ const nativeEvents: TeamEvent[] = [
 ]
 
 describe('native collaboration graph', () => {
+  it.each(['failed', 'running'])('撤回轮询保留真实 %s 运行、子工作、选择、焦点和缩放，图与列表详情一致', async status => {
+    const reason = `改用新的验收方向。${'保留已执行结果和独立子工作，等待核对。'.repeat(30)}\n<script>不得执行</script>`
+    const requester = '历史店长_已离开当前名单_abcdefghijklmnopqrstuvwx'
+    const withdrawal: TeamWithdrawal = { message_seq: 2, source_hash: 'a'.repeat(64), requester, sender: 'dev', recipient: 'test',
+      leader_id: requester, revision: 1, reason, run_id: 'withdraw-run', withdrawal_seq: 8 }
+    const events: TeamEvent[] = [{ ...nativeEvents[0], hash: withdrawal.source_hash, payload: { ...nativeEvents[0].payload, revision: 1 } },
+      ...nativeEvents.slice(1),
+      { seq: 4, type: 'team.message_received', actor: { id: 'test', kind: 'agent' },
+        payload: { kind: 'assignment', recipient: 'dev', text: '独立子工作', parent_assignment_seq: 2, revision: 1 } }]
+    const team = { ...nativeTeam, runs: [{ message_seq: 2, role: 'test', status, reason: '原运行原因' },
+      { message_seq: 4, role: 'dev', status: 'running' }] }
+    const props = { team, events, open: true, actorText, onOpenChange: vi.fn() }
+    const view = render(<TaskGraph {...props} />)
+    await waitFor(() => expect(document.querySelectorAll('.react-flow__edge')).toHaveLength(2))
+    const sourceButton = screen.getByRole('button', { name: /^委托 #2：/ })
+    expect((sourceButton.closest('.react-flow__node') as HTMLElement).style.pointerEvents).toBe('all')
+    sourceButton.focus()
+    fireEvent.click(sourceButton)
+    const panel = screen.getByRole('complementary', { name: '协作记录详情' })
+    const heading = within(panel).getByRole('heading', { name: '委托 #2' })
+    await waitFor(() => expect(document.activeElement).toBe(heading))
+    fireEvent.click(screen.getByRole('button', { name: '放大图谱' }))
+    await act(async () => { await new Promise(resolve => requestAnimationFrame(resolve)) })
+    const currentViewport = viewport()
+    const transform = currentViewport.style.transform
+    heading.focus()
+    view.rerender(<TaskGraph {...props} team={{ ...team, withdrawals: [withdrawal] }} />)
+    await waitFor(() => expect(document.querySelectorAll('.react-flow__edge')).toHaveLength(2))
+    expect(within(panel).getByText('工作已撤回')).toBeTruthy()
+    expect(within(panel).getByText(`撤回者：${requester}`)).toBeTruthy()
+    const reasonText = within(panel).getByText((_, element) => element?.tagName === 'P' && element.textContent === `原因：${reason}`)
+    expect(reasonText).toBeTruthy()
+    expect(within(panel).getByText('撤回事件 #8')).toBeTruthy()
+    expect(within(panel).getByText(status === 'failed' ? '消息处理失败' : '正在处理消息')).toBeTruthy()
+    expect(within(panel).getByText('原运行原因')).toBeTruthy()
+    expect(panel.querySelector('script')).toBeNull()
+    expect(reasonText.className).toBe('task-graph-record-text')
+    expect(document.activeElement).toBe(heading)
+    expect(document.querySelectorAll('.react-flow__node')).toHaveLength(3)
+    expect(viewport()).toBe(currentViewport)
+    expect(viewport().style.transform).toBe(transform)
+    expect(screen.getByRole('button', { name: /^委托 #2：.*工作已撤回/ }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: /^委托 #4：.*正在处理消息/ })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '协作列表' }))
+    const list = screen.getByRole('list', { name: '当前团队协作列表' })
+    expect(within(list).getAllByRole('listitem')).toHaveLength(3)
+    expect(within(list).getAllByText('工作已撤回')).toHaveLength(1)
+    fireEvent.click(within(list).getByRole('button', { name: /委托 #4/ }))
+    expect(within(panel).queryByText('撤回事件 #8')).toBeNull()
+    expect(within(panel).getAllByText('正在处理消息')).toHaveLength(2)
+    fireEvent.click(within(panel).getByRole('button', { name: '子委托 · 委托 #2' }))
+    expect(within(panel).getByText('撤回事件 #8')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '协作图' }))
+    expect(screen.getByRole('button', { name: /^委托 #2：/ }).getAttribute('aria-pressed')).toBe('true')
+    expect(viewport().style.transform).toBe(transform)
+  })
+
+  it.each([undefined, null, {}, [{ message_seq: 2 }]])('真实组件对缺失或异常撤回 %j 不冒称成功', async withdrawals => {
+    const team = { ...nativeTeam, withdrawals: withdrawals as TeamWithdrawal[] }
+    render(<TaskGraph team={team} events={nativeEvents} open actorText={actorText} onOpenChange={vi.fn()} />)
+    await waitFor(() => expect(document.querySelectorAll('.react-flow__node')).toHaveLength(2))
+    const panel = screen.getByRole('complementary', { name: '协作记录详情' })
+    expect(within(panel).getByText('已收到回报')).toBeTruthy()
+    expect(screen.queryByText('工作撤回')).toBeNull()
+    expect(screen.queryAllByText('工作已撤回')).toHaveLength(0)
+    fireEvent.click(screen.getByRole('button', { name: '协作列表' }))
+    expect(within(screen.getByRole('list', { name: '当前团队协作列表' })).getByText('已收到回报')).toBeTruthy()
+  })
+
   it('renders only real events and named relations in read-only React Flow with list, details and zoom', async () => {
     const view = render(<TaskGraph team={nativeTeam} events={nativeEvents} open actorText={actorText} onOpenChange={vi.fn()} />)
     await waitFor(() => expect(document.querySelectorAll('.react-flow__edge')).toHaveLength(1))

@@ -69,6 +69,7 @@ export function TeamGraphBody({ team, events, actorText, portrait }: {
         </div>
         <div className="task-graph-canvas" hidden={view !== 'graph'} role="region" aria-label="当前团队协作图">
           <ReactFlow<TeamNode> nodes={nodes} edges={edges} nodeTypes={nodeTypes} fitView fitViewOptions={fitOptions}
+            onNodeClick={(_, node) => choose(node.id)}
             minZoom={0.1} maxZoom={2} nodesDraggable={false} nodesConnectable={false} edgesReconnectable={false}
             elementsSelectable={false} nodesFocusable={false} edgesFocusable={false} deleteKeyCode={null}
             selectionKeyCode={null} multiSelectionKeyCode={null} selectNodesOnDrag={false} selectionOnDrag={false}
@@ -93,6 +94,11 @@ export function TeamGraphBody({ team, events, actorText, portrait }: {
         <dl className="task-graph-people"><div><dt>发送者</dt><dd>{portrait?.(selected.sender, 'sm')}{actorText(selected.sender)}</dd></div>
           <div><dt>接收者</dt><dd>{selected.recipient ? <>{portrait?.(selected.recipient, 'sm')}{actorText(selected.recipient)}</> : '当前记录未包含'}</dd></div></dl>
         <section><h4>记录原文</h4><p className="task-graph-record-text">{selected.text || '内容未包含在当前记录中'}</p></section>
+        {selected.withdrawal && <section><h4>工作撤回</h4>
+          <p className="task-graph-record-text">撤回者：{actorText(selected.withdrawal.requester)}</p>
+          <p className="task-graph-record-text">原因：{selected.withdrawal.reason}</p>
+          <p>撤回事件 #{selected.withdrawal.withdrawal_seq}</p>
+        </section>}
         {selected.processing && <section><h4>消息处理</h4><p>{selected.processing}</p>{selected.reason && <p className="task-graph-record-text">{selected.reason}</p>}</section>}
         {selected.artifacts && <section><h4>本次复核版本</h4><ul>{selected.artifacts.map(artifact => <li key={artifact.seq}>{artifact.filename} · 成果 #{artifact.seq}</li>)}</ul></section>}
         <section><h4>关联记录</h4>{related.length ? <ul className="task-graph-related">{related.map(edge => {

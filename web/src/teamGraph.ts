@@ -1,10 +1,11 @@
 import { isTeamHost, teamContinuationSource, teamRuns, teamRunStatus } from './team'
-import type { TeamEvent, TeamState } from './team'
+import type { TeamEvent, TeamState, TeamWithdrawal } from './team'
 
 export type TeamGraphEntry = {
   id: string; seq: number; kind: string; sender: string; recipient: string
   text: string; status: string; processing?: string; reason?: string; historical: boolean
   artifacts?: { seq: number; filename: string }[]
+  withdrawal?: TeamWithdrawal
 }
 export type TeamGraphEdge = { id: string; source: string; target: string; label: string }
 
@@ -17,6 +18,23 @@ export const teamGraphKinds: Record<string, string> = {
 }
 const reviewStatuses: Record<string, string> = {
   pending: '待复核', changes_requested: '待修复', approved: '该版本复核通过', outdated: '版本已变化，待重新复核', stale: '历史复核',
+}
+
+function messageWithdrawal(event: TeamEvent, rows: unknown): TeamWithdrawal | undefined {
+  if (event.type !== 'team.message_received' || event.actor.kind !== 'agent'
+    || !['assignment', 'message'].includes(text(event.payload.kind)) || !Array.isArray(rows)) return undefined
+  const matches = rows.filter(row => record(row).message_seq === event.seq)
+  if (matches.length !== 1) return undefined
+  const row = record(matches[0])
+  // The server verifies authority; here we only bind its projection to the exact original message.
+  if (!Number.isSafeInteger(row.message_seq) || Number(row.message_seq) <= 0
+    || !Number.isSafeInteger(row.withdrawal_seq) || Number(row.withdrawal_seq) <= event.seq
+    || !Number.isSafeInteger(row.revision) || Number(row.revision) < 0 || row.revision !== event.payload.revision
+    || !['source_hash', 'requester', 'sender', 'recipient', 'leader_id', 'reason', 'run_id'].every(key => text(row[key]).trim())
+    || !/^[a-f0-9]{64}$/.test(text(row.source_hash))
+    || row.sender !== event.actor.id || row.recipient !== event.payload.recipient
+    || (event.hash !== undefined && row.source_hash !== event.hash)) return undefined
+  return matches[0] as TeamWithdrawal
 }
 
 // Edges describe recorded communication, never task prerequisites or inferred role hierarchy.
@@ -123,13 +141,15 @@ export function projectTeamGraph(team: TeamState, input: readonly TeamEvent[]) {
       : run && ['failed', 'blocked', 'interrupted', 'uncertain', 'cancelled'].includes(run.status ?? '') ? teamRunStatus(run.status)
       : replies.has(event.seq) ? '已收到回报' : run ? teamRunStatus(run.status) : '消息等待处理'
     const artifacts = review || decision ? request.payload.artifacts : undefined
+    const withdrawal = messageWithdrawal(event, team.withdrawals)
     return {
       id: id(event.seq), seq: event.seq, kind,
       sender: review ? text(p.author) : decision ? text(p.reviewer) : event.actor.id,
       recipient: review ? text(p.reviewer) : decision ? text(request.payload.author) : text(p.recipient),
       text: review ? text(p.instruction) : decision ? text(p.feedback) : text(p.text),
-      status: review || decision ? superseded ? '已被再次复核替代' : reviewStatuses[reviewStatus] ?? '复核状态待确认' : messageStatus,
+      status: withdrawal ? '工作已撤回' : review || decision ? superseded ? '已被再次复核替代' : reviewStatuses[reviewStatus] ?? '复核状态待确认' : messageStatus,
       historical, processing: run ? teamRunStatus(run.status) : undefined, reason: run?.reason,
+      withdrawal,
       artifacts: Array.isArray(artifacts) ? artifacts.flatMap(value => {
         const artifact = record(value)
         return typeof artifact.seq === 'number' && typeof artifact.filename === 'string' ? [{ seq: artifact.seq, filename: artifact.filename }] : []

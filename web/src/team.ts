@@ -27,6 +27,19 @@ export type TeamReview = {
   revision: number
 }
 
+export type TeamWithdrawal = {
+  message_seq: number
+  source_hash: string
+  requester: string
+  sender: string
+  recipient: string
+  leader_id: string
+  revision: number
+  reason: string
+  run_id: string
+  withdrawal_seq: number
+}
+
 export type TeamState = {
   enabled: boolean
   objective: string
@@ -36,6 +49,7 @@ export type TeamState = {
   runs: TeamRun[]
   assignments: TeamAssignment[]
   reviews?: TeamReview[]
+  withdrawals?: TeamWithdrawal[]
   checkpoint: string
   revision: number
 }
@@ -89,11 +103,13 @@ export function resolveTeamTask<T extends { goal: string; status: string; team?:
     team: { ...detail.team, ...summary.team, objective: summary.goal, runs,
       effects_pending_count: summary.team.effects_pending_count,
       reviews: newObjective ? [] : detail.team.reviews,
+      withdrawals: newObjective ? undefined : detail.team.withdrawals,
       checkpoint: newObjective ? '新目标已收到，详细记录正在同步。' : '详细记录正在同步。' } }
 }
 
 export type TeamEvent = {
   seq: number
+  hash?: string
   type: string
   actor: { id: string; kind?: string; role?: string }
   payload: Record<string, unknown>

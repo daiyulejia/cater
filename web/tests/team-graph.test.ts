@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest'
 import { projectTeamGraph } from '../src/teamGraph'
-import type { TeamEvent, TeamState } from '../src/team'
+import type { TeamEvent, TeamState, TeamWithdrawal } from '../src/team'
 
 const state: TeamState = { enabled: true, objective: '入口', status: 'running', pending_count: 0, runs: [], assignments: [], checkpoint: '', revision: 1 }
 const event = (seq: number, type: string, payload: Record<string, unknown>, actor = { id: 'team', kind: 'system', role: 'team' }): TeamEvent => ({ seq, type, payload, actor })
@@ -186,4 +186,91 @@ test('复核结论必须属于实际请求、指定复核者和同一轮根记�
 test('没有真实事件时不拿旧 assignments 或 runs 伪造节点', () => {
   expect(projectTeamGraph({ ...state, assignments: [{ seq: 2, sender: 'manager', recipient: 'dev' }], runs: [{ message_seq: 2, status: 'running' }] }, []))
     .toEqual({ nodes: [], edges: [] })
+})
+
+const withdrawal: TeamWithdrawal = { message_seq: 2, source_hash: 'a'.repeat(64), requester: 'old-leader', sender: 'manager',
+  recipient: 'dev', leader_id: 'old-leader', revision: 1, reason: '方向已调整，保留已有结果', run_id: 'withdraw-run', withdrawal_seq: 8 }
+const withdrawnState = (withdrawals: unknown): TeamState => ({ ...state, withdrawals: withdrawals as TeamWithdrawal[] })
+
+test.each(['assignment', 'message'])('验证过的撤回只标记原%s，不删除边、回报、接续或独立子工作', kind => {
+  const events = [message(2, 'manager', 'dev', kind),
+    message(3, 'dev', 'test', 'assignment', { parent_assignment_seq: 2 }),
+    message(4, 'manager', 'dev', 'continuation', { continue_assignment_seq: 2, visible: true }),
+    message(9, 'dev', 'manager', 'report', { reply_to: 2 })]
+  const team = { ...withdrawnState([withdrawal]), runs: [{ message_seq: 3, role: 'test', status: 'running' }] }
+  const original = structuredClone({ team, events })
+  const graph = projectTeamGraph(team, events)
+  expect(graph.nodes[0]).toMatchObject({ status: '工作已撤回', text: '原文 2', withdrawal })
+  expect(graph.nodes.map(node => node.seq)).toEqual([2, 3, 4, 9])
+  expect(graph.edges).toEqual(projectTeamGraph(state, events).edges)
+  expect(graph.nodes.slice(1).map(node => node.status)).toEqual(['正在处理消息', '接续指令已投递', '回报已投递'])
+  expect(graph.nodes.slice(1).every(node => node.withdrawal === undefined)).toBe(true)
+  expect(projectTeamGraph(team, [...events].reverse())).toEqual(graph)
+  expect({ team, events }).toEqual(original)
+})
+
+test.each(['failed', 'running', 'interrupted', 'uncertain', 'cancelled', 'completed'])('撤回与真实历史运行 %s 并列，原因不互相覆盖', status => {
+  const events = [message(2, 'manager', 'dev'),
+    event(3, 'team.run_finished', { message_seq: 2, role: 'dev', status, reason: '原运行原因' }),
+    message(9, 'dev', 'manager', 'report', { reply_to: 2 })]
+  const original = projectTeamGraph(state, events)
+  const node = projectTeamGraph(withdrawnState([withdrawal]), events).nodes[0]
+  expect(node.status).toBe('工作已撤回')
+  expect(node.processing).toBe(original.nodes[0].processing)
+  expect(node.reason).toBe('原运行原因')
+  expect(node.withdrawal?.reason).toBe(withdrawal.reason)
+})
+
+test('历史撤回按原消息 revision 对齐，不按当前目标、角色名或组织名单重新授权', () => {
+  const events = [message(2, 'manager', 'dev'), event(10, 'team.objective_updated', { goal: '新目标' }),
+    message(11, 'manager', 'dev', 'assignment', { revision: 10 })]
+  const graph = projectTeamGraph({ ...withdrawnState([withdrawal]), revision: 10 }, events)
+  expect(graph.nodes[0]).toMatchObject({ status: '工作已撤回', historical: true, withdrawal })
+  expect(graph.nodes[1]).toMatchObject({ status: '消息等待处理', historical: false })
+  expect(graph.nodes[1].withdrawal).toBeUndefined()
+})
+
+test.each([undefined, null, {}, 'withdrawn', [null], [false], [[]], [], [withdrawal, withdrawal]])(
+  '缺失或异常撤回快照 %j 不冒称成功', rows => {
+    expect(projectTeamGraph(withdrawnState(rows), [message(2, 'manager', 'dev')]).nodes[0])
+      .toMatchObject({ status: '消息等待处理', withdrawal: undefined })
+  })
+
+test.each(Object.keys(withdrawal))('缺少撤回字段 %s 不冒称成功', key => {
+  const incomplete = { ...withdrawal } as Record<string, unknown>
+  delete incomplete[key]
+  expect(projectTeamGraph(withdrawnState([incomplete]), [message(2, 'manager', 'dev')]).nodes[0].withdrawal).toBeUndefined()
+})
+
+test.each([
+  { message_seq: '2' }, { message_seq: 0 }, { message_seq: 2.5 }, { message_seq: 404 },
+  { source_hash: 'bad' }, { source_hash: false }, { requester: '' }, { requester: {} }, { sender: 'other' },
+  { recipient: 'other' }, { leader_id: 1 }, { leader_id: ' ' }, { revision: '1' }, { revision: 2 },
+  { revision: -1 }, { revision: Number.NaN }, { reason: ' ' }, { reason: 1 }, { run_id: null },
+  { run_id: '' }, { withdrawal_seq: 2 }, { withdrawal_seq: 1 }, { withdrawal_seq: '8' },
+  { withdrawal_seq: Number.POSITIVE_INFINITY }, { withdrawal_seq: Number.MAX_SAFE_INTEGER + 1 },
+])('撤回数据 %j 不完整或不匹配时保留原状态', change => {
+  const node = projectTeamGraph(withdrawnState([{ ...withdrawal, ...change }]), [message(2, 'manager', 'dev')]).nodes[0]
+  expect(node.status).toBe('消息等待处理')
+  expect(node.withdrawal).toBeUndefined()
+})
+
+test('原消息带来源哈希时须一致；不要求再次下载撤回事件或工具回执', () => {
+  const source = { ...message(2, 'manager', 'dev'), hash: withdrawal.source_hash }
+  expect(projectTeamGraph(withdrawnState([withdrawal]), [source]).nodes[0].status).toBe('工作已撤回')
+  expect(projectTeamGraph(withdrawnState([withdrawal]), [{ ...source, hash: 'b'.repeat(64) }]).nodes[0].withdrawal).toBeUndefined()
+})
+
+test.each(['report', 'progress', 'notification', 'continuation'])('撤回不能扩散到 %s', kind => {
+  expect(projectTeamGraph(withdrawnState([withdrawal]), [message(2, 'manager', 'dev', kind, { visible: true })])
+    .nodes[0].withdrawal).toBeUndefined()
+})
+
+test('顾客消息、缺少原消息 revision、assignment状态与裸撤回事件都不能代替 validated withdrawals', () => {
+  const rows = withdrawnState([withdrawal])
+  expect(projectTeamGraph(withdrawnState([{ ...withdrawal, sender: 'human' }]), [message(2, 'human', 'dev')]).nodes[0].withdrawal).toBeUndefined()
+  expect(projectTeamGraph(rows, [message(2, 'manager', 'dev', 'assignment', { revision: undefined })]).nodes[0].withdrawal).toBeUndefined()
+  const events = [message(2, 'manager', 'dev'), event(8, 'team.assignment_withdrawn', withdrawal)]
+  expect(projectTeamGraph({ ...state, assignments: [{ seq: 2, status: 'withdrawn' }] }, events).nodes[0].status).toBe('消息等待处理')
+  expect(projectTeamGraph(rows, [events[1]])).toEqual({ nodes: [], edges: [] })
 })
