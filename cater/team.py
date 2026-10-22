@@ -1403,11 +1403,15 @@ class TeamService:
         awaiting_customer = False
         revision = self.view(task_id)["revision"]
         assignment = self._waiting_assignment(task_id, message, role)
+        budget_supervision = (message.payload.get("trigger") == "turn_boundary"
+                              and self.recovery.budget_boundary(message, self.rt.log.read(task_id=task_id)))
         try:
             if (message.actor == Actor.human() and isinstance(message.payload.get("questionnaire"), dict)
                     and message.payload.get("revision") != revision):
                 raise WorkConflict("这份补充对应的目标已变化，旧回答不会启动旧方案操作。")
             if message.payload.get("kind") == "recovery" and not self.recovery.current(task_id, message):
+                if budget_supervision and self._pending_operations(task_id):
+                    failure["admission_not_started"] = True
                 raise WorkConflict("恢复通知对应的目标、控制或工作目录已变化，不再启动旧工作。")
             if message.actor.kind == "agent" and (
                     message.payload.get("revision") != revision
@@ -1505,6 +1509,10 @@ class TeamService:
                         raise WorkConflict("复核状态或工作范围已变化，或存在待核对操作，未继续补登记请求。")
                     self._current(task_id, started, role, revision)
                 try:
+                    if budget_supervision and self._pending_operations(task_id):
+                        if not invocation_started:
+                            failure["admission_not_started"] = True
+                        raise WorkConflict("监督请求前出现未核对操作，先核对实际影响，不重放旧工作。")
                     invocation_started = True
                     turn = driver.tool_turn(role=role.role, prompt=prompt, history=wire_history, tools=tools)
                 except DriverProtocolError as error:
@@ -1733,6 +1741,8 @@ class TeamService:
             failure = {**failure, "interruption_kind": "review_decision_missing"}
         scope = (self.recovery.boundary_scope(task_id, message, started, last_scope)
                  if assignment is None and failure.get("interruption_kind") == "turn_boundary" else None)
+        if scope is not None and failure.get("boundary_reason") == "execution_budget" and self._pending_operations(task_id):
+            scope = None
         if scope is not None:
             failure = {**failure, "recovery_of": started.seq, "recovery_scope": scope}
         finished = self.rt.log.emit(type="team.run_finished", task_id=task_id, actor=HOST,

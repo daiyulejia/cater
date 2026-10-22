@@ -78,12 +78,68 @@ class TeamRecovery:
         events = self.rt.log.read(task_id=task_id)
         if not self.is_message(message, events):
             return False
+        if self.budget_boundary(message, events) and self.team._pending_operations(task_id):
+            return False
         scope = self.scope(task_id, events=events)
         return (scope["control_state"] == "running" and not scope["done"]
                 and _same_scope(message.payload.get("scope"), scope)
                 and not self.superseded(task_id, message, events=events))
 
+    @staticmethod
+    def budget_boundary(message, events):
+        return (message.payload.get("trigger") == "turn_boundary"
+                and any(event.seq == message.payload.get("interrupted_seq") and event.actor == HOST
+                        and event.type == "team.run_finished"
+                        and event.payload.get("boundary_reason") == "execution_budget" for event in events))
+
     def unhandled_inputs(self, task_id, events):
+        return self._unhandled_customer_inputs(task_id, events) | self._unhandled_budget_supervision(task_id, events)
+
+    def _unhandled_budget_supervision(self, task_id, events):
+        candidates = [e for e in events if e.type == "team.message_received"
+                      and e.payload.get("kind") == "recovery" and self.budget_boundary(e, events)]
+        if not candidates:
+            return set()
+        starts, finishes, entered = {}, {}, set()
+        for event in events:
+            p = event.payload
+            if (event.actor != HOST or not isinstance(p.get("run_id"), str)
+                    or not p["run_id"].strip()):
+                continue
+            if event.type in {"team.external_run_started", "team.model_called", "team.tool_started"}:
+                entered.add(p["run_id"])
+            if type(p.get("message_seq")) is not int or not isinstance(p.get("role"), str):
+                continue
+            if event.actor == HOST and event.type == "team.run_started":
+                starts.setdefault(p.get("message_seq"), []).append(event)
+            elif event.actor == HOST and event.type == "team.run_finished":
+                finishes[(p.get("run_id"), p.get("message_seq"), p.get("role"))] = event
+        scope = self.scope(task_id, events=events)
+        unhandled = set()
+        for source in candidates:
+            if not self.current(task_id, source):
+                continue
+            attempts = starts.get(source.seq, [])
+            for start in attempts:
+                p = start.payload
+                finish = finishes.get((p.get("run_id"), p.get("message_seq"), p.get("role")))
+                if (finish is None or not source.seq < start.seq < finish.seq
+                        or type(p.get("message_seq")) is not int or p["message_seq"] != source.seq
+                        or p.get("role") != source.payload["recipient"]
+                        or not isinstance(p.get("run_id"), str) or not p["run_id"].strip()
+                        or p["run_id"] in entered or finish.payload.get("status") != "interrupted"
+                        or finish.payload.get("admission_not_started") is not True
+                        or not _same_scope(p.get("recovery_contract"), RECOVERY_CONTRACT)
+                        or not _same_scope(p.get("recovery_scope"), scope)
+                        or type(p.get("revision")) is not int or p["revision"] != scope["revision"]
+                        or p.get("control_seq") != scope["control_seq"]):
+                    break
+            else:
+                if attempts:
+                    unhandled.add(source.seq)
+        return unhandled
+
+    def _unhandled_customer_inputs(self, task_id, events):
         """A control transition must not consume a customer input before admission."""
         control = next((e for e in reversed(events)
                         if e.type == "task.execution_controlled" and e.actor == Actor.human()), None)

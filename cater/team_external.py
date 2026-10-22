@@ -27,6 +27,14 @@ def driver_fingerprint(driver):
     return hashlib.sha256(json_utf8(data, sort_keys=True, allow_nan=False)).hexdigest()
 
 
+def _recent_tool_progress(state, timeout, calls):
+    facts = dict(state.observations)
+    progress, last, end = (facts.get(key) for key in ("progress_receipts", "last_progress_ms", "failure_ms"))
+    return (type(timeout) in {int, float} and 0 < timeout <= 3600
+            and all(type(value) is int for value in (progress, last, end))
+            and 0 < progress <= calls and 0 <= last <= end and end - last <= timeout * 1000)
+
+
 class TeamExternal:
     def __init__(self, team):
         self.team, self.rt = team, team.rt
@@ -97,9 +105,12 @@ class TeamExternal:
         stop_kind, delivered_text = None, ""
         public_chars = 0
         calls = 0
+        admission_blocked = False
         last_check = 0.0
         terminal = "failed"
         observer = self.progress
+        budget_supervision = (message.payload.get("trigger") == "turn_boundary"
+                              and self.team.recovery.budget_boundary(message, self.rt.log.read(task_id=task_id)))
 
         def observe(update):
             if update is not None and stop_kind is not None:
@@ -130,7 +141,7 @@ class TeamExternal:
             rules = basis["rule_fingerprint"]
 
             def check(force=False):
-                nonlocal last_check
+                nonlocal last_check, admission_blocked
                 if stop_kind is not None:
                     raise ExternalYield(stop_kind)
                 now = time.monotonic()
@@ -140,6 +151,10 @@ class TeamExternal:
                         and now - last_check < 0.2):
                     return
                 self.team._current(task_id, started, role, revision)
+                if budget_supervision and any(row.get("started_seq") != (attempt.seq if attempt is not None else None)
+                                             for row in self.team._pending_operations(task_id)):
+                    admission_blocked = attempt is None
+                    raise WorkConflict("监督接续前出现了未核对操作，先核对实际影响，不启动或继续旧范围工作。")
                 if getattr(driver, "closed", False):
                     raise WorkConflict("外部通道正在关闭，本轮停止接收新操作。")
                 if self.team._revision(task_id) != revision:
@@ -308,6 +323,8 @@ class TeamExternal:
                     failure['launch_directory_settlement_error'] = type(exc).__name__
         except WorkConflict as exc:
             status, reason = "interrupted", str(exc)
+            if admission_blocked:
+                failure["admission_not_started"] = True
             if attempt is None and self.rt.execution_control.view(task_id)["seq"] != started.payload["control_seq"]:
                 failure["admission_not_started"] = True
         except Exception as exc:
@@ -326,6 +343,26 @@ class TeamExternal:
             failure = {**failure, **details,
                        "external_observations": dict(run.state.observations) if run is not None else {},
                        "failure_stage": (run.state.failure_phase or run.state.phase) if run is not None else "setup"}
+            from .external_agent import QoderAcpDriver
+            if (type(driver) is QoderAcpDriver and type(exc) is ExternalRunLimit and exc.limit == "total"
+                    and stop_kind is None and run is not None and run.state.prompt_attempted is True
+                    and run.state.cleanup_complete is True and not run.state.cancel_failed
+                    and not any(key in failure for key in ("revocation_error", "external_settlement_error",
+                                                          "model_receipt_error", "launch_directory_settlement_error"))
+                    and _recent_tool_progress(run.state, driver.timeout, calls)):
+                try:
+                    check(force=True)
+                    scope = (self.team.recovery.run_scope(task_id, started, observed=last_scope)
+                             if assignment is not None else
+                             self.team.recovery.boundary_scope(task_id, message, started, last_scope))
+                    if scope is not None and not self.team._pending_operations(task_id):
+                        status = "interrupted"
+                        reason = (f"{role.name}本轮达到单次执行预算，已有成果与回执已保存；"
+                                  "从新的监督检查点核对并继续剩余工作，不重放旧请求。")
+                        failure.update(interruption_kind="turn_boundary", boundary_reason="execution_budget")
+                except (WorkConflict, sqlite3.Error, OSError):
+                    # A changed control/scope is not a grant to resume stale work.
+                    pass
             if code != "execution_budget":
                 self.rt._driver_health.record_failure(role.driver)
         finally:
