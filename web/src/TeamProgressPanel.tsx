@@ -11,6 +11,7 @@ import { NativeMcpReceipt } from './NativeMcpReceipt'
 import { NativeProjectHistoryReceipt } from './NativeProjectHistoryReceipt'
 import { NativeProjectRestoreReceipt } from './NativeProjectRestoreReceipt'
 import { NativeArtifactReceipt } from './NativeArtifactReceipt'
+import { NativeArtifactVersionsReceipt } from './NativeArtifactVersionsReceipt'
 import { nativeArtifactReceiptStatus } from './conversationActivityState'
 import { isFrozenArchiveReceipt, nativeFrozenArchiveReceiptStatus, teamToolReceipt } from './conversationActivityState'
 import { NativeFrozenArchiveReceipt } from './NativeFrozenArchiveReceipt'
@@ -143,6 +144,7 @@ function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean
     {reason && <p>{reason}</p>}
     {output && <pre className="max-h-48 overflow-auto whitespace-pre-wrap font-mono text-[11px]">{output}</pre>}
     <CommandOutputs stdout={result.stdout} stderr={result.stderr} limit={full ? undefined : 800} />
+    <NativeArtifactVersionsReceipt event={event} collapsed />
     {(result.truncated === true || stdout.truncated === true || stderr.truncated === true || result.complete === false || stdout.complete === false || stderr.complete === false) && <p>回执内容不完整。</p>}
   </div>
 }

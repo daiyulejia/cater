@@ -68,7 +68,9 @@ class TeamBrowser:
     def __init__(self, team):
         self.team, self.rt = team, team.rt
 
-    def _files(self, task_id, seqs):
+    def _files(self, task_id, seqs, *, historical=False):
+        if type(historical) is not bool:
+            raise BrowserInputError("版本选择模式无效。")
         if (not isinstance(seqs, list) or not 1 <= len(seqs) <= 128
                 or any(type(seq) is not int or seq < 1 for seq in seqs) or len(set(seqs)) != len(seqs)):
             raise BrowserInputError("请选择一至128份不重复的本群已发布文件。")
@@ -83,10 +85,12 @@ class TeamBrowser:
         selected = []
         for seq in seqs:
             event = by_seq.get(seq)
-            if event is None or latest.get(event.payload["filename"]) != seq:
+            if event is None:
+                raise BrowserInputError("文件必须由本群已登记成员发布；请核对成果序号与来源。")
+            if not historical and latest.get(event.payload["filename"]) != seq:
                 raise BrowserInputError("文件必须是本群当前已发布版本；请读取最新成果序号后重试。")
             p = event.payload
-            if len(aliases[unicodedata.normalize("NFC", p["filename"]).casefold()]) != 1:
+            if not historical and len(aliases[unicodedata.normalize("NFC", p["filename"]).casefold()]) != 1:
                 raise BrowserInputError("本群存在大小写或Unicode等价的不同文件名，无法确定同一解压目录的版本；请改用无歧义文件名。")
             if p.get("format") == "archive":
                 from .workspace_archive import validate_manifest

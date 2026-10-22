@@ -108,6 +108,14 @@ python -m cater --drivers drivers.json --roles roles.json --workspaces workspace
 
 工程清单中的 `executable` 标记会保留在 `checked_files`；POSIX 上还原并核对执行位。Windows 不提供相同的权限位语义，回执的 `executable_flags_checked` 为 `false`，不能据此声明已验证 POSIX 直接执行行为。
 
+需要用同一批输入比较确切旧新版时，可改用 `artifact_versions`，与 `artifact_seqs` 互斥。例如 `{"command":"python","args":["-"],"stdin":"...比较代码...","cwd":".","artifact_versions":[{"artifact_seq":123,"directory":"before"},{"artifact_seq":124,"directory":"after"}]}` 会将两个版本分别放入独立目录。若 ZIP 原成员是 `package/main.py`，实际副本路径就是 `before/package/main.py` 与 `after/package/main.py`。文本成果也保留原文件名；不必手抄旧源码、改成果名或猜临时绝对路径。
+
+这个显式模式允许本群同名历史版本，不放松原 `artifact_seqs` 或浏览器检查的最新版本要求。每个序号只选一次；目录必须是独立的单层便携名称，拒绝受保护名称、路径越界及大小写或 Unicode 等价冲突。所有版本合计仍限 128 文件、单文件 16 MiB、总 32 MiB，先核对总预算、清单和路径再读取 ZIP 字节。无效选择会在启动前拒绝，不回退实际工程目录；不会继承旧版本的批准或执行权限。
+
+回执中 `artifact_selection=version_directories`，`checked_artifacts` 记录所选序号、摘要、目录和检查末观察到的最新发布序号；`checked_files.source_path` 是原路径，`path` 是实际挂载路径。`scope_current` 在此模式表示目标、控制、目录授权及所选确切源字节仍有效，**不表示最新版**。`selected_versions_current` 单独表示所有所选版本是否都是最新发布；`null` 表示无法确定，不能按“是”处理。明确选择的旧版可以留下有效的历史运行证据，即使检查时又有同名新发布，也不会因此变成新版验收。`artifact_check_valid` 仍仅表示范围有效且原输入副本未改，不证明兼容、覆盖充分或独立复核通过；退出结果、检查内容和最终批准版本要分别核对。
+
+网页沿用已有“工具过程”入口，在对应命令下展开“版本副本检查详情”，可分别查看执行结果、版本新旧及原路径到挂载路径的映射。详情默认折叠，不在主聊天重复铺开文件清单或输出日志。
+
 消息协作中的角色可以直接使用 `workspace_read`、`workspace_write`、`workspace_run` 等已提供工具；已写好的文件可用 `publish_workspace_file` 读取真实正文后发布。未绑定目录时仍可发布文本成果，但不能因此声称已经运行命令或完成浏览器验证。下面的 `workspace_files`、独立验收门等说明针对旧治理工作项，不是普通聊天必须经过的流程。
 
 单份内联文本成果最多 65,536 个 UTF-8 字节。源文件超限、不可读或文件名不适合实际落盘时会在发布前明确拒绝，不发布节选，也不将这次拒绝当作发布影响未知。修正路径、内容或拆分文件后可以继续；真正发布后发生的落盘异常仍需核对，不因此自动重复操作。

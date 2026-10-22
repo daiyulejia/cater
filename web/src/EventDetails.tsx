@@ -10,6 +10,7 @@ import { NativeMcpReceipt } from './NativeMcpReceipt'
 import { NativeProjectHistoryReceipt } from './NativeProjectHistoryReceipt'
 import { NativeProjectRestoreReceipt } from './NativeProjectRestoreReceipt'
 import { NativeArtifactReceipt } from './NativeArtifactReceipt'
+import { NativeArtifactVersionsReceipt } from './NativeArtifactVersionsReceipt'
 import { nativeArtifactReceiptStatus } from './conversationActivityState'
 import { isFrozenArchiveReceipt, nativeFrozenArchiveReceiptStatus, teamToolReceipt } from './conversationActivityState'
 import { NativeFrozenArchiveReceipt } from './NativeFrozenArchiveReceipt'
@@ -584,6 +585,7 @@ export function EventDetails({ event: original, actorName, contextEvents = [] }:
     </div>)}</dl>}
     {event.type === 'verification.completed' && browser && <BrowserReport report={event.payload.browser_report} />}
     {outputs && <CommandOutputs stdout={browser ? undefined : outputs.stdout} stderr={nativeBrowser ? undefined : outputs.stderr} />}
+    <NativeArtifactVersionsReceipt key={event.seq} event={event} />
     {event.type === 'team.tool_finished' && (event.payload.name ?? event.payload.tool) === 'browser_check' && <NativeBrowserReceipt event={event} />}
     {skillTool(event) && event.type === 'team.tool_finished' && <NativeSkillReceipt event={event} />}
     {nativeMcp && event.type === 'team.tool_finished' && <NativeMcpReceipt key={event.seq} event={event} />}

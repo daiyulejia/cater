@@ -467,12 +467,16 @@ class TeamService:
             tools += workspace.schemas()
             for tool in tools:
                 if tool["name"] == "workspace_run":
+                    from .artifact_versions import schema as version_schema
+
+                    tool["input_schema"]["properties"]["artifact_versions"] = version_schema()
                     tool["input_schema"]["properties"]["artifact_seqs"] = {
                         "type": "array", "minItems": 1, "maxItems": 128,
                         "items": {"type": "integer", "minimum": 1},
                         "description": "可选：检查本群当前已发布的确切版本，而非工程目录。列出全部文本文件或完整工程ZIP，最多128文件、单16MiB、总32MiB。宿主校验并放入临时副本，cwd相对此副本（ZIP有父目录时填实际目录）。沿用当前命令别名和权限，不复制工程中未发布的输入或依赖；也不是OS沙箱。"}
                     tool["description"] += " 可用artifact_seqs直接运行指定成果副本，无须手写ZIP解压或子进程日志解码脚本。检查checked_artifacts、artifacts_unchanged和scope_current；结果不自动批准复核。"
-                    tool["input_schema"]["properties"]["cwd"]["description"] += " 提供artifact_seqs时改为相对成果副本根目录。"
+                    tool["description"] += " 比较确切旧新版时，改用artifact_versions按directory并列挂载；cwd相对副本根，路径为directory/原成员路径。scope_current不代表所选版本最新，另看selected_versions_current。"
+                    tool["input_schema"]["properties"]["cwd"]["description"] += " 提供artifact_seqs或artifact_versions时改为相对成果副本根目录。"
             if has_project_history and workspace.policy.mode in {"edit", "execute"}:
                 from .project_restore import schema as restore_schema
 
@@ -1147,7 +1151,7 @@ class TeamService:
                     raise WorkConflict("工作目录有未结束或待核对操作，不能重复执行。")
                 if post_delivery and not self._post_delivery_command(task_id, role, tool_start):
                     raise WorkConflict("顾客输入或执行范围已变化，未启动旧的交付后命令。")
-                if name == "workspace_run" and "artifact_seqs" in arguments:
+                if name == "workspace_run" and ("artifact_seqs" in arguments or "artifact_versions" in arguments):
                     from .team_artifact_check import execute
 
                     return execute(self, task_id, role, arguments, workspace, binding, tool_start)
