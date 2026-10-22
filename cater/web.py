@@ -731,8 +731,8 @@ class ActivityRunner:
                 if (control is None or control.payload.get("action") != "resume"
                         or control.payload.get("state") != "running" or "conversation_seq" in control.payload):
                     return self.status(task_id)
-                previous = next((row for row in events if row.seq == control.payload.get("previous_seq")
-                    and row.type == "task.execution_controlled" and row.actor == EventActor.human()), None)
+                from .execution_control import paused_predecessor
+                previous = paused_predecessor(control, events)
                 if previous is None or previous.seq >= control.seq or previous.payload.get("state") != "paused":
                     return self.status(task_id)
                 if any(row.type == "activity.queued" and row.actor == EventActor.system("orchestrator")
@@ -993,6 +993,8 @@ class ActivityRunner:
                     return
                 runtime._active_activity_id = activity_id
                 if action == "run":
+                    if "resume_seq" in binding and _team_enabled(runtime, task_id):
+                        runtime.team.recovery.resume(task_id, binding["resume_seq"])
                     if "expected_scope" in binding:
                         result = runtime.collaborate(task_id, expected_scope=binding["expected_scope"])
                     else:

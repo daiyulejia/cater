@@ -336,12 +336,13 @@ class WorkspaceExecutor:
               "limit": {"type": "integer", "minimum": 1, "maximum": MAX_MATCHES, "default": 50}}, ["query"]),
         ]
         if self.policy.mode in {"edit", "execute"}:
-            definitions.append(("workspace_write", "Atomically write UTF-8 text. This mutates the workspace; it is not a verification tool. To verify existing bytes, use workspace_read and compare its content/sha256 with the target artifact, rather than writing identical content to obtain a new receipt. Writing a check script does not execute it or prove its results. To update an existing file, first workspace_read it and pass that result's sha256 as expected_sha256. Null is ONLY for creating a file that does not exist. Optional old_text replaces exactly one literal occurrence with content (which may be empty); it requires a non-null hash and never creates a file. On conflict, read again and reconcile before retrying; never blindly overwrite.",
-                                {"path": relative, "content": {**string, "maxLength": MAX_FILE_BYTES}, "expected_sha256": {
+            definitions.append(("workspace_write", "Atomically create or replace a whole UTF-8 file, or edit one exact fragment. Omit old_text for a whole-file write; set old_text only for a fragment edit, with just its replacement in content. For existing files, first workspace_read and use its whole-file sha256; JSON null creates a missing file only. After a conflict, re-read and reconcile before choosing either mode. This is not a verification tool: use actual reads or runs to check results; writing a check script does not execute it.",
+                                {"path": relative, "content": {**string, "maxLength": MAX_FILE_BYTES, "description":
+                                    "Complete new file text when old_text is omitted. When old_text is supplied, only its replacement text: everything outside the one match stays unchanged. An empty replacement deletes that fragment."}, "expected_sha256": {
                                     "type": ["string", "null"], "minLength": 64, "maxLength": 64, "description":
                                     "For a new file pass JSON null, never an empty string or the string null. For an existing file copy the 64 lowercase hex characters from its latest workspace_read.sha256."},
                                  "old_text": {**string, "minLength": 1, "maxLength": MAX_FILE_BYTES,
-                                    "description": "Optional exact old text to replace once. Include enough context to match uniquely; no regex or whitespace normalization. content then contains only the replacement."}},
+                                    "description": "Omit this field for a whole-file write; do not send null or an empty placeholder. For a fragment edit, supply exact old text that matches once, including whitespace and newlines. content is only its replacement, not the whole file. No regex or normalization."}},
                                 ["path", "content", "expected_sha256"]))
         if self.policy.mode == "execute":
             definitions.append(("workspace_run", "Run a trusted host program alias (not an OS sandbox or task acceptance). The alias selects a fixed host-configured argv prefix; args are appended as literal arguments, not interpreted by a shell. Supported arguments and test discovery depend on that program, not the alias name. A zero exit code or outcome=passed does not prove a requested script or newly added tests ran: check the receipt argv and reported test names/counts before claiming coverage. If the intended check did not run, report the missing capability instead of claiming success. Long stdout/stderr previews have separate excerpt and tail_excerpt (preview_mode=head_tail); the missing middle is not saved. complete means capture finished, not that the preview is the full log. Each stream's utf8_valid describes captured byte validity: false means UTF-8 decoding lost information, null or absent means unknown, true does not undo preview truncation. Do not treat replacement characters as the original output or guess another encoding; report the limitation and use a verified encoding or ASCII-safe diagnostic for future checks, without blindly rerunning side effects.",
@@ -559,7 +560,7 @@ class WorkspaceExecutor:
                     text = _text(before)
                     index = text.find(old_text)
                     if index < 0 or text.find(old_text, index + 1) >= 0:
-                        _deny("conflict", "old_text must match exactly once, including overlapping matches. Read the file and use unique context.")
+                        _deny("conflict", "old_text must match exactly once, including overlapping matches; this request did not write the file. Re-read and choose unique literal context, or omit old_text to replace the whole file with complete content and the latest workspace_read.sha256.")
                     body = (text[:index] + content + text[index + len(old_text):]).encode("utf-8")
                     if len(body) > MAX_FILE_BYTES:
                         _deny("too_large", "Edited content exceeds the file size limit.")

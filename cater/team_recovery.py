@@ -6,6 +6,7 @@ import json
 
 from .activity_owner import activity_owner
 from .events import Actor
+from .execution_control import paused_predecessor
 from .work import WorkConflict
 
 
@@ -43,6 +44,8 @@ class TeamRecovery:
                 or event.payload.get("recipient") != self.rt.organization.leader.id):
             return False
         p = event.payload
+        if p.get("trigger") == "control_resume":
+            return self._resume_message(event, events, by_seq=by_seq)
         if type(p.get("recovery_of")) is not int or type(p.get("interrupted_seq")) is not int:
             return False
         boundary = p.get("trigger") == "turn_boundary"
@@ -161,11 +164,92 @@ class TeamRecovery:
 
     def superseded(self, task_id, message, *, events=None):
         events = events if events is not None else self.rt.log.read(task_id=task_id)
+        if message.payload.get("trigger") == "control_resume":
+            return any(e.actor == Actor.human() and e.type == "team.message_received"
+                       and e.seq > message.payload["resume_seq"] for e in events)
         original = message.payload.get("recovery_of")
         return (message.payload.get("trigger") == "turn_boundary"
                 and type(original) is int
                 and any(e.actor == Actor.human() and e.type == "team.message_received"
                         and e.seq > original for e in events))
+
+    def _resume_message(self, message, events=None, *, by_seq=None):
+        events = events if events is not None else self.rt.log.read(task_id=message.task_id)
+        by_seq = by_seq if by_seq is not None else {event.seq: event for event in events}
+        p = message.payload
+        if type(p.get("resume_seq")) is not int or type(p.get("scope")) is not dict:
+            return False
+        control, scope = by_seq.get(p["resume_seq"]), p["scope"]
+        if (control is None or control.actor != Actor.human() or control.type != "task.execution_controlled"
+                or control.payload.get("action") != "resume" or control.payload.get("state") != "running"
+                or not control.seq < message.seq or p.get("resume_hash") != control.hash):
+            return False
+        previous = paused_predecessor(control, events)
+        binding = control.payload.get("scope")
+        if (previous is None or previous.actor != Actor.human() or previous.type != "task.execution_controlled"
+                or previous.payload.get("state") != "paused" or not previous.seq < control.seq
+                or type(binding) is not dict or type(binding.get("workspace", {})) is not dict):
+            return False
+        objectives = [event for event in events if event.actor == HOST and event.seq < message.seq
+                      and event.type in {"team.objective_updated", "team.objective_completed"}]
+        before_resume = [event for event in objectives if event.seq < control.seq]
+        workspace = binding.get("workspace", {})
+        return (type(p.get("revision")) is int and type(scope.get("revision")) is int
+            and p["revision"] == scope["revision"]
+            and scope.get("revision") == (objectives[-1].seq if objectives else 0)
+            and scope["revision"] == (before_resume[-1].seq if before_resume else 0)
+            and not (objectives and objectives[-1].type == "team.objective_completed")
+            and type(scope.get("control_seq")) is int and scope["control_seq"] == control.seq
+            and scope.get("control_state") == "running" and scope.get("done") is False
+            and scope.get("execution_fingerprint") == binding.get("organization")
+            and scope.get("rule_fingerprint") == binding.get("rules")
+            and scope.get("workspace_revision") == workspace.get("revision")
+            and scope.get("workspace_fingerprint") == workspace.get("fingerprint")
+            and not any(event.seq < message.seq and event.actor == HOST and event.type == "team.message_received"
+                        and event.payload.get("kind") == "recovery" and event.payload.get("trigger") == "control_resume"
+                        and event.payload.get("resume_seq") == control.seq for event in events))
+
+    def resume(self, task_id, resume_seq):
+        """Translate an explicit resume into fresh supervision when the inbox is empty."""
+        if type(resume_seq) is not int or not self.team.enabled(task_id):
+            return None
+        with activity_owner(self.rt.log.path, task_id, "simple-team") as owned:
+            if not owned:
+                return None
+            with self.rt.log.atomic():
+                events = self.rt.log.read(task_id=task_id)
+                control = next((event for event in events if event.seq == resume_seq), None)
+                if (control is None or control.actor != Actor.human() or control.type != "task.execution_controlled"
+                        or control.payload.get("action") != "resume" or control.payload.get("state") != "running"):
+                    return None
+                previous = paused_predecessor(control, events)
+                if (previous is None or previous.actor != Actor.human() or previous.type != "task.execution_controlled"
+                        or previous.payload.get("state") != "paused"):
+                    return None
+                existing = next((event for event in events if event.actor == HOST and event.type == "team.message_received"
+                    and event.payload.get("kind") == "recovery" and event.payload.get("trigger") == "control_resume"
+                    and event.payload.get("resume_seq") == resume_seq), None)
+                if existing is not None:
+                    return existing if self.is_message(existing, events) else None
+                scope = self.scope(task_id, events=events)
+                previous_objective = next((event.seq for event in reversed(events)
+                    if event.seq < resume_seq and event.actor == HOST
+                    and event.type in {"team.objective_updated", "team.objective_completed"}), 0)
+                if (scope["control_state"] != "running" or scope["control_seq"] != resume_seq or scope["done"]
+                        or scope["revision"] != previous_objective
+                        or not any(event.seq < resume_seq and event.actor == HOST
+                                   and event.type == "team.run_started" for event in events)
+                        or control.payload.get("scope") != self.rt.work.scope(task_id)
+                        or self.rt.conversation_list.is_removed(task_id) or self.team._pending_operations(task_id)
+                        or self.team.view(task_id)["pending_count"]
+                        or any(row["status"] == "pending" for row in self.rt.questionnaires.view(task_id))
+                        or any(event.seq > resume_seq and event.actor == Actor.human()
+                               and event.type == "team.message_received" for event in events)):
+                    return None
+                return self.rt.log.emit(type="team.message_received", task_id=task_id, actor=HOST,
+                    payload={"kind": "recovery", "trigger": "control_resume", "recipient": self.rt.organization.leader.id,
+                        "resume_seq": control.seq, "resume_hash": control.hash, "revision": scope["revision"], "scope": scope,
+                        "text": "顾客已恢复执行。请核对当前目标、已有文件、成果和操作回执，继续未交付的工作并跟进必要交接、复核与最终交付；沿用原目标，不重做已经确认的操作。"})
 
     def run_scope(self, task_id, start, *, observed=None, events=None):
         events = events if events is not None else self.rt.log.read(task_id=task_id)

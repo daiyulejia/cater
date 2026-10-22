@@ -6,6 +6,24 @@ from .events import Actor, HeadChanged
 from .work import WorkConflict
 
 
+def paused_predecessor(control, events):
+    """Find a real pause through repeated resume controls, never through a cancel."""
+    by_seq = {event.seq: event for event in events}
+    while (control.actor == Actor.human() and control.type == "task.execution_controlled"
+           and control.payload.get("action") == "resume" and control.payload.get("state") == "running"):
+        seq = control.payload.get("previous_seq")
+        if type(seq) is not int:
+            return None
+        previous = by_seq.get(seq)
+        if (previous is None or previous.seq >= control.seq or previous.task_id != control.task_id
+                or previous.actor != Actor.human() or previous.type != "task.execution_controlled"):
+            return None
+        if previous.payload.get("state") == "paused" and previous.payload.get("action") == "pause":
+            return previous
+        control = previous
+    return None
+
+
 class ExecutionControl:
     def __init__(self, runtime):
         self.rt = runtime

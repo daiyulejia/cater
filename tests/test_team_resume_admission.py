@@ -47,6 +47,8 @@ class _NativeDriver:
     def tool_turn(self, *, role, prompt, history, tools):
         context = json.loads(prompt.rsplit("\n", 1)[-1])
         self.calls.append(context)
+        if context["message"].get("trigger") == "control_resume":
+            return turn("", ("wait_for_reply", {}))
         if self.write_first and len(self.calls) == 1:
             return turn("", ("workspace_write", {
                 "path": "once.txt", "content": "one effect", "expected_sha256": None}))
@@ -345,9 +347,14 @@ class ResumeAdmissionTests(unittest.TestCase):
                 s.runner.recover_interrupted()
                 with s.factory() as rt:
                     rt.collaborate(s.task)
-                self.assertEqual(len(s.contexts()), before, "An actual request is not an unstarted admission")
+                self.assertEqual(len([c for c in s.contexts() if c["message"]["seq"] == source.seq]), before,
+                                 "An actual request is not an unstarted admission")
+                fresh = s.contexts()[before:]
+                self.assertTrue(all(c["message"].get("trigger") == "control_resume" for c in fresh))
                 if outcome == "unknown":
-                    self.assertFalse([e for e in s.events() if e.type == "team.model_called"],
+                    original_runs = {e.payload["run_id"] for e in prefix if e.type == "team.run_started"}
+                    self.assertFalse([e for e in s.events() if e.type == "team.model_called"
+                                      and e.payload["run_id"] in original_runs],
                                      "Missing model_called alone cannot prove a request was never sent")
                 if outcome == "written":
                     writes = [e for e in s.events() if e.type == "team.tool_finished"
@@ -368,7 +375,7 @@ class ResumeAdmissionTests(unittest.TestCase):
                         raise WorkConflict("Offline fixture: external prompt sent, result unknown")
                     return "Offline late response"
 
-                s.driver.scripts[s.manager] = [sent] * 3
+                s.driver.scripts[s.manager] = [sent, lambda run: run.call("wait_for_reply")]
                 with s.blocked(source, gate, at_claim=False):
                     self.assertEqual(len(s.driver.runs), 1)
                     self.assertTrue(s.driver.runs[0].state.prompt_attempted)
@@ -380,7 +387,11 @@ class ResumeAdmissionTests(unittest.TestCase):
                 s.runner.recover_interrupted()
                 with s.factory() as rt:
                     rt.collaborate(s.task)
-                self.assertEqual(len(s.driver.runs), 1)
+                self.assertEqual(len([c for c in s.contexts() if c["message"]["seq"] == source.seq]), 1)
+                self.assertEqual(len(s.driver.runs), 2)
+                self.assertEqual(s.contexts()[-1]["message"].get("trigger"), "control_resume")
+                self.assertNotIn("tool_history_window", s.contexts()[-1],
+                                 "External sessions do not receive native model conversation history")
                 self.assertEqual(s.driver.errors, [])
                 s.assert_preserved(prefix)
 
@@ -411,7 +422,10 @@ class ResumeAdmissionTests(unittest.TestCase):
                     if external:
                         s.assert_answered_once(source)
                     else:
-                        self.assertEqual(s.contexts(), [], "Old native absence of receipts is not proof")
+                        fresh, = s.contexts()
+                        self.assertNotEqual(fresh["message"]["seq"], source.seq,
+                                            "Old native absence of receipts is not proof")
+                        self.assertEqual(fresh["message"].get("trigger"), "control_resume")
 
 
 if __name__ == "__main__":
