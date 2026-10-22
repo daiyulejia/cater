@@ -400,7 +400,7 @@ class TeamService:
                   {"reviewer": recipient, "artifact_seqs": {"type": "array", "minItems": 1, "maxItems": 20,
                       "items": {"type": "integer", "minimum": 1}}, "instruction": string,
                    "review_seq": {"type": "integer", "minimum": 1,
-                       "description": "仅修复后重提交填写原复核的request_seq；首次提交省略，不填委托或消息编号。"}}, ["reviewer", "artifact_seqs", "instruction"]),
+                       "description": "修订时填写当前复核request_seq，由原作者交回原复核者；可改名、增补或拆合成果，但artifact_seqs必须是本轮完整提交集合，旧批准不覆盖新版。首次提交省略，不填委托或消息编号。"}}, ["reviewer", "artifact_seqs", "instruction"]),
             _tool("record_review", "对reviews中指定版本记录独立复核结论并自动回给作者，本轮结束。发现需修复问题用changes_requested，读修正版且确认问题解决才approved；旧版通过不涵盖后续修改。具体写清依据与未验证范围。",
                   {"review_seq": {"type": "integer", "minimum": 1,
                        "description": "request_review返回的review_seq或reviews[].request_seq；不是委托message_seq、成果seq或回执seq。没有正式请求时先反馈给作者，由作者发布并request_review。"},
@@ -1250,7 +1250,9 @@ class TeamService:
             boundary = max((e.seq for e in self.rt.log.read(task_id=task_id) if e.actor == HOST
                             and e.type in {"team.started", "team.objective_updated"}), default=0)
             artifacts = self.rt.task(task_id).deliverables
-            selected = [a for a in artifacts if a["seq"] > boundary and a.get("filename") and a.get("content_sha256")]
+            retired = self.rt.team_reviews.superseded_artifacts(task_id, reviews=current_work["reviews"])
+            selected = [a for a in artifacts if a["seq"] > boundary
+                        and a.get("filename") and a.get("content_sha256")]
             if "artifact_seqs" in arguments:
                 seqs = arguments["artifact_seqs"]
                 by_seq = {a["seq"]: a for a in artifacts if a.get("filename") and a.get("content_sha256")}
@@ -1258,9 +1260,16 @@ class TeamService:
                         or any(type(seq) is not int or seq not in by_seq for seq in seqs) or len(set(seqs)) != len(seqs)):
                     return {"status": "error", "code": "invalid_delivery_files", "message": "请选择本群完整文件的有效序号，不重复；可以明确选择沿用的旧版本，也可以交付无文件结果。"}
                 selected = [by_seq[seq] for seq in seqs]
+                if any(a["seq"] in retired for a in selected):
+                    return {"status": "error", "code": "delivery_review_mismatch",
+                            "retired_artifact_seqs": [a["seq"] for a in selected if a["seq"] in retired],
+                            "message": "所选成果已被同一复核链的新提交替代，未交付历史草稿；请读取当前获批成果，或将拟沿用的旧稿明确纳入新的提交重新复核。"}
                 if len({a["filename"] for a in selected}) != len(selected):
                     return {"status": "error", "code": "invalid_delivery_files", "message": "同一文件名只选择一个交付版本。"}
             selected = list({a["filename"]: a for a in selected}.values())
+            if "artifact_seqs" not in arguments:
+                # Retiring the latest filename must not resurrect an older publication.
+                selected = [a for a in selected if a["seq"] not in retired]
             chosen = {a["filename"]: a for a in selected}
             approved = {ref["filename"]: ref
                 for review in sorted(current_work["reviews"], key=lambda row: row.get("decision_seq", 0))
