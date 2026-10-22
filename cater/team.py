@@ -6,6 +6,7 @@ import io
 import json
 import uuid
 import zipfile
+from collections import deque
 from collections.abc import Mapping
 from contextlib import closing, contextmanager, nullcontext
 from dataclasses import asdict
@@ -181,6 +182,9 @@ class TeamService:
 
         self.work_control = TeamWorkControl(self)
         self.project_history = ProjectHistory(self)
+        from .team_read_sources import TeamReadSources
+
+        self.read_sources = TeamReadSources(self)
         from .external_runs import ExternalRuns
         from .team_external import TeamExternal
         self.external_runs = ExternalRuns(self)
@@ -406,8 +410,11 @@ class TeamService:
                        "description": "request_review返回的review_seq或reviews[].request_seq；不是委托message_seq、成果seq或回执seq。没有正式请求时先反馈给作者，由作者发布并request_review。"},
                    "verdict": {"type": "string", "enum": ["changes_requested", "approved"]},
                    "feedback": string}, ["review_seq", "verdict", "feedback"]),
-            _tool("read_receipts", "读取本群真实工具回执的完整结果。按role（角色ID，如test）、message_seq（委托/输入消息序号）或name（工具名，如workspace_run）筛选；run_id仅填receipt_index中的真实运行ID，不能填角色名。多个条件同时满足；before_seq可向前翻页。回执是历史执行记录，不保证当前文件未变化，按风险判断是否补查。",
+            _tool("read_receipts", "读取本群真实工具回执。receipt_seq精确读一份既有回执；role、message_seq、name、run_id和before_seq可筛选分页，run_id不是角色名。section=file_reads只列当前目录绑定期间已观察的文件读取元数据，可用file_path精确筛选，再用返回的receipt_seq读原文。first/last_observed不是基线/当前磁盘；节选不补全文，历史不授权写入或证明结论。",
                   {"run_id": string, "role": {"type": "string", "enum": [r.id for r in members]},
+                   "section": {"type": "string", "enum": ["receipts", "file_reads"]},
+                   "receipt_seq": {"type": "integer", "minimum": 1, "description": "工具完成回执seq，不是started_seq、消息号或运行ID。"},
+                   "file_path": {"type": "string", "description": "仅section=file_reads，当前绑定内已记录读取的相对路径，不扫描磁盘。"},
                    "message_seq": {"type": "integer", "minimum": 1}, "name": string,
                    "before_seq": {"type": "integer", "minimum": 1},
                    "include_pending": {"type": "boolean", "description": "同时读取未结算操作详情；上下文pending_operations提供索引。继续读取旧项时将pending_next_before_seq填入before_seq。这不代表可以重放原操作。"},
@@ -528,17 +535,38 @@ class TeamService:
         return None
 
     def _receipts(self, task_id):
+        from .receipt_observations import receipt_observations
+        from .team_read_sources import bound_receipts
+
         events = self.rt.log.read(task_id=task_id)
         starts = {e.seq: e for e in events if e.actor == HOST and e.type == "team.tool_started"}
         rows = []
         for event in events:
             if event.actor != HOST or event.type != "team.tool_finished" or event.payload.get("name") == "read_receipts":
                 continue
-            row = {"seq": event.seq, **event.payload}
-            start = starts.get(row.get("started_seq"))
+            row = {**event.payload, "seq": event.seq}
+            row.pop("observations", None)
+            try:
+                start = starts.get(row.get("started_seq"))
+            except TypeError:
+                start = None
             if start and all(start.payload.get(key) == row.get(key) for key in ("run_id", "role", "name")):
                 row["message_seq"] = start.payload.get("message_seq")
             rows.append(row)
+        candidates = deque((row for row in rows if row.get("name") not in {
+            "read_artifact", "read_messages", "workspace_read", "workspace_list", "workspace_search", PROJECT_HISTORY}), maxlen=20)
+        wanted = {row["seq"] for row in candidates if row.get("name") == "workspace_run"}
+        verified = {event.seq: event for event, start in bound_receipts(self, task_id, events)
+                    if event.seq in wanted and start.payload["name"] == "workspace_run"}
+        observed = 0
+        for row in reversed(candidates):
+            event = verified.get(row["seq"])
+            if event is not None and (observations := receipt_observations(row.get("result"))):
+                row["observations"] = [{"source_seq": event.seq, "source_hash": event.hash, **value}
+                                       for value in observations]
+                observed += 1
+                if observed == 3:
+                    break
         return rows
 
     def _pending_operations(self, task_id):
@@ -734,9 +762,30 @@ class TeamService:
                     if r.get("name") not in {"read_artifact", "read_messages", "workspace_read", "workspace_list", "workspace_search", PROJECT_HISTORY}]
         receipt_index = [{**{key: row[key] for key in
             ("seq", "started_seq", "run_id", "message_seq", "role", "name") if key in row},
-            **{key: row["result"][key] for key in ("status", "outcome", "exit_code") if key in row.get("result", {})}}
+            **{key: row["result"][key] for key in ("status", "outcome", "exit_code")
+               if isinstance(row.get("result"), dict) and key in row["result"]}}
             for row in receipts[-20:]]
+        observation_bytes = 0
+        indexed = {row["seq"]: row for row in receipts[-20:]}
+        observed = 0
+        for entry in reversed(receipt_index):
+            values = indexed[entry["seq"]].get("observations")
+            if not values or observed >= 3:
+                continue
+            metadata = [{key: value[key] for key in ("source_seq", "source_hash", "kind", "source_stream",
+                        "literal_summary", "reported_tests", "reported_outcome", "reported_counts")}
+                        for value in values]
+            for value in metadata:
+                value.update(read_args={"receipt_seq": entry["seq"]},
+                             program_report_note="程序输出声明，不证明执行、覆盖或验收；可读原回执核对。")
+            size = json_bytes(metadata)
+            if observation_bytes + size <= 3000:
+                entry["observations"] = metadata
+                observation_bytes += size
+                observed += 1
         pending = self._pending_operations(task_id)
+        workspace_state = self.rt.workspaces.view(task_id)
+        file_sources = self.read_sources.index(task_id, workspace=workspace_state, events=events)
         project_history = self.project_history.index(task_id)
         rules = self.rt.rulebook.current_snapshot(task_id)
         return {"you": asdict(role), "members": [asdict(r) for r in [self.rt.organization.leader, *self.rt.roles]],
@@ -754,12 +803,13 @@ class TeamService:
                 "sender_name": name(message.actor.id), "sender_kind": message.actor.kind, **message.payload},
             "latest_customer_message": next((row for row in reversed(history) if row.get("sender_kind") == "human"), None),
             "receipt_index": receipt_index, "receipts_truncated": len(receipts) > 20,
+            **({"file_read_sources": file_sources} if file_sources is not None else {}),
             "pending_operations": [{k: row[k] for k in row if k != "arguments"} for row in pending[-20:]],
             "pending_operations_truncated": len(pending) > 20,
             "conversation": history[-60:], "artifacts": [{k: a.get(k) for k in
                 ("seq", "filename", "summary", "content_sha256", "local_path", "format")} for a in task.deliverables],
             "questionnaires": self.rt.questionnaires.view(task_id)[-5:],
-            "workspace": self.rt.workspaces.view(task_id), "rules": rules["rules"],
+            "workspace": workspace_state, "rules": rules["rules"],
             "background": dialogue_background(background, reader="read_background") if background is not None else None}, rules
 
     def _current(self, task_id, started, role, revision):
@@ -1006,9 +1056,24 @@ class TeamService:
                     _text(arguments[key], key, 128)
             if "role" in arguments:
                 self._role(arguments["role"])
-            for key in ("message_seq", "before_seq"):
+            for key in ("message_seq", "before_seq", "receipt_seq"):
                 if key in arguments and (type(arguments[key]) is not int or arguments[key] < 1):
                     raise ValueError("回执筛选序号需要正整数。")
+            section = arguments.get("section", "receipts")
+            if section not in {"receipts", "file_reads"}:
+                raise ValueError("回执读取section无效。")
+            if section == "file_reads":
+                if "receipt_seq" in arguments or "include_pending" in arguments:
+                    raise ValueError("文件读取目录仅返回已记录元数据；精确原文请另用receipt_seq读取。")
+                return self.read_sources.read(task_id, arguments)
+            if "file_path" in arguments:
+                raise ValueError("按路径查询读取来源时，请使用section=file_reads。")
+            if "receipt_seq" in arguments and arguments.get("include_pending"):
+                raise ValueError("receipt_seq只定位已完成回执；未结算操作请用原分页筛选。")
+            if "receipt_seq" in arguments:
+                with self._context_read():
+                    page = self.read_sources.exact(task_id, arguments)
+                return {"status": "ok", "receipts": page, "has_more": False, "next_before_seq": None}
             if "run_id" in arguments and not any(e.actor == HOST and e.payload.get("run_id") == arguments["run_id"]
                     for e in self.rt.log.iter_events(task_id=task_id, event_types=("team.run_started",))):
                 return {"status": "error", "message": "找不到本群的这个运行ID；角色名请用role筛选，委托序号请用message_seq，真实运行ID见receipt_index。"}
@@ -1390,6 +1455,8 @@ class TeamService:
                 "给顾客的命令说明运行位置和前提，别把受管核验环境的限制推广为顾客必然遇到的问题。"
                 "工具列表有reply_to_customer时，完成普通问答后用它发送完整答案，与此前公开过程分开；它不代表任务或委托完成。"
                 "receipt_index是最近工具回执的轻量索引，不是结论；可按role、message_seq、name查完整结果，run_id不是角色名。"
+                "observations若存在，是完整日志中程序报告的摘要，reported_tests不是宿主保证的覆盖数；如实引用原数字，不把它推成更多测试或更广正确性。"
+                "file_read_sources若存在，只表示当前目录绑定期间的历史读取；按receipt_seq读原文再比较原行为与新行为，不从现行规则反推旧代码。"
                 "pending_operations列出没有可信结算的操作；可用read_receipts的include_pending读取详情。"
                 "not_committed仅表示该版本契约下的本地事件未提交，不是外部命令或计费未发生；unknown需核对实际影响，不重放旧操作。"
                 "独立工具操作可以合并调用；已有可靠验证先读回执判断，按风险补查，不必每次从头重复所有步骤。"
