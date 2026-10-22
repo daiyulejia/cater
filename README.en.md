@@ -15,12 +15,14 @@ Python 3.11+ is required. Run directly from the source checkout, with no third-p
 ```bash
 git clone https://github.com/daiyulejia/cater.git
 cd cater
-python -m cater web --port 8766
+python -m cater --db .cater/cater.db web --port 8766
 ```
 
-Open the [local workroom](http://127.0.0.1:8766/). Choose another `--port` if it is occupied. Task records are stored in `.cater/cater.db` under the directory where you start Cater.
+Open the [local workroom](http://127.0.0.1:8766/). Task records are stored in `.cater/cater.db` under the current directory. Keep the same database and port for everyday use; when starting elsewhere, pass the original database's absolute path to `--db`.
 
 Already have the source? Run only the last command. Node.js and pnpm are needed only when changing the frontend; see [frontend development](web/README.md).
+
+If the port is occupied, first check whether Cater is already running. Updating source files does not upgrade a running service. Before upgrading, confirm that tasks are idle, back up the database, then stop the old service and start it with the same command. Add `--no-startup-recovery` to prevent automatic continuation on startup; you can then continue work through the conversation. A different port is useful for isolated testing, but does not upgrade the original entry.
 
 ## Work in Conversation
 

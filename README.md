@@ -15,12 +15,14 @@ Cater 正在开发中。目前提供中文本地工作台、可回放的协作�
 ```bash
 git clone https://github.com/daiyulejia/cater.git
 cd cater
-python -m cater web --port 8766
+python -m cater --db .cater/cater.db web --port 8766
 ```
 
-打开 [本地工作台](http://127.0.0.1:8766/)。端口被占用时，换一个 `--port`。任务记录默认保存在启动目录下的 `.cater/cater.db`。
+打开 [本地工作台](http://127.0.0.1:8766/)。任务记录保存在当前目录下的 `.cater/cater.db`；日常使用请固定同一数据库和端口。从其他目录启动时，`--db` 使用原数据库的绝对路径。
 
 已有源码时，只需执行最后一条命令。修改前端才需要 Node.js 和 pnpm，见 [前端开发](web/README.md)。
+
+端口已占用时，先确认是否已有 Cater 在运行。更新源码不会更新已运行的服务；升级时应先确认任务空闲、备份数据库，再停止原服务并用同一命令启动。使用 `--no-startup-recovery` 可关闭启动时自动续接，随后由你在对话中继续工作。另开端口适合隔离测试，并不会升级原入口。
 
 ## 在对话里工作
 

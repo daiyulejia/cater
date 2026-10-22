@@ -24,6 +24,7 @@ from .team_recovery import RECOVERY_CONTRACT, TeamRecovery, _same_scope
 from .team_delivery import HandoffError, TeamDelivery, handoff_schema
 from .team_browser import BROWSER_CONTRACT, TeamBrowser, browser_schema
 from .team_context import history_window, json_bytes, model_context, model_json
+from .delivery_followup_sources import delivery_followup_sources
 from .tool_protocol import contained_response_diagnostics, safe_tool_usage
 from .usage import valid_token_count
 from .team_response_correction import correctable, correction_context
@@ -796,12 +797,27 @@ class TeamService:
         file_sources = self.read_sources.index(task_id, workspace=workspace_state, events=events)
         project_history = self.project_history.index(task_id)
         rules = self.rt.rulebook.current_snapshot(task_id)
+        followup_sources = None
+        if (role.id == self.rt.organization.leader.id and message.actor == Actor.human()
+                and message.payload.get("kind") == "message" and assignment is None
+                and current_work["status"] == "done"):
+            from .team_read_sources import bound_receipts
+
+            delivery = next((event for event in events if event.seq == revision < message.seq
+                and event.type == "team.objective_completed" and event.actor == HOST), None)
+            if delivery is not None:
+                # Initial work has revision 0, while objective_seq points to team.started.
+                objective_revision = max((event.seq for event in events if event.seq < delivery.seq
+                    and event.actor == HOST and event.type in {"team.objective_updated", "team.objective_completed"}), default=0)
+                followup_sources = delivery_followup_sources(delivery, bound_receipts(self, task_id, events),
+                    objective_revision=objective_revision)
         return {"you": asdict(role), "members": [asdict(r) for r in [self.rt.organization.leader, *self.rt.roles]],
             **({"project_history": project_history} if project_history["available"] or project_history.get("reason") == "metadata_query_unavailable" else {}),
             "active_assignment": {"seq": assignment.seq, "sender": assignment.actor.id, **assignment.payload} if assignment else None,
             "open_assignments": open_assignments, "outgoing_work": outgoing,
             "work_checkpoint": checkpoint,
             "delivery_index": self.delivery.index(task_id),
+            **({"delivery_followup_sources": followup_sources} if followup_sources is not None else {}),
             **({"mcp_index": self.rt.mcp.index(**self.rt.mcp.scope(task_id, role.id))} if self.rt.mcp.configured else {}),
             "skills_index": self.rt.skills.index(**self._skill_scope(task_id, role, tool_names)),
             "reviews": current_work["reviews"],
