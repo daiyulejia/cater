@@ -1,6 +1,6 @@
 import { lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { hasBrowserReceipt, outputSummaryLines } from './outputPreview'
-import { replyEvidenceFor } from './replyEvidence'
+import { replyEvidenceDetailsFor } from './replyEvidence'
 import type { ReplyEvidence } from './replyEvidence'
 import { CommandOutputs } from './CommandOutputPreview'
 import type { ComponentProps, ReactNode } from 'react'
@@ -105,7 +105,7 @@ type Question = QuestionResult & { seq: number; status: string; question: string
 type ConversationReceipt = { seq: number; status: string }
 export type TaskDetail = { task: Task; team?: TeamState | null; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; questionnaires?: Questionnaire[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string } | null; activity?: Activity; execution_control?: ExecutionControl; workspace?: WorkspaceBinding }
 type DerivationSource = { id: string; goal: string }
-export type ChatItem = { replyEvidence?: ReplyEvidence; internal?: boolean; historicalDelivery?: boolean; id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; questionnaire?: Questionnaire; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event; retryStatus?: 'waiting' | 'succeeded' | 'failed' | 'cancelled'; auditEvents?: Event[]; auditName?: (id: string) => string }
+export type ChatItem = { replyEvidence?: ReplyEvidence; replyEvidenceWarning?: string; internal?: boolean; historicalDelivery?: boolean; id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; questionnaire?: Questionnaire; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event; retryStatus?: 'waiting' | 'succeeded' | 'failed' | 'cancelled'; auditEvents?: Event[]; auditName?: (id: string) => string }
 
 const accessToken = readAccessToken()
 
@@ -271,7 +271,7 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
   const shownRequests = new Set<string>()
   const teamEchoes = teamMessageEchoes(events)
   const teamProgress = teamProgressMessages(events)
-  const replyEvidence = replyEvidenceFor(events)
+  const replyEvidence = replyEvidenceDetailsFor(events)
   const leader = organization?.leader.id ?? 'store_manager'
   const deliveries = teamDeliveries(events, leader)
   const latestTeamObjective = events.filter((event) => isTeamHost(event)
@@ -417,7 +417,8 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       item.role = publicIdentity(speaker, organization)
       item.systemActor = false
       item.internal = teamEnabled && (audience.audience === 'team' || teamProgress.has(event.seq))
-      item.replyEvidence = replyEvidence.get(event.seq)
+      item.replyEvidence = replyEvidence.get(event.seq)?.evidence
+      item.replyEvidenceWarning = replyEvidence.get(event.seq)?.warning
       if (item.replyEvidence) item.auditName = displayName
       if (audience.recipient) item.targets = [displayName(audience.recipient)]
       return item.text ? [item] : []
@@ -1792,7 +1793,7 @@ function ChatBubble({ item, artifact, taskId, controls }: { item: ChatItem; arti
       {item.progress && <WorkspaceToolProgress events={item.progress} claim={item.id} name={item.display} />}
       {item.evidence.type === 'deliverable.published' && <ArtifactPreview item={artifact ?? untrustedArtifact(item.evidence)} publisher={item.display} showSummary={false} taskId={taskId} accessToken={accessToken} />}
       {(item.targets.length > 0 || item.replyTo) && <div className={`mt-2 flex flex-wrap gap-2 text-xs ${human ? 'text-[#fde9dd]' : 'text-teal-700'}`}>{item.internal && item.targets.length > 0 && <span>收件人：</span>}{item.targets.map((target) => <span key={target}>@{target}</span>)}{item.replyTo && <span className="inline-flex items-center gap-1"><CornerDownRight size={13} /> 回复 #{item.replyTo}</span>}</div>}
-      {(item.replyEvidence || item.details?.length || item.evidence.type === 'team.objective_completed') ? <AsyncPanel fallback={null}><MessageDetails item={item} /></AsyncPanel> : null}
+      {(item.replyEvidence || item.replyEvidenceWarning || item.details?.length || item.evidence.type === 'team.objective_completed') ? <AsyncPanel fallback={null}><MessageDetails item={item} /></AsyncPanel> : null}
       <AuditTrail item={item} />
     </div>
   </article>

@@ -4,6 +4,9 @@ import { isTeamHost } from './team'
 import type { TeamEvent } from './team'
 
 export type ReplyEvidence = { version: 1; sources: (HandoffEvidence & { kind: 'tool_receipt' })[]; note: string }
+export type ReplyEvidenceDetails = { evidence: ReplyEvidence; warning?: never } | { evidence?: never; warning: string }
+
+const omittedWarning = '可选答复引用未通过校验，未保存；答复正文已发送，不代表内容已验证。'
 
 const tools = new Set(['workspace_read', 'workspace_write', 'workspace_run', 'workspace_list', 'workspace_search', 'browser_check', 'read_artifact'])
 const outcomes = new Set(['passed', 'failed', 'timeout', 'launch_error', 'effects_unknown', 'not_started'])
@@ -13,6 +16,27 @@ const seq = (value: unknown): value is number => Number.isSafeInteger(value) && 
 const hash = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value)
 const boundedText = (value: unknown, limit: number): value is string => text(value) && value.length <= limit * 2 && Array.from(value).length <= limit
 const keys = (value: Record<string, unknown>, allowed: string[]) => Object.keys(value).every(key => allowed.includes(key))
+
+function recordedArguments(value: unknown): unknown {
+  if (!record(value) || Object.keys(value).length !== 2 || !keys(value, ['encoding', 'json'])
+    || value.encoding !== 'escaped_json' || typeof value.json !== 'string') return value
+  try {
+    let decodedKeys = 0
+    const parsed: unknown = JSON.parse(value.json, (_key, item: unknown) => {
+      if (typeof item === 'number' && !Number.isFinite(item)) throw new Error('Non-finite JSON number')
+      if (record(item)) decodedKeys += Object.keys(item).length
+      return item
+    })
+    // Tokenize every string, including values, so JSON.parse cannot silently discard duplicate keys.
+    let recordedKeys = 0
+    for (const token of value.json.matchAll(/"(?:\\.|[^"\\])*"/g)) {
+      if (/^\s*:/.test(value.json.slice(token.index + token[0].length))) recordedKeys++
+    }
+    return recordedKeys === decodedKeys ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
 
 function normalized(value: unknown): value is ReplyEvidence {
   if (!record(value) || !keys(value, ['version', 'sources', 'note']) || value.version !== 1
@@ -40,8 +64,8 @@ function normalized(value: unknown): value is ReplyEvidence {
 type ToolPair = { start: TeamEvent; finish: TeamEvent; input: TeamEvent; result: Record<string, unknown> }
 
 // A snapshot is scoped to one conversation by the task API. Never resolve refs outside it.
-export function replyEvidenceFor(events: readonly TeamEvent[]): ReadonlyMap<number, ReplyEvidence> {
-  const replies = new Map<number, ReplyEvidence>()
+export function replyEvidenceDetailsFor(events: readonly TeamEvent[]): ReadonlyMap<number, ReplyEvidenceDetails> {
+  const replies = new Map<number, ReplyEvidenceDetails>()
   const bySeq = new Map<number, TeamEvent>()
   const runs = new Map<string, TeamEvent[]>()
   const endings = new Map<string, TeamEvent[]>()
@@ -101,18 +125,28 @@ export function replyEvidenceFor(events: readonly TeamEvent[]): ReadonlyMap<numb
     const message = rows[0], a = message.payload, pair = pairFor(startedSeq)
     if (!pair) continue
     const { start, finish, input, result } = pair
-    const p = start.payload, args = p.arguments, contract = p.execution_contract
-    if (p.name !== 'reply_to_customer' || result.status !== 'ok' || !normalized(result.reply_evidence)
+    const p = start.payload, contract = p.execution_contract
+    // The HOST pair is already checked. Decoding an audit wrapper never grants citation authority.
+    const args = result.reply_evidence_status === 'omitted_invalid' ? recordedArguments(p.arguments) : p.arguments
+    if (p.name !== 'reply_to_customer' || result.status !== 'ok'
       || !record(contract) || Object.keys(contract).length !== 3 || contract.version !== 1
       || contract.kind !== 'atomic_local_events' || contract.receipt !== 'same_transaction'
       || !record(args) || !keys(args, ['text', 'evidence']) || !boundedText(args.text, 32000)
-      || !Array.isArray(args.evidence) || args.evidence.length < 1 || args.evidence.length > 8
       || input.actor.id !== 'human' || input.actor.kind !== 'human' || input.actor.role !== 'human' || input.payload.kind !== 'message'
       || message.actor.kind !== 'agent' || message.actor.id !== p.role || !text(message.actor.role)
       || !(start.seq < message.seq && message.seq < finish.seq) || result.message_seq !== message.seq
       || result.reply_to !== input.seq || a.reply_to !== input.seq || a.run_id !== p.run_id
       || a.text !== args.text.trim() || a.phase !== 'team' || a.customer_reply_tool !== 'reply_to_customer'
       || a.audience !== 'customer' || a.recipient !== 'human' || a.response_kind !== 'reply') continue
+
+    // Only the paired HOST receipt can omit evidence; raw refs and message claims are not evidence.
+    if ('reply_evidence_status' in result || 'reply_evidence_warning' in result) {
+      if (result.reply_evidence_status === 'omitted_invalid' && result.reply_evidence_warning === omittedWarning
+        && !('reply_evidence' in result) && 'evidence' in args) replies.set(message.seq, { warning: omittedWarning })
+      continue
+    }
+    if (!normalized(result.reply_evidence) || !Array.isArray(args.evidence)
+      || args.evidence.length < 1 || args.evidence.length > 8) continue
 
     const refs: { source_seq: number; quote: string }[] = []
     let valid = true
@@ -133,7 +167,15 @@ export function replyEvidenceFor(events: readonly TeamEvent[]): ReadonlyMap<numb
         && tools.has(String(origin.start.payload.name)) && source.role === origin.start.payload.role
         && source.tool === origin.start.payload.name && hash(receipt.hash) && receipt.hash === source.source_hash
     })) continue
-    replies.set(message.seq, evidence)
+    replies.set(message.seq, { evidence })
+  }
+  return replies
+}
+
+export function replyEvidenceFor(events: readonly TeamEvent[]): ReadonlyMap<number, ReplyEvidence> {
+  const replies = new Map<number, ReplyEvidence>()
+  for (const [messageSeq, details] of replyEvidenceDetailsFor(events)) {
+    if (details.evidence) replies.set(messageSeq, details.evidence)
   }
   return replies
 }

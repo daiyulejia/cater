@@ -16,6 +16,7 @@ import unittest
 from unittest.mock import patch
 
 from cater import team_reply
+from cater.reply_evidence import ReplyEvidenceError, normalize
 from cater.events import Actor
 from cater.team import HOST, LOCAL_EVENT_CONTRACT, LOCAL_EVENT_TOOLS, PAUSED_TOOLS
 from cater.team_read_sources import bound_receipts
@@ -156,12 +157,14 @@ class ReplyFixture(unittest.TestCase):
         return {"source_seq": event.seq, "quote": quote}
 
     def assert_rejected(self, context, evidence):
-        before = self.answers(context[0])
-        _start, result = self.dispatch(context, evidence)
-        self.assertEqual(result["status"], "error", result)
+        # Attachment validation remains strict; message omission is tested separately.
+        before = self.log.read(task_id=context[0])
+        with self.assertRaises(ReplyEvidenceError) as failure:
+            normalize(self.team, context[0], evidence, before_seq=self.log.count() + 1)
+        result = failure.exception.result()
         self.assertTrue(result.get("message"), result)
         self.assertNotEqual(result.get("outcome"), "effects_unknown", result)
-        self.assertEqual(self.answers(context[0]), before, "Invalid evidence sent a customer message")
+        self.assertEqual(self.log.read(task_id=context[0]), before, "The attachment parser wrote events")
         return result
 
     def assert_evidence(self, context, start, result, refs, originals):
@@ -319,7 +322,7 @@ class ReplyEvidenceContractTests(ReplyFixture):
         self.assertEqual(saved["status"], "error")
         self.assertEqual(saved["exit_code"], 1)
 
-    def test_invalid_types_limits_bool_and_extra_fields_are_correctable(self):
+    def test_reference_parser_rejects_invalid_types_limits_bool_and_extra_fields(self):
         _s, original = self.source()
         context = self.context()
         invalid = [None, True, False, {}, "receipt", 1, [None], [True], [[]], [{}],
@@ -345,7 +348,7 @@ class ReplyEvidenceContractTests(ReplyFixture):
                 self.assertEqual(result["status"], "error", result)
                 self.assertEqual(self.answers(), [])
 
-    def test_false_quote_is_rejected_and_exact_whitespace_is_preserved(self):
+    def test_reference_parser_rejects_false_quote_and_preserves_exact_whitespace(self):
         _s, original = self.source(result=self.result("prefix  exact body \n suffix"))
         context = self.context()
         for quote in ("invented body", "EXACT BODY", "prefix exact body", "prefix...suffix"):
@@ -355,7 +358,7 @@ class ReplyEvidenceContractTests(ReplyFixture):
         start, result = self.dispatch(context, refs)
         self.assert_evidence(context, start, result, refs, [original])
 
-    def test_foreign_missing_and_future_sources_do_not_send_or_leak(self):
+    def test_reference_parser_rejects_foreign_missing_and_future_sources_without_leaks(self):
         foreign_task = self.new_task()
         _s, foreign = self.source(task=foreign_task, result=self.result("FOREIGN_PRIVATE_BODY"))
         context = self.context()
@@ -378,8 +381,9 @@ class ReplyEvidenceContractTests(ReplyFixture):
             self.assertEqual(finished.seq, anticipated)
         _start, result = self.dispatch(context, [{"source_seq": anticipated, "quote": "RAW_RECEIPT_BODY"}],
                                        on_started=append_source)
-        self.assertEqual(result["status"], "error", result)
-        self.assertEqual(self.answers(task), [])
+        self.assertEqual((result["status"], result["reply_evidence_status"]), ("ok", "omitted_invalid"))
+        self.assertNotIn("reply_evidence", result)
+        self.assertEqual(len(self.answers(task)), 1)
 
     def test_orphan_late_duplicate_and_untrusted_chains_are_rejected(self):
         defects = ("orphan", "late", "duplicate_run_before", "duplicate_run_after", "system_input",
@@ -493,7 +497,10 @@ class ReplyEvidenceContractTests(ReplyFixture):
         context = self.context()
         _start, result = self.dispatch(context)
         self.assertEqual(result["status"], "ok", result)
-        self.assert_rejected(context, [self.ref(original)])
+        before = self.answers()
+        _start, result = self.dispatch(context, [self.ref(original)])
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(self.answers(), before)
 
     def test_new_input_revision_control_and_open_delegation_still_restrict_reply(self):
         for change in ("human", "revision", "control", "delegation"):
@@ -634,10 +641,15 @@ class ReplyEvidenceRecoveryTests(ReplyFixture):
         self.assertIsNone(self.committed(context, [e for e in events if e.seq != receipt.seq]))
         self.assertIsNone(self.committed(context, [e for e in events if e.seq != answer.seq]))
 
-    def test_invalid_citation_without_answer_keeps_normal_recovery_and_never_replays_model(self):
+    def test_legacy_rejected_citation_without_answer_keeps_normal_recovery(self):
         _s, original = self.source()
         context = self.context()
-        self.assert_rejected(context, [self.ref(original, "invented quote")])
+        result = self.assert_rejected(context, [self.ref(original, "invented quote")])
+        start = self.emit("team.tool_started", {**context[3].payload, "name": "reply_to_customer",
+            "call_id": "legacy-rejected-reply", "execution_contract": dict(LOCAL_EVENT_CONTRACT),
+            "arguments": {"text": TEXT, "evidence": [self.ref(original, "invented quote")]}})
+        self.emit("team.tool_finished", {"started_seq": start.seq, "name": "reply_to_customer",
+            "run_id": context[3].payload["run_id"], "role": self.manager, "result": result})
         self.assertIsNone(self.committed(context))
         with patch.object(self.f.driver, "agent_run", side_effect=AssertionError("No model replay")) as model:
             queued = self.team.recovery.prepare(self.task)
@@ -699,17 +711,13 @@ class ReplyEvidenceRecoveryTests(ReplyFixture):
 
 
 class ReplyEvidenceExternalTests(ReplyFixture):
-    def test_external_invalid_quote_then_valid_reply_yields_and_skips_later_calls(self):
+    def test_external_invalid_optional_quote_yields_without_correction_or_later_calls(self):
         _s, original = self.source()
         refs = [self.ref(original)]
 
         def script(run):
-            invalid = run.call("reply_to_customer", text=TEXT, evidence=[self.ref(original, "false quote")])
-            self.assertEqual(invalid["status"], "error", invalid)
-            self.assertEqual(self.answers(), [])
-            self.assertFalse(run.revoked)
-            run.call("reply_to_customer", text=TEXT, evidence=refs)
-            self.fail("Successful evidence reply did not yield immediately")
+            run.call("reply_to_customer", text=TEXT, evidence=[self.ref(original, "false quote")])
+            self.fail("Successful reply with omitted evidence did not yield immediately")
 
         self.f.driver.scripts = {self.manager: [script]}
         message = self.f.receive("Explain from the original source.")
@@ -728,7 +736,9 @@ class ReplyEvidenceExternalTests(ReplyFixture):
                 self.assertLess(host_external.seq, start.seq)
                 for key in ("run_id", "role", "message_seq"):
                     self.assertEqual(start.payload[key], host_external.payload[key])
-        self.assertEqual([r["status"] for r in self.f.results("reply_to_customer")], ["error", "ok"])
+        result, = self.f.results("reply_to_customer")
+        self.assertEqual((result["status"], result["reply_evidence_status"]), ("ok", "omitted_invalid"))
+        self.assertNotIn("reply_evidence", result)
         answer, = self.answers()
         self.assertEqual(answer.payload["reply_to"], message.seq)
         self.assertEqual(self.events("team.run_finished")[-1].payload["status"], "completed")
@@ -885,23 +895,17 @@ class ReplyEvidenceNativeTests(ReplyFixture):
         self.assertEqual(customer.payload["text"], TEXT)
         self.assertEqual(self.rt.task(self.task).deliverables, [])
 
-    def test_native_invalid_evidence_can_be_corrected_in_same_exchange(self):
+    def test_native_invalid_optional_evidence_sends_once_without_correction_round(self):
         _s, original = self.source()
-
-        def correct(context, history, tools):
-            result = json.loads(history[-1]["content"])
-            self.assertEqual(result["status"], "error", result)
-            self.assertEqual(self.answers(), [])
-            return self.f.native_turn("", ("reply_to_customer", {"text": TEXT, "evidence": [self.ref(original)]}))
-
         self.f.driver.steps[self.manager] = [
             self.f.native_turn("", ("reply_to_customer", {"text": TEXT, "evidence": [self.ref(original, "invented")]})),
-            correct, AssertionError("No model acknowledgment after corrected reply")]
-        self.team.receive(self.task, "Correct the citation, then answer.")
+            AssertionError("Optional citation failure must not request another model turn")]
+        self.team.receive(self.task, "Explain the saved receipt.")
         self.f.run_team()
-        self.assertEqual(len(self.f.driver.calls), 2)
-        self.assertGreater(self.f.validated_continuations, 0)
-        self.assertEqual([r["status"] for r in self.f.results("reply_to_customer")], ["error", "ok"])
+        self.assertEqual(len(self.f.driver.calls), 1)
+        result, = self.f.results("reply_to_customer")
+        self.assertEqual((result["status"], result["reply_evidence_status"]), ("ok", "omitted_invalid"))
+        self.assertNotIn("reply_evidence", result)
         self.assertEqual(len(self.answers()), 1)
 
     def test_rebound_and_paused_historical_receipts_do_not_authorize_writes(self):

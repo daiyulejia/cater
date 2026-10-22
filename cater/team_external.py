@@ -188,13 +188,9 @@ class TeamExternal:
             attempt = self.team.external_runs.begin(task_id, role, started, basis=basis,
                 binding=binding, tool_names=[tool["name"] for tool in tools],
                 driver_fingerprint=fingerprint)
-            prompt_instructions = (instructions
-                + "本轮通过受管外部客户端执行，实际工作只使用Cater提供的工具。"
-                  "客户端工作目录是临时启动目录，不是顾客工程；工程路径与权限以workspace及工具回执为准。"
-                  "完成原委托时用send_message明确recipient与reply_to正式交回；仅输出结束语不算交还。"
-                  "wait_for_reply、提问、复核、正式交还或finish_work成功后，本轮立即让出执行机会，"
-                  "不继续修改刚交回的成果；下一份输入会包含最新上下文。"
-                  "工具错误先读实际回执，不能因为通信失败就重复执行。\n")
+            from .team_instructions import EXTERNAL, context_instructions
+
+            prompt_instructions = instructions + context_instructions(context) + EXTERNAL
             context_text = model_json(context)
             prompt = prompt_instructions + context_text
             # Never load a customer's project-local client hooks/settings.

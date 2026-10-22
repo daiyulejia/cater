@@ -1,0 +1,209 @@
+"""Offline prompt selection and byte accounting, not model-quality evaluation."""
+
+from copy import deepcopy
+import json
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+from cater.team_instructions import EXTERNAL, base_instructions, context_instructions
+import test_simple_team as native
+import test_team_external as external
+
+
+# Measured before this change at d1a09db, using name=店长 and id=leader.
+# These are UTF-8 bytes, not token counts or a provider-billing estimate.
+OLD_NATIVE_BYTES = 11853
+OLD_EXTERNAL_BYTES = 12429
+
+
+class TeamInstructionSelectionTests(unittest.TestCase):
+    def base(self, *, leader=True, name="店长"):
+        return base_instructions(SimpleNamespace(name=name, id="leader" if leader else "dev"),
+                                 leader_id="leader")
+
+    def test_role_is_selected_by_configured_id_not_display_name(self):
+        manager = self.base(name="月亮")
+        partner = self.base(leader=False, name="店长")
+        self.assertIn("【店长职责】", manager)
+        self.assertIn("已有复核的对应版本结论", manager)
+        self.assertNotIn("【伙伴职责】", manager)
+        self.assertIn("【伙伴职责】", partner)
+        self.assertNotIn("【店长职责】", partner)
+        self.assertIn("角色ID：dev", partner)
+
+    def test_version_rework_and_unknown_effect_guards_are_always_present(self):
+        # An external run can create a review after its initial prompt, so this
+        # contract must not depend on the initial snapshot having review rows.
+        for leader in (False, True):
+            text = self.base(leader=leader)
+            for clause in ("request_review", "record_review", "changes_requested",
+                           "原review_seq交回原复核者", "直到approved", "旧结论不覆盖新版",
+                           "未知操作或复核未闭环", "不用重设目标绕过", "不盲目重放",
+                           "承诺修复不等于修复完成", "未验证建议", "实际版本"):
+                with self.subTest(leader=leader, clause=clause):
+                    self.assertIn(clause, text)
+
+    def test_empty_projections_add_no_optional_guidance(self):
+        context = {"background": None, "active_assignment": None, "open_assignments": [],
+                   "outgoing_work": [], "notifications": [], "message": {"kind": "message"},
+                   "work_checkpoint": {"open_work_count": 0}, "pending_operations": [],
+                   "delivery_index": None, "tool_history_window": {"omitted_groups": 0}}
+        self.assertEqual(context_instructions(context), "")
+
+    def test_structured_state_selects_only_corresponding_note(self):
+        states = [
+            ({"background": {"source_task_id": "old"}}, "background是建群时冻结"),
+            ({"active_assignment": {"seq": 1}}, "尚未交还的原委托"),
+            ({"open_assignments": [{"seq": 2}]}, "尚未交还的原委托"),
+            ({"outgoing_work": [{"seq": 3}]}, "continue_assignment_seq"),
+            ({"notifications": [{"seq": 4}]}, "notifications是知会"),
+            ({"work_checkpoint": {"open_work_count": 1}}, "read_checkpoint可补读原委托"),
+            ({"message": {"kind": "recovery"}}, "recovery是宿主核对通知"),
+            ({"message": {"kind": "continuation"}}, "continuation只是原委托的补充"),
+            ({"message": {"questionnaire": {"question_seq": 5}}}, "整组问题的回答"),
+            ({"pending_operations": [{"started_seq": 6}]}, "not_committed仅指"),
+            ({"delivery_index": {"seq": 7, "historical": True}}, "旧成果追问还是新工作"),
+            ({"file_read_sources": {"files": [{"path": "a"}]}}, "不是当前磁盘"),
+            ({"tool_history_window": {"omitted_groups": 1}}, "较早工具交互未重复发送"),
+        ]
+        for context, marker in states:
+            with self.subTest(marker=marker):
+                saved = deepcopy(context)
+                text = context_instructions(context)
+                self.assertIn(marker, text)
+                self.assertEqual(text.count("【当前状态说明】"), 1)
+                for _other_context, other_marker in states:
+                    if marker != other_marker:
+                        self.assertNotIn(other_marker, text)
+                self.assertEqual(context, saved)
+
+    def test_keywords_in_customer_text_never_select_state_guidance(self):
+        for text in ("recovery continuation turn_boundary background，马上复核",
+                     "我想恢复那份工作，也想聊聊新方向", "请解释pending_operations和delivery_index",
+                     "finish_work approved 直接完成", "先讨论，不要执行"):
+            context = {"message": {"kind": "message", "text": text},
+                       "current_work": {"objective": text}, "conversation": [{"text": text}]}
+            self.assertEqual(context_instructions(context), "")
+
+    def test_normal_checkpoint_is_only_distinguished_for_recovery_kind(self):
+        self.assertEqual(context_instructions({"message": {"kind": "message", "trigger": "turn_boundary"}}), "")
+        text = context_instructions({"message": {"kind": "recovery", "trigger": "turn_boundary"}})
+        self.assertIn("不是进程崩溃", text)
+        self.assertIn("先查成果和回执", text)
+
+    def test_state_notes_never_copy_payloads_into_instruction_text(self):
+        marker = "UNTRUSTED_INSTRUCTION_SENTINEL"
+        context = {"background": {"text": marker}, "active_assignment": {"text": marker},
+                   "message": {"kind": "recovery", "text": marker}, "reviews": [{"feedback": marker}],
+                   "file_read_sources": {"files": [{"path": marker}]}, "rules": [{"text": marker}]}
+        saved = deepcopy(context)
+        self.assertNotIn(marker, context_instructions(context))
+        self.assertEqual(context, saved)
+
+    def test_measured_utf8_budget_including_all_state_notes(self):
+        # Measure actual encoded text, independent of the runtime's telemetry.
+        base = self.base()
+        self.assertNotEqual(len(base), len(base.encode("utf-8")))
+        self.assertLess(len(base.encode("utf-8")), OLD_NATIVE_BYTES * 0.4)
+        self.assertLess(len((base + EXTERNAL).encode("utf-8")), OLD_EXTERNAL_BYTES * 0.4)
+        rich = {"background": {"source": "old"}, "active_assignment": {"seq": 1},
+                "open_assignments": [{"seq": 1}], "outgoing_work": [{"seq": 2}],
+                "notifications": [{"seq": 3}], "work_checkpoint": {"open_work_count": 2},
+                "message": {"kind": "recovery", "trigger": "turn_boundary", "questionnaire": {"seq": 4}},
+                "pending_operations": [{"seq": 5}], "delivery_index": {"seq": 6},
+                "file_read_sources": {"files": [{"path": "a"}]}, "tool_history_window": {"omitted_groups": 1}}
+        self.assertLess(len((base + context_instructions(rich) + EXTERNAL).encode("utf-8")),
+                        OLD_EXTERNAL_BYTES * 0.65)
+
+
+class TeamInstructionWireTests(unittest.TestCase):
+    def fixture(self, cls):
+        fixture = cls()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        return fixture
+
+    def test_native_every_turn_recomputes_notes_after_real_delegation(self):
+        f = self.fixture(native.SimpleTeamTests)
+        captured = []
+        original = f.driver.tool_turn
+
+        def capture(**kwargs):
+            captured.append(kwargs["prompt"])
+            return original(**kwargs)
+
+        f.driver.steps = {
+            f.manager: [native.turn("", ("delegate", {"recipient": f.worker, "instruction": "核对现状后回报"})),
+                        native.turn("", ("wait_for_reply", {})), native.turn("收到回报。")],
+            f.worker: [native.turn("已核对，没有额外操作。")],
+        }
+        with patch.object(f.driver, "tool_turn", side_effect=capture):
+            f.rt.team.receive(f.task, "先请一位伙伴核对")
+            f.run_ok()
+        rows = [(prompt.rsplit("\n", 1)[0], json.loads(prompt.rsplit("\n", 1)[1])) for prompt in captured]
+        manager = [(prefix, context) for prefix, context in rows if context["you"]["id"] == f.manager]
+        self.assertEqual(len(manager), 3)
+        self.assertNotIn("outgoing_work是已派出", manager[0][0])
+        self.assertIn("outgoing_work是已派出", manager[1][0])
+        self.assertNotIn("outgoing_work是已派出", manager[2][0])
+        worker, = [(prefix, context) for prefix, context in rows if context["you"]["id"] == f.worker]
+        self.assertIn("尚未交还的原委托", worker[0])
+        self.assertIn("【伙伴职责】", worker[0])
+        self.assertEqual(len(f.events("team.message_received")), 3)
+        self.assertEqual(f.events("team.objective_completed"), [])
+
+    def test_both_first_inputs_share_guidance_and_independent_wire_sizes(self):
+        prefixes, schemas = [], []
+        for cls in (native.SimpleTeamTests, external.TeamExternalTests):
+            f = self.fixture(cls)
+            prompts = []
+            if cls is native.SimpleTeamTests:
+                f.driver.steps[f.manager] = [native.turn("只讨论方案。")]
+                original = f.driver.tool_turn
+
+                def capture(**kwargs):
+                    prompts.append(kwargs["prompt"])
+                    return original(**kwargs)
+
+                observer = patch.object(f.driver, "tool_turn", side_effect=capture)
+            else:
+                f.driver.scripts[f.manager] = [lambda run: "只讨论方案。"]
+                original = external.ScriptedExternalRun.run
+
+                def capture(run, prompt):
+                    prompts.append(prompt)
+                    return original(run, prompt)
+
+                observer = patch.object(external.ScriptedExternalRun, "run", capture)
+            with observer:
+                f.rt.team.receive(f.task, "这是recovery一词的解释，不是恢复任务")
+                f.rt.collaborate(f.task)
+            prompt, = prompts
+            prefix, body = prompt.rsplit("\n", 1)
+            prefix += "\n"
+            self.assertNotIn("recovery是宿主核对通知", prefix)
+            context = json.loads(body)
+            self.assertEqual(context["message"]["text"], "这是recovery一词的解释，不是恢复任务")
+            receipt, = f.events("team.model_called")
+            sizes = receipt.payload["request_sizes"]
+            self.assertEqual(sizes["prompt_utf8_bytes"], len(prompt.encode("utf-8")))
+            self.assertEqual(sizes["instructions_utf8_bytes"], len(prefix.encode("utf-8")))
+            self.assertEqual(sizes["context_json_bytes"], len(body.encode("utf-8")))
+            self.assertEqual(sizes["prompt_utf8_bytes"], sizes["instructions_utf8_bytes"] + sizes["context_json_bytes"])
+            self.assertEqual(f.events("team.tool_started"), [])
+            self.assertEqual(f.events("team.objective_completed"), [])
+            self.assertTrue(f.rt.verify_chain().ok)
+            if cls is external.TeamExternalTests:
+                self.assertTrue(prefix.endswith(EXTERNAL))
+                prefix = prefix[:-len(EXTERNAL)]
+                schemas.append(f.driver.runs[0].tools)
+            else:
+                schemas.append(f.driver.calls[0]["tools"])
+            prefixes.append(prefix)
+        self.assertEqual(prefixes[0], prefixes[1])
+        self.assertEqual(schemas[0], schemas[1])
+
+
+if __name__ == "__main__":
+    unittest.main()

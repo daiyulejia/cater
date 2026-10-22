@@ -95,8 +95,9 @@ class ExternalModelJsonTests(unittest.TestCase):
         self.assertEqual(context, model_context(raw[0]))
         self.assertEqual(context['message']['text'], message.payload['text'])
         self.assertEqual(context_text, json.dumps(context, ensure_ascii=False, separators=(',', ':')))
-        self.assertIn('本轮通过受管外部客户端执行', instructions)
-        self.assertIn('你的输出可以成为下一位的输入', instructions)
+        self.assertIn('【外部客户端】实际工作只用Cater工具', instructions)
+        self.assertIn('临时启动目录不是顾客工程', instructions)
+        self.assertIn('完成原委托用send_message正式交回', instructions)
         receipt, = fixture.events('team.model_called')
         sizes = receipt.payload['request_sizes']
         self.assertEqual(sizes, {

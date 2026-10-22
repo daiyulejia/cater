@@ -1,9 +1,7 @@
 """Compact model envelopes through real Runtime and loopback HTTP adapters."""
 
-import ast
 from contextlib import contextmanager
 from copy import deepcopy
-import inspect
 import json
 import unittest
 from unittest.mock import patch
@@ -11,9 +9,8 @@ from unittest.mock import patch
 from cater.artifacts import normalize_deliverables
 from cater.events import Actor
 from cater.runtime import Runtime
-import cater.team as team_module
-import cater.team_external as external_module
 from cater.team_context import HISTORY_BYTES, model_context
+from cater.team_instructions import EXTERNAL, base_instructions, context_instructions
 import test_protocol_usage as protocol
 import test_team_external as external
 
@@ -27,17 +24,6 @@ LITERAL = (
     '\tquoted "value", backslash \\, trailing  spaces  \nEND'
 )
 VISIBLE = 'Model says: { "a": 1, "b": 2 }\n  \u4fdd\u7559\u6b63\u6587\u7f29\u8fdb\tC:\\a b\\file.py'
-
-
-def declared_string(module, name, **bindings):
-    # Derive the complete declared instructions independently of prompt assembly.
-    nodes = [node.value for node in ast.walk(ast.parse(inspect.getsource(module)))
-             if isinstance(node, ast.Assign)
-             and any(isinstance(target, ast.Name) and target.id == name for target in node.targets)]
-    if len(nodes) != 1:
-        raise AssertionError(f"Expected one declaration of {name}")
-    return eval(compile(ast.Expression(nodes[0]), module.__file__, "eval"),
-                {"__builtins__": {}}, bindings)
 
 
 def final_response(cls):
@@ -118,19 +104,19 @@ class TeamCompactWireTests(unittest.TestCase):
         receipts = fixture.events("team.model_called")
         self.assertEqual(len(receipts), len(requests))
         self.assertEqual(len(turns), len(requests))
-        instructions = declared_string(team_module, "instructions",
-                                       role=fixture.rt.team._role(fixture.manager))
         for request, captured, receipt in zip(requests, turns, receipts):
             prompt = request["messages"][0 if cls is protocol.AnthropicMessagesDriver else 1]["content"]
             self.assertEqual(prompt, captured["prompt"])
-            self.assertTrue(prompt.startswith(instructions))
-            context_text = prompt[len(instructions):]
+            instructions, context_text = prompt.rsplit("\n", 1)
+            instructions += "\n"
             history_bytes = len(json.dumps(captured["history"], ensure_ascii=False).encode("utf-8"))
             context = model_context(captured["raw_context"])
             context["tool_history_window"] = {
                 "omitted_groups": 0, "retained_json_bytes": history_bytes,
                 "soft_budget_bytes": HISTORY_BYTES, "run_id": receipt.payload["run_id"],
             }
+            self.assertEqual(instructions, base_instructions(fixture.rt.team._role(fixture.manager),
+                leader_id=fixture.manager) + context_instructions(context))
             self.assert_compact(context_text, context)
             self.assertEqual(prompt, instructions + json.dumps(context, ensure_ascii=False, separators=(",", ":")))
             self.assertEqual(context["message"]["text"], LITERAL)
@@ -282,10 +268,10 @@ class TeamCompactWireTests(unittest.TestCase):
         self.assertEqual(len(f.driver.runs), 1)
         prompt, = prompts
         raw, = contexts
-        instructions = declared_string(team_module, "instructions", role=f.rt.team._role(f.manager))
-        instructions = declared_string(external_module, "prompt_instructions", instructions=instructions)
-        self.assertTrue(prompt.startswith(instructions))
-        context_text = prompt[len(instructions):]
+        instructions, context_text = prompt.rsplit("\n", 1)
+        instructions += "\n"
+        self.assertEqual(instructions, base_instructions(f.rt.team._role(f.manager), leader_id=f.manager)
+                         + context_instructions(model_context(raw)) + EXTERNAL)
         self.assert_compact(context_text, model_context(raw))
         self.assertEqual(json.loads(context_text)["message"]["text"], LITERAL)
         receipt, = f.events("team.model_called")
