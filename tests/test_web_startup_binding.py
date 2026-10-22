@@ -136,7 +136,7 @@ class WebStartupBindingTests(unittest.TestCase):
         summary = next(row for row in rows if row["id"] == self.activity_task)
         expected = runner.status(self.activity_task)
         self.assertEqual(summary["activity"], {key: expected[key] for key in (
-            "state", "active", "revision", "instance_id")})
+            "id", "state", "active", "revision", "instance_id")})
         self.assertEqual(activity(), expected)
 
     def run_http_checks(self, server, runner):

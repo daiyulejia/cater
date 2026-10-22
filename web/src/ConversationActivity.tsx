@@ -20,7 +20,9 @@ export function ConversationActivity(props: ConversationActivityProps) {
   const view = conversationActivity(props)
   const lines = [...view.lines].sort((a, b) => Number(Boolean(b.warning)) - Number(Boolean(a.warning))
     || Number(Boolean(b.moving)) - Number(Boolean(a.moving))).slice(0, 2)
-  const compactText = view.message ?? lines[0]?.text
+  const publicLine = lines.find(line => line.publicText)
+  const publicPreview = publicLine?.publicText?.trim().split('\n').filter(Boolean).at(-1)
+  const compactText = publicPreview ? `${props.names[publicLine!.role!] ?? publicLine!.role} · ${Array.from(publicPreview).slice(-100).join('')}` : view.message ?? lines[0]?.text
   const warningCount = view.lines.filter(line => line.warning).length
   const deadline = view.visible ? view.nextCheckAt : undefined
   useEffect(() => {
@@ -53,17 +55,23 @@ export function ConversationActivity(props: ConversationActivityProps) {
       </div>
     </div>
     {!view.waitsForCustomer && <div id={bodyId} tabIndex={expanded ? 0 : -1} role="status" aria-live="polite" aria-atomic="true" className="activity-body space-y-1.5">
-      {compactText && <p className="activity-compact-summary" aria-label="当前进展摘要">{compactText}</p>}
+      {compactText && <p className="activity-compact-summary" aria-label="当前进展摘要" aria-live={publicPreview ? 'off' : undefined}>{compactText}</p>}
       {view.message && <p className="activity-message flex min-w-0 items-start gap-2 text-[#294a40]">
         {view.messageRole && !lines.some((line) => line.role === view.messageRole) && <span aria-hidden="true" className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden">{props.portrait(view.messageRole)}</span>}
         <span className="min-w-0">{view.message}</span>
       </p>}
-      {lines.map((line, index) => <p key={line.id} data-secondary={index > 0} className={`activity-line flex min-w-0 items-start gap-2 ${line.warning ? 'text-[#b55f51]' : ''}`}>
+      {lines.map((line, index) => <div key={line.id} data-secondary={index > 0} className={`activity-line min-w-0 ${line.warning ? 'text-[#b55f51]' : ''}`}>
+        <p className="flex min-w-0 items-start gap-2">
         {line.role ? <span aria-hidden="true" className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden">{props.portrait(line.role)}</span>
           : <Clock3 size={14} className="mt-1 shrink-0" aria-hidden="true" />}
         <span className="min-w-0 flex-1">{line.text}</span>
-        {line.moving && <LoaderCircle size={14} aria-label="有近期执行反馈" className="mt-1 shrink-0 motion-safe:animate-spin" />}
-      </p>)}
+        {line.moving && <LoaderCircle size={14} aria-label={line.publicText ? '有近期活动反馈' : '有近期执行反馈'} className="mt-1 shrink-0 motion-safe:animate-spin" />}
+        </p>
+        {line.publicText && <details aria-live="off" className="ml-10 mt-1 text-[#58776e]">
+          <summary className="cursor-pointer font-medium">工作说明<span className="ml-2 text-[11px] font-normal text-[#839087]">{line.publicTruncated ? '最近片段 · 成员自述' : '成员自述'}</span></summary>
+          <pre className="mt-1 max-h-28 overflow-y-auto whitespace-pre-wrap break-words font-sans text-xs leading-5 [overflow-wrap:anywhere]">{line.publicText}</pre>
+        </details>}
+      </div>)}
       {notice && <p className="activity-notice flex items-start gap-2 text-[#b55f51]"><CircleAlert size={14} className="mt-1 shrink-0" aria-hidden="true" /><span className="min-w-0">{notice}</span></p>}
     </div>}
   </section>

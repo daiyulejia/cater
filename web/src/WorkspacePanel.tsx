@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
-import { FilePenLine, FileSearch, Folder, FolderCog, LoaderCircle, RefreshCw, Save, Terminal, Unlink, X } from 'lucide-react'
+import { Check, Copy, FilePenLine, FileSearch, Folder, FolderCog, LoaderCircle, RefreshCw, Save, Terminal, Unlink, X } from 'lucide-react'
 import { sameWorkScope } from './participants'
 import { CommandOutputs } from './CommandOutputPreview'
 
@@ -26,6 +26,36 @@ const modeText = (mode?: WorkspaceMode) => mode ? ({ read_only: '只读', edit: 
 const toolText = (name: unknown) => ({ workspace_list: '读取目录', workspace_read: '读取文件', workspace_search: '查找内容', workspace_write: '修改文件', workspace_run: '运行命令' }[String(name)] ?? '工具调用')
 const errorText = (error: unknown) => error instanceof Error ? error.message : '暂时无法保存工作目录，请稍后重试。'
 const buttonClass = 'inline-flex min-h-9 items-center justify-center gap-1.5 rounded-md px-2 text-xs font-semibold text-[#34786e] hover:bg-[#e7f0ec] disabled:opacity-45'
+
+function CurrentWorkspaceRoot({ root }: { root: string }) {
+  const [copyState, setCopyState] = useState<'idle' | 'copying' | 'copied' | 'failed'>('idle')
+  const mounted = useRef(true)
+  const copying = useRef(false)
+  useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  const copy = async () => {
+    if (copying.current) return
+    copying.current = true
+    setCopyState('copying')
+    try {
+      await navigator.clipboard.writeText(root)
+      if (mounted.current) setCopyState('copied')
+    } catch {
+      if (mounted.current) setCopyState('failed')
+    } finally { copying.current = false }
+  }
+  return <div className="mt-1 min-w-0">
+    <div className="flex min-w-0 items-start gap-2">
+      <p className="min-w-0 flex-1 select-text whitespace-pre-wrap font-mono [overflow-wrap:anywhere]">{root}</p>
+      <button type="button" className={`${buttonClass} size-9 shrink-0`} aria-label="复制当前目录路径" title="复制当前目录路径" disabled={copyState === 'copying'} aria-busy={copyState === 'copying'} onClick={() => void copy()}>
+        {copyState === 'copying' ? <LoaderCircle size={15} className="motion-safe:animate-spin" aria-hidden="true" /> : copyState === 'copied' ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}
+      </button>
+    </div>
+    <p className="text-[#58776e]">目录位于服务所在电脑，非手机本地目录。</p>
+    {copyState === 'copying' && <p role="status">正在复制路径…</p>}
+    {copyState === 'copied' && <p role="status" className="text-[#34786e]">已复制当前目录路径</p>}
+    {copyState === 'failed' && <p role="alert" className="text-[#a54f3e]">复制失败，请手动选择路径复制。</p>}
+  </div>
+}
 
 // Task identity owns the dialog, selection and pending UI, including across navigation.
 export function WorkspacePanel(props: Props) {
@@ -149,9 +179,9 @@ function WorkspaceBindingPanel(props: Props) {
               {props.workspaceId === undefined && !managed && !loading && !optionsError && <p className="mt-1">宿主未配置默认独立目录；未选择目录时不提供文件和运行工具。</p>}
               {currentId && !loading && !optionsError && !draftDirectory && <p className="mt-1 text-[#895746]">原选择不在可选列表中；已有待确认请求仍使用原目录，需核对服务端配置。</p>}</>
               : <p className="mt-1">{workspace?.workspace_id ? workspace.title || workspace.workspace_id : '尚未绑定工作目录'}</p>}
-            {workspace?.root && <p className="mt-1 font-mono">{workspace.root}</p>}
+            {workspace?.workspace_id && workspace.root && <CurrentWorkspaceRoot key={JSON.stringify([workspace.workspace_id, workspace.root])} root={workspace.root} />}
             {workspace?.workspace_id && <p className="mt-1">权限：{modeText(workspace.mode)} · {workspace.available ? '可用' : '不可用，需重新绑定'}</p>}
-            {currentManaged && choiceId === currentId && !selected && workspace?.mode === 'execute' && <p className="mt-1 text-[#895746]">命令在这台电脑上运行，当前不是沙箱</p>}
+            {currentManaged && choiceId === currentId && !selected && workspace?.mode === 'execute' && <p className="mt-1 text-[#895746]">命令在服务所在电脑上运行，当前不是沙箱</p>}
             {workspace?.reason && <p className="mt-1 text-[#895746]">{workspace.reason}</p>}
             {!props.draft && !workspace && <p className="mt-1 text-[#895746]">暂未取得工作目录状态，请重新读取后再绑定。</p>}
           </section>
@@ -172,7 +202,7 @@ function WorkspaceBindingPanel(props: Props) {
                 <p>创建位置（基目录），并非本群已创建的目录：</p>
               </>}
               <p className="font-mono">{selected.root}</p><p>权限：{modeText(selected.mode)}</p>
-              {selected.mode === 'execute' && <><p className="text-[#895746]">命令在这台电脑上运行，当前不是沙箱</p><p>可用命令：{selected.commands.length ? selected.commands.join('、') : '未配置'}</p></>}
+              {selected.mode === 'execute' && <><p className="text-[#895746]">命令在服务所在电脑上运行，当前不是沙箱</p><p>可用命令：{selected.commands.length ? selected.commands.join('、') : '未配置'}</p></>}
             </div>}
           </section>
           {!props.draft && <p className="border-t border-[#dce7e0] pt-3 text-[#58776e]">切换或解除绑定后，需重新核对当前计划与已有成果。</p>}

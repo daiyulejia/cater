@@ -56,7 +56,7 @@ export type TeamState = {
 
 export type TeamSummary = Pick<TeamState, 'enabled' | 'status' | 'pending_count' | 'revision' | 'effects_pending_count'> & { runs?: TeamRun[] }
 
-export type TeamActivity = { state: string; active: boolean; revision?: number; instance_id?: string; follow_up?: { action?: string } }
+export type TeamActivity = { id?: string; state: string; active: boolean; revision?: number; instance_id?: string; follow_up?: { action?: string } }
 
 export type TeamSnapshotClock = {
   version: number

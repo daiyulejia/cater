@@ -32,6 +32,7 @@ class TeamExternal:
         self.team, self.rt = team, team.rt
         self._scheduler = None
         self._live = {}
+        self.progress = None
 
     def begin_scheduler(self, task_id):
         if self._scheduler is not None or self._live:
@@ -98,6 +99,18 @@ class TeamExternal:
         calls = 0
         last_check = 0.0
         terminal = "failed"
+        observer = self.progress
+
+        def observe(update):
+            if update is not None and stop_kind is not None:
+                return
+            if observer is not None and attempt is not None:
+                try:
+                    observer(attempt, revision, update)
+                except Exception:
+                    # Optional observation must not change work, cleanup or delivery.
+                    pass
+
         try:
             if self.rt.log.db.in_transaction:
                 raise WorkConflict("外部运行必须先提交开始记录，不能处于外层事务中。")
@@ -181,6 +194,7 @@ class TeamExternal:
                 # Revoke before acknowledging a terminal host action. A later
                 # model tool request cannot mutate already handed-off work.
                 if stop_kind is not None:
+                    observe(None)
                     run.revoke_tools()
                 return result
 
@@ -198,7 +212,7 @@ class TeamExternal:
             scratch = LaunchDirectory(self.rt.log, attempt)
             try:
                 run = driver.agent_run(cwd=scratch.path, tools=tools, execute=execute,
-                                       check_current=check, on_update=None)
+                                       check_current=check, on_update=observe if observer is not None else None)
                 try:
                     if self._scheduler == (task_id, threading.get_ident()):
                         self._live[attempt.seq] = (attempt, run, check)
@@ -315,6 +329,7 @@ class TeamExternal:
             if code != "execution_budget":
                 self.rt._driver_health.record_failure(role.driver)
         finally:
+            observe(None)
             if attempt is not None and run is None:
                 self.team.external_runs.finish(attempt, phase="setup", prompt_attempted=False,
                                                cleanup_complete=True, result="failed")

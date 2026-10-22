@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
-import { beforeEach, expect, test, vi } from 'vitest'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import App from '../src/App'
 import type { TaskDetail } from '../src/App'
 import { WorkspacePanel, WorkspaceToolProgress } from '../src/WorkspacePanel'
@@ -29,6 +29,127 @@ const open = async () => { await act(async () => fireEvent.click(screen.getByRol
 const choose = (value: string) => fireEvent.change(screen.getByRole('combobox', { name: '可选目录' }), { target: { value } })
 const save = async () => { await act(async () => fireEvent.click(screen.getByRole('button', { name: '保存绑定' }))) }
 const disabled = (name: string) => (screen.getByRole('button', { name, exact: true }) as HTMLButtonElement).disabled
+const clipboardDescriptor = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+const clipboard = (writeText = vi.fn().mockResolvedValue(undefined)) => {
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+  return writeText
+}
+afterEach(() => {
+  if (clipboardDescriptor) Object.defineProperty(navigator, 'clipboard', clipboardDescriptor)
+  else Reflect.deleteProperty(navigator, 'clipboard')
+})
+
+test('只复制宿主当前绑定 root 的原文，任务活动时可复制且不触发绑定或运行', async () => {
+  const root = 'F:\\群工作目录\\host\\实际目录 空格\\很长的目录名'
+  const p = props({ ...managedBinding(), root })
+  p.loadOptions.mockResolvedValue([...options, managed])
+  p.active = true
+  const writeText = clipboard()
+  render(<WorkspacePanel {...p} />)
+  await open()
+  const current = within(screen.getByRole('region', { name: '当前工作目录' }))
+  expect(current.getByText(root)).toBeTruthy()
+  expect(current.getByText('目录位于服务所在电脑，非手机本地目录。')).toBeTruthy()
+  expect(screen.getByRole('button', { name: '复制当前目录路径' }).querySelector('svg')).toBeTruthy()
+  expect(disabled('复制当前目录路径')).toBe(false)
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '复制当前目录路径' })))
+  expect(writeText).toHaveBeenCalledExactlyOnceWith(root)
+  expect(current.getByRole('status').textContent).toBe('已复制当前目录路径')
+  expect(p.onBind).not.toHaveBeenCalled()
+  expect(p.onRefresh).not.toHaveBeenCalled()
+  expect(screen.queryByRole('link')).toBeNull()
+})
+
+test('浏览未保存目录仍复制当前 root；不可用只读绑定不影响复制', async () => {
+  const p = props({ ...binding(), available: false, mode: 'read_only' })
+  const writeText = clipboard()
+  render(<WorkspacePanel {...p} />)
+  await open()
+  choose('host')
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '复制当前目录路径' })))
+  expect(writeText).toHaveBeenCalledExactlyOnceWith(p.workspace!.root)
+  expect(p.onBind).not.toHaveBeenCalled()
+})
+
+test.each(['denied', 'missing', 'throws'] as const)('剪贴板 %s 明确失败并保留可选路径，后续可重试', async (failure) => {
+  if (failure === 'missing') Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
+  else clipboard(failure === 'denied' ? vi.fn().mockRejectedValue(new Error('denied')) : vi.fn(() => { throw new Error('unavailable') }))
+  const p = props(binding())
+  render(<WorkspacePanel {...p} />)
+  await open()
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '复制当前目录路径' })))
+  expect(screen.getByRole('alert').textContent).toBe('复制失败，请手动选择路径复制。')
+  expect(within(screen.getByRole('region', { name: '当前工作目录' })).getByText(p.workspace!.root!)).toBeTruthy()
+  expect(screen.queryByText('已复制当前目录路径')).toBeNull()
+  const writeText = clipboard()
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '复制当前目录路径' })))
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(screen.getByText('已复制当前目录路径')).toBeTruthy()
+  expect(writeText).toHaveBeenCalledExactlyOnceWith(p.workspace!.root)
+})
+
+test.each(['root', 'binding', 'task', 'reopen'] as const)('%s 变化清除旧复制成功，返回原路径也不恢复', async (change) => {
+  clipboard()
+  const p = props(binding())
+  const view = render(<WorkspacePanel {...p} />)
+  await open()
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '复制当前目录路径' })))
+  expect(screen.getByText('已复制当前目录路径')).toBeTruthy()
+  if (change === 'reopen') {
+    fireEvent.click(screen.getByRole('button', { name: '关闭工作目录' }))
+    await open()
+  } else {
+    view.rerender(<WorkspacePanel {...p} taskId={change === 'task' ? 'b' : 'a'} workspace={{ ...p.workspace!,
+      ...(change === 'root' ? { root: '/srv/另一个目录' } : change === 'binding' ? { workspace_id: 'other' } : {}) }} />)
+    if (change === 'task') await open()
+  }
+  expect(screen.queryByText('已复制当前目录路径')).toBeNull()
+  view.rerender(<WorkspacePanel {...p} />)
+  if (change === 'task') await open()
+  expect(screen.queryByText('已复制当前目录路径')).toBeNull()
+  expect(disabled('复制当前目录路径')).toBe(false)
+})
+
+test.each(['root', 'task', 'reopen'] as const)('%s 后旧剪贴板请求迟到不覆盖新复制结果', async (change) => {
+  const pending = deferred<void>()
+  const writeText = clipboard(vi.fn().mockReturnValueOnce(pending.promise).mockRejectedValue(new Error('new copy denied')))
+  const p = props(binding())
+  const view = render(<WorkspacePanel {...p} />)
+  await open()
+  fireEvent.click(screen.getByRole('button', { name: '复制当前目录路径' }))
+  fireEvent.click(screen.getByRole('button', { name: '复制当前目录路径' }))
+  expect(writeText).toHaveBeenCalledTimes(1)
+  expect(disabled('复制当前目录路径')).toBe(true)
+  if (change === 'reopen') {
+    fireEvent.click(screen.getByRole('button', { name: '关闭工作目录' }))
+    await open()
+  } else {
+    view.rerender(<WorkspacePanel {...p} taskId={change === 'task' ? 'b' : 'a'} workspace={{ ...p.workspace!, root: '/srv/新目录' }} />)
+    if (change === 'task') await open()
+  }
+  expect(disabled('复制当前目录路径')).toBe(false)
+  expect(screen.queryByText('正在复制路径…')).toBeNull()
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '复制当前目录路径' })))
+  await act(async () => pending.resolve())
+  expect(screen.queryByText('已复制当前目录路径')).toBeNull()
+  expect(screen.getByRole('alert').textContent).toBe('复制失败，请手动选择路径复制。')
+})
+
+test.each([undefined, unbound(), { ...unbound(), root: 'F:/残留路径' }, { ...binding(), root: undefined }])('无实际当前绑定 root 时不提供复制或推测路径 %#', async (workspace) => {
+  render(<WorkspacePanel {...props()} workspace={workspace} />)
+  await open()
+  choose('host')
+  expect(screen.queryByRole('button', { name: '复制当前目录路径' })).toBeNull()
+  expect(screen.queryByText('F:/残留路径')).toBeNull()
+})
+
+test.each([managed, options[1]])('草稿 $id 仅显示配置预览，不把基目录当作已建群路径复制', async (option) => {
+  render(<WorkspacePanel draft workspaceId={option.id} loadOptions={async () => [option]} onSelect={vi.fn()} />)
+  await open()
+  expect(screen.getByText(option.root)).toBeTruthy()
+  expect(screen.queryByRole('button', { name: '复制当前目录路径' })).toBeNull()
+  if (option.managed) expect(screen.getByText('创建位置（基目录），并非本群已创建的目录：')).toBeTruthy()
+})
 
 test('入口按需加载，只选预配置目录；中文权限与 execute 主机说明随选择呈现', async () => {
   const p = props()
@@ -46,7 +167,7 @@ test('入口按需加载，只选预配置目录；中文权限与 execute 主�
   expect(screen.getByText('权限：可读写')).toBeTruthy()
   expect(screen.queryByText(/当前不是沙箱/)).toBeNull()
   choose('host')
-  expect(screen.getByText('命令在这台电脑上运行，当前不是沙箱')).toBeTruthy()
+  expect(screen.getByText('命令在服务所在电脑上运行，当前不是沙箱')).toBeTruthy()
   expect(screen.getByText('可用命令：test、build')).toBeTruthy()
   await save()
   expect(p.onBind).toHaveBeenCalledExactlyOnceWith({ workspace_id: 'host', expected_revision: null })
@@ -436,7 +557,7 @@ test.each([undefined, '__managed__', null, 'host'])('有 managed 时默认展示
   expect(screen.getByText('创建位置（基目录），并非本群已创建的目录：')).toBeTruthy()
   expect(screen.getByText(managed.root)).toBeTruthy()
   expect(screen.getByText('权限：可读写并运行命令')).toBeTruthy()
-  expect(screen.getByText('命令在这台电脑上运行，当前不是沙箱')).toBeTruthy()
+  expect(screen.getByText('命令在服务所在电脑上运行，当前不是沙箱')).toBeTruthy()
   expect(screen.getByText('可用命令：test')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: '关闭工作目录' }))
   if (id !== undefined) await selectDraftDirectory(id)
@@ -593,7 +714,7 @@ test.each([true, false])('已绑定 managed 显示回执实际目录，模板存
   expect(screen.queryByText(managed.root)).toBeNull()
   expect(screen.queryByText(/创建位置（基目录）/)).toBeNull()
   expect(screen.getByText('权限：可读写并运行命令 · 可用')).toBeTruthy()
-  expect(screen.getByText('命令在这台电脑上运行，当前不是沙箱')).toBeTruthy()
+  expect(screen.getByText('命令在服务所在电脑上运行，当前不是沙箱')).toBeTruthy()
   expect(disabled('保存绑定')).toBe(true)
   await act(async () => fireEvent.click(screen.getByRole('button', { name: '重新读取' })))
   expect(screen.getByRole('option', { name: '独立工作目录 · 当前绑定' })).toBeTruthy()

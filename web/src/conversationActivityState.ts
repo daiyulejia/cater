@@ -2,6 +2,8 @@ import { isTeamHost, isTeamRecovery, teamMessageAudience, teamProgressMessages, 
 import type { TeamEvent, TeamRun, TeamState } from './team'
 import { archiveEntries, portableArchivePart } from './archiveManifest'
 import { commonResponseDiagnostics, requestFailureFields, responseDiagnosticFields, responseDiagnostics } from './responseDiagnostics'
+import { publicReports } from './publicProgress'
+import type { PublicProgressSnapshot } from './publicProgress'
 
 type TimedEvent = TeamEvent & { ts?: string }
 export type ConversationActivityInput = {
@@ -10,12 +12,14 @@ export type ConversationActivityInput = {
   names: Record<string, string>
   leaderId: string
   sending: boolean
-  activity?: { active: boolean; state: string; error?: string }
+  activity?: { id?: string; instance_id?: string; active: boolean; state: string; error?: string }
+  publicProgress?: PublicProgressSnapshot
+  progressReceivedAt?: number
   executionState: string
   syncError?: string
   controlBusy?: boolean
 }
-type Line = { id: string; role?: string; text: string; moving?: boolean; warning?: boolean }
+type Line = { id: string; role?: string; text: string; moving?: boolean; warning?: boolean; publicText?: string; publicTruncated?: boolean }
 export type ConversationActivityView = {
   visible: boolean
   message?: string
@@ -672,6 +676,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   const lines: Line[] = []
   let nextCheckAt: number | undefined
   const canMove = !syncError && executionState === 'running' && !controlBusy
+  const reports = canMove ? publicReports(input.publicProgress, input.progressReceivedAt, activity, events, team.revision, now) : new Map()
   const freshness = (records: TeamEvent[]) => {
     const last = records.at(-1)
     const time = timestamp(last)
@@ -727,7 +732,9 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
         && typeof run.start.payload.run_id === 'string' && event.payload.run_id === run.start.payload.run_id)]
       .filter((event): event is TeamEvent => Boolean(event)).sort((a, b) => a.seq - b.seq)
     const awaitingCustomer = pendingQuestions.has(role) && !running
-    const moving = !awaitingCustomer && running && freshness(records)
+    const report = running && run?.start ? reports.get(String(run.start.payload.run_id)) : undefined
+    if (report) nextCheckAt = Math.min(nextCheckAt ?? Infinity, report.expiresAt)
+    const moving = !awaitingCustomer && running && (freshness(records) || Boolean(report))
     const action = toolBelongs ? tools[string(toolName) ?? ''] ?? '工具调用' : undefined
     const handling = bySeq.get(run?.message_seq ?? -1)?.actor.kind === 'human' ? '正在处理消息' : '正在处理工作'
     let text = awaitingCustomer ? '等待你的补充' : running ? moving ? handling : '暂无新反馈，执行状态待确认'
@@ -741,6 +748,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       text += `；冻结历史 · 来源群 ${source.task_id} · 原成果 #${source.seq} · 冻结截止 #${snapshot.source_seq}`
     }
     lines.push({ id: role, role, text: `${label(role)} · ${text}`, moving,
+      ...(report ? { publicText: report.text, publicTruncated: report.truncated } : {}),
       warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回', '历史目录已读取', '历史交付说明已读取', '历史文件已读取', '成果正文已读取', '成果本页已读取', '工程文件清单已读取', '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对', '历史文件已创建', '已有相同文件，未重写'].includes(toolOutcome(finished, toolName))) })
   }
   const reported = new Set(events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'agent'

@@ -2,6 +2,7 @@ import { lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { hasBrowserReceipt, outputSummaryLines } from './outputPreview'
 import { replyEvidenceDetailsFor } from './replyEvidence'
 import type { ReplyEvidence } from './replyEvidence'
+import type { PublicProgressSnapshot } from './publicProgress'
 import { CommandOutputs } from './CommandOutputPreview'
 import type { ComponentProps, ReactNode } from 'react'
 import {
@@ -103,7 +104,7 @@ type Event = { seq: number; ts?: string; type: string; category: string; actor: 
 type QuestionResult = { question_seq?: number; answer?: string; evidence?: { source_seq: number; quote: string }[]; limits?: string[]; reason?: string; speaker_id?: string; driver?: string; tokens?: number; token_usage?: string }
 type Question = QuestionResult & { seq: number; status: string; question: string; role_id: string; basis: QuestionBasis; outdated: boolean }
 type ConversationReceipt = { seq: number; status: string }
-export type TaskDetail = { task: Task; team?: TeamState | null; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; questionnaires?: Questionnaire[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string } | null; activity?: Activity; execution_control?: ExecutionControl; workspace?: WorkspaceBinding }
+export type TaskDetail = { task: Task; team?: TeamState | null; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; questionnaires?: Questionnaire[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string } | null; activity?: Activity; execution_control?: ExecutionControl; workspace?: WorkspaceBinding; public_progress?: PublicProgressSnapshot; progressReceivedAt?: number }
 type DerivationSource = { id: string; goal: string }
 export type ChatItem = { replyEvidence?: ReplyEvidence; replyEvidenceWarning?: string; internal?: boolean; historicalDelivery?: boolean; id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; questionnaire?: Questionnaire; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event; retryStatus?: 'waiting' | 'succeeded' | 'failed' | 'cancelled'; auditEvents?: Event[]; auditName?: (id: string) => string }
 
@@ -1031,9 +1032,11 @@ function App() {
 
   const requestDetail = useCallback(async (path: string, init?: RequestInit) => {
     const order = ++detailOrderRef.current
+    const progressRequestedAt = Date.now()
     const next = await api<TaskDetail>(path, init)
     validateTaskDetail(next)
-    return { next, order }
+    // Count the whole round trip conservatively so a delayed response is not fresh.
+    return { next: { ...next, progressReceivedAt: progressRequestedAt }, order }
   }, [])
 
   const acceptControls = useCallback((items: { id: string; execution_control?: ExecutionControl }[]) => {
@@ -1660,7 +1663,7 @@ function App() {
               </div>
               {!loading && unread > 0 && <button onClick={jumpToLatest} className="absolute bottom-3 left-1/2 flex -translate-x-1/2 items-center gap-2 whitespace-nowrap rounded-md border border-[#d9b9a5] bg-[#fff7eb] px-3 py-2 text-xs font-semibold text-[#915340] shadow-md" title="返回最新消息"><ArrowDown size={15} /> 查看新消息 · {unread}</button>}
             </div>
-            {!loading && currentDetail && task.team?.enabled && <div className="shrink-0 px-4 sm:px-7"><AsyncPanel fallback={<p role="status" className="py-2 text-xs text-[#52766d]">正在读取工作进展…</p>}><ConversationActivity key={task.id} team={task.team} events={currentDetail.events} names={names} leaderId={organization?.leader.id ?? 'store_manager'} sending={pending.has(task.id)} activity={currentActivity} executionState={executionState} syncError={loadError} controlBusy={controlBusy} portrait={(id) => <Portrait id={id} size="sm" />} onInspect={() => setShowMobileBoard(true)} onRefresh={() => setReloadToken((current) => current + 1)} onPause={() => void controlTask('pause')} /></AsyncPanel></div>}
+            {!loading && currentDetail && task.team?.enabled && <div className="shrink-0 px-4 sm:px-7"><AsyncPanel fallback={<p role="status" className="py-2 text-xs text-[#52766d]">正在读取工作进展…</p>}><ConversationActivity key={task.id} team={task.team} events={currentDetail.events} names={names} leaderId={organization?.leader.id ?? 'store_manager'} sending={pending.has(task.id)} activity={currentActivity} publicProgress={currentDetail.public_progress} progressReceivedAt={currentDetail.progressReceivedAt} executionState={executionState} syncError={loadError} controlBusy={controlBusy} portrait={(id) => <Portrait id={id} size="sm" />} onInspect={() => setShowMobileBoard(true)} onRefresh={() => setReloadToken((current) => current + 1)} onPause={() => void controlTask('pause')} /></AsyncPanel></div>}
             {derivation ? <DerivationDraftBar goal={derivation.goal} onCancel={cancelDerivation} /> : legacyQuestionMode ? <QuestionComposerBar onCancel={toggleQuestion} /> : rulesControl}
             <DirectionComposer key={composerKey} members={team} message={message} isSending={isSending} isLoading={loading} deriving={Boolean(derivation)} questioning={legacyQuestionMode} onMessageChange={setMessage} onSend={() => void (derivation ? deriveTask() : legacyQuestionMode ? sendQuestion() : sendDirection())} />
           </> : <><EmptyConversation onChoose={setDraft} />{isSending && <div className="px-4 sm:px-7"><ChatWaiting text="正在发送给店长，等待接收回执" error="" onRetry={() => {}} /></div>}{rulesControl}<TaskComposer members={team} draft={draft} isSending={isSending} disabled={!recoveryReady || !pageReady || Boolean(recovery)} workspaceControl={<WorkspacePanel draft workspaceId={newWorkspaceId} disabled={!recoveryReady || !pageReady || Boolean(recovery)} loadOptions={loadWorkspaceOptions} onSelect={selectDraftWorkspace} />} onDraftChange={setDraft} onCreate={() => void createTask()} /></>}

@@ -37,6 +37,7 @@ from .rules import RuleConflict
 from .work import WorkConflict
 from .web_assets import asset_path, capture_web_assets
 from .web_instance import capture_instance
+from .public_progress import PublicProgress, visible_progress
 
 
 MAX_REQUEST_BYTES = 1_048_576
@@ -69,6 +70,7 @@ class ActivityRunner:
         self._revision = 0
         self._question_tasks: dict[str, str] = {}
         self._conversation_tasks: dict[str, str] = {}
+        self.public_progress = PublicProgress()
 
     @property
     def instance_id(self) -> str:
@@ -965,7 +967,8 @@ class ActivityRunner:
     def _run_owned(self, task_id: str, activity_id: str, action: str) -> None:
         control = None
         try:
-            with self._runtime_factory() as runtime:
+            with self._runtime_factory() as runtime, self.public_progress.capture(task_id, activity_id) as observer:
+                runtime.team.external.progress = observer
                 if any(event.actor == EventActor.system("orchestrator")
                        and event.payload.get("activity_id") == activity_id
                        for event in runtime.log.iter_events(task_id=task_id,
@@ -1593,8 +1596,10 @@ def make_handler(
                     task = rt.task(task_id)
                     if task is None:
                         return self._not_found()
+                    activity = activities.status(task_id)
                     return self._send_json(
-                        task_api_payload(rt, task_id, activity=activities.status(task_id))
+                        task_api_payload(rt, task_id, activity=activity,
+                            public_progress=activities.public_progress.snapshot(task_id, activity.get("id")))
                     )
             if path.startswith("/tasks/"):
                 task_id = path.split("/", 2)[2]
@@ -2194,7 +2199,9 @@ def make_handler(
 
         def _task_payload(self, task_id: str, runner: ActivityRunner) -> dict[str, Any]:
             with self._runtime() as runtime:
-                return task_api_payload(runtime, task_id, activity=runner.status(task_id))
+                activity = runner.status(task_id)
+                return task_api_payload(runtime, task_id, activity=activity,
+                    public_progress=runner.public_progress.snapshot(task_id, activity.get("id")))
 
         def _send_html(self, body: str) -> None:
             raw = body.encode("utf-8")
@@ -2880,7 +2887,7 @@ def _task_summary(task: TaskSnapshot, *, version: int, latest_seq: int, conversa
 
 
 def _summary_activity(row: dict[str, Any], activity: dict[str, Any]) -> dict[str, Any]:
-    state = {key: activity[key] for key in ("state", "active", "revision", "instance_id") if key in activity}
+    state = {key: activity[key] for key in ("id", "state", "active", "revision", "instance_id") if key in activity}
     if activity.get("follow_up"):
         state["follow_up"] = {"action": activity["follow_up"]["action"]}
     label = row["status_label"]
@@ -2901,12 +2908,14 @@ def task_api_payload(
     task_id: str,
     *,
     activity: dict[str, Any] | None = None,
+    public_progress: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     with _read_snapshot(rt):
-        return _task_api_payload(rt, task_id, activity=activity)
+        return _task_api_payload(rt, task_id, activity=activity, public_progress=public_progress)
 
 
-def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | None) -> dict[str, Any]:
+def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | None,
+                      public_progress: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     version = _event_version(rt)
     task = rt.task(task_id)
     if task is None:
@@ -2942,6 +2951,13 @@ def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | N
     }
     if activity is not None:
         payload["activity"] = activity
+        if public_progress is not None:
+            payload["public_progress"] = {"activity_id": activity.get("id"),
+                "instance_id": activity.get("instance_id"),
+                "runs": visible_progress(public_progress, events=events, team=team, activity=activity,
+                    control=payload["execution_control"],
+                    current=lambda start, row: rt.team._current(task_id, start,
+                        rt.team._role(row["role"]), row["revision"])) if public_progress else []}
     return payload
 
 

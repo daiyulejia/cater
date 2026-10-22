@@ -129,3 +129,23 @@ test('工作期间可继续聊天，查看与刷新不提交，暂停使用既�
   expect(within(progress()).queryByLabelText('有近期执行反馈')).toBeNull()
   expect(input.value).toBe('补充：按钮用中文')
 })
+
+test('真实详情字段接入原进展区，公开片段更新不进入聊天，断网后撤下', async () => {
+  const initial = payload(false)
+  const identity = { role: 'dev', run_id: 'public-worker', message_seq: 3 }
+  initial.events.push(event(3, 'team.message_received', { text: '保存中文文档', recipient: 'dev', kind: 'assignment', revision: 1 }, 'store_manager', 'agent'),
+    event(4, 'team.run_started', { ...identity, revision: 1 }),
+    event(5, 'team.external_run_started', { ...identity, run_started_seq: 4 }))
+  initial.activity = { id: 'public-activity', instance_id: 'public-instance', active: true, state: 'running' }
+  initial.public_progress = { activity_id: 'public-activity', instance_id: 'public-instance', runs: [{ ...identity,
+    run_started_seq: 4, external_started_seq: 5, revision: 1, text: '先核对用户原文。', truncated: false, age_ms: 0 }] }
+  const app = await mount(initial)
+  await waitFor(() => expect(progress().querySelector('pre')?.textContent).toBe('先核对用户原文。'))
+  expect(screen.getByLabelText('聊天记录').textContent).not.toContain('先核对用户原文。')
+  await app.update({ ...initial, public_progress: { ...initial.public_progress,
+    runs: [{ ...initial.public_progress.runs[0], text: '正在读取原文并核对措辞。' }] } })
+  await waitFor(() => expect(progress().querySelector('pre')?.textContent).toBe('正在读取原文并核对措辞。'))
+  await app.disconnect()
+  await waitFor(() => expect(progress().querySelector('pre')).toBeNull())
+  expect(app.fetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(0)
+})
