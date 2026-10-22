@@ -84,6 +84,8 @@ python -m cater --drivers drivers.json --roles roles.json --workspaces workspace
 
 新命令回执的 `execution_context` 仅记录外层启动配置：版本 `1`、`invocation=direct_argv`、`environment=minimal_with_allowlist`、`path_policy=os_default/allowlist_configured` 及平台 `win32/linux/darwin/other`。不保存环境变量值或软件清单；默认 PATH 使用 `os.defpath`，显式允许配置也不保证等于顾客终端。查找未命中不证明整机未安装，按 argv 启动不证明子程序没有 shell，配置记录不证明程序启动成功。交付引用可冻结这组来源事实；旧回执没有字段时保持未知，不追补推测。
 
+Windows 精简环境还提供固定 `PATHEXT=.COM;.EXE;.BAT;.CMD`，使 PowerShell 能识别原生可执行程序，不默认继承用户的脚本/文件关联扩展。宿主显式在 `env_allowlist` 允许该变量后，可用宿主值覆盖，包括空值；Windows 允许项按大写环境键写入，避免大小写变体产生重复项。POSIX 保持大小写敏感，也不注入此 Windows 默认值。这不新增程序别名或命令权限，子程序仍需可信，未知影响与进程收尾仍按原机制核对。
+
 工具会在分派工作区动作前核对声明中的字段、类型、取值和范围，不自动把字符串数字或布尔值转换为数字。此时拒绝返回 `invalid_arguments` 和 `not_started`，指出已声明的错误字段，不回显参数值；原生聊天与旧工作项均可据此修正请求，不把它当成未知命令副作用。实际执行后的错误及既有待核对操作不会因此解除。
 
 命令启动前还会检查 `cwd`。目录不存在或无法访问时返回 `cwd_unavailable`、`complete=true` 和 `not_started`；越界、受保护路径、链接或非目录仍保留对应的安全拒绝。此时没有启动程序，可核对实际目录后修正 `cwd`，不会仅因这个输入错误锁住后续命令。对发布成果副本运行时，`cwd` 相对于解包副本的实际目录，不是 ZIP 文件名。该说明不把启动后的错误改成“未执行”，也不清除旧回执中已存在的未知操作。

@@ -739,12 +739,14 @@ class WorkspaceExecutor:
         env = {"PATH": os.defpath, "TEMP": tempfile.gettempdir(), "TMP": tempfile.gettempdir()}
         path_policy = "os_default"
         if os.name == "nt":
+            # PowerShell uses PATHEXT even for absolute native executable paths.
+            env["PATHEXT"] = ".COM;.EXE;.BAT;.CMD"
             for key in ("SystemRoot", "WINDIR"):
                 if key in os.environ:
-                    env[key] = os.environ[key]
+                    env[key.upper()] = os.environ[key]
         for key in self.policy.env_allowlist:
             if key in os.environ:
-                env[key] = os.environ[key]
+                env[key.upper() if os.name == "nt" else key] = os.environ[key]
                 if key == "PATH" or os.name == "nt" and key.casefold() == "path":
                     path_policy = "allowlist_configured"
         execution_context = {"version": 1, "invocation": "direct_argv",
