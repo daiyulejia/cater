@@ -16,6 +16,8 @@ import { WorkboardPanel } from './WorkboardPanel'
 import { MentionInput } from './MentionInput'
 import { TeamDirectory } from './TeamDirectory'
 import { TaskList } from './TaskList'
+import { conversationTitle } from './conversationTitle'
+import { InstanceInfo } from './InstanceInfo'
 import { TaskGraphDialog } from './TaskGraphDialog'
 import { RulesPanel } from './RulesPanel'
 import { WorkItems } from './WorkItems'
@@ -114,6 +116,7 @@ const apiRead = <T,>(path: string, read: (response: Response) => Promise<T>, ini
 }
 const api = <T,>(path: string, init?: RequestInit): Promise<T> => apiRead(path, readJsonResponse<T>, init)
 const loadWorkspaceOptions = () => api<WorkspaceOption[]>('/api/workspaces')
+const loadInstance = () => api<unknown>('/api/instance')
 
 function validateTaskDetail(value: TaskDetail, expectedId?: string): void {
   if (typeof value?.task?.id !== 'string' || !value.task.id || (expectedId && value.task.id !== expectedId)
@@ -839,6 +842,7 @@ function App() {
   const [pending, setPending] = useState<Set<string>>(new Set())
   const [showEvidence, setShowEvidence] = useState(false)
   const [showMobileBoard, setShowMobileBoard] = useState(false)
+  const [goalExpanded, setGoalExpanded] = useState(false)
   const [taskListPreference, setTasksCollapsed] = useState<boolean>()
   const tasksCollapsed = taskListPreference ?? selectedId !== null
   const [taskSearchOpen, setTaskSearchOpen] = useState(false)
@@ -938,6 +942,7 @@ function App() {
     setSelectedId(id)
     setChatFilter('all')
     setShowMobileBoard(false)
+    setGoalExpanded(false)
     setGraphOpen(false)
     const notice = remember ? navigationMemory.current?.remember(id) : ''
     if (notice) setRecoveryNotice(current => current.includes(notice) ? current : [current, notice].filter(Boolean).join(' '))
@@ -1240,6 +1245,7 @@ function App() {
     ? { ...selectedSummary, team: selectedSummary.team ? { objective: selectedSummary.goal, assignments: [], checkpoint: '', runs: [], ...selectedSummary.team } : undefined,
       acceptance: [], messages: [], assignments: [], deliverables: [] } : undefined) : undefined
   const task = resolveTeamTask(baseTask, selectedSummary, currentDetail?.summary?.version ?? currentDetail?.events.at(-1)?.seq ?? 0)
+  const heading = conversationTitle(task?.goal ?? '')
   const loading = selectedId !== null && currentDetail === null
   const workspaceActive = task?.team?.enabled ? hasActiveTeamMessages(task.team)
     : Boolean(currentDetail?.activity?.active || task?.activity?.active || task?.work?.items.some((item) =>
@@ -1568,10 +1574,11 @@ function App() {
           <span className="brand-mark grid size-11 shrink-0 place-items-center rounded-lg text-white"><Cat size={23} strokeWidth={2.2} /></span>
           <span className="min-w-0"><strong className="block text-[19px] font-extrabold leading-5 text-[#713f34]">Cater</strong><span className="mt-1 block text-[11px] font-semibold text-[#a9604f]">有猫的工作间</span></span>
         </button>
-        <div className="flex items-center gap-2 text-xs">
+        <div className="flex items-center gap-1 text-xs sm:gap-2">
           <TeamDirectory members={team} availability={organization?.availability} open={teamOpen} onOpenChange={setTeamOpen} refreshing={teamRefreshing} error={teamError || (!organization ? rolesError : '')} onRefresh={() => void refreshOrganization()} portrait={(id) => <Portrait id={id} size="xl" />} onMention={(name) => { if (task) setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${name} `); else setDraft((current) => `${current.trim()}${current.trim() ? ' ' : ''}@${name} `) }} />
           <span className={`channel-mode max-w-32 shrink-0 rounded-md px-2.5 py-1.5 text-[11px] font-medium sm:max-w-none ${driverModeStyle(organization?.mode)}`} title={driverModeText(organization?.mode)}><span className="sr-only sm:not-sr-only">{driverModeText(organization?.mode)}</span><span className="sm:hidden" aria-hidden="true">{organization?.mode === 'external_driver' ? '外接' : organization?.mode === 'mixed_driver' ? '混合' : organization?.mode === 'local_demo' ? '演示' : '待确认'}</span></span>
           <button type="button" onClick={() => void verifyChain()} disabled={checkingChain} className={`inline-flex size-8 items-center justify-center rounded-md hover:bg-[#e7f0ec] sm:w-auto sm:gap-1 sm:px-2 ${chainStatus && !chainStatus.ok ? 'text-rose-700' : 'text-[#34786e]'}`} aria-label={checkingChain ? '正在核验事件链' : chainStatus ? chainStatus.ok ? `上次核验通过，共 ${chainStatus.checked} 条事件` : `事件链异常，事件 #${chainStatus.broken_at ?? '?'}` : '核验事件链'} title={chainStatus?.reason || '点击核验事件链；显示的是上次核验结果'}><ShieldCheck size={17} /><span className="hidden sm:inline">{checkingChain ? '正在核验' : chainStatus ? chainStatus.ok ? `已核验 ${chainStatus.checked} 条` : `链异常 · #${chainStatus.broken_at ?? '?'}` : '核验事件链'}</span></button>
+          <InstanceInfo loadInstance={loadInstance} />
         </div>
       </header>
       <main data-conversation={Boolean(task)} className={`app-layout grid grid-cols-1 ${task ? 'lg:grid-cols-[252px_minmax(0,1fr)_318px]' : 'lg:grid-cols-[252px_minmax(0,1fr)]'}`}>
@@ -1600,9 +1607,13 @@ function App() {
           </div>}
           {task ? <>
             <div className="chat-heading flex items-start justify-between gap-3 px-4 py-3 sm:px-7 sm:py-4" style={{ backgroundImage: `linear-gradient(90deg, #fffaf5 0%, rgba(255,250,245,.98) 55%, rgba(255,250,245,.78) 100%), url(${cafeWelcome})` }}>
-              <div className="flex min-w-0 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><h1 tabIndex={-1} className="line-clamp-2 text-[16px] font-bold leading-snug sm:text-lg">{task.goal}</h1></div></div>
+              <div className="flex min-w-0 flex-1 items-start gap-3"><Portrait id={organization?.leader.id ?? 'store_manager'} /><div className="min-w-0 flex-1"><p className="mb-1 text-[11px] font-semibold text-[#a55642]">店长 · 这件事我在跟进</p><div className="flex min-w-0 items-start gap-1"><h1 tabIndex={-1} className="line-clamp-2 min-w-0 [overflow-wrap:anywhere] text-[16px] font-bold leading-snug sm:text-lg">{heading.label}</h1><button type="button" onClick={() => setGoalExpanded(value => !value)} aria-label={goalExpanded ? '收起完整目标' : '查看完整目标'} title={goalExpanded ? '收起完整目标' : '查看完整目标'} aria-expanded={goalExpanded} aria-controls="conversation-goal" className="grid size-8 shrink-0 place-items-center rounded-md text-[#34786e] hover:bg-[#e7f0ec]"><ChevronDown size={17} className={goalExpanded ? 'rotate-180' : ''} /></button></div>{heading.excerpt && <span className="text-[10px] text-[#72877c]">目标节选</span>}</div></div>
               <div className="flex shrink-0 items-center gap-2"><span className={`status-pill hidden sm:inline-flex ${executionState === 'running' && currentActivity?.active && currentActivity.state === executionState ? 'is-running' : ''}`}>{currentStatusLabel}</span><button id="workboard-trigger" onClick={() => setShowMobileBoard(true)} aria-label="打开成果与过程" title="打开成果与过程" aria-haspopup="dialog" aria-expanded={showMobileBoard} className="rounded-md border border-[#d3dfd9] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#24766b] lg:hidden">成果</button></div>
             </div>
+            {goalExpanded && <section id="conversation-goal" aria-label="当前完整目标" className="shrink-0 border-b border-[#d3dfd9] px-4 py-2 sm:px-7">
+              <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-[11px] text-[#52766d]"><h2 className="font-semibold">当前完整目标</h2><span className="min-w-0 [overflow-wrap:anywhere]">任务编号：{task.id}</span></div>
+              <p className="overflow-y-auto whitespace-pre-wrap text-xs leading-5 [overflow-wrap:anywhere]" style={{ maxHeight: 'min(32dvh, 16rem)' }}>{task.goal}</p>
+            </section>}
             <div className="filter-strip flex shrink-0 flex-wrap items-center justify-between gap-2 px-4 py-2 sm:px-7"><ChatFilters value={chatFilter} onChange={setChatFilter} />
               <div className="chat-tools flex max-w-full flex-wrap items-center gap-2">
                 <ConversationMembers key={task.id} members={team} participants={participants} portrait={(id, size) => <Portrait id={id} size={size} />} onMention={(id) => setMessage(`${message.trim()}${message.trim() ? ' ' : ''}@${names[id] ?? id} `)} onOpenDirectory={() => { setTeamOpen(true); void refreshOrganization() }} />

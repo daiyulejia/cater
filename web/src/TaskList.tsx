@@ -3,6 +3,7 @@ import { useMemo, useState } from 'react'
 import type { ExecutionControl } from './executionControl'
 import { executionLabel } from './executionControl'
 import type { TeamSummary } from './team'
+import { conversationTitle } from './conversationTitle'
 import './TaskList.css'
 
 type ListedTask = {
@@ -102,8 +103,9 @@ export function TaskList<T extends ListedTask>({ tasks, selectedId, drafts, coll
         const control = executionState?.(item) ?? item.execution_control?.state
         const state = listActivity(item, control)
         const label = executionLabel(control) || statusLabel(item)
+        const title = conversationTitle(item.goal)
         return <button key={item.id} onClick={() => onChoose(item.id)} aria-current={item.id === selectedId ? 'page' : undefined} className={`task-item w-56 shrink-0 px-3 py-3 text-left lg:w-full ${item.id === selectedId ? 'is-active' : ''}`}>
-          <div className="flex items-start gap-2"><TaskActivity state={state} /><span className="line-clamp-2 min-w-0 break-words text-[13px] font-semibold leading-5">{item.goal}</span></div>
+          <div className="flex items-start gap-2"><TaskActivity state={state} /><span aria-label={title.excerpt ? `目标节选：${title.label}` : undefined} className="line-clamp-2 min-w-0 [overflow-wrap:anywhere] text-[13px] font-semibold leading-5">{title.label}</span></div>
           <div className="mt-2 flex items-center gap-2 pl-[23px] text-[11px] text-[#7c918b]"><span className="task-list-state-label min-w-0 break-words" data-state={state}>{label}</span>{drafts[item.id]?.trim() && <span title="有未发送内容" role="img" aria-label="有未发送内容" className="shrink-0 text-[#b65f49]"><FilePenLine size={13} /></span>}</div>
         </button>
       })}

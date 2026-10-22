@@ -36,6 +36,7 @@ from .runtime import DriverHealth, ExecutionScopeChanged, Runtime
 from .rules import RuleConflict
 from .work import WorkConflict
 from .web_assets import asset_path, capture_web_assets
+from .web_instance import capture_instance
 
 
 MAX_REQUEST_BYTES = 1_048_576
@@ -1307,6 +1308,7 @@ def serve(
             audit_keys=audit_keys,
             static_dir=web_assets if web_assets is not None else _workroom_dist(),
             recover_on_startup=False,
+            instance_recovery_policy=recover_on_startup,
             shared_drivers=driver_owner.drivers,
             shared_driver_health=driver_health,
             shared_mcp_pool=driver_owner.mcp.pool,
@@ -1375,9 +1377,12 @@ def make_handler(
     shared_mcp_pool: McpPool | None = None,
     access_token: str | None = None,
     recover_on_startup: bool = True,
+    instance_recovery_policy: bool | None = None,
 ):
     if type(recover_on_startup) is not bool:
         raise ValueError("recover_on_startup must be a boolean")
+    if instance_recovery_policy is not None and type(instance_recovery_policy) is not bool:
+        raise ValueError("instance_recovery_policy must be a boolean or None")
     if access_token is not None and not access_token.strip():
         raise ValueError("web access token must not be empty")
     static_assets = capture_web_assets(static_dir) if static_dir is not None else None
@@ -1406,6 +1411,9 @@ def make_handler(
         )
 
     activities = ActivityRunner(build_runtime)
+    instance = capture_instance(db_path, ui_version=static_assets.version if static_assets else None,
+        startup_recovery=recover_on_startup if instance_recovery_policy is None else instance_recovery_policy,
+        custom_runtime=runtime_factory is not None, instance_id=activities.instance_id)
     if recover_on_startup:
         activities.recover_interrupted()
     summaries_lock = threading.Lock()
@@ -1431,6 +1439,11 @@ def make_handler(
                     return self._not_found()
             if self._requires_access_token(path) and not self._has_valid_access_token():
                 return self._unauthorized()
+            if path == "/api/instance":
+                if parsed.query or parsed.fragment:
+                    return self._bad_request("instance metadata does not accept query parameters")
+                host, port = self.server.server_address[:2]
+                return self._send_json({**instance, "listener": {"host": host, "port": port}})
             if path == "/":
                 return self._send_html(render_index(self._runtime()))
             if path == "/api/task-summaries":
