@@ -23,6 +23,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -345,7 +346,7 @@ class WorkspaceExecutor:
                                     "description": "Omit this field for a whole-file write; do not send null or an empty placeholder. For a fragment edit, supply exact old text that matches once, including whitespace and newlines. content is only its replacement, not the whole file. No regex or normalization."}},
                                 ["path", "content", "expected_sha256"]))
         if self.policy.mode == "execute":
-            definitions.append(("workspace_run", "Run a trusted host program alias (not an OS sandbox or task acceptance). The alias selects a fixed host-configured argv prefix; args are appended as literal arguments, not interpreted by a shell. Supported arguments and test discovery depend on that program, not the alias name. A zero exit code or outcome=passed does not prove a requested script or newly added tests ran: check the receipt argv and reported test names/counts before claiming coverage. If the intended check did not run, report the missing capability instead of claiming success. Long stdout/stderr previews have separate excerpt and tail_excerpt (preview_mode=head_tail); the missing middle is not saved. complete means capture finished, not that the preview is the full log. Each stream's utf8_valid describes captured byte validity: false means UTF-8 decoding lost information, null or absent means unknown, true does not undo preview truncation. Do not treat replacement characters as the original output or guess another encoding; report the limitation and use a verified encoding or ASCII-safe diagnostic for future checks, without blindly rerunning side effects.",
+            definitions.append(("workspace_run", "Run a trusted host program alias (not an OS sandbox or task acceptance). The alias selects a fixed host-configured argv prefix; args are appended as literal arguments, not interpreted by an extra host shell. The program may itself invoke shells. The launch environment is minimal with an explicit allowlist; PATH need not match the user's terminal. A lookup miss here does not prove a program is uninstalled on the machine. Supported arguments and test discovery depend on that program, not the alias name. A zero exit code or outcome=passed does not prove a requested script or newly added tests ran: check the receipt argv and reported test names/counts before claiming coverage. If the intended check did not run, report the missing capability instead of claiming success. Long stdout/stderr previews have separate excerpt and tail_excerpt (preview_mode=head_tail); the missing middle is not saved. complete means capture finished, not that the preview is the full log. Each stream's utf8_valid describes captured byte validity: false means UTF-8 decoding lost information, null or absent means unknown, true does not undo preview truncation. Do not treat replacement characters as the original output or guess another encoding; report the limitation and use a verified encoding or ASCII-safe diagnostic for future checks, without blindly rerunning side effects.",
                                 {"command": {"type": "string", "enum": sorted(self.policy.commands),
                                              "description": "Configured host alias, not an executable path or a shell command. Do not infer its capabilities from its name."},
                                  "args": {"type": "array", "maxItems": 100,
@@ -736,6 +737,7 @@ class WorkspaceExecutor:
                         "message": str(exc) if isinstance(exc, _Denied) else
                             "工作目录不存在或不可访问，命令尚未启动；请核对cwd相对路径后修正。"}}
         env = {"PATH": os.defpath, "TEMP": tempfile.gettempdir(), "TMP": tempfile.gettempdir()}
+        path_policy = "os_default"
         if os.name == "nt":
             for key in ("SystemRoot", "WINDIR"):
                 if key in os.environ:
@@ -743,6 +745,11 @@ class WorkspaceExecutor:
         for key in self.policy.env_allowlist:
             if key in os.environ:
                 env[key] = os.environ[key]
+                if key == "PATH" or os.name == "nt" and key.casefold() == "path":
+                    path_policy = "allowlist_configured"
+        execution_context = {"version": 1, "invocation": "direct_argv",
+            "environment": "minimal_with_allowlist", "path_policy": path_policy,
+            "platform": sys.platform if sys.platform in {"win32", "linux", "darwin"} else "other"}
         argv = [*self.policy.commands[command], *args]
         stdout, stderr = _Capture(), _Capture()
         started = time.monotonic()
@@ -821,6 +828,7 @@ class WorkspaceExecutor:
                   "outcome": outcome, "exit_code": exit_code, "timed_out": outcome == "timeout",
                   "duration_ms": round((time.monotonic() - started) * 1000),
                   "stdout": out_meta, "stderr": err_meta,
+                  "execution_context": execution_context,
                   "bytes": out_meta["bytes"] + err_meta["bytes"],
                   "truncated": out_meta["truncated"] or err_meta["truncated"], "complete": complete,
                   "process_scope": scope.kind if scope is not None else None}

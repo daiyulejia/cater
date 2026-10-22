@@ -92,6 +92,21 @@ class TeamInstructionSelectionTests(unittest.TestCase):
         self.assertIn("不是进程崩溃", text)
         self.assertIn("先查成果和回执", text)
 
+    def test_completed_human_followup_is_guidance_not_a_new_work_restriction(self):
+        context = {"current_work": {"status": "done"},
+                   "message": {"sender_kind": "human", "text": "UNTRUSTED_SENTINEL"}}
+        saved = deepcopy(context)
+        text = context_instructions(context)
+        for clause in ("普通追问", "已有成果和回执", "确需修改时再采用新工作目标",
+                       "等价输入验证", "不证明整机未安装"):
+            self.assertIn(clause, text)
+        self.assertNotIn("UNTRUSTED_SENTINEL", text)
+        self.assertEqual(context, saved)
+        for state in ({}, {"status": "running"}, {"status": "failed"}):
+            self.assertEqual(context_instructions({**context, "current_work": state}), "")
+        for sender in (None, "agent", "system"):
+            self.assertEqual(context_instructions({**context, "message": {"sender_kind": sender}}), "")
+
     def test_state_notes_never_copy_payloads_into_instruction_text(self):
         marker = "UNTRUSTED_INSTRUCTION_SENTINEL"
         context = {"background": {"text": marker}, "active_assignment": {"text": marker},

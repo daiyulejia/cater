@@ -7,6 +7,10 @@ import type { TeamEvent } from './team'
 type Data = Record<string, unknown>
 type Artifact = { seq: number; filename: string; content_sha256: string; directory?: string }
 type Output = { excerpt?: string; bytes?: number | null; sha256?: string | null; truncated?: boolean; complete?: boolean | null; utf8_valid?: boolean | null }
+type ExecutionContext = {
+  version: 1; invocation: 'direct_argv'; environment: 'minimal_with_allowlist'
+  path_policy: 'os_default' | 'allowlist_configured'; platform: 'win32' | 'linux' | 'darwin' | 'other'
+}
 type Receipt = {
   version: 1; source_seq: number; source_hash: string; started_seq: number; started_hash: string; role: string; tool: 'workspace_run'
   request: Data | null; request_complete: boolean; stdin: { bytes: number; sha256: string } | null; argv: string[] | null
@@ -14,6 +18,7 @@ type Receipt = {
   outcome: keyof typeof outcomes | null; exit_code: number | null; complete: boolean | null; scope_current: boolean | null
   artifacts_unchanged: boolean | null; artifact_check_valid: boolean | null; selected_versions_current: boolean | null
   stdout: Output | null; stderr: Output | null; checked_artifacts: Artifact[] | null; delivery_artifact_seqs: number[]
+  execution_context?: ExecutionContext
 }
 
 const outcomes = { passed: '记录为正常结束', failed: '执行失败', timeout: '执行超时', launch_error: '启动失败',
@@ -32,6 +37,14 @@ const boolean = (value: unknown) => typeof value === 'boolean'
 const sequenceList = (value: unknown, maximum = 128, distinct = true): value is number[] => Array.isArray(value)
   && value.length <= maximum && value.every(seq) && (!distinct || new Set(value).size === value.length)
 const jsonSize = (value: unknown) => size(JSON.stringify(value))
+
+function executionContext(value: unknown): value is ExecutionContext {
+  const keys = ['version', 'invocation', 'environment', 'path_policy', 'platform']
+  return record(value) && only(value, keys) && keys.every(key => Object.hasOwn(value, key))
+    && value.version === 1 && value.invocation === 'direct_argv' && value.environment === 'minimal_with_allowlist'
+    && (value.path_policy === 'os_default' || value.path_policy === 'allowlist_configured')
+    && (value.platform === 'win32' || value.platform === 'linux' || value.platform === 'darwin' || value.platform === 'other')
+}
 
 function request(value: unknown): value is Data {
   if (!record(value) || !only(value, ['command', 'args', 'cwd', 'timeout', 'artifact_seqs', 'artifact_versions']) || !text(value.command, 1024)) return false
@@ -65,7 +78,8 @@ const receiptKeys = ['version', 'source_seq', 'source_hash', 'started_seq', 'sta
   'artifacts_unchanged', 'artifact_check_valid', 'selected_versions_current', 'stdout', 'stderr', 'checked_artifacts', 'delivery_artifact_seqs']
 
 function receipt(value: unknown, deliverySeq: number): value is Receipt {
-  if (!record(value) || !only(value, receiptKeys) || !receiptKeys.every(key => Object.hasOwn(value, key))
+  if (!record(value) || !only(value, [...receiptKeys, 'execution_context']) || !receiptKeys.every(key => Object.hasOwn(value, key))
+    || Object.hasOwn(value, 'execution_context') && !executionContext(value.execution_context)
     || value.version !== 1 || value.tool !== 'workspace_run' || !seq(value.source_seq) || value.source_seq >= deliverySeq
     || !seq(value.started_seq) || value.started_seq >= value.source_seq
     || !hash(value.source_hash) || !hash(value.started_hash) || !text(value.role, 128)
@@ -123,6 +137,7 @@ function Request({ entry }: { entry: Receipt }) {
 }
 
 function ReceiptDetails({ entry, historical, name, deliveryArtifacts }: { entry: Receipt; historical: boolean; name?: (id: string) => string; deliveryArtifacts: unknown }) {
+  const context = entry.execution_context
   const selected = entry.request && ('artifact_seqs' in entry.request || 'artifact_versions' in entry.request)
   const copy = entry.environment === 'temporary_artifact_copy_not_sandbox'
   const versioned = Boolean(entry.checked_artifacts?.length) || selected
@@ -143,6 +158,13 @@ function ReceiptDetails({ entry, historical, name, deliveryArtifacts }: { entry:
       <p>{entry.scope_current === null ? '范围有效性未知。' : entry.scope_current ? '回执记录时范围有效，不证明业务覆盖或批准。' : '回执范围已失效，只能作为历史记录。'}</p>
       <details className={foldClass}>
         <summary className="cursor-pointer font-semibold">执行环境与目录</summary>
+        {context ? <>
+          <p>宿主启动方式：按 argv 直接启动；精简环境。</p>
+          <p>PATH：{context.path_policy === 'os_default' ? '系统默认 PATH，不是用户终端 PATH' : '有显式允许配置，不保证与用户终端 PATH 一致'}
+            {' · '}平台：{{ win32: 'Windows', linux: 'Linux', darwin: 'macOS', other: '其他平台' }[context.platform]}</p>
+          <p>以上元数据仅描述外层启动配置，不证明程序成功启动。</p>
+          <p>查找不到程序不证明整机未安装；直接 argv 不代表程序内部没有子 shell；不等于操作系统沙箱。</p>
+        </> : <p>启动方式、进程环境、PATH 策略与平台未知（未记录执行上下文）。</p>}
         <p>工程授权/锁根：{entry.authorized_root ?? '未知'}。这不是外部客户端的工作目录。</p>
         {copy ? <><p>成果副本模式：执行根为已清理的临时成果副本，不是工程授权根，也不是操作系统沙箱。</p>
           <p>实际记录的工作目录（相对临时副本根）：{entry.cwd === null ? '未知' : entry.cwd === '' ? '根目录（空相对路径）' : entry.cwd}</p></>

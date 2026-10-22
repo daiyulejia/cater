@@ -113,7 +113,7 @@ class DeliveryCommandTests(unittest.TestCase):
                  "actual_result": {key: copy.deepcopy(result[key]) for key in (
                      "status", "outcome", "exit_code", "argv", "cwd", "environment", "complete",
                      "scope_current", "artifacts_unchanged", "artifact_check_valid", "selected_versions_current",
-                     "checked_artifacts", "stdout", "stderr") if key in result}}
+                     "checked_artifacts", "stdout", "stderr", "execution_context") if key in result}}
         if record is not None:
             entry["frozen_record"] = copy.deepcopy(record)
         EXECUTION_EVIDENCE.append(entry)
@@ -157,7 +157,10 @@ class DeliveryCommandTests(unittest.TestCase):
         return result
 
     def assert_record(self, record, start, finish, result):
-        self.assertEqual(set(record), RECORD_KEYS)
+        expected = RECORD_KEYS | ({"execution_context"} if "execution_context" in result else set())
+        self.assertEqual(set(record), expected)
+        if "execution_context" in result:
+            self.assertEqual(record["execution_context"], result["execution_context"])
         self.assertEqual(record["version"], 1)
         self.assertEqual((record["source_seq"], record["source_hash"]), (finish.seq, finish.hash))
         self.assertEqual((record["started_seq"], record["started_hash"]), (start.seq, start.hash))

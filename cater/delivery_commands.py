@@ -132,6 +132,17 @@ def _argv(value):
     return _small(value) if isinstance(value, list) and all(isinstance(v, str) for v in value) else None
 
 
+def _execution_context(value):
+    if (type(value) is not dict or set(value) != {"version", "invocation", "environment", "path_policy", "platform"}
+            or type(value.get("version")) is not int or value["version"] != 1
+            or not all(type(value.get(key)) is str for key in ("invocation", "environment", "path_policy", "platform"))
+            or value["invocation"] != "direct_argv" or value["environment"] != "minimal_with_allowlist"
+            or value["path_policy"] not in {"os_default", "allowlist_configured"}
+            or value["platform"] not in {"win32", "linux", "darwin", "other"}):
+        return None
+    return dict(value)
+
+
 def _event(team, task_id, seq, kind):
     row = team.rt.log.db.execute('SELECT * FROM events WHERE task_id = ? AND seq = ? AND type = ?',
                                 (task_id, seq, kind)).fetchone()
@@ -188,6 +199,9 @@ def normalize(team, task_id, seqs, *, revision, artifacts):
                 'checked_artifacts': checked,
                 'delivery_artifact_seqs': [row['seq'] for row in checked or [] if any(
                     all(row[key] == ref[key] for key in ('seq', 'filename', 'content_sha256')) for ref in artifacts)]})
+            execution_context = _execution_context(result.get('execution_context'))
+            if execution_context is not None:
+                records[-1]['execution_context'] = execution_context
             if any(isinstance(result.get(key), dict) and result[key].get('complete') is False
                    for key in ('stdout', 'stderr')):
                 records[-1]['complete'] = False
@@ -262,6 +276,15 @@ def markdown(records, *, artifacts=None):
             '临时成果副本，非OS沙箱；相对cwd不指向上述工程授权根。' if row.get('environment') == 'temporary_artifact_copy_not_sandbox'
                 else '执行根没有另行冻结；不依据客户端目录猜测。', '',
             f"来源事件哈希（记录值）：{row['source_hash']}", '']
+        execution_context = _execution_context(row.get('execution_context'))
+        if execution_context is None:
+            lines += ['启动环境细节未记录，不能倒推原环境或用户终端。', '']
+        else:
+            platform = {'win32': 'Windows', 'linux': 'Linux', 'darwin': 'macOS', 'other': '其他平台'}[execution_context['platform']]
+            path = ('系统默认查找路径，不是用户终端PATH' if execution_context['path_policy'] == 'os_default'
+                    else '配置了宿主显式允许的PATH项，不保证与用户终端一致')
+            lines += [f'启动环境记录：{platform}；宿主按argv启动；精简环境与显式允许项；PATH：{path}。',
+                      '这里只描述外层启动配置，不证明启动成功、子程序没有shell、整机软件是否安装，也不是OS沙箱。', '']
         checked = _artifacts(row.get('checked_artifacts'))
         matched = row.get('delivery_artifact_seqs')
         matched = matched if isinstance(matched, list) and len(matched) <= 8 and all(_integer(v) for v in matched) else []

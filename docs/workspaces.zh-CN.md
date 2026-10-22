@@ -82,6 +82,8 @@ python -m cater --drivers drivers.json --roles roles.json --workspaces workspace
 
 **`execute` 是宿主执行权限，不是操作系统沙箱。** 程序别名限制可启动的程序，不限制解释器参数、脚本自身的文件或网络能力。命令使用清理后的环境，不默认继承 API Key；可显式放行不属于常见密钥名称的环境变量。只给可信工作内容配置需要的程序。进程组或 Windows Job 负责进程生命周期，不能替代文件或网络隔离。
 
+新命令回执的 `execution_context` 仅记录外层启动配置：版本 `1`、`invocation=direct_argv`、`environment=minimal_with_allowlist`、`path_policy=os_default/allowlist_configured` 及平台 `win32/linux/darwin/other`。不保存环境变量值或软件清单；默认 PATH 使用 `os.defpath`，显式允许配置也不保证等于顾客终端。查找未命中不证明整机未安装，按 argv 启动不证明子程序没有 shell，配置记录不证明程序启动成功。交付引用可冻结这组来源事实；旧回执没有字段时保持未知，不追补推测。
+
 工具会在分派工作区动作前核对声明中的字段、类型、取值和范围，不自动把字符串数字或布尔值转换为数字。此时拒绝返回 `invalid_arguments` 和 `not_started`，指出已声明的错误字段，不回显参数值；原生聊天与旧工作项均可据此修正请求，不把它当成未知命令副作用。实际执行后的错误及既有待核对操作不会因此解除。
 
 命令启动前还会检查 `cwd`。目录不存在或无法访问时返回 `cwd_unavailable`、`complete=true` 和 `not_started`；越界、受保护路径、链接或非目录仍保留对应的安全拒绝。此时没有启动程序，可核对实际目录后修正 `cwd`，不会仅因这个输入错误锁住后续命令。对发布成果副本运行时，`cwd` 相对于解包副本的实际目录，不是 ZIP 文件名。该说明不把启动后的错误改成“未执行”，也不清除旧回执中已存在的未知操作。

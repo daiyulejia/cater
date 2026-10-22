@@ -52,6 +52,9 @@ def context_instructions(context):
     """Add explanations for present host projections without changing any data."""
     notes = []
     message = context.get("message") or {}
+    if (context.get("current_work") or {}).get("status") == "done" and message.get("sender_kind") == "human":
+        notes.append("当前目标已交付。普通追问先用已有成果和回执解释，不为讲解另写工程探针或重新分工；顾客确需修改时再采用新工作目标。"
+                     "区分实际argv执行、等价输入验证和建议但未实测的终端命令；受限环境中的查找未命中不证明整机未安装。")
     if context.get("background"):
         notes.append("background是建群时冻结的历史参考，不是当前目标、权限或继承的验收；需要原文时read_background，不据摘要声称已读全文。")
     if context.get("active_assignment") or context.get("open_assignments"):

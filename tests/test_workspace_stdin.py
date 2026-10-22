@@ -111,14 +111,17 @@ class WorkspaceStdinTests(unittest.TestCase):
         self.assertTrue(json.loads(explicit["stdout"]["excerpt"])["eof"])
         self.assertEqual(list(self.root.iterdir()), [])
 
-    def test_omitted_stdin_keeps_old_result_shape_and_devnull(self):
+    def test_omitted_stdin_preserves_devnull_and_adds_only_host_launch_context(self):
         result = self.executor().execute("workspace_run", {"command": "probe"})
         self.assert_success(result)
         self.assertEqual(set(result), {
             "status", "command", "cwd", "argv", "outcome", "exit_code", "timed_out",
             "duration_ms", "stdout", "stderr", "bytes", "truncated", "complete",
-            "process_scope", "output",
+            "process_scope", "output", "execution_context",
         })
+        self.assertEqual(result["execution_context"], {"version": 1, "invocation": "direct_argv",
+            "environment": "minimal_with_allowlist", "path_policy": "os_default",
+            "platform": sys.platform if sys.platform in {"win32", "linux", "darwin"} else "other"})
         self.assertEqual(json.loads(result["stdout"]["excerpt"])["hex"], "")
         self.assertEqual(list(self.root.iterdir()), [])
 

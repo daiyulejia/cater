@@ -12,6 +12,8 @@ type Data = Record<string, unknown>
 const sha = 'a'.repeat(64)
 const artifact = (extra: Data = {}) => ({ seq: 5, filename: '工程.zip', content_sha256: sha, ...extra })
 const output = (extra: Data = {}) => ({ bytes: 6, sha256: sha, excerpt: '已记录', complete: true, truncated: false, utf8_valid: true, ...extra })
+const executionContext = (extra: Data = {}) => ({ version: 1, invocation: 'direct_argv', environment: 'minimal_with_allowlist',
+  path_policy: 'os_default', platform: 'win32', ...extra })
 const receipt = (extra: Data = {}): Data => ({
   version: 1, source_seq: 30, source_hash: 'b'.repeat(64), started_seq: 29, started_hash: 'c'.repeat(64), role: 'dev', tool: 'workspace_run',
   request: { command: '检查', args: ['真实参数', '--原样'], cwd: 'src', timeout: 30 }, request_complete: true, stdin: null,
@@ -166,6 +168,119 @@ test('普通工程授权根不冒充客户端目录，也不绑定本次交付�
   expect(body.textContent).toContain('实际记录的相对工作目录：src')
   expect(body.textContent).not.toContain('F:/授权工程/src')
   expect(body.textContent).not.toContain('成果副本模式')
+})
+
+test.each(['os_default', 'allowlist_configured'] as const)('执行上下文仅在原有环境折叠区显示精确事实与边界：%s', async path_policy => {
+  const value = receipt({ execution_context: executionContext({ path_policy }) })
+  const saved = snapshot([value])
+  const before = JSON.stringify(saved)
+  const fetchMock = vi.fn()
+  vi.stubGlobal('fetch', fetchMock)
+  const writeText = clipboard()
+  mount([value], { evidence: saved })
+  const body = openReceipt()
+  expect(fold('执行环境与目录', body).open).toBe(false)
+  const environment = open('执行环境与目录', body)
+  expect(environment.textContent).toContain('宿主启动方式：按 argv 直接启动；精简环境。')
+  expect(environment.textContent).toContain(path_policy === 'os_default'
+    ? 'PATH：系统默认 PATH，不是用户终端 PATH' : 'PATH：有显式允许配置，不保证与用户终端 PATH 一致')
+  expect(environment.textContent).not.toContain(path_policy === 'os_default' ? '有显式允许配置' : '系统默认 PATH')
+  for (const label of ['平台：Windows', '以上元数据仅描述外层启动配置，不证明程序成功启动',
+    '查找不到程序不证明整机未安装', '直接 argv 不代表程序内部没有子 shell', '不等于操作系统沙箱']) {
+    expect(environment.textContent).toContain(label)
+  }
+  expect(body.querySelectorAll(':scope > div > details')).toHaveLength(5)
+  expect(body.textContent).not.toMatch(/未作为执行依据|未记录执行上下文/)
+  open('实际工具请求', body)
+  fireEvent.click(within(body).getByRole('button', { name: '复制完整工具请求' }))
+  await within(body).findByText('已复制完整工具请求')
+  expect(JSON.parse(writeText.mock.calls[0][0])).toEqual(value.request)
+  expect(writeText.mock.calls[0][0]).not.toContain('execution_context')
+  expect(fetchMock).not.toHaveBeenCalled()
+  expect(JSON.stringify(saved)).toBe(before)
+})
+
+test.each([
+  ['launch_error', '启动失败'], ['not_started', '未开始执行'],
+] as const)('外层启动配置与是否成功启动独立，失败仍可携带元数据：%s', (outcome, label) => {
+  mount([receipt({ execution_context: executionContext({ path_policy: 'allowlist_configured' }),
+    status: 'error', outcome, exit_code: null, argv: [] })])
+  const body = openReceipt()
+  expect(body.querySelector('summary')!.textContent).toContain(label)
+  const environment = open('执行环境与目录', body)
+  expect(environment.textContent).toContain('宿主启动方式：按 argv 直接启动；精简环境。')
+  expect(environment.textContent).toContain('有显式允许配置，不保证与用户终端 PATH 一致')
+  expect(environment.textContent).toContain('以上元数据仅描述外层启动配置，不证明程序成功启动')
+  expect(body.textContent).not.toMatch(/未作为执行依据|记录为正常结束/)
+})
+
+test.each([
+  ['win32', 'Windows'], ['linux', 'Linux'], ['darwin', 'macOS'], ['other', '其他平台'],
+] as const)('平台只取回执枚举，不取浏览器平台：%s', (platform, label) => {
+  vi.stubGlobal('navigator', { platform: '不应显示的客户端平台' })
+  mount([receipt({ execution_context: executionContext({ platform }) })])
+  const environment = open('执行环境与目录', openReceipt())
+  expect(environment.textContent).toContain(`平台：${label}`)
+  expect(environment.textContent).not.toContain('不应显示')
+})
+
+test.each([
+  [false, null], [true, null], [true, 'temporary_artifact_copy_not_sandbox'],
+] as const)('缺少执行上下文的旧回执保留事实，环境策略显示未知：历史 %s，环境 %s', (historicalDelivery, environment) => {
+  mount([receipt({ environment })], { historicalDelivery })
+  const body = openReceipt()
+  const settings = open('执行环境与目录', body)
+  expect(settings.textContent).toContain('启动方式、进程环境、PATH 策略与平台未知（未记录执行上下文）')
+  expect(settings.textContent).not.toMatch(/精简环境|按 argv 直接启动|系统默认 PATH|有显式允许配置|平台：Windows/)
+  expect(body.textContent).toContain('完成事件 #30')
+  expect(body.textContent).not.toContain('未作为执行依据')
+  if (historicalDelivery) expect(body.textContent).toContain('历史交付中的冻结记录')
+  if (environment) expect(settings.textContent).toContain('成果副本模式')
+})
+
+test.each([
+  null, undefined, {}, [], 'direct_argv',
+  ...[{ version: 2 }, { version: true }, { invocation: 'shell' }, { invocation: ['direct_argv'] },
+    { environment: 'inherited' }, { environment: null }, { path_policy: 'user_terminal' }, { path_policy: {} },
+    { platform: 'windows' }, { platform: null }, { platform: 'toString' },
+    { extra: '不应显示' }, { env: { PRIVATE: '不应显示' } },
+  ].map(extra => executionContext(extra)),
+  ...['version', 'invocation', 'environment', 'path_policy', 'platform'].map(key => {
+    const value: Data = executionContext()
+    delete value[key]
+    return value
+  }),
+  Object.assign(Object.create({ platform: 'win32' }), executionContext({ platform: undefined })),
+].map((value, index) => [index, value] as const))('执行上下文畸形、缺字段或额外键不得作为可信事实：%s', (_, execution_context) => {
+  mount([receipt({ execution_context })])
+  const outer = open('实际命令记录')
+  expect(outer.textContent).toContain('未作为执行依据')
+  expect(outer.querySelector('details, pre, button')).toBeNull()
+  expect(outer.textContent).not.toMatch(/精简环境|按 argv 直接启动|系统默认 PATH|有显式允许配置|不应显示/)
+})
+
+test('合法执行上下文不能绕过宿主身份、事件来源或回执必填校验', () => {
+  const value = receipt({ execution_context: executionContext() })
+  const view = render(<NativeCommandReceipts event={snapshot([value])} />)
+  expect(view.getByText('实际命令记录')).toBeTruthy()
+  for (const actor of [
+    { id: 'team', kind: 'agent', role: 'team' }, { id: 'other', kind: 'system', role: 'team' },
+    { id: 'team', kind: 'system', role: 'other' }, Object.create({ id: 'team', kind: 'system', role: 'team' }),
+  ]) {
+    view.rerender(<NativeCommandReceipts event={{ ...snapshot([value]), actor }} />)
+    expect(view.container.childElementCount).toBe(0)
+  }
+  view.rerender(<NativeCommandReceipts event={{ ...snapshot([value]), type: 'msg.said' }} />)
+  expect(view.container.childElementCount).toBe(0)
+  for (const invalid of [receipt({ execution_context: executionContext(), source_seq: 40 }),
+    receipt({ execution_context: executionContext(), started_seq: 30 }), receipt({ execution_context: executionContext(), unknown: true })]) {
+    view.rerender(<NativeCommandReceipts event={snapshot([invalid])} />)
+    expect(view.container.textContent).toContain('未作为执行依据')
+    expect(view.container.textContent).not.toContain('精简环境')
+  }
+  delete value.environment
+  view.rerender(<NativeCommandReceipts event={snapshot([value])} />)
+  expect(view.container.textContent).toContain('未作为执行依据')
 })
 
 test('临时副本相对目录、历史比较和交付版本关联分别显示，不混为执行通过', () => {
