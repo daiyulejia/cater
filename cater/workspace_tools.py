@@ -43,6 +43,7 @@ MAX_MATCHES = 200
 MAX_VISITED = 2000
 MAX_SEARCH_BYTES = 8 * MAX_FILE_BYTES
 MAX_RESULT_BYTES = 64000
+MAX_STDIN_BYTES = 65536
 _PROTECTED = {
     ".git", ".ssh", ".aws", ".azure", ".gnupg", ".kube", ".docker",
     ".config", ".codex", ".pki", ".terraform", ".pgpass", ".my.cnf",
@@ -349,6 +350,8 @@ class WorkspaceExecutor:
                                  "args": {"type": "array", "maxItems": 100,
                                           "description": "Literal arguments appended to the configured argv prefix. They do not replace the program. That program may accept, reject, or ignore them; inspect actual execution evidence. Do not put a whole shell command in one argument.",
                                           "items": {**string, "maxLength": 8192}, "default": []}, "cwd": path,
+                                 "stdin": {**string, "maxLength": MAX_STDIN_BYTES,
+                                           "description": "Optional text sent as exact UTF-8 standard input, at most 65536 bytes; no added newline or BOM. The configured program must support it: explicitly choose its stdin mode in args when needed. Useful for temporary checks without writing helper scripts. This does not change the alias prefix, Python isolation/imports, cwd or program permissions, and does not guarantee no file/network effects. Omit to keep stdin closed. Input is recorded with the request, not a secret channel. Receipt metadata only describes configured input, not proof it was read or executed."},
                                  "timeout": {"type": "number", "exclusiveMinimum": 0, "maximum": self.policy.timeout,
                                              "default": self.policy.timeout}}, ["command"]))
         return [{"name": name, "description": description,
@@ -365,6 +368,13 @@ class WorkspaceExecutor:
             invalid = sorted(key for key, field in schema["properties"].items()
                              if isinstance(arguments, dict) and key in arguments
                              and not _argument_valid(arguments[key], field))
+            if name == "workspace_run" and isinstance(arguments, dict) and isinstance(arguments.get("stdin"), str):
+                try:
+                    if len(arguments["stdin"].encode("utf-8")) > MAX_STDIN_BYTES:
+                        invalid.append("stdin")
+                except UnicodeError:
+                    invalid.append("stdin")
+                invalid = sorted(set(invalid))
             if name == "workspace_write" and isinstance(arguments, dict) and "old_text" in arguments:
                 expected = arguments.get("expected_sha256")
                 if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
@@ -693,7 +703,7 @@ class WorkspaceExecutor:
         return signature
 
     def _run(self, command: str, args: list[str] | None = None, cwd: str = ".",
-             timeout: float | None = None) -> dict:
+             timeout: float | None = None, stdin: str | None = None) -> dict:
         if not isinstance(command, str) or command not in self.policy.commands:
             _deny("unknown_command", "Unknown command alias.")
         args = [] if args is None else args
@@ -704,6 +714,16 @@ class WorkspaceExecutor:
         timeout = self.policy.timeout if timeout is None else _timeout(timeout)
         if timeout > self.policy.timeout:
             _deny("invalid_arguments", "Timeout exceeds workspace policy.")
+        input_bytes = None
+        if stdin is not None:
+            if not isinstance(stdin, str):
+                _deny("invalid_arguments", "Standard input must be UTF-8 text.")
+            try:
+                input_bytes = stdin.encode("utf-8")
+            except UnicodeError:
+                _deny("invalid_arguments", "Standard input must be UTF-8 text.")
+            if len(input_bytes) > MAX_STDIN_BYTES:
+                _deny("invalid_arguments", "Standard input exceeds the byte limit.")
         try:
             directory = self._path(cwd)
             _inspect(directory, True)
@@ -744,7 +764,8 @@ class WorkspaceExecutor:
                            for capture, stream in ((stdout, process.stdout), (stderr, process.stderr))]
                 for reader in readers:
                     reader.start()
-                process.stdin.write(json.dumps(argv).encode("utf-8"))
+                request = argv if stdin is None else {"argv": argv, "stdin_utf8": stdin}
+                process.stdin.write(json.dumps(request).encode("utf-8"))
                 process.stdin.close()
                 process.wait(timeout=max(0.001, timeout - (time.monotonic() - started)))
                 # Worker errors are intentionally not echoed: they may include host secrets.
@@ -802,6 +823,10 @@ class WorkspaceExecutor:
                   "bytes": out_meta["bytes"] + err_meta["bytes"],
                   "truncated": out_meta["truncated"] or err_meta["truncated"], "complete": complete,
                   "process_scope": scope.kind if scope is not None else None}
+        if input_bytes is not None:
+            result["stdin"] = {"encoding": "utf-8", "bytes": len(input_bytes),
+                               "sha256": hashlib.sha256(input_bytes).hexdigest(),
+                               "note": "配置给命令的输入，不证明目标程序已读取或执行。"}
         result["output"] = out_meta["excerpt"] + err_meta["excerpt"]
         if not ok:
             result["error"] = {"code": outcome if not cleanup_failed and complete and exit_code is not None else "process_failed",

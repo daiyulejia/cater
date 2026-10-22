@@ -36,7 +36,7 @@ class SkillLibraryTests(unittest.TestCase):
     def test_catalog_is_metadata_only_and_hashes_raw_bytes_without_path(self):
         result = self.index()
         self.assertEqual(result["configuration_status"], "ok")
-        entry, = result["skills"]
+        entry, = [row for row in result["skills"] if row["id"] == "local-guide"]
         self.assertEqual(entry["sha256"], hashlib.sha256(self.body.read_bytes()).hexdigest())
         self.assertEqual(entry["bytes"], len(self.body.read_bytes()))
         self.assertEqual(entry["source"], "configured")
@@ -78,20 +78,44 @@ class SkillLibraryTests(unittest.TestCase):
 
     def test_empty_filter_has_no_recipients_but_empty_requirements_need_no_tools(self):
         self.configure([{**self.entry, "roles": []}])
-        self.assertEqual(self.index()["total"], 0)
+        ids = [row["id"] for row in self.index()["skills"]]
+        self.assertNotIn("local-guide", ids)
+        self.assertIn("explanatory-delivery", ids)
+        self.assertEqual(self.read()["code"], "skill_unavailable")
         self.configure([{**self.entry, "requires": []}])
         self.assertEqual(self.read()["status"], "ok")
 
     def test_catalog_paging_and_metadata_budget(self):
+        builtins = SkillLibrary().index(**self.scope, limit=20)
+        self.assertFalse(builtins["has_more"])
+        builtin_ids = [row["id"] for row in builtins["skills"]]
+        self.assertIn("explanatory-delivery", builtin_ids)
         rows = [{**self.entry, "id": f"guide-{i}"} for i in range(23)]
         self.configure(rows)
+        custom_ids = [row["id"] for row in rows]
+        expected_ids = custom_ids + builtin_ids
         first = self.index(limit=20)
-        self.assertEqual(first["total"], 23)
+        self.assertEqual(first["total"], 23 + builtins["total"])
         self.assertEqual(len(first["skills"]), 20)
         self.assertTrue(first["has_more"])
-        second = self.index(offset=first["next_offset"], limit=20)
-        self.assertEqual(len(second["skills"]), 3)
-        self.assertFalse(second["has_more"])
+        combined = []
+        page = first
+        while True:
+            self.assertEqual(page["offset"], len(combined))
+            self.assertEqual(page["total"], len(expected_ids))
+            self.assertLessEqual(len(page["skills"]), 20)
+            combined.extend(page["skills"])
+            self.assertEqual(page["next_offset"], len(combined))
+            self.assertEqual(page["has_more"], len(combined) < len(expected_ids))
+            if not page["has_more"]:
+                break
+            self.assertGreater(page["next_offset"], page["offset"])
+            page = self.index(offset=page["next_offset"], limit=20)
+        ids = [row["id"] for row in combined]
+        self.assertEqual(ids, expected_ids)
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertEqual([row["id"] for row in combined if row["source"] == "configured"], custom_ids)
+        self.assertEqual([row["id"] for row in combined if row["source"] == "builtin"], builtin_ids)
         self.assertEqual(len(self.index()["skills"]), 5)
         with self.assertRaises(ValueError):
             self.index(offset=999)
@@ -103,8 +127,13 @@ class SkillLibraryTests(unittest.TestCase):
         self.assertFalse(result["has_more"])
         self.assertEqual(result["next_offset"], end)
         self.assertEqual(self.read(offset=end + 1)["code"], "invalid_skill_request")
-        self.assertEqual(self.index(offset=1)["skills"], [])
-        self.assertFalse(self.index(offset=1)["has_more"])
+        total = self.index()["total"]
+        last = self.index(offset=total)
+        self.assertEqual(last["skills"], [])
+        self.assertFalse(last["has_more"])
+        self.assertEqual(last["next_offset"], total)
+        with self.assertRaises(ValueError):
+            self.index(offset=total + 1)
 
     def test_metadata_argument_validation_is_bounded(self):
         for kwargs in ({"offset": True}, {"offset": -1}, {"limit": 0}, {"limit": 21}, {"limit": "1"}):

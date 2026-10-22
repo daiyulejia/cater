@@ -4,6 +4,6 @@
     {"id": "engineering-checks", "title": "工程运行与检查", "description": "从真实配置识别命令，区分构建、测试与环境失败，留下运行依据。", "path": "engineering-checks.md", "requires": ["workspace_run"]},
     {"id": "static-web-checks", "title": "静态网页行为验证", "description": "对发布版本设计真实交互断言，分析失败并复查修正版。", "path": "static-web-checks.md", "requires": ["browser_check"]},
     {"id": "versioned-review", "title": "独立复核与修复交接", "description": "从具体版本与实际依据开展复核，不把承诺修改当作已修复。", "path": "versioned-review.md", "requires": ["request_review", "read_artifact"]},
-    {"id": "explanatory-delivery", "title": "说明改动与复查方法", "description": "让顾客理解原因、影响和运行方法，同时诚实交代证据与未验证范围。", "path": "explanatory-delivery.md", "requires": ["finish_work"]}
+    {"id": "explanatory-delivery", "title": "说明改动与复查方法", "description": "用于工程讲解、普通追问和交付说明，诚实交代原因、影响、依据与未验证范围。", "path": "explanatory-delivery.md", "requires": []}
   ]
 }

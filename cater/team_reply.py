@@ -70,7 +70,7 @@ def committed_reply(team, start, events):
 
 def schema():
     return {"name": TOOL, "description": (
-        "核对后直接回答本轮顾客问题，发送给顾客并结束本轮。text是简明完整的可读答案，不混入之前的过程前言。"
+        "核对后直接回答本轮顾客问题，发送给顾客并结束本轮。text给简明完整的答案，按需区分实际观察、源码推导和未验证建议；失败实验未取得的输出不能写成实测，不混入之前的过程前言。"
         "只发消息，不代表整个任务完成或复核通过；正式交付仍用finish_work，伙伴交还委托仍用send_message。"
         "若只是解释或核验旧交付，无需重设目标或发布新报告；需要可查原文时可选填evidence，顾客默认折叠查看。"),
         "input_schema": {"type": "object", "additionalProperties": False,
