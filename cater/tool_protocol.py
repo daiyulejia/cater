@@ -1,4 +1,4 @@
-"""Client-tool wire adapters. No execution, retries, logging, or runtime state."""
+"""Value-only client-tool wire adapters; no execution, retries, logging or I/O."""
 
 from __future__ import annotations
 
@@ -33,6 +33,36 @@ def json_utf8(value: Any, *, sort_keys: bool = False, allow_nan: bool = True) ->
     except UnicodeEncodeError:
         return json.dumps(value, ensure_ascii=True, sort_keys=sort_keys,
                           allow_nan=allow_nan).encode("utf-8")
+
+
+class RecordedToolResult(dict):
+    """Original result plus a host receipt pointer that JSON never persists."""
+
+    __slots__ = ("_reference",)
+
+    def __init__(self, result: dict, receipt_seq: int, receipt_hash: str):
+        if not isinstance(result, dict):
+            raise ValueError("Recorded result must be an object")
+        self._reference = (receipt_seq, receipt_hash)
+        self.receipt_reference()
+        super().__init__(result)
+
+    @property
+    def receipt_seq(self):
+        return self._reference[0]
+
+    @property
+    def receipt_hash(self):
+        return self._reference[1]
+
+    def receipt_reference(self):
+        seq, fingerprint = self._reference
+        if (type(seq) is not int or not 0 < seq < 2 ** 63 or type(fingerprint) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None):
+            raise ValueError("Invalid recorded receipt pointer")
+        return {"source_seq": seq, "source_hash": fingerprint, "read_tool": "read_receipts",
+                "read_args": {"receipt_seq": seq},
+                "note": "这是本次工具的宿主完成回执编号，引用原文时使用此source_seq，不猜started_seq。状态与退出码会自动附在引用上，不拼成正文quote；记录不认证观点正确。"}
 
 
 @dataclass(frozen=True)

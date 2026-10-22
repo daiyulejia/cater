@@ -2,6 +2,7 @@
 
 from .events import Actor
 from .work import WorkConflict
+from .reply_evidence import ReplyEvidenceError, evidence_schema, normalize, same
 
 
 TOOL = "reply_to_customer"
@@ -43,11 +44,20 @@ def committed_reply(team, start, events):
         answer = by_seq.get(answer_seq) if type(answer_seq) is int else None
         if (not isinstance(contract, dict) or contract != LOCAL_EVENT_CONTRACT
                 or type(contract.get("version")) is not int
-                or not isinstance(args, dict) or set(args) != {"text"}
+                or not isinstance(args, dict) or set(args) - {"text", "evidence"} or "text" not in args
                 or not isinstance(args["text"], str) or not args["text"].strip() or len(args["text"]) > 32000
                 or type(result.get("reply_to")) is not int or result["reply_to"] != source.seq
                 or answer is None or not tool.seq < answer.seq < receipt.seq
                 or answer.type != "msg.said" or answer.actor != Actor.agent(role.id, role.role)):
+            continue
+        try:
+            evidence = normalize(team, start.task_id, args.get("evidence", []), before_seq=tool.seq, events=events)
+        except (ReplyEvidenceError, ValueError, TypeError, OSError):
+            continue
+        marker = answer.payload.get("reply_evidence_started_seq")
+        if (not same(result.get("reply_evidence"), evidence)
+                or (not (type(marker) is int and marker == tool.seq) if evidence is not None
+                    else "reply_evidence_started_seq" in answer.payload)):
             continue
         a = answer.payload
         if (a.get("phase") == "team" and a.get("run_id") == p["run_id"] and a.get("text") == args["text"].strip()
@@ -62,9 +72,10 @@ def schema():
     return {"name": TOOL, "description": (
         "核对后直接回答本轮顾客问题，发送给顾客并结束本轮。text是简明完整的可读答案，不混入之前的过程前言。"
         "只发消息，不代表整个任务完成或复核通过；正式交付仍用finish_work，伙伴交还委托仍用send_message。"
-        "若只是解释或核验旧交付，无需重设目标或发布新报告。"),
+        "若只是解释或核验旧交付，无需重设目标或发布新报告；需要可查原文时可选填evidence，顾客默认折叠查看。"),
         "input_schema": {"type": "object", "additionalProperties": False,
-            "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 32000}},
+            "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 32000},
+                           "evidence": evidence_schema()},
             "required": ["text"]}}
 
 
@@ -91,16 +102,40 @@ def reply(team, task_id, role, arguments, tool_start, assignment):
             or assignment is not None or team._waiting_assignment(task_id, source, role) is not None):
         raise WorkConflict("此入口只回答本轮直接顾客输入；已有委托仍向原委托人交还，未代替任何人宣布完成。")
     team._current(task_id, run, role, tool_start.payload["revision"])
+    try:
+        evidence = normalize(team, task_id, arguments.get("evidence", []), before_seq=tool_start.seq)
+    except ReplyEvidenceError as exc:
+        return exc.result()
     previous = next((e for e in events if e.type == "msg.said"
         and e.actor == Actor.agent(role.id, role.role) and e.payload.get("run_id") == run.payload["run_id"]
         and e.payload.get("customer_reply_tool") == TOOL), None)
     if previous:
         if previous.payload.get("text") != text:
             raise WorkConflict("本轮顾客答复已发送；未用另一份文字覆盖已发送消息。")
+        old_start_seq = previous.payload.get("reply_evidence_started_seq")
+        old_start = by_seq.get(old_start_seq) if type(old_start_seq) is int else None
+        if "reply_evidence_started_seq" in previous.payload and (
+                old_start is None or old_start.actor != HOST or old_start.type != "team.tool_started"
+                or old_start.payload.get("name") != TOOL or old_start.seq >= previous.seq
+                or any(old_start.payload.get(key) != tool_start.payload.get(key)
+                       for key in ("run_id", "role", "message_seq"))):
+            raise WorkConflict("本轮已发答复的原引用关联无效，未覆盖既有消息。")
+        try:
+            old_args = old_start.payload.get("arguments") if old_start else {}
+            if not isinstance(old_args, dict):
+                raise ValueError("Invalid original reply arguments")
+            old_refs = old_args.get("evidence", [])
+            old_evidence = normalize(team, task_id, old_refs, before_seq=old_start.seq) if old_start else None
+        except (ReplyEvidenceError, ValueError, TypeError):
+            raise WorkConflict("本轮已发答复的原引用暂无法核对，未覆盖既有消息。") from None
+        if not same(old_evidence, evidence):
+            raise WorkConflict("本轮顾客答复已发送；未用另一组引用覆盖已发送消息。")
         event = previous
     else:
         event = team.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
             payload={"text": text, "claim": text[:180], "phase": "team", "run_id": run.payload["run_id"],
                      "reply_to": source.seq, "response_kind": "reply", "audience": "customer",
-                     "recipient": "human", "customer_reply_tool": TOOL})
-    return {"status": "ok", "message_seq": event.seq, "reply_to": source.seq}
+                     "recipient": "human", "customer_reply_tool": TOOL,
+                     **({"reply_evidence_started_seq": tool_start.seq} if evidence is not None else {})})
+    return {"status": "ok", "message_seq": event.seq, "reply_to": source.seq,
+            **({"reply_evidence": evidence} if evidence is not None else {})}

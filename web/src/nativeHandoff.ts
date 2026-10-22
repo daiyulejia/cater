@@ -11,6 +11,7 @@ export type HandoffEvidence = {
   role?: string
   tool?: string
   status?: string
+  outcome?: 'passed' | 'failed' | 'timeout' | 'launch_error' | 'effects_unknown' | 'not_started'
   exit_code?: number
   complete?: boolean
   truncated?: boolean

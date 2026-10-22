@@ -65,6 +65,27 @@ def _receipt_text(result):
     return parts
 
 
+def receipt_metadata(result, *, role, name):
+    """Recorded execution/capture fields, independent of any quoted conclusion."""
+    metadata = {"kind": "tool_receipt", "role": role, "tool": name, "status": result["status"]}
+    if type(result.get("exit_code")) is int:
+        metadata["exit_code"] = result["exit_code"]
+    if type(result.get("complete")) is bool:
+        metadata["complete"] = result["complete"]
+    if any(isinstance(result.get(key), dict) and result[key].get("complete") is False for key in ("stdout", "stderr")):
+        metadata["complete"] = False
+    if type(result.get("truncated")) is bool:
+        metadata["truncated"] = result["truncated"]
+    if any(isinstance(result.get(key), dict) and result[key].get("truncated") is True for key in ("stdout", "stderr")):
+        metadata["truncated"] = True
+    encoding = {key: result[key]["utf8_valid"] for key in ("stdout", "stderr")
+                if isinstance(result.get(key), dict) and "utf8_valid" in result[key]
+                and (type(result[key]["utf8_valid"]) is bool or result[key]["utf8_valid"] is None)}
+    if encoding:
+        metadata["output_utf8_valid"] = encoding
+    return metadata
+
+
 class TeamDelivery:
     def __init__(self, team):
         self.team, self.rt = team, team.rt
@@ -106,22 +127,7 @@ class TeamDelivery:
                     or "call_id" in p and p["call_id"] != s["call_id"]
                     or not isinstance(result, dict) or result.get("status") not in {"ok", "error"}):
                 continue
-            metadata = {"kind": "tool_receipt", "role": s["role"], "tool": name, "status": result["status"]}
-            if type(result.get("exit_code")) is int:
-                metadata["exit_code"] = result["exit_code"]
-            if type(result.get("complete")) is bool:
-                metadata["complete"] = result["complete"]
-            if any(isinstance(result.get(key), dict) and result[key].get("complete") is False for key in ("stdout", "stderr")):
-                metadata["complete"] = False
-            if type(result.get("truncated")) is bool:
-                metadata["truncated"] = result["truncated"]
-            if any(isinstance(result.get(key), dict) and result[key].get("truncated") is True for key in ("stdout", "stderr")):
-                metadata["truncated"] = True
-            encoding = {key: result[key]["utf8_valid"] for key in ("stdout", "stderr")
-                        if isinstance(result.get(key), dict) and "utf8_valid" in result[key]
-                        and (type(result[key]["utf8_valid"]) is bool or result[key]["utf8_valid"] is None)}
-            if encoding:
-                metadata["output_utf8_valid"] = encoding
+            metadata = receipt_metadata(result, role=s["role"], name=name)
             if name == "browser_check":
                 checked = result.get("checked_artifacts")
                 if (result.get("scope_current") is not True or result.get("artifacts_unchanged") is not True

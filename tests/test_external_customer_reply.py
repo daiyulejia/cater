@@ -118,8 +118,9 @@ class ExternalCustomerReplyTests(unittest.TestCase):
         schema = team_reply.schema()["input_schema"]
         self.assertEqual(schema["required"], ["text"])
         self.assertFalse(schema["additionalProperties"])
-        self.assertEqual(schema["properties"], {"text": {
-            "type": "string", "minLength": 1, "maxLength": 32000}})
+        self.assertEqual(set(schema["properties"]), {"text", "evidence"})
+        self.assertEqual(schema["properties"]["text"], {
+            "type": "string", "minLength": 1, "maxLength": 32000})
 
     def test_done_followup_preserves_delivery_archive_hashes_and_objective(self):
         def deliver(run):

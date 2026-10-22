@@ -283,7 +283,21 @@ class McpToolBridge:
                     raise ValueError("Invalid tool result")
                 body = json_utf8(value, allow_nan=False).decode("utf-8")
                 result = {"content": [{"type": "text", "text": body}], "isError": value.get("status") != "ok"}
-                self._encode({"response": {"jsonrpc": "2.0", "id": identifier, "result": result}})
+                from .tool_protocol import RecordedToolResult
+
+                if type(value) is RecordedToolResult:
+                    # Keep the original result first; optional provenance cannot
+                    # turn an otherwise valid completed operation into an error.
+                    try:
+                        footer = json_utf8({"cater_receipt": value.receipt_reference()}, allow_nan=False).decode("utf-8")
+                        enriched = {**result, "content": [*result["content"], {"type": "text", "text": footer}]}
+                        self._encode({"response": {"jsonrpc": "2.0", "id": identifier, "result": enriched}})
+                    except Exception:
+                        self._encode({"response": {"jsonrpc": "2.0", "id": identifier, "result": result}})
+                    else:
+                        result = enriched
+                else:
+                    self._encode({"response": {"jsonrpc": "2.0", "id": identifier, "result": result}})
             except Exception:
                 result = {"content": [{"type": "text", "text":
                     "Host tool did not return a valid result. Check host receipts before retrying; effects may have occurred."}],

@@ -7,17 +7,21 @@ const sourceLabels = { artifact: '成果原文', tool_receipt: '历史工具回�
 const statusLabels: Record<string, string> = { ok: '正常返回', error: '返回错误', completed: '已结束', succeeded: '执行成功',
   passed: '检查通过', failed: '执行失败', approved: '伙伴同意', changes_requested: '伙伴建议修改', timeout: '超时', unavailable: '不可用' }
 
-const toolLabels: Record<string, string> = { browser_check: '检查网页交互', workspace_read: '读取文件', workspace_write: '写入文件', workspace_run: '运行命令', workspace_list: '列出目录', workspace_search: '查找文件' }
+const toolLabels: Record<string, string> = { browser_check: '检查网页交互', workspace_read: '读取文件', workspace_write: '写入文件', workspace_run: '运行命令', workspace_list: '列出目录', workspace_search: '查找文件', read_artifact: '读取成果原文' }
+const outcomeLabels = { passed: '检查通过', failed: '执行失败', timeout: '超时', launch_error: '启动失败', effects_unknown: '执行影响待核实', not_started: '未开始执行' }
 
-function SourceQuote({ source, name }: { source: HandoffEvidence; name?: (id: string) => string }) {
-  return <li className="space-y-1">
+function SourceQuote({ source, name, reply = false }: { source: HandoffEvidence; name?: (id: string) => string; reply?: boolean }) {
+  const nonzero = reply && source.exit_code !== undefined && source.exit_code !== 0
+  return <li className={reply ? 'min-w-0 space-y-1 [overflow-wrap:anywhere]' : 'space-y-1'}>
     <p className="font-semibold">{sourceLabels[source.kind]} · 事件 #{source.source_seq}</p>
     {source.filename && <p>文件：{source.filename}</p>}
     {(source.role || source.tool || source.status) && <p>{[
       source.role && `伙伴：${name?.(source.role) ?? '协作成员'}`, source.tool && `工具：${Object.hasOwn(toolLabels, source.tool) ? toolLabels[source.tool] : '工作目录操作'}`,
       source.status && `记录状态：${Object.hasOwn(statusLabels, source.status) ? statusLabels[source.status] : source.status}`,
     ].filter(Boolean).join(' · ')}</p>}
-    {source.exit_code !== undefined && <p>退出码：{source.exit_code}</p>}
+    {source.exit_code !== undefined && <p className={nonzero ? 'font-semibold text-red-700' : undefined}>退出码：{source.exit_code}{nonzero ? ' · 命令未成功（非零退出）' : ''}</p>}
+    {reply && source.outcome && <p className={source.outcome !== 'passed' ? 'font-semibold text-red-700' : undefined}>执行结果：{outcomeLabels[source.outcome]}</p>}
+    {nonzero && <p>退出状态不表示引文中的每项业务断言都失败。</p>}
     {source.complete !== undefined && <p>{source.complete ? '回执采集完整' : '回执采集未完成'}</p>}
     {source.truncated === true && <p>回执正文仅保留部分内容。</p>}
     {(['stdout', 'stderr'] as const).map(stream => {
@@ -47,6 +51,16 @@ function DetailList({ title, items, numbered = false }: { title: string; items: 
 
 export function MessageDetails({ item }: { item: ChatItem }) {
   const handoff = nativeHandoff(item.evidence)
+  const replyEvidence = item.replyEvidence
+  if (replyEvidence) return <details className="message-details mt-3 min-w-0 border-t border-[#dfeae5] pt-2 text-xs text-[#52766d] [overflow-wrap:anywhere]">
+    <summary className="cursor-pointer font-semibold">查看答复依据</summary>
+    <div className="mt-2 space-y-3 leading-5">
+      {item.details?.length ? <ul className="space-y-1.5">{item.details.map((detail, index) => <li key={index}>{detail}</li>)}</ul> : null}
+      <p className="whitespace-pre-wrap">{replyEvidence.note}</p>
+      <p>引文对应当时的工具回执，不代表答复观点正确，也不认证测试身份、覆盖范围或验收通过。</p>
+      <ul className="space-y-3">{replyEvidence.sources.map((source, index) => <SourceQuote key={index} source={source} name={item.auditName} reply />)}</ul>
+    </div>
+  </details>
   if (!handoff && !item.details?.length) return null
   const human = item.kind === 'human'
   return <details className={`message-details mt-3 min-w-0 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#dfeae5] text-[#52766d]'}`}>

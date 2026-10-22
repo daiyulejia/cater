@@ -1166,9 +1166,14 @@ class TeamService:
 
     def _invoke_tool(self, task_id, role, started, revision, call, schema, workspace, binding, tool_start, assignment):
         def settle(result):
-            self.rt.log.emit(type="team.tool_finished", task_id=task_id, actor=HOST,
+            event = self.rt.log.emit(type="team.tool_finished", task_id=task_id, actor=HOST,
                 payload={"started_seq": tool_start.seq, "run_id": started.payload["run_id"],
                          "role": role.id, "name": call.name, "result": result})
+            from .reply_evidence import SUPPORTED
+            from .tool_protocol import RecordedToolResult
+
+            if call.name in SUPPORTED:
+                return RecordedToolResult(result, event.seq, event.hash)
             return result
 
         try:
@@ -1452,8 +1457,10 @@ class TeamService:
                 "测试期望是否正确要回到顾客需求、规范或独立可算的例子；错误的测试也可能被某个实现满足，不能因改实现后变绿就断定测试必然正确。"
                 "要确认文件没被改弱或改动，应把发布版本与修改前的确切版本或workspace_read历史回执比较；只比当前两个副本的hash，不能证明它们与修前一致。"
                 "工具回执argv描述宿主配置的命令别名；其固定参数、路径或隔离模式不代表顾客普通终端也有同样设置。"
-                "给顾客的命令说明运行位置和前提，别把受管核验环境的限制推广为顾客必然遇到的问题。"
+                "给顾客最短且适用当前工程的复查命令，说明运行位置和前提，未验证建议另作标明，不扩展猜测排障。"
+                "区分程序报告、整条命令的状态/退出码和伙伴意见；片段通过但进程失败时分别说明，不把受管环境限制推广到顾客。"
                 "工具列表有reply_to_customer时，完成普通问答后用它发送完整答案，与此前公开过程分开；它不代表任务或委托完成。"
+                "需要可查依据时可选填evidence的原回执source_seq与逐字quote，不猜编号，也不把引用匹配当成观点认证。"
                 "receipt_index是最近工具回执的轻量索引，不是结论；可按role、message_seq、name查完整结果，run_id不是角色名。"
                 "observations若存在，是完整日志中程序报告的摘要，reported_tests不是宿主保证的覆盖数；如实引用原数字，不把它推成更多测试或更广正确性。"
                 "file_read_sources若存在，只表示当前目录绑定期间的历史读取；按receipt_seq读原文再比较原行为与新行为，不从现行规则反推旧代码。"
