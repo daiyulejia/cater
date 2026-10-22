@@ -4,12 +4,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 from .events import Actor
 from .review_contract import browser_observations
 
 
 HOST = Actor.system("team")
+
+
+def omission_reason(value):
+    """Validate a recorded choice explanation, not the truth of that explanation."""
+    if not isinstance(value, str) or len(value) > 1000 or "\0" in value:
+        return None
+    # Include the BOM stripped by JavaScript, alongside Python's Unicode whitespace.
+    reason = re.sub(r"^[\s\ufeff]+|[\s\ufeff]+$", "", value)
+    if not reason:
+        return None
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        return None
+    return reason
 
 
 class HandoffError(ValueError):
@@ -255,14 +271,21 @@ class TeamDelivery:
     @staticmethod
     def markdown(event):
         note = event.payload.get("handoff")
+        reason = (omission_reason(event.payload.get("omitted_approved_artifacts_reason"))
+                  if event.actor == HOST and event.type == "team.objective_completed" else None)
+        omission = (["## 未附已复核成果的原因", "", *["    " + line for line in reason.splitlines()], "",
+                     "这是店长记录的交付选择说明，不表示已附上这些成果。", ""] if reason else [])
         if (not isinstance(note, dict) or type(note.get("version")) is not int or note["version"] != 1
                 or not isinstance(note.get("why"), str) or not note["why"].strip()
                 or any(not isinstance(note.get(k), list) or not all(isinstance(v, str) for v in note[k])
                        for k in ("changed", "impact", "alternatives", "reproduce", "limits"))):
-            return None
+            return ("\n".join(["# 交付说明", "", f"对应交付事件 #{event.seq}", "",
+                str(event.payload.get("summary", "")), "", "## 当时记录的验证范围", "",
+                str(event.payload.get("verification", "")), "", *omission]) if omission else None)
         lines = ["# 交付说明", "", f"对应交付事件 #{event.seq}", "", str(event.payload.get("summary", "")), "",
                  "## 当时记录的验证范围", "", str(event.payload.get("verification", "")), "",
                  "## 为什么这样做", "", note["why"], ""]
+        lines += omission
         for key, title in (("changed", "改动"), ("impact", "影响"), ("alternatives", "取舍与其他考虑"),
                            ("reproduce", "成员建议的运行与复查"), ("limits", "未验证范围")):
             if note[key]:
@@ -314,6 +337,7 @@ class TeamDelivery:
         if event is None:
             raise ValueError("找不到本群这次交付记录。")
         return {"status": "ok", "delivery": {"seq": event.seq,
-                **{k: event.payload[k] for k in ("summary", "verification", "artifacts", "handoff") if k in event.payload}},
+                **{k: event.payload[k] for k in ("summary", "verification", "artifacts", "handoff",
+                    "omitted_approved_artifacts_reason") if k in event.payload}},
                 "historical": self.team.view(task_id)["revision"] != event.seq,
                 "note": "保存的版本说明；步骤未因此执行，引用摘录匹配不证明判断正确或当前文件未变化。"}

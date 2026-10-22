@@ -21,7 +21,7 @@ from .events import Actor
 from .drivers import DriverProtocolError, tool_failure_diagnostics, tool_protocol_error_usage
 from .room_dialogue import addressed_role
 from .team_recovery import RECOVERY_CONTRACT, TeamRecovery, _same_scope
-from .team_delivery import HandoffError, TeamDelivery, handoff_schema
+from .team_delivery import HandoffError, TeamDelivery, handoff_schema, omission_reason
 from .team_browser import BROWSER_CONTRACT, TeamBrowser, browser_schema
 from .team_context import history_window, json_bytes, model_context, model_json
 from .delivery_followup_sources import delivery_followup_sources
@@ -460,7 +460,9 @@ class TeamService:
                       {"summary": {**string, "description": "直接回答本次问题，收束必要结论、数字及口径或成果入口、最短操作及关键原因或风险；不重复长细节，顾客要求全文或数字时不省略。不只说已完成，也不让顾客翻内部记录拼答案。"},
                        "verification": string, "handoff": handoff_schema(),
                        "artifact_seqs": {"type": "array", "maxItems": 128, "items": {"type": "integer", "minimum": 1},
-                           "description": "可选：明确选择本次交付的文件事件序号，包括需要沿用的旧文件；空数组表示无文件。不填时只收本轮目标内每个文件名的最新发布，不自动带上旧目标文件。"}}, ["summary", "verification"]),
+                           "description": "可选：明确选择本次交付的文件事件序号，包括需要沿用的旧文件；空数组是明确不附文件，不是默认占位。不填时只收本轮目标内每个文件名的最新发布，不自动带上旧目标文件。本轮已有获批成果却一份都未选时，需核对选择或说明有意不附的原因。"},
+                       "omitted_approved_artifacts_reason": {"type": "string", "minLength": 1, "maxLength": 1000,
+                           "description": "仅在本轮已有获批成果、但本次一份都不附时填写有意排除的原因。不会自动附文件或替代复核；不是普通答复的必填项。"}}, ["summary", "verification"]),
             ]
         if workspace is not None:
             from .team_archive import schema as archive_schema
@@ -1375,11 +1377,21 @@ class TeamService:
                 return {"status": "error", "code": "delivery_review_mismatch",
                     "approved_artifacts": mismatches,
                     "message": "所选文件不是本轮独立复核通过的确切版本，未交付旧版或替代版；请选择获批版本，或将实际拟交付版本重新提交复核。"}
+            omits_approved = bool(approved) and not any(filename in chosen for filename in approved)
+            reason = omission_reason(arguments.get("omitted_approved_artifacts_reason")) if omits_approved else None
+            if omits_approved and reason is None:
+                return {"status": "error", "code": "approved_artifacts_omitted",
+                    "approved_artifacts": list(approved.values()),
+                    "message": "本轮已有复核通过的成果，但本次选择一份都没有包含，尚未登记交付。请核对artifact_seqs并明确选择所需版本；"
+                        "空数组不是默认占位。若有意不附这些成果，请填写omitted_approved_artifacts_reason说明原因；"
+                        "不会自动加文件，也不要求顾客审批。省略artifact_seqs会收录本轮最新发布，有草稿时不要盲目删字段。"}
             payload = {"summary": _text(arguments["summary"]), "verification": _text(arguments["verification"]),
                        "run_id": tool_start.payload["run_id"], "objective_seq": boundary,
                        "artifact_selection": "explicit" if "artifact_seqs" in arguments else "current_objective",
                        "artifacts": list({a["filename"]: {k: a[k] for k in ("seq", "filename", "content_sha256")}
                                           for a in selected}.values())}
+            if reason is not None:
+                payload["omitted_approved_artifacts_reason"] = reason
             result = {"status": "ok", "note": "已记录店长交付结论，实际验证范围按原文保留。"}
             if "handoff" in arguments:
                 try:

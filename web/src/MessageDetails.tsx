@@ -3,6 +3,8 @@ import { nativeHandoff, nativeHandoffWarning } from './nativeHandoff'
 import type { HandoffEvidence } from './nativeHandoff'
 import { outputEncodingHint } from './outputPreview'
 import { NativeCommandReceipts } from './NativeCommandReceipts'
+import { DeliveryOmissionNote } from './DeliveryOmissionNote'
+import { deliveryOmissionReason } from './deliveryOmission'
 
 const sourceLabels = { artifact: '成果原文', tool_receipt: '历史工具回执', peer_review: '伙伴复核意见' }
 const statusLabels: Record<string, string> = { ok: '正常返回', error: '返回错误', completed: '已结束', succeeded: '执行成功',
@@ -51,6 +53,7 @@ function DetailList({ title, items, numbered = false }: { title: string; items: 
 }
 
 export function MessageDetails({ item }: { item: ChatItem }) {
+  const omissionReason = deliveryOmissionReason(item.evidence)
   const handoff = nativeHandoff(item.evidence)
   const handoffWarning = nativeHandoffWarning(item.evidence)
   const replyEvidenceWarning = item.replyEvidenceWarning
@@ -59,16 +62,18 @@ export function MessageDetails({ item }: { item: ChatItem }) {
     <summary className="cursor-pointer font-semibold">查看答复依据</summary>
     <div className="mt-2 space-y-3 leading-5">
       {item.details?.length ? <ul className="space-y-1.5">{item.details.map((detail, index) => <li key={index}>{detail}</li>)}</ul> : null}
+      <DeliveryOmissionNote event={item.evidence} historical={item.historicalDelivery} />
       <p className="whitespace-pre-wrap">{replyEvidence.note}</p>
       <p>引文对应当时的工具回执，不代表答复观点正确，也不认证测试身份、覆盖范围或验收通过。</p>
       <ul className="space-y-3">{replyEvidence.sources.map((source, index) => <SourceQuote key={index} source={source} name={item.auditName} reply />)}</ul>
     </div>
   </details>
-  if (!handoff && !handoffWarning && !replyEvidenceWarning && !item.details?.length) return null
+  if (!handoff && !handoffWarning && !replyEvidenceWarning && !item.details?.length && omissionReason === undefined) return null
   const human = item.kind === 'human'
   return <details className={`message-details mt-3 min-w-0 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#dfeae5] text-[#52766d]'}`}>
-    <summary className="cursor-pointer font-semibold">{handoff ? '为什么这样做 · 如何运行' : '查看判断与依据'}</summary>
+    <summary className="cursor-pointer font-semibold">{handoff ? '为什么这样做 · 如何运行' : omissionReason !== undefined && !item.details?.length && !handoffWarning && !replyEvidenceWarning ? '交付文件说明' : '查看判断与依据'}</summary>
     {item.details?.length ? <ul className="mt-2 space-y-1.5 leading-5">{item.details.map((detail, index) => <li key={`${item.id}-${index}`}>{detail}</li>)}</ul> : null}
+    <DeliveryOmissionNote event={item.evidence} historical={item.historicalDelivery} />
     {replyEvidenceWarning && <p className="mt-2 whitespace-pre-wrap leading-5 [overflow-wrap:anywhere]">{replyEvidenceWarning}</p>}
     {handoffWarning && <p className="mt-2 whitespace-pre-wrap leading-5 [overflow-wrap:anywhere]">可选交付说明：{handoffWarning}</p>}
     {handoff && <div className="mt-3 space-y-3 leading-5">

@@ -158,7 +158,7 @@ class ExplanationGuidanceTests(unittest.TestCase):
         self.assertEqual(set(reply["input_schema"]["properties"]), {"text", "evidence"})
         self.assertEqual(finish["input_schema"]["required"], ["summary", "verification"])
         self.assertEqual(set(finish["input_schema"]["properties"]),
-                         {"summary", "verification", "handoff", "artifact_seqs"})
+                         {"summary", "verification", "handoff", "artifact_seqs", "omitted_approved_artifacts_reason"})
 
 
 if __name__ == "__main__":

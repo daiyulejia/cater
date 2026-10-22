@@ -176,7 +176,10 @@ class DeliveryHierarchyTests(unittest.TestCase):
                 schema = next(tool for tool in tools if tool["name"] == "finish_work")["input_schema"]
                 schemas.append(schema)
                 self.assertEqual(schema["required"], ["summary", "verification"])
-                self.assertEqual(set(schema["properties"]), {"summary", "verification", "handoff", "artifact_seqs"})
+                self.assertEqual(set(schema["properties"]), {"summary", "verification", "handoff", "artifact_seqs", "omitted_approved_artifacts_reason"})
+                self.assertEqual(schema["properties"]["omitted_approved_artifacts_reason"]["type"], "string")
+                self.assertEqual(schema["properties"]["omitted_approved_artifacts_reason"]["minLength"], 1)
+                self.assertEqual(schema["properties"]["omitted_approved_artifacts_reason"]["maxLength"], 1000)
                 self.assertEqual(schema["properties"]["handoff"], handoff_schema())
                 self.assertEqual(schema["properties"]["summary"], {"type": "string", "description":
                     schema["properties"]["summary"]["description"]})
