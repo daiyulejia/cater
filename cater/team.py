@@ -1380,16 +1380,19 @@ class TeamService:
                        "artifact_selection": "explicit" if "artifact_seqs" in arguments else "current_objective",
                        "artifacts": list({a["filename"]: {k: a[k] for k in ("seq", "filename", "content_sha256")}
                                           for a in selected}.values())}
+            result = {"status": "ok", "note": "已记录店长交付结论，实际验证范围按原文保留。"}
             if "handoff" in arguments:
                 try:
                     payload["handoff"] = self.delivery.normalize(task_id, arguments["handoff"],
                         artifacts=payload["artifacts"], revision=current_work["revision"])
-                except HandoffError as exc:
-                    return {"status": "error", "code": "invalid_handoff", "message": str(exc),
-                            **({"diagnostics": exc.diagnostics} if getattr(exc, "diagnostics", None) else {}),
-                            **exc.source_catalog}
+                except HandoffError:
+                    # Optional explanation failure must not turn draft citations into evidence.
+                    omitted = {"handoff_status": "omitted_invalid",
+                               "handoff_warning": "可选交付说明未通过校验，未保存；主要交付结论与成果已保留。"}
+                    payload.update(omitted)
+                    result.update(omitted)
             self.rt.log.emit(type="team.objective_completed", task_id=task_id, actor=HOST, payload=payload)
-            return {"status": "ok", "note": "已记录店长交付结论，实际验证范围按原文保留。"}
+            return result
 
     def _run_message(self, task_id, message, role, started):
         status, reason, final = "completed", "", ""

@@ -3,7 +3,7 @@ import { beforeEach, expect, test, vi } from 'vitest'
 import App from '../src/App'
 import type { ChatItem, TaskDetail } from '../src/App'
 import { MessageDetails } from '../src/MessageDetails'
-import { nativeHandoff } from '../src/nativeHandoff'
+import { nativeHandoff, nativeHandoffWarning } from '../src/nativeHandoff'
 import { completion, detail, event, handoff, leader, members, summaries } from './native-handoff.fixtures'
 
 const label = '为什么这样做 · 如何运行'
@@ -61,6 +61,109 @@ test('可信交付只扩展原折叠区，展示三类精确摘录、版本与�
   fireEvent.click(summary)
   expect(fetchMock.mock.calls).toHaveLength(calls)
   expect(JSON.stringify(snapshot)).toBe(saved)
+})
+
+const omittedWarning = '可选交付说明未通过格式或引用核对，已省略；核心交付验收不受影响。'
+function omittedCompletion(seq = 10) {
+  const saved = completion(seq)
+  delete saved.payload.handoff
+  Object.assign(saved.payload, { handoff_status: 'omitted_invalid', handoff_warning: omittedWarning })
+  return saved
+}
+
+test('可选说明省略警告只进入既有折叠详情，交付正文和完成状态保持不变', async () => {
+  const saved = omittedCompletion()
+  const before = JSON.stringify(saved)
+  const { fetchMock } = await mount(detail([saved]))
+  const summary = await stream().findByText('查看判断与依据', { selector: 'summary' })
+  const fold = summary.closest('details')!
+  const bubble = fold.closest('.message-bubble')!
+  expect(fold.open).toBe(false)
+  expect(bubble.querySelectorAll('.message-details')).toHaveLength(1)
+  expect(stream().getByText('交付摘要 10')).toBeTruthy()
+  expect(stream().getByText('· 店长最终交付')).toBeTruthy()
+  const body = bubble.cloneNode(true) as HTMLElement
+  body.querySelector('.message-details')!.remove()
+  expect(body.textContent).not.toContain(omittedWarning)
+  expect(body.textContent).not.toMatch(/失败|未完成|省略/)
+  const calls = fetchMock.mock.calls.length
+  fireEvent.click(summary)
+  expect(fold.open).toBe(true)
+  expect(within(fold).getByText('原有验证范围 10')).toBeTruthy()
+  expect(within(fold).getByText(`可选交付说明：${omittedWarning}`)).toBeTruthy()
+  expect(fold.querySelector('blockquote, ol, button, a, [role="alert"]')).toBeNull()
+  expect(stream().queryByText(label)).toBeNull()
+  expect(fetchMock.mock.calls).toHaveLength(calls)
+  expect(JSON.stringify(saved)).toBe(before)
+})
+
+test('省略状态屏蔽夹带的 handoff 与未验证引文，没有 verification 时仍可展开警告', () => {
+  const evidence = omittedCompletion()
+  evidence.payload.handoff = handoff('不得显示的未验证说明')
+  delete evidence.payload.verification
+  expect(nativeHandoff(evidence)).toBeUndefined()
+  expect(nativeHandoffWarning(evidence)).toBe(omittedWarning)
+  const { container } = render(<MessageDetails item={{ id: 10, kind: 'agent', evidence } as ChatItem} />)
+  const fold = screen.getByText('查看判断与依据').closest('details')!
+  expect(fold.open).toBe(false)
+  fireEvent.click(fold.querySelector('summary')!)
+  expect(within(fold).getByText(`可选交付说明：${omittedWarning}`)).toBeTruthy()
+  expect(container.querySelector('blockquote, ol, h3')).toBeNull()
+  expect(container.textContent).not.toContain('不得显示的未验证说明')
+  for (const source of handoff().evidence) expect(container.textContent).not.toContain(source.quote)
+})
+
+test.each([
+  { handoff_status: undefined, handoff_warning: omittedWarning },
+  { handoff_status: 'valid', handoff_warning: omittedWarning },
+  { handoff_status: {}, handoff_warning: omittedWarning },
+  ...[undefined, null, '', '  ', [], {}, 7].map(handoff_warning => ({ handoff_status: 'omitted_invalid', handoff_warning })),
+])('缺少有效省略标记或警告时不生成空详情或推断失败：%j', (payload) => {
+  const evidence = { ...omittedCompletion(), payload }
+  expect(nativeHandoffWarning(evidence)).toBeUndefined()
+  const { container } = render(<MessageDetails item={{ id: 10, kind: 'agent', evidence } as ChatItem} />)
+  expect(container.childElementCount).toBe(0)
+})
+
+test('普通发言和非宿主来源不能提供省略警告，警告内容仅作为纯文本', () => {
+  for (const evidence of [
+    { ...omittedCompletion(), type: 'msg.said' },
+    ...[
+      { id: 'team', kind: 'agent', role: 'team' }, { id: 'team', kind: 'human', role: 'team' },
+      { id: 'other', kind: 'system', role: 'team' }, { id: 'team', kind: 'system', role: 'other' },
+    ].map(actor => ({ ...omittedCompletion(), actor })),
+  ]) {
+    expect(nativeHandoffWarning(evidence)).toBeUndefined()
+    const view = render(<MessageDetails item={{ id: 10, kind: 'agent', evidence } as ChatItem} />)
+    expect(view.container.childElementCount).toBe(0)
+    view.unmount()
+  }
+  const evidence = omittedCompletion()
+  evidence.payload.handoff_warning = '<img src=x onerror=alert(1)> [说明](javascript:alert(1))'
+  const { container } = render(<MessageDetails item={{ id: 10, kind: 'agent', evidence } as ChatItem} />)
+  expect(container.textContent).toContain(evidence.payload.handoff_warning)
+  expect(container.querySelector('img, script, a, [role="alert"]')).toBeNull()
+})
+
+test('新交付有效说明不继承旧省略警告，后续发言不能替换宿主保存的警告', async () => {
+  const omitted = omittedCompletion()
+  const spoken = event(11, 'msg.said', { phase: 'team', audience: 'customer', recipient: 'human',
+    delivery_seq: 10, run_id: 'run-10', text: '核心成果已交付', handoff_status: 'omitted_invalid',
+    handoff_warning: '不可信的自报警告', handoff: handoff('不可信的自报引文') },
+  { id: 'store_manager', kind: 'agent', role: 'store_manager' })
+  const app = await mount(detail([omitted, spoken]))
+  const final = await stream().findByText('核心成果已交付')
+  const current = final.closest('article')!
+  await waitFor(() => expect(within(current).getByText(`可选交付说明：${omittedWarning}`)).toBeTruthy())
+  expect(stream().queryByText(/不可信的自报/)).toBeNull()
+  await app.update(detail([omitted, spoken, completion(20)]))
+  const next = await stream().findByText('交付摘要 20')
+  const nextFold = (await within(next.closest('article')!).findByText(label, { selector: 'summary' })).closest('details')!
+  expect(within(nextFold).getByText(handoff().why)).toBeTruthy()
+  expect(nextFold.textContent).not.toContain(omittedWarning)
+  const history = stream().getByText('店长交付记录', { selector: 'summary' }).closest('details')!
+  expect(history.open).toBe(false)
+  expect(within(history).getByText(`可选交付说明：${omittedWarning}`)).toBeTruthy()
 })
 
 test('采集完成与正文截断分别显示，伙伴和工具使用中文身份', async () => {

@@ -56,7 +56,7 @@ class HandoffDiagnosticsTests(unittest.TestCase):
         self.assertEqual(normalized["evidence"], expected)
         self.assertEqual(HandoffError("existing message").diagnostics, [])
 
-    def test_finish_dispatch_returns_diagnostics_and_same_run_can_correct(self):
+    def test_finish_dispatch_omits_invalid_note_without_retry_or_public_diagnostics(self):
         artifact = self.artifact("selected source")
         selected = self.refs()
         arguments = {"summary": "Selected source delivered", "verification": "Source inspection only",
@@ -65,51 +65,34 @@ class HandoffDiagnosticsTests(unittest.TestCase):
             {"source_seq": 999999, "quote": "unavailable"},
             {"source_seq": artifact.seq, "quote": "wrong quote"},
         ])
-        corrected = self.handoff([{"source_seq": artifact.seq, "quote": "selected source"}])
-        observed = []
-
-        def repair(context, history, tools):
-            response = history[-1]
-            self.assertEqual(response["role"], "tool")
-            self.assertTrue(response["is_error"])
-            receipt = json.loads(response["content"])
-            self.assertEqual((receipt["status"], receipt["code"]), ("error", "invalid_handoff"))
-            self.assertEqual([(d["evidence_index"], d["source_seq"], d["reason"])
-                              for d in receipt["diagnostics"]],
-                             [(0, 999999, "source_unavailable"), (1, artifact.seq, "quote_mismatch")])
-            self.assertTrue(all(d["guidance"] for d in receipt["diagnostics"]))
-            self.assertEqual(list(self.rt.log.iter_events(task_id=self.task,
-                             event_types=("team.objective_completed",))), [])
-            self.assertEqual(self.refs(), selected)
-            observed.append(receipt)
-            return test_simple_team.turn("", ("finish_work", {**arguments, "handoff": corrected}))
-
         self.driver.steps[self.manager] = [
             test_simple_team.turn("", ("finish_work", {**arguments, "handoff": invalid})),
-            repair,
         ]
         self.rt.team.receive(self.task, "Deliver the selected source with exact citations")
         self.rt.collaborate(self.task)
         events = self.rt.log.read(task_id=self.task)
         receipts = [e for e in events if e.type == "team.tool_finished"
                     and e.payload["name"] == "finish_work"]
-        self.assertEqual(len(receipts), 2)
-        self.assertEqual(observed, [receipts[0].payload["result"]])
-        self.assertEqual(receipts[1].payload["result"]["status"], "ok")
+        self.assertEqual(len(receipts), 1)
+        result = receipts[0].payload["result"]
+        self.assertEqual((result["status"], result["handoff_status"]), ("ok", "omitted_invalid"))
+        self.assertNotIn("diagnostics", result)
+        self.assertNotIn("available_sources", result)
         self.assertTrue(all(e.actor == HOST for e in receipts))
         run, = [e for e in events if e.type == "team.run_started"]
         self.assertTrue(all(e.payload["run_id"] == run.payload["run_id"] for e in receipts))
         completed, = [e for e in events if e.type == "team.objective_completed"]
         self.assertEqual(completed.actor, HOST)
         self.assertEqual(completed.payload["run_id"], run.payload["run_id"])
-        self.assertLess(receipts[0].seq, completed.seq)
+        self.assertLess(completed.seq, receipts[0].seq)
         self.assertEqual(completed.payload["artifacts"], selected)
-        evidence, = completed.payload["handoff"]["evidence"]
-        self.assertEqual((evidence["source_seq"], evidence["source_hash"], evidence["quote"]),
-                         (artifact.seq, artifact.hash, "selected source"))
+        self.assertNotIn("handoff", completed.payload)
+        self.assertEqual(completed.payload["handoff_warning"], result["handoff_warning"])
+        self.assertEqual(completed.payload["summary"], arguments["summary"])
+        self.assertEqual(completed.payload["verification"], arguments["verification"])
         self.assertEqual([e.seq for e in events if e.type == "deliverable.published"], [artifact.seq])
         self.assertEqual(self.rt.team.view(self.task)["status"], "done")
-        self.assertEqual(len(self.driver.calls), 2)
+        self.assertEqual(len(self.driver.calls), 1)
         self.assertEqual(self.driver.steps[self.manager], [])
         self.assertTrue(self.rt.verify_chain().ok)
 

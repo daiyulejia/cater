@@ -125,12 +125,38 @@ class ProgressBudgetTransportTests(unittest.TestCase):
         self.assertEqual(dict(run.state.observations)['progress_receipts'], 3)
         self.assertGreater(dict(run.state.observations)['response_ms'] - dict(run.state.observations)['prompt_attempt_ms'], 2000)
 
-    def test_public_text_does_not_extend_idle_or_start_tools(self):
-        result, run, calls = self.exercise('text', total=7)
+    def test_public_text_keeps_transport_alive_but_cannot_extend_total_or_start_tools(self):
+        result, run, calls = self.exercise('text', total=4)
+        self.assertIsInstance(result, ExternalRunLimit)
+        self.assertEqual(result.limit, 'total')
+        self.assertEqual(calls, [])
+        self.assertGreater(dict(run.state.observations)['public_updates'], 0)
+        self.assertIn('last_activity_ms', dict(run.state.observations))
+        self.assertNotIn('progress_receipts', dict(run.state.observations))
+
+    def test_real_stream_finishes_beyond_idle_without_any_tool_calls(self):
+        result, run, calls = self.exercise('stream', total=7)
+        self.assertEqual(result.stop_reason, 'end_turn')
+        self.assertEqual(calls, [])
+        self.assertIn('last_activity_ms', dict(run.state.observations))
+        self.assertNotIn('progress_receipts', dict(run.state.observations))
+
+    def test_silent_client_still_stops_at_idle(self):
+        result, run, calls = self.exercise('silent', total=7)
         self.assertIsInstance(result, ExternalRunLimit)
         self.assertEqual(result.limit, 'idle')
         self.assertEqual(calls, [])
-        self.assertGreater(dict(run.state.observations)['public_updates'], 0)
+
+    def test_private_stream_counts_only_as_liveness_and_is_never_exposed(self):
+        result, run, calls = self.exercise('thinking', total=7)
+        self.assertEqual(result.stop_reason, 'end_turn')
+        self.assertEqual(result.text, '')
+        self.assertEqual(calls, [])
+        facts = dict(run.state.observations)
+        self.assertIn('last_activity_ms', facts)
+        self.assertNotIn('public_updates', facts)
+        self.assertNotIn('progress_receipts', facts)
+        self.assertNotIn('PRIVATE_ACTUAL_STREAM', repr(run.state))
 
     def test_repeated_read_cannot_keep_idle_alive(self):
         result, run, calls = self.exercise('repeat', total=7)

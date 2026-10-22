@@ -810,7 +810,7 @@ function App() {
   const [recoveryNotice, setRecoveryNotice] = useState('')
   const creationMounted = useRef(true)
   const [newProject, setNewProject] = useState<{ id: string; name: string } | null>(null)
-  const [newWorkspaceId, setNewWorkspaceId] = useState<string | undefined>()
+  const [newWorkspaceId, setNewWorkspaceId] = useState<string | null | undefined>()
   const [tasks, setTasks] = useState<TaskSummary[]>([])
   const removedTasks = useRef(new Set<string>())
   const removalRequests = useRef<Record<string, string>>({})
@@ -916,7 +916,7 @@ function App() {
     updateDraft(composerKey, value)
   }
 
-  const selectDraftWorkspace = (workspaceId: string | undefined) => {
+  const selectDraftWorkspace = (workspaceId: string | null | undefined) => {
     if (workspaceId === newWorkspaceId) return
     navigationRef.current += 1
     if (creationRequest.current) clearCreationRecovery(creationRequest.current.requestId)
@@ -1357,7 +1357,7 @@ function App() {
         body: JSON.stringify({
           goal: attempt.text.trim(),
           project_id: attempt.projectId,
-          ...(attempt.workspaceId ? { workspace_id: attempt.workspaceId } : {}),
+          ...(attempt.workspaceId !== undefined ? { workspace_id: attempt.workspaceId } : {}),
           request_id: attempt.requestId,
           collaboration: 'team',
           run: true, background: true,

@@ -47,6 +47,7 @@ async function mount() {
     if (url === '/api/organization') return json([leader])
     if (url === '/api/organization/profile') return json({ leader, cabinet: [], workers: [] })
     if (url === '/api/task-summaries') return json(list)
+    if (url === '/api/workspaces') return json([])
     if (url === endpoint && init.method === 'POST') return json(ack())
     if (init.method === undefined || init.method === 'GET') {
       if (url === `/api/tasks/${targetId}`) return json(detail(targetId))

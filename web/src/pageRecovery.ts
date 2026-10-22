@@ -17,7 +17,7 @@ export type PageDraftSnapshot = {
   questionMode: boolean
   derivation: { id: string; goal: string } | null
   project: { id: string; name: string } | null
-  workspaceId?: string
+  workspaceId?: string | null
   requests?: {
     conversation: Record<string, { text: string; requestId: string }>
     questions: Record<string, { text: string; requestId: string }>
@@ -87,7 +87,7 @@ function copySnapshot(value: unknown): PageDraftSnapshot | null {
       || !id(value.project.id) || typeof value.project.name !== 'string') return null
     project = { id: value.project.id, name: value.project.name }
   }
-  if (value.workspaceId !== undefined
+  if (value.workspaceId !== undefined && value.workspaceId !== null
     && (typeof value.workspaceId !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(value.workspaceId))) return null
   let requests: PageDraftSnapshot['requests']
   if (value.requests !== undefined) {
@@ -112,7 +112,7 @@ function copySnapshot(value: unknown): PageDraftSnapshot | null {
   }
   return {
     drafts, selectedId: value.selectedId, questionMode: value.questionMode, derivation, project,
-    ...(value.workspaceId !== undefined ? { workspaceId: value.workspaceId as string } : {}),
+    ...(value.workspaceId !== undefined ? { workspaceId: value.workspaceId as string | null } : {}),
     ...(requests ? { requests } : {}),
   }
 }

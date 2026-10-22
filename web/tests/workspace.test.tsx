@@ -12,8 +12,11 @@ const options: WorkspaceOption[] = [
   { id: 'edit', title: '猫咖前端', root: 'F:/猫咖/web', mode: 'edit', commands: [] },
   { id: 'host', title: '本机工程', root: 'F:/工程', mode: 'execute', commands: ['test', 'build'] },
 ]
+const managed: WorkspaceOption = { id: '__managed__', title: '新建独立工作目录', root: 'F:/群工作目录', mode: 'execute', commands: ['test'], managed: true }
 const unbound = (): WorkspaceBinding => ({ workspace_id: null, revision: null, available: false, reason: '尚未绑定工作目录。', pending: [] })
 const binding = (revision = 7): WorkspaceBinding => ({ ...unbound(), workspace_id: 'edit', revision, available: true, reason: '', title: '猫咖前端', root: 'F:/猫咖/web', mode: 'edit' })
+const managedBinding = (taskId = 'task_existing', revision = 8): WorkspaceBinding => ({ ...unbound(), workspace_id: `__managed__${taskId}`, revision,
+  available: true, reason: '', title: '独立工作目录', root: `F:/群工作目录/host/${taskId}`, mode: 'execute', managed: true })
 const deferred = <T,>() => {
   let resolve!: (value: T) => void
   let reject!: (cause: unknown) => void
@@ -290,6 +293,40 @@ beforeEach(() => {
   vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} unobserve() {} })
 })
 
+test('App 给已有无目录群补绑 managed 只 POST 绑定与原 revision，回执实际目录成为当前选项', async () => {
+  let workspace = { ...unbound(), revision: 7 }
+  const fetchMock = vi.fn((url: string, init: RequestInit = {}) => {
+    if (url === '/api/task-summaries') return json({ tasks: [{ id: 'task_existing', goal: 'task_existing任务', status: 'pending', status_label: '待开始', version: 7, latest_seq: 7, conversation_count: 1 }] })
+    if (url === '/api/organization') return json([])
+    if (url === '/api/organization/profile') return json({ leader: { id: 'store_manager', name: '店长' }, cabinet: [], workers: [] })
+    if (url === '/api/workspaces') return json([...options, managed])
+    if (url === '/api/tasks/task_existing/workspace' && init.method === 'POST') {
+      workspace = { ...managedBinding(), revision: 8 }
+      return json(detail('task_existing', workspace))
+    }
+    if (url === '/api/tasks/task_existing') return json(detail('task_existing', workspace))
+    throw new Error(`Unexpected request ${url}`)
+  })
+  vi.stubGlobal('fetch', fetchMock)
+  await act(async () => { render(<App />) })
+  await open()
+  choose('__managed__')
+  expect(fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0)
+  await save()
+  const posts = fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')
+  expect(posts.map(([url]) => url)).toEqual(['/api/tasks/task_existing/workspace'])
+  expect(JSON.parse(posts[0][1].body as string)).toEqual({ workspace_id: '__managed__', expected_revision: 7 })
+  expect(screen.getByRole('option', { name: '独立工作目录 · 当前绑定' })).toBeTruthy()
+  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('__managed__task_existing')
+  expect(screen.getByText(workspace.root!)).toBeTruthy()
+  expect(screen.queryByRole('option', { name: '当前绑定不在可选列表中' })).toBeNull()
+  expect(screen.getByText(/工作目录已更新.*任务未自动执行/)).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '关闭工作目录' }))
+  await open()
+  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('__managed__task_existing')
+  expect(fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(1)
+})
+
 test.each(['resolve', 'reject'] as const)('App 复用请求封装发送精确 body；POST 迟到 %s 不覆盖导航与草稿', async (settle) => {
   const pending = deferred<Response>()
   const data = { a: detail('a'), b: detail('b', binding()) }
@@ -333,11 +370,11 @@ test.each(['resolve', 'reject'] as const)('App 复用请求封装发送精确 bo
   expect(screen.queryByText(/旧请求失败|提交结果未知/)).toBeNull()
 })
 
-test('草稿面板按需选目录与清除，只回调本地选择，关闭未确认选项不生效', async () => {
+test('草稿面板预读默认配置，选择与清除只回调本地选择，关闭未确认选项不生效', async () => {
   const onSelect = vi.fn()
   const loadOptions = vi.fn(async () => options)
   const view = render(<WorkspacePanel draft loadOptions={loadOptions} onSelect={onSelect} />)
-  expect(loadOptions).not.toHaveBeenCalled()
+  expect(loadOptions).toHaveBeenCalledTimes(1)
   await open()
   expect(screen.getByText('新对话草稿')).toBeTruthy()
   expect(screen.queryByText(/暂未取得工作目录状态|重新核对当前计划/)).toBeNull()
@@ -353,11 +390,10 @@ test('草稿面板按需选目录与清除，只回调本地选择，关闭未�
   view.rerender(<WorkspacePanel draft workspaceId="host" loadOptions={loadOptions} onSelect={onSelect} />)
   await open()
   fireEvent.click(screen.getByRole('button', { name: '不使用目录' }))
-  expect(onSelect).toHaveBeenLastCalledWith(undefined)
+  expect(onSelect).toHaveBeenLastCalledWith(null)
 })
 
-async function mountCreationWorkspace() {
-  let catalog = options
+async function mountCreationWorkspace(catalog = options) {
   let submit: (url: string, init: RequestInit) => Response | Promise<Response> = () => json(detail('created', binding()))
   const fetchMock = vi.fn((url: string, init: RequestInit = {}) => {
     if (init.method === 'POST') return submit(url, init)
@@ -383,21 +419,212 @@ async function mountCreationWorkspace() {
 const newInput = () => screen.getByRole('textbox', { name: '发起任务对话' }) as HTMLTextAreaElement
 const writeNew = (text = '  首次发送的工程任务  ') => fireEvent.change(newInput(), { target: { value: text } })
 const sendNew = async () => { await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送新任务' }))) }
-const selectDraftDirectory = async (id: string | undefined) => {
+const selectDraftDirectory = async (id: string | null) => {
   await open()
   if (id) choose(id)
   await act(async () => fireEvent.click(screen.getByRole('button', { name: id ? '用于新对话' : '不使用目录' })))
 }
 
-test.each([undefined, 'docs', 'host'])('首次发送目录 %s 随创建提交，选择不写后台，无目录省略字段；成功后清除下一份选择', async (id) => {
+test.each([undefined, '__managed__', null, 'host'])('有 managed 时默认展示独立目录，用户选择 %s 优先且创建提交保持三态', async (id) => {
+  const h = await mountCreationWorkspace([...options, managed])
+  expect(screen.getByRole('button', { name: '工作目录' }).textContent).toContain('新建独立目录')
+  expect(screen.getByRole('button', { name: '工作目录' }).title).toContain('首次发送时创建')
+  expect(screen.queryByRole('dialog')).toBeNull()
+  await open()
+  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('__managed__')
+  expect(screen.getByText('首次发送时由宿主创建本群独立目录；实际目录以创建回执为准。')).toBeTruthy()
+  expect(screen.getByText('创建位置（基目录），并非本群已创建的目录：')).toBeTruthy()
+  expect(screen.getByText(managed.root)).toBeTruthy()
+  expect(screen.getByText('权限：可读写并运行命令')).toBeTruthy()
+  expect(screen.getByText('命令在这台电脑上运行，当前不是沙箱')).toBeTruthy()
+  expect(screen.getByText('可用命令：test')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '关闭工作目录' }))
+  if (id !== undefined) await selectDraftDirectory(id)
+  expect(h.posts()).toHaveLength(0)
+  writeNew()
+  await sendNew()
+  expect(h.bodies()[0]).toEqual({ goal: '首次发送的工程任务', request_id: expect.any(String), collaboration: 'team', run: true, background: true,
+    ...(id !== undefined ? { workspace_id: id } : {}) })
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '新建任务' })))
+  expect(screen.getByRole('button', { name: '工作目录' }).textContent).toContain('新建独立目录')
+})
+
+test.each([[], options, [{ ...managed, managed: false }, ...options]].map(catalog => ({ catalog })))('未配置 managed 模板时保持无默认目录，不自动选旧工程 %#', async ({ catalog }) => {
+  const h = await mountCreationWorkspace(catalog)
+  await open()
+  expect(screen.getByText('未选择工作目录')).toBeTruthy()
+  expect(screen.getByText('宿主未配置默认独立目录；未选择目录时不提供文件和运行工具。')).toBeTruthy()
+  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('')
+  expect(screen.queryByText('首次发送时由宿主创建本群独立目录；实际目录以创建回执为准。')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '关闭工作目录' }))
+  writeNew()
+  await sendNew()
+  expect(h.bodies()[0]).not.toHaveProperty('workspace_id')
+})
+
+test('目录列表迟到不覆盖显式禁用；列表读取失败诚实显示且仍能禁用', async () => {
+  const pending = deferred<WorkspaceOption[]>()
+  const loadOptions = vi.fn(() => pending.promise)
+  const onSelect = vi.fn()
+  const view = render(<WorkspacePanel draft loadOptions={loadOptions} onSelect={onSelect} />)
+  await open()
+  expect(screen.getByText('正在读取目录配置')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '不使用目录' }))
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(null)
+  view.rerender(<WorkspacePanel draft workspaceId={null} loadOptions={loadOptions} onSelect={onSelect} />)
+  await act(async () => pending.resolve([...options, managed]))
+  await open()
+  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('')
+  expect(screen.getByText('新任务不绑定工作目录，不提供文件和运行工具。')).toBeTruthy()
+  expect(onSelect).toHaveBeenCalledTimes(1)
+  cleanup()
+  const failedOptions = vi.fn(async () => { throw new Error('目录连接失败') })
+  render(<WorkspacePanel draft loadOptions={failedOptions} onSelect={onSelect} />)
+  await open()
+  expect(screen.getByText('目录配置未核对')).toBeTruthy()
+  expect(screen.getByRole('alert').textContent).toContain('目录连接失败')
+  expect(screen.queryByText(/宿主未配置默认独立目录/)).toBeNull()
+  expect(disabled('不使用目录')).toBe(false)
+})
+
+test.each([null, 'docs', '__managed__'])('重新读取目录列表保留具体选择 %s，不跟随默认模板变化', async (id) => {
+  const h = await mountCreationWorkspace([...options, managed])
+  await selectDraftDirectory(id)
+  h.setCatalog(options)
+  await open()
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '重新读取' })))
+  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe(id ?? '')
+  fireEvent.click(screen.getByRole('button', { name: '关闭工作目录' }))
+  writeNew()
+  await sendNew()
+  expect(h.bodies()[0].workspace_id).toBe(id)
+})
+
+test.each([null, {}, 'invalid'])('预读目录收到非数组回包 %j 时保留草稿面板并提示未核对', async (response) => {
+  render(<WorkspacePanel draft loadOptions={async () => response as unknown as WorkspaceOption[]} onSelect={vi.fn()} />)
+  await open()
+  expect(screen.getByText('目录配置未核对')).toBeTruthy()
+  expect(screen.getByRole('alert').textContent).toContain('工作目录列表格式无效')
+  expect(disabled('不使用目录')).toBe(false)
+})
+
+test('默认 auto 失败后模板变化、刷新恢复仍重试原 body；显式禁用会生成新请求', async () => {
+  const h = await mountCreationWorkspace([...options, managed])
+  h.setSubmit(() => new Response('创建回包失败', { status: 503 }))
+  writeNew()
+  await sendNew()
+  const original = h.posts()[0][1].body
+  expect(h.bodies()[0]).not.toHaveProperty('workspace_id')
+  await open()
+  expect(screen.getByText('首次发送时由宿主创建本群独立目录；实际目录以创建回执为准。')).toBeTruthy()
+  expect(screen.queryByText(/当前尚未创建/)).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '关闭工作目录' }))
+  h.setCatalog(options)
+  await open()
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '重新读取' })))
+  expect(screen.getByText('未选择工作目录')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '关闭工作目录' }))
+  await sendNew()
+  expect(h.posts()[1][1].body).toBe(original)
+  cleanup()
+  await act(async () => { render(<App />) })
+  expect(h.posts()).toHaveLength(2)
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '恢复待确认任务' })))
+  await sendNew()
+  expect(h.posts()[2][1].body).toBe(original)
+  await selectDraftDirectory(null)
+  await sendNew()
+  expect(h.bodies()[3].workspace_id).toBeNull()
+  expect(h.bodies()[3].request_id).not.toBe(h.bodies()[0].request_id)
+  await sendNew()
+  expect(h.posts()[4][1].body).toBe(h.posts()[3][1].body)
+})
+
+test('已有未绑定群可选 managed，只有保存才发送绑定，不自动执行任务', async () => {
+  const p = props()
+  p.loadOptions.mockResolvedValue([...options, managed])
+  const next = managedBinding()
+  p.onBind.mockResolvedValue(next)
+  const view = render(<WorkspacePanel {...p} taskId="task_existing" />)
+  await open()
+  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('')
+  choose('__managed__')
+  expect(screen.getByText('保存绑定时创建或绑定本群独立目录；不会自动执行任务。')).toBeTruthy()
+  expect(screen.getByText(managed.root)).toBeTruthy()
+  expect(p.onBind).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: '关闭工作目录' }))
+  await open()
+  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('')
+  choose('__managed__')
+  await save()
+  expect(p.onBind).toHaveBeenCalledExactlyOnceWith({ workspace_id: '__managed__', expected_revision: null })
+  view.rerender(<WorkspacePanel {...p} taskId="task_existing" workspace={next} />)
+  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe(next.workspace_id)
+  expect(screen.getByRole('option', { name: '独立工作目录 · 当前绑定' })).toBeTruthy()
+  expect(screen.queryByRole('option', { name: '当前绑定不在可选列表中' })).toBeNull()
+  expect(screen.getByText(/工作目录已更新.*任务未自动执行/)).toBeTruthy()
+  expect(disabled('保存绑定')).toBe(true)
+})
+
+test.each(['active', 'pending'] as const)('已有群选中 managed 后进入 %s 仍禁止保存，不分配目录', async (state) => {
+  const p = props()
+  p.loadOptions.mockResolvedValue([managed])
+  const view = render(<WorkspacePanel {...p} />)
+  await open()
+  choose('__managed__')
+  expect(disabled('保存绑定')).toBe(false)
+  view.rerender(<WorkspacePanel {...p} active={state === 'active'} workspace={{ ...unbound(), pending: state === 'pending' ? [{ seq: 12, task_id: 'a', name: 'workspace_write' }] : [] }} />)
+  expect((screen.getByRole('combobox') as HTMLSelectElement).disabled).toBe(true)
+  expect(disabled('保存绑定')).toBe(true)
+  await save()
+  expect(p.onBind).not.toHaveBeenCalled()
+})
+
+test.each([true, false])('已绑定 managed 显示回执实际目录，模板存在=%s 时均不误报目录失踪', async (templateAvailable) => {
+  const current = managedBinding()
+  const p = props(current)
+  p.loadOptions.mockResolvedValue(templateAvailable ? [managed] : [])
+  p.onRefresh.mockResolvedValue(current)
+  render(<WorkspacePanel {...p} taskId="task_existing" />)
+  await open()
+  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe(current.workspace_id)
+  expect(screen.getByRole('option', { name: '独立工作目录 · 当前绑定' })).toBeTruthy()
+  expect(screen.getByText(current.root!)).toBeTruthy()
+  expect(screen.queryByText(managed.root)).toBeNull()
+  expect(screen.queryByText(/创建位置（基目录）/)).toBeNull()
+  expect(screen.getByText('权限：可读写并运行命令 · 可用')).toBeTruthy()
+  expect(screen.getByText('命令在这台电脑上运行，当前不是沙箱')).toBeTruthy()
+  expect(disabled('保存绑定')).toBe(true)
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '重新读取' })))
+  expect(screen.getByRole('option', { name: '独立工作目录 · 当前绑定' })).toBeTruthy()
+  expect(screen.queryByRole('option', { name: '当前绑定不在可选列表中' })).toBeNull()
+  expect(p.onBind).not.toHaveBeenCalled()
+})
+
+test('managed 权限失效仍显示当前绑定，可通过模板按原 revision 重新绑定', async () => {
+  const current = { ...managedBinding(), available: false, reason: '权限已变化，需要重新绑定。' }
+  const p = props(current)
+  p.loadOptions.mockResolvedValue([managed])
+  p.onBind.mockResolvedValue(managedBinding('task_existing', 9))
+  render(<WorkspacePanel {...p} taskId="task_existing" />)
+  await open()
+  expect(screen.getByRole('option', { name: '独立工作目录 · 当前绑定（不可用）' })).toBeTruthy()
+  expect(screen.getByText(current.reason)).toBeTruthy()
+  expect(disabled('保存绑定')).toBe(true)
+  choose('__managed__')
+  await save()
+  expect(p.onBind).toHaveBeenCalledExactlyOnceWith({ workspace_id: '__managed__', expected_revision: 8 })
+})
+
+test.each([undefined, null, 'docs', 'host'])('首次发送目录 %s 随创建提交，选择不写后台，auto 省略字段；成功后清除下一份选择', async (id) => {
   const h = await mountCreationWorkspace()
-  expect(h.fetchMock.mock.calls.some(([url]) => url === '/api/workspaces')).toBe(false)
-  if (id) await selectDraftDirectory(id)
+  expect(h.fetchMock.mock.calls.some(([url]) => url === '/api/workspaces')).toBe(true)
+  if (id !== undefined) await selectDraftDirectory(id)
   expect(h.posts()).toHaveLength(0)
   writeNew()
   await sendNew()
   expect(h.posts().map(([url]) => url)).toEqual(['/api/tasks'])
-  expect(h.bodies()[0]).toEqual({ goal: '首次发送的工程任务', request_id: expect.any(String), collaboration: 'team', run: true, background: true, ...(id ? { workspace_id: id } : {}) })
+  expect(h.bodies()[0]).toEqual({ goal: '首次发送的工程任务', request_id: expect.any(String), collaboration: 'team', run: true, background: true, ...(id !== undefined ? { workspace_id: id } : {}) })
   fireEvent.click(screen.getByRole('button', { name: '新建任务' }))
   await open()
   expect(screen.getByText('未选择工作目录')).toBeTruthy()
@@ -417,9 +644,9 @@ test('创建重试保持原目录和原 ID；只浏览其他目录不改变原�
   fireEvent.click(screen.getByRole('button', { name: '关闭工作目录' }))
   await sendNew()
   expect(h.posts()[1][1].body).toBe(original)
-  await selectDraftDirectory(undefined)
+  await selectDraftDirectory(null)
   await sendNew()
-  expect(h.bodies()[2]).not.toHaveProperty('workspace_id')
+  expect(h.bodies()[2].workspace_id).toBeNull()
   expect(h.bodies()[2].request_id).not.toBe(h.bodies()[0].request_id)
 })
 
@@ -450,10 +677,10 @@ test.each(['resolve', 'reject'] as const)('发送中改目录后旧响应 %s 不
   expect(new Set(h.bodies().map((body) => body.request_id)).size).toBe(3)
 })
 
-test('刷新恢复完整原目录与原请求；目录从列表消失也不静默替换，不自动重发', async () => {
-  const h = await mountCreationWorkspace()
+test.each([null, '__managed__', 'host'])('刷新恢复目录 %s 与原请求；目录从列表消失也不静默替换，不自动重发', async (id) => {
+  const h = await mountCreationWorkspace([...options, managed])
   h.setSubmit(() => new Response('提交回执丢失', { status: 503 }))
-  await selectDraftDirectory('host')
+  await selectDraftDirectory(id)
   writeNew()
   await sendNew()
   const original = h.posts()[0][1].body
@@ -464,8 +691,9 @@ test('刷新恢复完整原目录与原请求；目录从列表消失也不静�
   await act(async () => fireEvent.click(screen.getByRole('button', { name: '恢复待确认任务' })))
   expect(newInput().value).toBe('  首次发送的工程任务  ')
   await open()
-  expect(screen.getByRole('option', { name: '原选择不在可选列表中' })).toBeTruthy()
-  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe('host')
+  if (id !== null) expect(screen.getByRole('option', { name: '原选择不在可选列表中' })).toBeTruthy()
+  else expect(screen.getByText('新任务不绑定工作目录，不提供文件和运行工具。')).toBeTruthy()
+  expect((screen.getByRole('combobox') as HTMLSelectElement).value).toBe(id ?? '')
   fireEvent.click(screen.getByRole('button', { name: '关闭工作目录' }))
   await sendNew()
   expect(h.posts()[1][1].body).toBe(original)

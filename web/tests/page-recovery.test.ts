@@ -109,6 +109,13 @@ test('可省略 workspace；显式 undefined 规范化，空草稿和 null 项�
   expect((await loadPageRecovery('')).snapshot).toEqual({ drafts: {}, selectedId: null, questionMode: false, derivation: null, project: null })
 })
 
+test.each([null, '__managed__', 'frontend-execute_1'])('草稿恢复原样保留目录选择 %s', async (workspaceId) => {
+  const original = { ...snapshot(), workspaceId }
+  expect(await save(original)).toBe('')
+  expect(readRecord().snapshot.workspaceId).toBe(workspaceId)
+  expect((await loadPageRecovery('')).snapshot).toEqual(original)
+})
+
 test('单 tab 隔离，创建恢复 key 独立；只读取自身 key 和认证 key', async () => {
   window.sessionStorage.setItem(CREATION_RECOVERY_KEY, 'private creation record')
   window.sessionStorage.setItem('private.unrelated', 'private data')
@@ -182,7 +189,7 @@ const invalidSnapshots: [string, (value: PageDraftSnapshot) => unknown][] = [
   ['目标必须字符串', (v) => ({ ...v, derivation: { id: 't1', goal: 0 } })],
   ['项目名必须字符串', (v) => ({ ...v, project: { id: 'p1', name: null } })],
   ['项目 ID 非法', (v) => ({ ...v, project: { id: '../p1', name: '' } })],
-  ...[null, '', 7, {}, 'F:/any-root', '../root', 'has space', 'x'.repeat(81)].map((workspaceId): [string, (v: PageDraftSnapshot) => unknown] =>
+  ...['', 7, {}, 'F:/any-root', '../root', 'has space', 'x'.repeat(81)].map((workspaceId): [string, (v: PageDraftSnapshot) => unknown] =>
     [`非法 workspace ${JSON.stringify(workspaceId)}`, (v) => ({ ...v, workspaceId })]),
 ]
 

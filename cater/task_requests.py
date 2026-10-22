@@ -29,6 +29,8 @@ def prepare(runtime: Runtime, request: dict, request_id: str | None, *, default_
             return task_id, False, activation(runtime, task_id)
         if request.get("workspace_id") is not None:
             runtime.workspaces.bind(task_id, request["workspace_id"], expected_revision=None)
+        elif "workspace_id" not in request:
+            runtime.workspaces.bind_default(task_id)
         team = getattr(runtime, "team", None)
         # Select execution only after identity lookup; defaults are not request identity.
         if (not request.get("battle") and (request.get("collaboration") == "team" or default_team)

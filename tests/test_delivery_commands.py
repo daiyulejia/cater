@@ -576,16 +576,16 @@ class DeliveryCommandTests(unittest.TestCase):
         self.assertNotEqual(self.team.delivery.markdown(variant), original,
                             "Markdown hides the relationship to this delivery's bytes")
 
-    def test_invalid_optional_reference_can_be_removed_and_does_not_create_approval_gate(self):
+    def test_invalid_optional_reference_is_omitted_and_does_not_create_approval_gate(self):
         seq = self.archive()
         result = self.finish(self.handoff([999999]), artifact_seqs=[seq])
-        self.assertEqual((result["status"], result["code"]), ("error", "invalid_handoff"))
-        self.assertIn("command_receipts", result["message"])
-        self.assertTrue(any(word in result["message"] for word in ("移除", "删除", "remove")))
-        self.assertEqual(self.events("team.objective_completed"), [])
+        self.assertEqual((result["status"], result["handoff_status"]), ("ok", "omitted_invalid"))
+        completed, = self.events("team.objective_completed")
+        self.assertNotIn("handoff", completed.payload)
+        self.assertEqual(completed.payload["handoff_warning"], result["handoff_warning"])
         self.assertEqual(self.events("team.review_requested"), [])
         self.assertEqual(self.finish(self.handoff(), artifact_seqs=[seq])["status"], "ok")
-        self.assertNotIn("command_receipts", self.events("team.objective_completed")[0].payload["handoff"])
+        self.assertEqual(self.events("team.objective_completed"), [completed])
 
     def test_old_handoff_omits_command_field_and_does_not_read_new_command_sources(self):
         with patch("cater.delivery_commands.normalize", side_effect=AssertionError("Old handoff must not normalize command sources")):

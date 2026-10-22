@@ -48,6 +48,10 @@ python -m cater --drivers drivers.json --roles roles.json --workspaces workspace
 
 新对话也可在首次发送前选择目录；创建、目录绑定与首次执行意图在同一事务保存。重试未知创建必须保留原目录和请求标识，不能将同一请求换绑到另一目录。衍生对话不自动继承父任务的目录授权。
 
+宿主可在配置顶层显式添加 `managed` 模板，例如 `{"workspaces":[],"managed":{"root":"F:/CaterWorkspaces","mode":"edit"}}`。基目录须预先存在，模式须明确指定；`execute` 模式的程序权限仅来自模板自己的 `commands`（别名到固定 argv 数组），另支持 `env_allowlist`、`timeout`，不复制既有工程权限。`managed` 缺省或为 `null` 时关闭。目录按数据库路径命名空间和任务 ID 分配并持久保留，不是操作系统沙箱。
+
+**自动分配入口范围：**目前主新建入口 `POST /api/tasks`（调用 `task_requests.prepare`）及 CLI `new` 支持宿主启用后的默认分配；请求省略 `workspace_id` 才采用默认策略，显式 `null` 保持无目录，显式已有 ID 优先，`__managed__` 表示明确选择独立目录。CLI 对应省略选项、`--no-workspace`、`--workspace ID` 和 `--workspace __managed__`。旧表单 `/tasks` 仅经过 `prepare` 的分支适用；直接调用 `Runtime.create_task`、`POST /api/tasks/{id}/derive`、`rooms.start_task` 均不会自动分配，衍生任务也不继承来源工作区权限。因此不能将此能力理解为所有创建 API 都会自动绑定；这些旁路创建后仍须通过工作区绑定入口明确选择目录。
+
 命令行也可以查看和绑定：
 
 ```bash

@@ -293,12 +293,14 @@ class HandoffSourceCatalogTests(unittest.TestCase):
                 self.assertEqual(event.payload["handoff"]["version"], 1)
                 self.assertTrue(CATALOG_KEYS.isdisjoint(event.payload["handoff"]))
 
-    def test_schema_dispatch_receipt_has_no_catalog_or_completion(self):
+    def test_normalize_validation_omits_note_without_publishing_catalog(self):
         self.artifact("source")
         result = self.finish({**self.handoff(), "why": ""})
-        self.assertEqual((result["status"], result["code"]), ("error", "invalid_handoff"))
+        self.assertEqual((result["status"], result["handoff_status"]), ("ok", "omitted_invalid"))
         self.assertTrue(CATALOG_KEYS.isdisjoint(result))
-        self.assertEqual(self.events("team.objective_completed"), [])
+        completed, = self.events("team.objective_completed")
+        self.assertNotIn("handoff", completed.payload)
+        self.assertTrue(CATALOG_KEYS.isdisjoint(completed.payload))
 
     def test_unknown_operation_gate_still_precedes_citation_catalog(self):
         artifact = self.artifact("source")
@@ -327,7 +329,7 @@ class HandoffSourceCatalogTests(unittest.TestCase):
         self.assertEqual(self.rt.log.read(), before)
         self.assertEqual(self.driver.calls, [])
 
-    def test_fixed_driver_full_dispatch_reads_each_catalog_source_then_corrects_same_run(self):
+    def test_fixed_driver_reads_preflight_catalog_sources_before_valid_finish(self):
         """Real Runtime/tool dispatch; scripted driver, no provider or real task replay."""
         artifact = self.artifact("ARTIFACT_BODY_SECRET")
         review = self.review("REVIEW_BODY_SECRET")
@@ -346,50 +348,43 @@ class HandoffSourceCatalogTests(unittest.TestCase):
                      "artifact_seqs": [artifact.seq]}
         expected = {artifact.seq: "ARTIFACT_BODY_SECRET", review.seq: "REVIEW_BODY_SECRET",
                     receipt.seq: "TOOL_BODY_SECRET"}
-        observed, reads = [], []
+        error = self.rejected(value=self.handoff([
+            {"source_seq": unsupported.seq, "quote": "wrong"},
+            {"source_seq": artifact.seq, "quote": "WRONG_QUOTE_SECRET"}]))
+        catalog = error.source_catalog
+        rows = catalog["available_sources"]
+        self.assertEqual([r["source_seq"] for r in rows], list(expected))
+        self.assertEqual(catalog["available_sources_total"], 3)
+        self.assertFalse(catalog["available_sources_truncated"])
+        reads = []
 
         def read_next(context, history, tools):
             self.assertEqual(history[-1]["role"], "tool")
             result = json.loads(history[-1]["content"])
-            if not observed:
-                self.assertTrue(history[-1]["is_error"])
-                self.assertEqual((result["status"], result["code"]), ("error", "invalid_handoff"))
-                self.assertNotIn("source_catalog", result)
-                self.assertEqual([d["reason"] for d in result["diagnostics"]],
-                                 ["source_unavailable", "quote_mismatch"])
-                self.assertEqual(result.keys() & CATALOG_KEYS, CATALOG_KEYS)
-                observed.append(result)
-                rows = result["available_sources"]
-                self.assertEqual([r["source_seq"] for r in rows], list(expected))
-                self.assertEqual(result["available_sources_total"], 3)
-                self.assertFalse(result["available_sources_truncated"])
+            row = rows[len(reads)]
+            self.assertEqual(result["status"], "ok")
+            if row["kind"] == "artifact":
+                self.assertEqual((result["seq"], result["content"]), (artifact.seq, expected[artifact.seq]))
+            elif row["kind"] == "peer_review":
+                self.assertEqual((result["review"]["decision_seq"], result["review"]["feedback"]),
+                                 (review.seq, expected[review.seq]))
             else:
-                row = observed[0]["available_sources"][len(reads)]
-                self.assertEqual(result["status"], "ok")
-                if row["kind"] == "artifact":
-                    self.assertEqual((result["seq"], result["content"]), (artifact.seq, expected[artifact.seq]))
-                elif row["kind"] == "peer_review":
-                    self.assertEqual((result["review"]["decision_seq"], result["review"]["feedback"]),
-                                     (review.seq, expected[review.seq]))
-                else:
-                    returned, = result["receipts"]
-                    self.assertEqual((returned["seq"], returned["result"]["stdout"]),
-                                     (receipt.seq, expected[receipt.seq]))
-                reads.append({"source_seq": row["source_seq"], "quote": expected[row["source_seq"]]})
+                returned, = result["receipts"]
+                self.assertEqual((returned["seq"], returned["result"]["stdout"]),
+                                 (receipt.seq, expected[receipt.seq]))
+            reads.append({"source_seq": row["source_seq"], "quote": expected[row["source_seq"]]})
             self.assertEqual(self.events("team.objective_completed"), [])
             self.assertEqual(self.refs(), selected)
             if len(reads) < 3:
-                row = observed[0]["available_sources"][len(reads)]
+                row = rows[len(reads)]
                 self.assertIn(row["read_tool"], {t["name"] for t in tools})
                 return test_simple_team.turn("", (row["read_tool"], row["read_args"]))
             return test_simple_team.turn("", ("finish_work", {**arguments, "handoff": self.handoff(reads)}))
 
         before = self.rt.log.read(task_id=self.task)
         self.driver.steps[self.manager] = [
-            test_simple_team.turn("", ("finish_work", {**arguments, "handoff": self.handoff([
-                {"source_seq": unsupported.seq, "quote": "wrong"},
-                {"source_seq": artifact.seq, "quote": "WRONG_QUOTE_SECRET"}])})),
-            read_next, read_next, read_next, read_next,
+            test_simple_team.turn("", (rows[0]["read_tool"], rows[0]["read_args"])),
+            read_next, read_next, read_next,
         ]
         self.rt.team.receive(self.task, "Synthetic citation recovery; no real provider", request_id="catalog-recovery")
         self.rt.collaborate(self.task)
@@ -398,8 +393,7 @@ class HandoffSourceCatalogTests(unittest.TestCase):
         self.assertFalse([e.payload for e in events if e.type == "team.run_finished"
                           and e.payload["status"] == "failed"], repr([e.payload for e in finished]))
         self.assertEqual([e.payload["name"] for e in finished],
-                         ["finish_work", "read_artifact", "read_checkpoint", "read_receipts", "finish_work"])
-        self.assertEqual(finished[0].payload["result"], observed[0])
+                         ["read_artifact", "read_checkpoint", "read_receipts", "finish_work"])
         self.assertEqual(finished[-1].payload["result"]["status"], "ok")
         self.assertTrue(CATALOG_KEYS.isdisjoint(finished[-1].payload["result"]))
         run, = [e for e in events if e.type == "team.run_started"]
@@ -417,18 +411,18 @@ class HandoffSourceCatalogTests(unittest.TestCase):
         self.assertEqual({k: tool_evidence[k] for k in ("status", "exit_code", "complete", "truncated")},
                          {"status": "error", "exit_code": 2, "complete": True, "truncated": True})
         self.assertEqual(self.rt.team.view(self.task)["status"], "done")
-        self.assertEqual(len(self.driver.calls) - fixture_calls, 5)
-        self.assertEqual(self.rt.task(self.task).tokens - fixture_tokens, 35)
-        self.assertEqual(self.rt._reported_driver_tokens("team_test") - fixture_driver_tokens, 35)
+        self.assertEqual(len(self.driver.calls) - fixture_calls, 4)
+        self.assertEqual(self.rt.task(self.task).tokens - fixture_tokens, 28)
+        self.assertEqual(self.rt._reported_driver_tokens("team_test") - fixture_driver_tokens, 28)
         self.assertEqual(self.driver.steps[self.manager], [])
         self.assertFalse([e for e in events if e.type in {"team.review_requested", "team.review_recorded", "deliverable.published"}])
         self.assertTrue(self.rt.verify_chain().ok)
         self._qa_trace = {"driver": "scripted team_test; NOT a real Qwen/provider replay",
-            "driver_turns": len(self.driver.calls) - fixture_calls, "reported_fixture_tokens": 35,
+            "driver_turns": len(self.driver.calls) - fixture_calls, "reported_fixture_tokens": 28,
             "setup_driver_turns": fixture_calls,
-            "run_id": run.payload["run_id"], "failed_receipt": observed[0],
-            "read_tool_calls": [{"name": e.payload["name"], "seq": e.seq} for e in finished[1:-1]],
-            "corrected_evidence": reads, "completion_seq": completed.seq,
+            "run_id": run.payload["run_id"], "preflight_catalog": catalog,
+            "read_tool_calls": [{"name": e.payload["name"], "seq": e.seq} for e in finished[:-1]],
+            "verified_evidence": reads, "completion_seq": completed.seq,
             "events": [{"seq": e.seq, "type": e.type} for e in events]}
 
 

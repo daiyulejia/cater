@@ -38,13 +38,14 @@ def main():
                 result = {'sessionId': 'budget-session', 'models': {'currentModelId': 'chosen',
                     'availableModels': [{'modelId': 'chosen', 'name': 'ExactModel'}]}}
             elif method == 'session/prompt':
-                for index in range(3 if mode == 'progress' else 20):
-                    time.sleep(1 if mode == 'progress' else 0.5)
-                    if mode in {'text', 'silent'}:
-                        if mode == 'text':
+                for index in range(3 if mode in {'progress', 'stream', 'thinking'} else 20):
+                    time.sleep(1 if mode in {'progress', 'stream', 'thinking'} else 0.5)
+                    if mode in {'text', 'silent', 'stream', 'thinking'}:
+                        if mode != 'silent':
                             send({'jsonrpc': '2.0', 'method': 'session/update', 'params': {
-                                'sessionId': 'budget-session', 'update': {'sessionUpdate': 'agent_message_chunk',
-                                'content': {'type': 'text', 'text': 'still talking'}}}})
+                                'sessionId': 'budget-session', 'update': {
+                                'sessionUpdate': 'agent_thought_chunk' if mode == 'thinking' else 'agent_message_chunk',
+                                'content': {'type': 'text', 'text': 'PRIVATE_ACTUAL_STREAM' if mode == 'thinking' else 'still talking'}}}})
                     else:
                         relay_call(str(index), 'tools/call', {'name': 'inspect',
                             'arguments': {'page': 0 if mode == 'repeat' else index}})

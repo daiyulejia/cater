@@ -40,11 +40,13 @@ class _ProgressBudget:
     def __init__(self, idle, total):
         self.idle, self.total = idle, total
         self.started = self.progress_at = time.monotonic()
+        self.activity_at = self.started
+        self._tool_updates = {}
         self.seen = set()
 
     def expired(self):
         now = time.monotonic()
-        idle_deadline = self.progress_at + self.idle
+        idle_deadline = max(self.progress_at, self.activity_at) + self.idle
         total_deadline = self.started + self.total
         if now >= min(idle_deadline, total_deadline):
             return ExternalRunLimit("total" if total_deadline <= idle_deadline else "idle")
@@ -54,6 +56,43 @@ class _ProgressBudget:
         error = self.expired()
         if error is not None:
             raise error
+
+    def observed(self, update):
+        """Transport activity is not useful work or acceptance; total never moves."""
+        if self.expired() is not None:
+            return False
+        kind = update.get("sessionUpdate")
+        if kind == "agent_message_chunk":
+            content = update.get("content")
+            if (not isinstance(content, dict) or content.get("type") != "text"
+                    or not isinstance(content.get("text"), str) or not content["text"].strip()):
+                return False
+        elif kind in {"tool_call", "tool_call_update"}:
+            if not isinstance(update.get("toolCallId"), str) or not update["toolCallId"]:
+                return False
+            details = {key: update[key] for key in ("toolCallId", "rawInput", "content", "status") if key in update}
+            if len(details) < 2:
+                return False
+            try:
+                fingerprint = hashlib.sha256(json_utf8(details, sort_keys=True, allow_nan=False)).digest()
+            except (TypeError, ValueError):
+                return False
+            identity = hashlib.sha256(json_utf8(update["toolCallId"])).digest()
+            if fingerprint == self._tool_updates.get(identity):
+                return False
+            # Retain per-call state without allowing a notification flood to grow memory.
+            if identity not in self._tool_updates and len(self._tool_updates) >= 256:
+                return False
+            self._tool_updates[identity] = fingerprint
+        else:
+            return False
+        return self.activity()
+
+    def activity(self):
+        if self.expired() is not None:
+            return False
+        self.activity_at = time.monotonic()
+        return True
 
     def settled(self, call, result):
         if self.expired() is not None:
@@ -115,7 +154,7 @@ class QoderAcpDriver:
         self.token_budget, self.timeout = token_budget, timeout
         self.max_run_seconds = max_run_seconds
         self._command = (
-            executable, "--acp", "--model", model, "--max-output-tokens", "2048",
+            executable, "--acp", "--model", model,
             "--max-model-request-retries", "0", "--tools", "", "--strict-mcp-config",
             "--setting-sources", "local", "--permission-mode", "default",
         )
@@ -308,6 +347,8 @@ class ExternalAgentRun:
                 self._mark("first_public_update_ms")
                 self._mark("last_public_update_ms", latest=True)
                 self._observations["public_updates"] = self._observations.get("public_updates", 0) + 1
+                if self._budget is not None and self._budget.observed(update):
+                    self._mark("last_activity_ms", latest=True)
             if self._phase == "prompting" and update.get("sessionUpdate") == "agent_message_chunk":
                 content = update.get("content", {})
                 if content.get("type") == "text":
@@ -316,6 +357,15 @@ class ExternalAgentRun:
                 self._on_update(update)
         except BaseException as exc:
             # ACP wraps observer exceptions; retain the original host signal.
+            self._stop(exc)
+            raise
+
+    def _activity(self):
+        try:
+            self._current(allow_pending=self._cooperative)
+            if self._phase == "prompting" and self._budget is not None and self._budget.activity():
+                self._mark("last_activity_ms", latest=True)
+        except BaseException as exc:
             self._stop(exc)
             raise
 
@@ -395,6 +445,7 @@ class ExternalAgentRun:
             self._bridge = McpToolBridge(self._tools, self._call, timeout=self._timeout)
             self._session = AcpSession(
                 self._command, cwd=self._cwd, timeout=self._timeout, on_request=self._request,
+                on_activity=self._activity,
             )
             self._cooperative = cooperative and all(
                 callable(getattr(self._session, name, None)) for name in ("iter_open", "iter_prompt")

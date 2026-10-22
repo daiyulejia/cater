@@ -172,7 +172,7 @@ class ExternalAgentTests(unittest.TestCase):
 
     def test_exact_flags_lazy_construction_and_configuration_close(self):
         self.assertEqual(self.driver.command, [
-            "never-launch-qoder", "--acp", "--model", "ExactModel", "--max-output-tokens", "2048",
+            "never-launch-qoder", "--acp", "--model", "ExactModel",
             "--max-model-request-retries", "0", "--tools", "", "--strict-mcp-config",
             "--setting-sources", "local", "--permission-mode", "default",
         ])

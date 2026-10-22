@@ -122,6 +122,8 @@ def cmd_new(args: argparse.Namespace) -> int:
             workspace_id = getattr(args, "workspace", None)
             if workspace_id is not None:
                 rt.workspaces.bind(task_id, workspace_id, expected_revision=None)
+            elif not getattr(args, "no_workspace", False):
+                rt.workspaces.bind_default(task_id)
         print(f"created {task_id}")
         if args.dispatch:
             rt.dispatch(task_id)
@@ -800,7 +802,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_new = sub.add_parser("new", help="create a task")
     p_new.add_argument("goal")
     p_new.add_argument("--accept", action="append")
-    p_new.add_argument("--workspace", help="首次执行前绑定已配置的工作区标识")
+    new_workspace = p_new.add_mutually_exclusive_group()
+    new_workspace.add_argument("--workspace", help="首次执行前绑定已配置的工作区标识；__managed__ 分配独立目录，省略时使用宿主默认策略")
+    new_workspace.add_argument("--no-workspace", action="store_true", help="不绑定工作目录，也不使用宿主默认分配")
     p_new.add_argument("--dispatch", action="store_true", help="dispatch mission before running")
     p_new.add_argument("--assign-to", help="directly assign the task to one worker role")
     p_new.add_argument("--assign-objective", help="objective for --assign-to")

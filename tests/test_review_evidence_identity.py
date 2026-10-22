@@ -64,7 +64,7 @@ class ReviewEvidenceIdentityTests(unittest.TestCase):
         with self.assertRaises(HandoffError):
             self.normalize(newer, result["decision_seq"])
 
-    def test_finish_rejects_request_identity_then_accepts_actual_decision(self):
+    def test_finish_omits_request_identity_without_replacing_delivery_on_retry(self):
         f = self.f
         artifact, review = self.prepare()
         f.acknowledge_latest_review()
@@ -78,16 +78,12 @@ class ReviewEvidenceIdentityTests(unittest.TestCase):
             }}))
             return result
 
-        rejected = deliver(review["review_seq"])
-        self.assertEqual(rejected["code"], "invalid_handoff")
-        self.assertFalse(any(e.type == "team.objective_completed"
-                             for e in f.rt.log.read(task_id=f.task)))
+        result = deliver(review["review_seq"])
+        self.assertEqual((result["status"], result["handoff_status"]), ("ok", "omitted_invalid"))
         self.assertEqual(deliver(review["decision_seq"])["status"], "ok")
         completed, = [e for e in f.rt.log.read(task_id=f.task) if e.type == "team.objective_completed"]
-        evidence, = completed.payload["handoff"]["evidence"]
-        self.assertEqual(evidence["source_seq"], review["decision_seq"])
-        self.assertEqual(evidence["kind"], "peer_review")
-        self.assertEqual(evidence["status"], "approved")
+        self.assertNotIn("handoff", completed.payload)
+        self.assertEqual(completed.payload["handoff_status"], "omitted_invalid")
         self.assertEqual(f.rt.team.view(f.task)["status"], "done")
         self.assertTrue(f.rt.verify_chain().ok)
 

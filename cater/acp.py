@@ -122,7 +122,7 @@ class AcpSession:
     No login, model fallback, prompt retry, tool execution or persistence is
     implicit. Each role/workspace binding should own a separate instance.
     `end_turn` only ends a turn; it is not evidence of task completion.
-    Private thought notifications are discarded before reaching callbacks.
+    Private thought content is discarded; the optional activity callback gets no payload.
     """
 
     def __init__(
@@ -133,6 +133,7 @@ class AcpSession:
         timeout: float = 30,
         env: dict[str, str] | None = None,
         on_request: Callable[[str, dict], dict] | None = None,
+        on_activity: Callable[[], None] | None = None,
     ):
         if (not isinstance(command, list) or not command
                 or not all(isinstance(arg, str) and "\0" not in arg for arg in command)
@@ -147,6 +148,8 @@ class AcpSession:
             raise ValueError("ACP environment must contain strings")
         if on_request is not None and not callable(on_request):
             raise ValueError("ACP request handler must be callable")
+        if on_activity is not None and not callable(on_activity):
+            raise ValueError("ACP activity observer must be callable")
         directory = Path(cwd).resolve(strict=True)
         if not directory.is_dir():
             raise ValueError("ACP cwd must be a directory")
@@ -155,6 +158,7 @@ class AcpSession:
         self.timeout = float(timeout)
         self.env = None if env is None else dict(env)
         self.on_request = on_request
+        self._on_activity = on_activity
         self.session_id: str | None = None
         self.agent_info: dict = {}
         self._session_result: dict | None = None
@@ -611,6 +615,15 @@ class AcpSession:
                 self._pending_updates.append(body)
         else:
             update = self._validate_update(body)
+            if update["sessionUpdate"] == "agent_thought_chunk" and self._on_activity is not None:
+                content = update.get("content")
+                if (isinstance(content, dict) and content.get("type") == "text"
+                        and isinstance(content.get("text"), str) and content["text"].strip()):
+                    # Observe liveness only. No private content leaves the adapter.
+                    try:
+                        self._on_activity()
+                    except Exception:
+                        raise AcpProtocolError("ACP activity handler failed") from None
             if update["sessionUpdate"] != "agent_thought_chunk" and on_update is not None:
                 on_update(update)
 

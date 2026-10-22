@@ -118,14 +118,15 @@ class TeamHandoffTests(unittest.TestCase):
         self.assertEqual(completion.payload["handoff"]["evidence"][0]["content_sha256"], artifact["content_sha256"])
         self.assertFalse([e for e in self.events("team.tool_started") if e.payload["name"] == "workspace_run"])
 
-    def test_wrong_quote_is_error_without_partial_completion(self):
+    def test_wrong_quote_omits_optional_handoff_without_partial_evidence(self):
         source = self.artifact()
         result = self.finish(self.handoff([{"source_seq": source.seq, "quote": "all tests passed"}]))
-        self.assertEqual(result["status"], "error")
-        self.assertEqual(result["code"], "invalid_handoff")
-        self.assertIn("原文不符", result["message"])
-        self.assertEqual(self.events("team.objective_completed"), [])
-        self.assertEqual(self.rt.team.view(self.task)["status"], "running")
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["handoff_status"], "omitted_invalid")
+        event, = self.events("team.objective_completed")
+        self.assertNotIn("handoff", event.payload)
+        self.assertEqual(event.payload["handoff_warning"], result["handoff_warning"])
+        self.assertEqual(self.rt.team.view(self.task)["status"], "done")
 
     def test_latest_same_filename_only_and_foreign_group_are_not_citation_sources(self):
         old = self.artifact("# old source\n", filename="note.md")
@@ -176,12 +177,13 @@ class TeamHandoffTests(unittest.TestCase):
         self.assertTrue(ref["complete"])
         self.assertTrue(ref["truncated"])
 
-    def test_global_size_diagnostic_reaches_model_and_does_not_commit_completion(self):
+    def test_global_size_limit_omits_optional_handoff_without_blocking_completion(self):
         value = {**self.handoff(), "changed": ["a" * 1000] * 12, "impact": ["b" * 1000] * 12}
         result = self.finish(value)
-        self.assertEqual(result["code"], "invalid_handoff")
-        self.assertIn("24KB", result["message"])
-        self.assertEqual(self.events("team.objective_completed"), [])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["handoff_status"], "omitted_invalid")
+        event, = self.events("team.objective_completed")
+        self.assertNotIn("handoff", event.payload)
         schema = next(t for t in self.rt.team._schemas(self.rt.organization.leader, None) if t["name"] == "finish_work")
         self.assertIn("24KB", schema["input_schema"]["properties"]["handoff"]["description"])
 

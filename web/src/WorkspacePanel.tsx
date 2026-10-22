@@ -5,10 +5,10 @@ import { sameWorkScope } from './participants'
 import { CommandOutputs } from './CommandOutputPreview'
 
 export type WorkspaceMode = 'read_only' | 'edit' | 'execute'
-export type WorkspaceOption = { id: string; title: string; root: string; mode: WorkspaceMode; commands: string[] }
+export type WorkspaceOption = { id: string; title: string; root: string; mode: WorkspaceMode; commands: string[]; managed?: boolean }
 export type WorkspaceBinding = {
   revision: number | null; workspace_id: string | null; title?: string; root?: string; mode?: WorkspaceMode
-  available: boolean; reason: string; pending: { seq: number; task_id: string; name: string }[]
+  available: boolean; reason: string; managed?: boolean; pending: { seq: number; task_id: string; name: string }[]
 }
 export type WorkspaceChange = { workspace_id: string | null; expected_revision: number | null }
 type Props = {
@@ -18,9 +18,9 @@ type Props = {
   onBind: (change: WorkspaceChange) => Promise<WorkspaceBinding | undefined>
   onRefresh: () => Promise<WorkspaceBinding | undefined>
 } | {
-  draft: true; workspaceId?: string; disabled?: boolean
+  draft: true; workspaceId?: string | null; disabled?: boolean
   loadOptions: () => Promise<WorkspaceOption[]>
-  onSelect: (workspaceId: string | undefined) => void
+  onSelect: (workspaceId: string | null | undefined) => void
 }
 const modeText = (mode?: WorkspaceMode) => mode ? ({ read_only: '只读', edit: '可读写', execute: '可读写并运行命令' }[mode] ?? '权限待核对') : '权限待核对'
 const toolText = (name: unknown) => ({ workspace_list: '读取目录', workspace_read: '读取文件', workspace_search: '查找内容', workspace_write: '修改文件', workspace_run: '运行命令' }[String(name)] ?? '工具调用')
@@ -37,40 +37,48 @@ function WorkspaceBindingPanel(props: Props) {
   const taskId = props.draft ? '$new' : props.taskId
   const workspace = props.draft ? undefined : props.workspace
   const active = props.draft ? false : props.active
-  const currentId = (props.draft ? props.workspaceId : workspace?.workspace_id) ?? ''
   const [open, setOpen] = useState(false)
   const [options, setOptions] = useState<WorkspaceOption[]>([])
-  const [loading, setLoading] = useState(false)
+  const [loading, setLoading] = useState(Boolean(props.draft))
   const [optionsError, setOptionsError] = useState('')
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [reload, setReload] = useState(0)
-  const [choice, setChoice] = useState('')
+  const [choice, setChoice] = useState<string>()
   const [revision, setRevision] = useState<number | null>(null)
   const mounted = useRef(true)
   const saving = useRef(false)
   useLayoutEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
 
+  const shouldLoad = Boolean(props.draft || open)
   useEffect(() => {
-    if (!open) return
+    if (!shouldLoad) return
     let cancelled = false
     void loadOptions().then((rows) => {
+      if (!Array.isArray(rows)) throw new Error('工作目录列表格式无效，请重新读取。')
       if (!cancelled) setOptions(rows)
-    }, (cause) => {
+    }).catch((cause) => {
       if (!cancelled) { setOptions([]); setOptionsError(errorText(cause)) }
     }).finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [open, reload, loadOptions])
+  }, [shouldLoad, reload, loadOptions])
 
-  const selected = options.find((option) => option.id === choice)
+  // Auto is a display default; it must not rewrite an explicit choice or a retry's identity.
+  const managed = options.find((option) => option.id === '__managed__' && option.managed)
+  const currentId = (props.draft ? props.workspaceId === undefined ? managed?.id : props.workspaceId : workspace?.workspace_id) ?? ''
+  const currentManaged = Boolean(workspace?.managed && currentId)
+  const choiceId = choice ?? currentId
+  const selected = options.find((option) => option.id === choiceId)
   const draftDirectory = options.find((option) => option.id === currentId)
+  const draftTitle = draftDirectory?.title || (currentId === '__managed__' ? '新建独立工作目录' : currentId)
+    || (props.draft && props.workspaceId === null ? '不使用目录' : loading ? '正在读取目录配置' : optionsError ? '目录配置未核对' : '未选择工作目录')
   const pending = workspace?.pending ?? []
   const changedElsewhere = workspace !== undefined && workspace.revision !== revision
   const blocked = Boolean(disabled || busy || refreshing || (!props.draft && (active || !workspace || changedElsewhere || pending.some((item) => item.task_id === taskId))))
   const reset = (binding: WorkspaceBinding | undefined) => {
-    setChoice(props.draft ? props.workspaceId ?? '' : binding?.workspace_id ?? '')
+    setChoice(props.draft ? undefined : binding?.workspace_id ?? '')
     setRevision(binding?.revision ?? null)
   }
   const refresh = async () => {
@@ -92,7 +100,7 @@ function WorkspaceBindingPanel(props: Props) {
   const save = async (workspaceId: string | null) => {
     if (blocked || saving.current || (workspaceId !== null && (loading || optionsError || !options.some((option) => option.id === workspaceId)))) return
     if (props.draft) {
-      props.onSelect(workspaceId ?? undefined)
+      props.onSelect(workspaceId)
       setOpen(false)
       return
     }
@@ -116,45 +124,53 @@ function WorkspaceBindingPanel(props: Props) {
 
   return <Dialog.Root open={open} onOpenChange={(next) => {
     if (next) {
-      setLoading(true)
-      setOptionsError('')
+      if (!props.draft) { setLoading(true); setOptionsError('') }
       if (!saving.current) { reset(workspace); setError(''); setNotice('') }
     }
     setOpen(next)
   }}>
-    <Dialog.Trigger asChild><button type="button" className={`origin-trigger ${buttonClass} w-9 sm:w-auto`} disabled={disabled} aria-label="工作目录" title={props.draft ? `新对话草稿目录：${draftDirectory?.title || currentId || '未选择'}` : '工作目录：查看或更换'}>
-      {currentId ? <FolderCog size={16} aria-hidden="true" /> : <Folder size={16} aria-hidden="true" />}<span className="hidden sm:inline">工作目录</span>
+    <Dialog.Trigger asChild><button type="button" className={`origin-trigger ${buttonClass} w-9 sm:w-auto`} disabled={disabled} aria-label="工作目录" title={props.draft ? `新对话草稿目录：${draftTitle}${draftDirectory?.managed ? '（首次发送时创建）' : ''}` : '工作目录：查看或更换'}>
+      {currentId ? <FolderCog size={16} aria-hidden="true" /> : <Folder size={16} aria-hidden="true" />}<span className="hidden sm:inline">{props.draft && draftDirectory?.managed ? '新建独立目录' : props.draft && props.workspaceId === null ? '不使用目录' : '工作目录'}</span>
     </button></Dialog.Trigger>
     <Dialog.Portal>
       <Dialog.Overlay className="fixed inset-0 z-[60] bg-[#22352d]/30" />
       <Dialog.Content className="fixed left-1/2 top-1/2 z-[61] flex max-h-[calc(100dvh-32px)] w-[calc(100vw-32px)] max-w-[460px] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-lg border-t-[3px] border-[#c9745a] bg-[#fcfdfb] text-[#2d493e] shadow-xl [overflow-wrap:anywhere]">
         <header className="flex shrink-0 items-start gap-3 border-b border-[#dce7e0] bg-[#f2f7fa] p-4">
           <div className="min-w-0 flex-1"><Dialog.Title className="text-base font-bold">工作目录{props.draft && <span className="ml-2 text-xs font-normal text-[#58776e]">新对话草稿</span>}</Dialog.Title>
-            <Dialog.Description className="mt-1 text-xs leading-5 text-[#58776e]">{props.draft ? '选择仅保存在当前草稿，首次发送时随新任务提交。' : '仅可选择已预配置的目录。保存绑定不会自动执行任务。'}</Dialog.Description></div>
+            <Dialog.Description className="mt-1 text-xs leading-5 text-[#58776e]">{props.draft ? '选择仅保存在当前草稿，首次发送时随新任务提交。' : '可选择宿主配置的目录或独立目录模板。保存绑定不会自动执行任务。'}</Dialog.Description></div>
           <Dialog.Close asChild><button type="button" className={`${buttonClass} size-9 shrink-0`} aria-label="关闭工作目录" title="回到聊天"><X size={18} /></button></Dialog.Close>
         </header>
         <div className="min-h-0 space-y-4 overflow-y-auto p-4 text-xs leading-5" aria-busy={busy || refreshing}>
           <section aria-label="当前工作目录">
             <h3 className="font-semibold">{props.draft ? '草稿目录' : '当前目录'}</h3>
-            {props.draft ? <><p className="mt-1">{draftDirectory?.title || currentId || '未选择工作目录'}</p>
+            {props.draft ? <><p className="mt-1">{draftTitle}</p>
+              {draftDirectory?.managed && <p className="mt-1">首次发送时由宿主创建本群独立目录；实际目录以创建回执为准。</p>}
+              {props.workspaceId === null && <p className="mt-1">新任务不绑定工作目录，不提供文件和运行工具。</p>}
+              {props.workspaceId === undefined && !managed && !loading && !optionsError && <p className="mt-1">宿主未配置默认独立目录；未选择目录时不提供文件和运行工具。</p>}
               {currentId && !loading && !optionsError && !draftDirectory && <p className="mt-1 text-[#895746]">原选择不在可选列表中；已有待确认请求仍使用原目录，需核对服务端配置。</p>}</>
               : <p className="mt-1">{workspace?.workspace_id ? workspace.title || workspace.workspace_id : '尚未绑定工作目录'}</p>}
             {workspace?.root && <p className="mt-1 font-mono">{workspace.root}</p>}
             {workspace?.workspace_id && <p className="mt-1">权限：{modeText(workspace.mode)} · {workspace.available ? '可用' : '不可用，需重新绑定'}</p>}
+            {currentManaged && choiceId === currentId && !selected && workspace?.mode === 'execute' && <p className="mt-1 text-[#895746]">命令在这台电脑上运行，当前不是沙箱</p>}
             {workspace?.reason && <p className="mt-1 text-[#895746]">{workspace.reason}</p>}
             {!props.draft && !workspace && <p className="mt-1 text-[#895746]">暂未取得工作目录状态，请重新读取后再绑定。</p>}
           </section>
           <section className="border-t border-[#dce7e0] pt-3" aria-label="选择工作目录">
             <label htmlFor={`workspace-${taskId}`} className="font-semibold">可选目录</label>
-            <select id={`workspace-${taskId}`} value={choice} disabled={blocked || loading || Boolean(optionsError) || !options.length} onChange={(event) => { setChoice(event.target.value); setNotice('') }} className="mt-2 block min-h-10 w-full min-w-0 max-w-full rounded-md border border-[#cddfe8] bg-white px-2 text-sm disabled:opacity-60">
+            <select id={`workspace-${taskId}`} value={choiceId} disabled={blocked || loading || Boolean(optionsError) || !options.length} onChange={(event) => { setChoice(event.target.value); setNotice('') }} className="mt-2 block min-h-10 w-full min-w-0 max-w-full rounded-md border border-[#cddfe8] bg-white px-2 text-sm disabled:opacity-60">
               <option value="">选择预配置目录</option>
-              {choice && !selected && <option value={choice}>{props.draft ? '原选择不在可选列表中' : '当前绑定不在可选列表中'}</option>}
+              {currentManaged && !options.some((option) => option.id === currentId) && <option value={currentId}>{workspace?.title || '独立工作目录'} · 当前绑定{!workspace?.available && '（不可用）'}</option>}
+              {choiceId && !selected && !(currentManaged && choiceId === currentId) && <option value={choiceId}>{props.draft ? '原选择不在可选列表中' : '当前绑定不在可选列表中'}</option>}
               {options.map((option) => <option key={option.id} value={option.id}>{option.title} · {modeText(option.mode)}</option>)}
             </select>
             {loading ? <p role="status" className="mt-2">正在读取可选目录…</p>
               : optionsError ? <p role="alert" className="mt-2 text-[#a54f3e]">可选目录读取失败：{optionsError}</p>
                 : !options.length && <p className="mt-2">尚未配置可选工作目录，请在服务端配置后重新读取。</p>}
             {selected && <div className="mt-2 space-y-1">
+              {selected.id === '__managed__' && selected.managed && <>
+                {!props.draft && <p>保存绑定时创建或绑定本群独立目录；不会自动执行任务。</p>}
+                <p>创建位置（基目录），并非本群已创建的目录：</p>
+              </>}
               <p className="font-mono">{selected.root}</p><p>权限：{modeText(selected.mode)}</p>
               {selected.mode === 'execute' && <><p className="text-[#895746]">命令在这台电脑上运行，当前不是沙箱</p><p>可用命令：{selected.commands.length ? selected.commands.join('、') : '未配置'}</p></>}
             </div>}
@@ -172,8 +188,8 @@ function WorkspaceBindingPanel(props: Props) {
         <footer className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-[#dce7e0] px-3 py-2">
           <button type="button" className={buttonClass} onClick={() => void refresh()} disabled={busy || refreshing} title="重新读取目录与绑定"><RefreshCw size={15} className={refreshing ? 'motion-safe:animate-spin' : ''} />重新读取</button>
           <div className="flex flex-wrap gap-1">
-            <button type="button" className={buttonClass} disabled={blocked || !currentId} onClick={() => void save(null)}><Unlink size={15} />{props.draft ? '不使用目录' : '解除绑定'}</button>
-            <button type="button" className={`${buttonClass} bg-[#e7f0ec]`} disabled={blocked || loading || Boolean(optionsError) || !selected || (choice === currentId && (props.draft || workspace?.available))} onClick={() => void save(choice)} aria-busy={busy}>
+            <button type="button" className={buttonClass} disabled={blocked || (props.draft ? props.workspaceId === null : !currentId)} onClick={() => void save(null)}><Unlink size={15} />{props.draft ? '不使用目录' : '解除绑定'}</button>
+            <button type="button" className={`${buttonClass} bg-[#e7f0ec]`} disabled={blocked || loading || Boolean(optionsError) || !selected || (choiceId === currentId && (props.draft ? props.workspaceId !== undefined : workspace?.available))} onClick={() => void save(choiceId)} aria-busy={busy}>
               {busy ? <LoaderCircle size={15} className="motion-safe:animate-spin" /> : <Save size={15} />}{busy ? '保存中…' : props.draft ? '用于新对话' : '保存绑定'}
             </button>
           </div>

@@ -190,6 +190,7 @@ class AcpDuplexBoundaryTests(unittest.TestCase):
         def session_factory(command, **kwargs):
             session = self.session(on_request=kwargs["on_request"], pipe=pipe)
             session.timeout = kwargs["timeout"]
+            session._on_activity = kwargs.get("on_activity")
 
             def opened(**options):
                 session.agent_info = {"name": "qoder-cli-cn"}
@@ -352,7 +353,7 @@ class AcpDuplexBoundaryTests(unittest.TestCase):
                 self.assertEqual(len(calls), 1 if boundary.endswith("before") else 2)
                 self.terminal(session)
 
-    def test_public_and_private_updates_do_not_extend_external_idle_budget(self):
+    def test_stream_activity_extends_idle_but_is_not_useful_work(self):
         now = [100.0]
         pipe = MemoryInput()
         write_finished = False
@@ -369,7 +370,7 @@ class AcpDuplexBoundaryTests(unittest.TestCase):
 
         def pump(*args):
             if write_finished:
-                now[0] = 102.0
+                now[0] += 1
             return False
 
         with patch("cater.acp.time.monotonic", lambda: now[0]), patch.object(MemoryBridge, "pump", pump):
@@ -377,9 +378,11 @@ class AcpDuplexBoundaryTests(unittest.TestCase):
             with self.assertRaises(ExternalRunLimit) as caught:
                 run.run("memory")
         self.assertEqual(caught.exception.limit, "idle")
+        self.assertEqual(now[0], 103.0)
         self.assertEqual([u["sessionUpdate"] for u in updates], ["agent_message_chunk"])
         self.assertEqual(run.state.text, "public")
         self.assertNotIn("progress_receipts", dict(run.state.observations))
+        self.assertEqual(dict(run.state.observations)["last_activity_ms"], 1000)
         self.assertTrue(run.state.cleanup_complete)
         self.assertTrue(all(bridge.closed and bridge.revoked for bridge in bridges))
         execute.assert_not_called()

@@ -13,6 +13,9 @@ import time
 from .activity_owner import activity_owner
 from .drivers import DriverResponse, DriverUnavailable
 from .events import Actor
+from .managed_workspaces import (
+    MANAGED_ID, WorkspaceConfiguration, database_namespace, managed_id, parse_template, task_policy,
+)
 from .responses import load_response_object
 from .tool_protocol import json_utf8
 from .usage import valid_token_count
@@ -34,14 +37,17 @@ def load_workspaces(path):
 def _parse_workspaces(raw):
     from .workspace_tools import WorkspacePolicy
 
-    if not isinstance(raw, dict) or set(raw) != {"workspaces"} or not isinstance(raw["workspaces"], list):
+    if (not isinstance(raw, dict) or set(raw) - {"workspaces", "managed"}
+            or not isinstance(raw.get("workspaces"), list)):
         raise ValueError("工作区配置需要 workspaces 列表。")
+    parse_template(raw.get("managed"))
     entries = {}
     for row in raw["workspaces"]:
         if not isinstance(row, dict):
             raise ValueError("工作区配置项必须是对象。")
         identity, title = row.get("id"), row.get("title")
         if (not isinstance(identity, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", identity)
+                or identity.startswith(MANAGED_ID)
                 or identity in entries or not isinstance(title, str) or not title.strip() or len(title) > 200):
             raise ValueError("工作区需要不重复的标识和名称。")
         policy = WorkspacePolicy.from_dict({k: v for k, v in row.items() if k not in {"id", "title", "checks"}})
@@ -59,17 +65,24 @@ def _parse_workspaces(raw):
                     or not isinstance(check["cwd"], str) or check["cwd"] != "."):
                 raise ValueError("工作区检查配置无效，需要已有命令、参数和根目录。")
             seen.add(check["id"])
-        fingerprint = hashlib.sha256(json.dumps({"policy": policy.fingerprint, "checks": checks},
-            sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        entries[identity] = {"id": identity, "title": title.strip(), "policy": policy, "checks": checks,
-                             "fingerprint": fingerprint}
+        entries[identity] = _entry(identity, title.strip(), policy, checks)
     return entries
+
+
+def _entry(identity, title, policy, checks):
+    fingerprint = hashlib.sha256(json.dumps({"policy": policy.fingerprint, "checks": checks},
+        sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    return {"id": identity, "title": title, "policy": policy, "checks": checks,
+            "fingerprint": fingerprint}
 
 
 class WorkspaceService:
     def __init__(self, runtime, config_path=None):
         self.rt = runtime
-        self.config = {}
+        self._configured = {}
+        self._managed = None
+        self._namespace = database_namespace(runtime.log)
+        self.config = WorkspaceConfiguration(self)
         self.config_path = Path(config_path).absolute() if config_path is not None else None
         self._config_digest = None
         self.config_error = ""
@@ -85,20 +98,44 @@ class WorkspaceService:
                 raise ValueError("工作区配置超过大小限制。")
             digest = hashlib.sha256(body).hexdigest()
             if digest != self._config_digest:
-                config = _parse_workspaces(json.loads(body))
-                self.config, self._config_digest = config, digest
+                raw = json.loads(body)
+                config = _parse_workspaces(raw)
+                managed = parse_template(raw.get("managed"))
+                self._configured, self._managed, self._config_digest = config, managed, digest
                 self.config_error = ""
         except (ValueError, OSError, UnicodeError, RecursionError, TypeError):
-            self.config, self._config_digest = {}, None
+            self._configured, self._managed, self._config_digest = {}, None, None
             self.config_error = "工作区配置暂不可用，请检查服务端配置文件；现有工具权限已停用。"
 
     def options(self):
         self._refresh()
         if self.config_error:
             raise ValueError(self.config_error)
-        return [{"id": row["id"], "title": row["title"], "root": row["policy"].as_dict()["root"],
+        rows = [{"id": row["id"], "title": row["title"], "root": row["policy"].as_dict()["root"],
                  "mode": row["policy"].as_dict()["mode"],
-                 "commands": list(row["policy"].as_dict().get("commands", {}))} for row in self.config.values()]
+                 "commands": list(row["policy"].as_dict().get("commands", {}))} for row in self._configured.values()]
+        if self._managed is not None:
+            policy = self._managed.as_dict()
+            rows.append({"id": MANAGED_ID, "title": "新建独立工作目录", "root": policy["root"],
+                         "mode": policy["mode"], "commands": list(policy["commands"]), "managed": True})
+        return rows
+
+    def _managed_entry(self, task_id, *, create=False):
+        if self._managed is None:
+            raise ValueError("宿主未启用独立工作目录。")
+        try:
+            policy = task_policy(self._managed, self._namespace, task_id, create=create)
+        except OSError:
+            raise ValueError("独立工作目录不可用，请检查宿主目录及权限。") from None
+        return {**_entry(managed_id(task_id), "独立工作目录", policy, []), "managed": True}
+
+    def bind_default(self, task_id):
+        self._refresh()
+        if self.config_error:
+            raise ValueError(self.config_error)
+        if self._managed is not None:
+            return self.bind(task_id, MANAGED_ID, expected_revision=None)
+        return self.view(task_id)
 
     def _binding(self, task_id):
         return next((e for e in reversed(list(self.rt.log.iter_events(
@@ -177,11 +214,15 @@ class WorkspaceService:
         return {"revision": event.seq, "workspace_id": p.get("workspace_id"), "title": p.get("title"),
                 "root": p.get("root"), "mode": p.get("mode"), "fingerprint": p.get("fingerprint"),
                 "available": available, "reason": "" if available else self.config_error or "工作区未配置或权限已变化，需要重新绑定。",
+                **({"managed": True} if p.get("managed") is True else {}),
                 "pending": [{"seq": e.seq, "task_id": e.task_id, "name": e.payload["name"]} for e in pending]}
 
     def bind(self, task_id, workspace_id, *, expected_revision):
         self._refresh()
-        if workspace_id is not None and (not isinstance(workspace_id, str) or workspace_id not in self.config):
+        managed = (isinstance(workspace_id, str)
+                   and (workspace_id == MANAGED_ID or workspace_id == MANAGED_ID + task_id))
+        if workspace_id is not None and (not isinstance(workspace_id, str)
+                or (self._managed is None if managed else workspace_id not in self._configured)):
             raise ValueError("只能选择已配置的工作区。")
         if expected_revision is not None and type(expected_revision) is not int:
             raise ValueError("工作区版本无效。")
@@ -196,11 +237,14 @@ class WorkspaceService:
                 raise WorkConflict("已有工作在途，需要结束或核对后再更换工作区。")
             if self.pending(task_id=task_id, effects_only=True):
                 raise WorkConflict("已有工具结果待核对，暂时不能更换工作区。")
-            row = self.config.get(workspace_id)
+            row = self._managed_entry(task_id, create=True) if managed else self.config.get(workspace_id)
+            if workspace_id is not None and row is None:
+                raise WorkConflict("工作区配置已变化，请刷新后重试。")
             if row:
                 policy = row["policy"].as_dict()
-                payload = {"workspace_id": workspace_id, "title": row["title"], "root": policy["root"],
-                           "mode": policy["mode"], "fingerprint": row["fingerprint"]}
+                payload = {"workspace_id": row["id"], "title": row["title"], "root": policy["root"],
+                           "mode": policy["mode"], "fingerprint": row["fingerprint"],
+                           **({"managed": True} if managed else {})}
             else:
                 payload = {"workspace_id": None, "fingerprint": None, "root": None, "mode": None, "title": None}
             self.rt.log.emit(type="workspace.bound", task_id=task_id, actor=Actor.human(),

@@ -42,6 +42,10 @@ beforeEach(() => {
     if (url === '/api/task-summaries') return Promise.resolve(json({ tasks: [summary('task_alpha'), summary('task_beta')] }))
     if (url === '/api/organization') return Promise.resolve(json([]))
     if (url === '/api/organization/profile') return Promise.resolve(json({ leader: { id: 'store_manager', name: '店长' }, cabinet: [], workers: [] }))
+    if (url === '/api/workspaces') return Promise.resolve(json([
+      { id: '__managed__', title: '新建独立工作目录', root: 'F:/群工作目录', mode: 'execute', commands: ['test'], managed: true },
+      { id: 'docs', title: '资料', root: 'F:/资料', mode: 'read_only', commands: [] },
+    ]))
     if (url === '/api/projects') return Promise.resolve(json([]))
     if (url.startsWith('/api/rules')) return Promise.resolve(json({ rules: [] }))
     if (/^\/api\/tasks\/task_(alpha|beta)$/.test(url)) return Promise.resolve(json(detail(url.split('/')[3])))
@@ -51,6 +55,38 @@ beforeEach(() => {
 })
 const posts = () => request.mock.calls.filter(([, init]) => init.method && init.method !== 'GET')
 const input = () => screen.getByRole('textbox', { name: '向团队发送消息' }) as HTMLTextAreaElement
+
+test.each([undefined, null, '__managed__', 'docs'])('新群草稿目录 %s 经实际保留刷新流程恢复，managed 默认不覆盖用户选择', async workspaceId => {
+  const reload = vi.spyOn(pageNavigation, 'reload').mockImplementation(() => {})
+  await act(async () => { render(<App />) })
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '新建任务' })))
+  if (workspaceId !== undefined) {
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: '工作目录', exact: true })))
+    if (workspaceId !== null) fireEvent.change(screen.getByRole('combobox', { name: '可选目录' }), { target: { value: workspaceId } })
+    fireEvent.click(screen.getByRole('button', { name: workspaceId === null ? '不使用目录' : '用于新对话', exact: true }))
+  }
+  fireEvent.change(screen.getByRole('textbox', { name: '发起任务对话' }), { target: { value: '保留的新群草稿' } })
+  await act(async () => fireEvent.click(within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button', { name: /^task_alpha任务/ })))
+  await screen.findByText('这部分暂时打不开')
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '保留草稿并刷新' })))
+  expect(reload).toHaveBeenCalledTimes(1)
+  const snapshot = JSON.parse(window.sessionStorage.getItem(PAGE_RECOVERY_KEY)!).snapshot
+  expect(snapshot.workspaceId).toBe(workspaceId)
+  if (workspaceId === undefined) expect(snapshot).not.toHaveProperty('workspaceId')
+  cleanup()
+  await act(async () => { render(<StrictMode><App /></StrictMode>) })
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '新建任务' })))
+  expect((screen.getByRole('textbox', { name: '发起任务对话' }) as HTMLTextAreaElement).value).toBe('保留的新群草稿')
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '工作目录', exact: true })))
+  expect((screen.getByRole('combobox', { name: '可选目录' }) as HTMLSelectElement).value).toBe(workspaceId === undefined ? '__managed__' : workspaceId ?? '')
+  fireEvent.click(screen.getByRole('button', { name: '关闭工作目录' }))
+  expect(posts()).toHaveLength(0)
+  allowFailedPost = true
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: '发送新任务' })))
+  const body = JSON.parse(posts()[0][1].body as string)
+  expect(body.workspace_id).toBe(workspaceId)
+  if (workspaceId === undefined) expect(body).not.toHaveProperty('workspace_id')
+})
 
 test.each(['paused', 'cancelled'] as const)('进展模块失败时%s说明与聊天仍可用，不自动提交控制', async state => {
   const original = request.getMockImplementation()!

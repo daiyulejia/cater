@@ -40,8 +40,8 @@ test('不同标签页存储不共享恢复记录', async () => {
   expect(source.getItem(CREATION_RECOVERY_KEY)).not.toBeNull()
 })
 
-test('创建目录标识完整保存并恢复；旧版无目录记录保持兼容，不持久化目录授权详情', async () => {
-  const original = { ...attempt(), workspaceId: 'frontend-execute_1' }
+test.each([null, '__managed__', 'frontend-execute_1'])('创建目录 %s 完整保存并恢复；旧版无目录记录保持兼容，不持久化目录授权详情', async (workspaceId) => {
+  const original = { ...attempt(), workspaceId }
   expect(await saveCreationRecovery(original, '', () => true)).toBe('')
   const record = JSON.parse(window.sessionStorage.getItem(CREATION_RECOVERY_KEY)!)
   expect(record.attempt).toEqual(original)
@@ -53,7 +53,7 @@ test('创建目录标识完整保存并恢复；旧版无目录记录保持兼�
   expect((await loadCreationRecovery('')).attempt).not.toHaveProperty('workspaceId')
 })
 
-test.each([null, '', 7, {}, 'F:/any-root', 'has space', 'x'.repeat(81)])('损坏目录标识不进入刷新恢复：%j', async (workspaceId) => {
+test.each(['', 7, {}, 'F:/any-root', 'has space', 'x'.repeat(81)])('损坏目录标识不进入刷新恢复：%j', async (workspaceId) => {
   await saveCreationRecovery(attempt(), '', () => true)
   const record = JSON.parse(window.sessionStorage.getItem(CREATION_RECOVERY_KEY)!)
   record.attempt.workspaceId = workspaceId

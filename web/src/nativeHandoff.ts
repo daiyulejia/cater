@@ -40,7 +40,8 @@ export function isOutputUtf8Validity(value: unknown): value is NonNullable<Hando
 
 // The server owns source validation. Only read its saved completion, never a speaker's self-report.
 export function nativeHandoff(event: TeamEvent): NativeHandoff | undefined {
-  if (event.type !== 'team.objective_completed' || !isTeamHost(event)) return undefined
+  if (event.type !== 'team.objective_completed' || !isTeamHost(event)
+    || event.payload.handoff_status === 'omitted_invalid') return undefined
   const value = event.payload.handoff
   if (!record(value) || value.version !== 1 || !text(value.why)
     || !['changed', 'impact', 'alternatives', 'reproduce', 'limits'].every((key) => strings(value[key]))
@@ -56,4 +57,10 @@ export function nativeHandoff(event: TeamEvent): NativeHandoff | undefined {
     if ('output_utf8_valid' in evidence && !isOutputUtf8Validity(evidence.output_utf8_valid)) return undefined
   }
   return value as NativeHandoff
+}
+
+export function nativeHandoffWarning(event: TeamEvent): string | undefined {
+  if (event.type !== 'team.objective_completed' || !isTeamHost(event)
+    || event.payload.handoff_status !== 'omitted_invalid') return undefined
+  return text(event.payload.handoff_warning) ? event.payload.handoff_warning.trim() : undefined
 }
