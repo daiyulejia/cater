@@ -2,6 +2,7 @@ import type { ChatItem } from './App'
 import { nativeHandoff } from './nativeHandoff'
 import type { HandoffEvidence } from './nativeHandoff'
 import { outputEncodingHint } from './outputPreview'
+import { NativeCommandReceipts } from './NativeCommandReceipts'
 
 const sourceLabels = { artifact: '成果原文', tool_receipt: '历史工具回执', peer_review: '伙伴复核意见' }
 const statusLabels: Record<string, string> = { ok: '正常返回', error: '返回错误', completed: '已结束', succeeded: '执行成功',
@@ -71,7 +72,8 @@ export function MessageDetails({ item }: { item: ChatItem }) {
       <DetailList title="改动" items={handoff.changed} />
       <DetailList title="影响" items={handoff.impact} />
       <DetailList title="取舍与其他考虑" items={handoff.alternatives} />
-      <DetailList title="运行与复查" items={handoff.reproduce} numbered />
+      <NativeCommandReceipts event={item.evidence} historical={item.historicalDelivery} name={item.auditName} />
+      <DetailList title={Object.hasOwn(handoff, 'command_receipts') ? '成员建议的运行与复查' : '运行与复查'} items={handoff.reproduce} numbered />
       <DetailList title="未验证范围" items={handoff.limits} />
       {handoff.evidence.length > 0 && <section><h3 className="font-semibold">引用来源</h3>
         <ul className="mt-2 space-y-3">{handoff.evidence.map((source, index) => <SourceQuote key={index} source={source} name={item.auditName} />)}</ul>

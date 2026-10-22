@@ -34,12 +34,15 @@ def _strings(value, *, count=12):
 
 
 def handoff_schema():
+    from .delivery_commands import schema as command_schema
+
     strings = {"type": "array", "maxItems": 12, "items": {"type": "string", "maxLength": 1000}}
     return {"type": "object", "additionalProperties": False, "required": ["why", "reproduce", "limits"],
         "description": "可选的对客原因、长细节与证据，在此折叠保存；关键结论留主摘要，不是私有思维。完整说明（含宿主补充引用信息）总计不超过24KB UTF-8。quote从文件正文、回执stdout/stderr/content、浏览器实际观测或当前复核反馈逐字摘录，不引用计划标签作为执行证据。",
         "properties": {"why": {"type": "string", "maxLength": 4000},
             **{key: strings for key in ("changed", "impact", "alternatives", "reproduce", "limits")},
-            "reproduce": {**strings, "description": "详细复查步骤、工作目录、完整命令和实际环境；不以占位词代替，区分已运行与未验证建议，不凭说明声称执行。"},
+            "reproduce": {**strings, "description": "成员建议的使用和复查步骤：给出适用目录、完整命令及环境，区分已运行与建议，不凭说明声称执行。Cater工具JSON字段不是终端参数，客户端临时目录不是工程；实际命令可选用command_receipts引用宿主记录，不必重新编写。"},
+            "command_receipts": command_schema(),
             "evidence": {"type": "array", "maxItems": 16, "items": {"type": "object", "additionalProperties": False,
                 "required": ["source_seq", "quote"], "properties": {
                     "source_seq": {"type": "integer", "minimum": 1,
@@ -190,7 +193,7 @@ class TeamDelivery:
                     "请按 read_tool/read_args 读取原文，再选择必要引文；未列全时仍可核对已有的其他合法来源。"}
 
     def normalize(self, task_id, value, *, artifacts, revision):
-        allowed = {"why", "changed", "impact", "alternatives", "reproduce", "limits", "evidence"}
+        allowed = {"why", "changed", "impact", "alternatives", "reproduce", "limits", "evidence", "command_receipts"}
         if (not isinstance(value, dict) or set(value) - allowed
                 or not {"why", "reproduce", "limits"} <= set(value)):
             raise HandoffError("交付说明需要原因、复查步骤与未覆盖范围，不能包含私有思考或其他未定义字段。")
@@ -227,6 +230,14 @@ class TeamDelivery:
             raise HandoffError("交付引用与当前成果、工具回执或版本复核原文不符，请读取实际来源后修正。",
                                diagnostics=diagnostics, source_catalog=self._source_catalog(sources))
         result["evidence"] = normalized
+        if "command_receipts" in value:
+            from .delivery_commands import normalize as command_records
+
+            try:
+                result["command_receipts"] = command_records(self.team, task_id, value["command_receipts"],
+                    revision=revision, artifacts=artifacts)
+            except ValueError as error:
+                raise HandoffError(str(error) + " 可修正或移除可选command_receipts继续交付；未重跑原命令。") from None
         if len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > 24000:
             raise HandoffError("交付说明超过24KB，请保留关键原因、步骤、边界及必要引用。")
         return result
@@ -253,11 +264,15 @@ class TeamDelivery:
                  "## 当时记录的验证范围", "", str(event.payload.get("verification", "")), "",
                  "## 为什么这样做", "", note["why"], ""]
         for key, title in (("changed", "改动"), ("impact", "影响"), ("alternatives", "取舍与其他考虑"),
-                           ("reproduce", "运行与复查"), ("limits", "未验证范围")):
+                           ("reproduce", "成员建议的运行与复查"), ("limits", "未验证范围")):
             if note[key]:
                 lines += ["## " + title, ""]
                 lines += [f"{i + 1}. {value}" if key == "reproduce" else "- " + value for i, value in enumerate(note[key])]
                 lines.append("")
+        if isinstance(note.get('command_receipts'), list):
+            from .delivery_commands import markdown as command_markdown
+
+            lines += command_markdown(note['command_receipts'], artifacts=event.payload.get('artifacts'))
         lines += ["## 说明边界", "", "这是该次交付保存的模型说明；运行步骤不会因此执行，原因推断不等于独立证明。",
                   "历史检查不证明当前文件未变化；文件版本请核对同目录的 manifest.json。", ""]
         evidence = note.get("evidence", [])

@@ -200,7 +200,7 @@ class TeamReadSources:
         try:
             for row in cursor:
                 try:
-                    actor = Actor(**json.loads(row["actor_json"]))
+                    actor = Actor(**json.loads(row["actor_json"], object_pairs_hook=_unambiguous))
                     yield SimpleNamespace(seq=row["seq"], task_id=row["task_id"], type=row["type"],
                         actor=actor, hash=row["hash"], payload=self._values(row, fields))
                 except (ValueError, TypeError, UnicodeError):
