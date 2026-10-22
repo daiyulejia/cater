@@ -40,7 +40,8 @@ class AcpSendBudgetTests(unittest.TestCase):
             with self.subTest(override=override):
                 client = self.session()
                 with patch("cater.acp.time.monotonic", return_value=100) as clock:
-                    def sent(message, deadline):
+                    def sent(message, deadline, *, service):
+                        self.assertTrue(callable(service))
                         self.assertEqual(message["method"], "session/prompt")
                         self.assertEqual(deadline, send_deadline)
                         clock.return_value = 100.25

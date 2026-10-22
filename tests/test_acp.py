@@ -432,12 +432,12 @@ class AcpTests(unittest.TestCase):
         probe = CancelLockProbe(client._turn_lock)
         original_send = client._send
 
-        def gated_send(value, deadline):
+        def gated_send(value, deadline, **kwargs):
             if value.get("method") == "session/prompt":
                 at_send.set()
                 if not allow_send.wait(4):
                     raise AssertionError("test did not release prompt send")
-            return original_send(value, deadline)
+            return original_send(value, deadline, **kwargs)
 
         def on_update(value):
             if value.get("content", {}).get("text") == "cancel-observed":

@@ -13,6 +13,7 @@ import queue
 import subprocess
 import threading
 import time
+from collections import deque
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
@@ -157,7 +158,10 @@ class AcpSession:
         self._stopped = threading.Event()
         self._state_lock = threading.RLock()
         self._operation_lock = threading.Lock()
-        self._write_lock = threading.Lock()
+        self._write_lock = threading.RLock()
+        self._write_owner: int | None = None
+        self._write_done: threading.Event | None = None
+        self._input_failed = False
         self._turn_lock = threading.RLock()
         self._turn = 0
         self._cancelled = False
@@ -293,9 +297,17 @@ class AcpSession:
                     self._prompt_active = False
 
     def cancel(self) -> bool:
-        """Request cancellation without claiming that remote work has stopped."""
+        """Request cancellation; False also means an owner callback cannot send yet.
+
+        A callback waiting for its own input cannot synchronously write cancel.
+        Its caller may abort/close instead; remote work is never declared stopped.
+        """
         with self._state_lock:
-            if self._closed or not self._prompt_active or self.session_id is None:
+            if self._closed or self._input_failed or not self._prompt_active or self.session_id is None:
+                return False
+            # A service/update callback cannot wait for its own pending write.
+            if (self._write_owner == threading.get_ident()
+                    and self._write_done is not None and not self._write_done.is_set()):
                 return False
             turn = self._turn
         try:
@@ -387,6 +399,9 @@ class AcpSession:
             except queue.Empty:
                 if service is None:
                     raise AcpTimeout("ACP response timed out", phase="response") from None
+        return self._decode_frame(frame)
+
+    def _decode_frame(self, frame):
         if self._closed:
             raise AcpUnavailable("ACP session is closed")
         if isinstance(frame, AcpError):
@@ -399,39 +414,79 @@ class AcpSession:
             raise AcpProtocolError("ACP output must be an object")
         return result
 
-    def _send(self, value, deadline: float):
+    def _send(self, value, deadline: float, *, service=None):
         data = self._encode(value)
         if not self._write_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            with self._state_lock:
+                self._input_failed = True
             raise AcpTimeout("ACP input pipe timed out", phase="input")
+        previous_owner, previous_done = self._write_owner, self._write_done
         try:
             with self._state_lock:
                 proc = self._proc
-                if self._closed or proc is None or proc.stdin is None:
+                if self._closed or self._input_failed or proc is None or proc.stdin is None:
                     raise AcpUnavailable("ACP input pipe is unavailable")
+                self._write_owner = threading.get_ident()
+                done = self._write_done = threading.Event()
                 output: queue.Queue = queue.Queue(maxsize=1)
 
                 def write():
                     try:
                         proc.stdin.write(data)
                         proc.stdin.flush()
+                        done.set()
                         output.put(None)
                     except (OSError, ValueError):
+                        with self._state_lock:
+                            self._input_failed = True
+                        done.set()
                         output.put(AcpUnavailable("ACP input pipe is unavailable"))
 
                 writer = threading.Thread(target=write, daemon=True)
                 self._writers.append(writer)
                 writer.start()
-            try:
-                error = output.get(timeout=max(0.0, deadline - time.monotonic()))
-            except queue.Empty:
-                raise AcpTimeout("ACP input pipe timed out", phase="input") from None
+            while True:
+                if self._closed:
+                    raise AcpUnavailable("ACP session is closed")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AcpTimeout("ACP input pipe timed out", phase="input")
+                if service is None:
+                    try:
+                        error = output.get(timeout=remaining)
+                    except queue.Empty:
+                        raise AcpTimeout("ACP input pipe timed out", phase="input") from None
+                else:
+                    try:
+                        error = output.get_nowait()
+                    except queue.Empty:
+                        drained = service()
+                        if self._closed:
+                            raise AcpUnavailable("ACP session is closed")
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise AcpTimeout("ACP input pipe timed out", phase="input")
+                        if drained:
+                            continue
+                        try:
+                            error = output.get(timeout=min(0.01, remaining))
+                        except queue.Empty:
+                            continue
+                break
             writer.join(timeout=max(0.0, deadline - time.monotonic()))
             if not writer.is_alive():
                 with self._state_lock:
                     self._writers.remove(writer)
             if error is not None:
                 raise error
+        except BaseException:
+            # An abandoned/partial frame is not a channel for another cancel write.
+            with self._state_lock:
+                self._input_failed = True
+            raise
         finally:
+            with self._state_lock:
+                self._write_owner, self._write_done = previous_owner, previous_done
             self._write_lock.release()
 
     def _validate_update(self, params: dict) -> dict:
@@ -449,7 +504,7 @@ class AcpSession:
         except Exception:
             raise AcpProtocolError("ACP update handler failed") from None
 
-    def _client_request(self, message: dict, deadline: float):
+    def _client_request(self, message: dict, deadline: float, *, service=None):
         params = message.get("params", {})
         if params.get("sessionId") != self.session_id or self.session_id is None:
             raise AcpProtocolError("ACP client request belongs to another session")
@@ -475,22 +530,37 @@ class AcpSession:
             if method == "session/request_permission" and self._cancelled:
                 response.pop("error", None)
                 response["result"] = {"outcome": {"outcome": "cancelled"}}
-            self._send(response, deadline)
+            self._send(response, deadline, service=service)
+
+    def _session_update(self, body, *, starting_session, on_update):
+        if starting_session and self.session_id is None:
+            update = body.get("update", {})
+            session_id = body.get("sessionId")
+            if (not isinstance(update, dict)
+                    or not isinstance(update.get("sessionUpdate"), str)
+                    or not isinstance(session_id, str) or not session_id):
+                raise AcpProtocolError("Invalid ACP session update")
+            if self._pending_session_id not in {None, session_id}:
+                raise AcpProtocolError("ACP startup updates have conflicting sessions")
+            self._pending_session_id = session_id
+            if update.get("sessionUpdate") != "agent_thought_chunk":
+                if len(self._pending_updates) >= MAX_PENDING_UPDATES:
+                    raise AcpProtocolError("Too many pending ACP updates")
+                self._pending_updates.append(body)
+        else:
+            update = self._validate_update(body)
+            if update["sessionUpdate"] != "agent_thought_chunk" and on_update is not None:
+                on_update(update)
 
     def _rpc(self, method: str, params: dict, *, on_update=None, service=None, timeout=None) -> dict:
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         self._next_id += 1
         request_id = "cater-" + str(self._next_id)
-        with self._turn_lock:
-            if method == "session/prompt":
-                with self._state_lock:
-                    self._turn += 1
-                    self._cancelled = False
-                    self._prompt_active = True
-            send_deadline = min(deadline, time.monotonic() + self.timeout)
-            self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}, send_deadline)
-        while True:
-            message = self._receive(deadline, service=service)
+        deferred = deque()
+        deferred_bytes = 0
+        terminal_deferred = False
+
+        def validate(message):
             if message.get("jsonrpc") != "2.0":
                 raise AcpProtocolError("Invalid ACP JSON-RPC envelope")
             if "method" in message:
@@ -503,28 +573,7 @@ class AcpSession:
                         raise AcpProtocolError("ACP session update must be a notification")
                     if type(message["id"]) not in {str, int}:
                         raise AcpProtocolError("Invalid ACP client request ID")
-                    self._client_request(message, deadline)
-                elif message["method"] == "session/update":
-                    body = message.get("params", {})
-                    if method == "session/new" and self.session_id is None:
-                        update = body.get("update", {})
-                        session_id = body.get("sessionId")
-                        if (not isinstance(update, dict)
-                                or not isinstance(update.get("sessionUpdate"), str)
-                                or not isinstance(session_id, str) or not session_id):
-                            raise AcpProtocolError("Invalid ACP session update")
-                        if self._pending_session_id not in {None, session_id}:
-                            raise AcpProtocolError("ACP startup updates have conflicting sessions")
-                        self._pending_session_id = session_id
-                        if update.get("sessionUpdate") != "agent_thought_chunk":
-                            if len(self._pending_updates) >= MAX_PENDING_UPDATES:
-                                raise AcpProtocolError("Too many pending ACP updates")
-                            self._pending_updates.append(body)
-                    else:
-                        update = self._validate_update(body)
-                        if update["sessionUpdate"] != "agent_thought_chunk" and on_update is not None:
-                            on_update(update)
-                continue
+                return
             if message.get("id") != request_id:
                 raise AcpProtocolError("ACP response ID mismatch")
             if ("result" in message) == ("error" in message):
@@ -535,9 +584,86 @@ class AcpSession:
                 if (not isinstance(error, dict) or type(error.get("code")) is not int
                         or not isinstance(error.get("message"), str)):
                     raise AcpProtocolError("Invalid ACP error response")
-                raise AcpRequestRejected("ACP server rejected the request", rpc_code=error["code"], rpc_method=method)
-            if not isinstance(message["result"], dict):
+            elif not isinstance(message["result"], dict):
                 raise AcpProtocolError("ACP result must be an object")
+
+        def notify(message):
+            self._session_update(message.get("params", {}),
+                                 starting_session=method == "session/new", on_update=on_update)
+
+        def during_send(input_deadline):
+            nonlocal deferred_bytes, terminal_deferred
+            if time.monotonic() >= input_deadline:
+                raise AcpTimeout("ACP input pipe timed out", phase="input")
+            if service is not None:
+                service()
+            if terminal_deferred:
+                return False
+            drained = False
+            for _ in range(32):
+                if time.monotonic() >= input_deadline:
+                    raise AcpTimeout("ACP input pipe timed out", phase="input")
+                try:
+                    frame = self._frames.get_nowait()
+                except queue.Empty:
+                    break
+                message = self._decode_frame(frame)
+                validate(message)
+                drained = True
+                notification = "method" in message and "id" not in message
+                if notification and message["method"] != "session/update":
+                    continue
+                private = (notification and message["method"] == "session/update"
+                           and isinstance(message.get("params", {}).get("update"), dict)
+                           and message["params"]["update"].get("sessionUpdate") == "agent_thought_chunk")
+                if private or notification and not deferred:
+                    notify(message)
+                    continue
+                # Preserve business-frame order without unbounded input-phase buffering.
+                size = len(frame) - 1
+                if len(deferred) >= MAX_PENDING_UPDATES or deferred_bytes + size > MAX_FRAME_BYTES:
+                    raise AcpProtocolError("Too many deferred ACP messages during input")
+                deferred.append((message, size))
+                deferred_bytes += size
+                if "method" not in message:
+                    terminal_deferred = True
+                    break
+            return drained
+
+        with self._turn_lock:
+            if method == "session/prompt":
+                with self._state_lock:
+                    self._turn += 1
+                    self._cancelled = False
+                    self._prompt_active = True
+            send_deadline = min(deadline, time.monotonic() + self.timeout)
+            self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
+                       send_deadline, service=lambda: during_send(send_deadline))
+        while True:
+            if deferred:
+                if self._closed:
+                    raise AcpUnavailable("ACP session is closed")
+                if time.monotonic() >= deadline:
+                    raise AcpTimeout("ACP response timed out", phase="response")
+                if service is not None:
+                    service()
+                if self._closed:
+                    raise AcpUnavailable("ACP session is closed")
+                if time.monotonic() >= deadline:
+                    raise AcpTimeout("ACP response timed out", phase="response")
+                message, size = deferred.popleft()
+                deferred_bytes -= size
+            else:
+                message = self._receive(deadline, service=service)
+            validate(message)
+            if "method" in message:
+                if "id" in message:
+                    self._client_request(message, deadline, service=lambda: during_send(deadline))
+                elif message["method"] == "session/update":
+                    notify(message)
+                continue
+            if "error" in message:
+                raise AcpRequestRejected("ACP server rejected the request", rpc_code=message["error"]["code"], rpc_method=method)
             return message["result"]
 
     def _abort(self):

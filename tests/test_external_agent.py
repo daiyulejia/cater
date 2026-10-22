@@ -48,12 +48,12 @@ class ExternalAgentTests(unittest.TestCase):
                     raise owner.cancel_error
                 return result
 
-            def _send(self, value, deadline):
+            def _send(self, value, deadline, **kwargs):
                 if isinstance(value, dict) and value.get("method") == "session/cancel":
                     owner.events.append("wire-cancel")
                     if owner.cancel_send_error:
                         raise owner.cancel_send_error
-                return super()._send(value, deadline)
+                return super()._send(value, deadline, **kwargs)
 
             def close(self):
                 owner.events.append("session-close")
