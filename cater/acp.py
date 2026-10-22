@@ -29,6 +29,14 @@ MAX_PENDING_UPDATES = 128
 _STOP_REASONS = {"end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"}
 
 
+def _exhaust(iterator):
+    while True:
+        try:
+            next(iterator)
+        except StopIteration as done:
+            return done.value
+
+
 class AcpError(RuntimeError):
     """Transport failure; never replay a prompt with an unknown outcome."""
 
@@ -190,6 +198,20 @@ class AcpSession:
         on_update: Callable[[dict], None] | None = None,
         service: Callable[[], None] | None = None,
     ) -> dict:
+        return _exhaust(self._iter_open(mcp_servers=mcp_servers, client_capabilities=client_capabilities,
+                                       on_update=on_update, service=service, cooperative=False))
+
+    def iter_open(self, *, mcp_servers=None, client_capabilities=None, on_update=None, service=None):
+        """Advance startup on the calling thread, yielding during protocol waits."""
+        return self._iter_open(mcp_servers=mcp_servers, client_capabilities=client_capabilities,
+                               on_update=on_update, service=service, cooperative=True)
+
+    def _advance(self, cooperative, name, *args, **kwargs):
+        if cooperative:
+            return (yield from getattr(self, '_iter_' + name)(*args, cooperative=True, **kwargs))
+        return getattr(self, '_' + name)(*args, **kwargs)
+
+    def _iter_open(self, *, mcp_servers, client_capabilities, on_update, service, cooperative):
         servers = [] if mcp_servers is None else mcp_servers
         capabilities = {} if client_capabilities is None else client_capabilities
         if not isinstance(servers, list) or not all(isinstance(s, dict) for s in servers):
@@ -206,8 +228,8 @@ class AcpSession:
             if self.session_id is not None:
                 raise AcpUnavailable("ACP session is already open")
             try:
-                self._start(service=service)
-                initialized = self._rpc("initialize", {
+                yield from self._advance(cooperative, 'start', service=service)
+                initialized = yield from self._advance(cooperative, 'rpc', "initialize", {
                     "protocolVersion": 1, "clientCapabilities": deepcopy(capabilities),
                     "clientInfo": {"name": "cater", "version": "0.1"},
                 }, service=service)
@@ -217,7 +239,8 @@ class AcpSession:
                 if not isinstance(info, dict):
                     raise AcpProtocolError("Invalid ACP agent information")
                 self.agent_info = deepcopy(info)
-                result = self._rpc("session/new", {"cwd": self.cwd, "mcpServers": deepcopy(servers)}, service=service)
+                result = yield from self._advance(cooperative, 'rpc', "session/new",
+                    {"cwd": self.cwd, "mcpServers": deepcopy(servers)}, service=service)
                 session_id = result.get("sessionId")
                 if not isinstance(session_id, str) or not session_id:
                     raise AcpProtocolError("ACP server did not provide a session ID")
@@ -240,6 +263,15 @@ class AcpSession:
 
     def prompt(self, text: str, *, on_update: Callable[[dict], None] | None = None,
                service: Callable[[], None] | None = None, timeout: float | None = None) -> AcpPromptResult:
+        return _exhaust(self._iter_prompt(text, on_update=on_update, service=service,
+                                         timeout=timeout, cooperative=False))
+
+    def iter_prompt(self, text, *, on_update=None, service=None, timeout=None):
+        """Yield without cancelling or replaying this prompt; close aborts it."""
+        return self._iter_prompt(text, on_update=on_update, service=service,
+                                 timeout=timeout, cooperative=True)
+
+    def _iter_prompt(self, text, *, on_update, service, timeout, cooperative):
         if not isinstance(text, str) or not text.strip():
             raise ValueError("ACP prompt must be nonempty text")
         if on_update is not None and not callable(on_update):
@@ -280,7 +312,8 @@ class AcpSession:
                     if self._closed:
                         raise AcpUnavailable("ACP session is closed")
                 attempted = True
-                result = self._rpc("session/prompt", params, on_update=update, service=service, timeout=timeout)
+                result = yield from self._advance(cooperative, 'rpc', "session/prompt", params,
+                                                  on_update=update, service=service, timeout=timeout)
                 reason = result.get("stopReason")
                 if not isinstance(reason, str) or reason not in _STOP_REASONS:
                     raise AcpProtocolError("Invalid ACP stop reason")
@@ -335,6 +368,9 @@ class AcpSession:
         return data + b"\n"
 
     def _start(self, *, service=None):
+        return _exhaust(self._iter_start(service=service, cooperative=False))
+
+    def _iter_start(self, *, service=None, cooperative):
         deadline = time.monotonic() + self.timeout
         try:
             with self._state_lock:
@@ -350,8 +386,9 @@ class AcpSession:
                 self._reader.start()
         except (OSError, ValueError):
             raise AcpUnavailable("ACP process could not start safely") from None
-        self._send(self.command, deadline)
-        if self._receive(deadline, service=service) != {"ready": True}:
+        yield from self._advance(cooperative, 'send', self.command, deadline, **({'service': service} if cooperative else {}))
+        ready = yield from self._advance(cooperative, 'receive', deadline, service=service)
+        if ready != {"ready": True}:
             raise AcpProtocolError("ACP process did not acknowledge startup")
 
     def _offer(self, item):
@@ -379,6 +416,9 @@ class AcpSession:
             self._offer(AcpUnavailable("ACP output pipe is unavailable"))
 
     def _receive(self, deadline: float, *, service=None) -> dict:
+        return _exhaust(self._iter_receive(deadline, service=service, cooperative=False))
+
+    def _iter_receive(self, deadline, *, service=None, cooperative):
         if self._closed:
             raise AcpUnavailable("ACP session is closed")
         while True:
@@ -394,10 +434,13 @@ class AcpSession:
             if remaining <= 0:
                 raise AcpTimeout("ACP response timed out", phase="response")
             try:
-                frame = self._frames.get(timeout=remaining if service is None else min(0.05, remaining))
+                frame = self._frames.get(timeout=min(0.01, remaining) if cooperative else
+                                         remaining if service is None else min(0.05, remaining))
                 break
             except queue.Empty:
-                if service is None:
+                if cooperative:
+                    yield None
+                elif service is None:
                     raise AcpTimeout("ACP response timed out", phase="response") from None
         return self._decode_frame(frame)
 
@@ -415,6 +458,9 @@ class AcpSession:
         return result
 
     def _send(self, value, deadline: float, *, service=None):
+        return _exhaust(self._iter_send(value, deadline, service=service, cooperative=False))
+
+    def _iter_send(self, value, deadline, *, service=None, cooperative):
         data = self._encode(value)
         if not self._write_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             with self._state_lock:
@@ -451,7 +497,20 @@ class AcpSession:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise AcpTimeout("ACP input pipe timed out", phase="input")
-                if service is None:
+                if cooperative:
+                    try:
+                        error = output.get_nowait()
+                    except queue.Empty:
+                        if service is not None:
+                            service()
+                        if self._closed:
+                            raise AcpUnavailable("ACP session is closed")
+                        if time.monotonic() >= deadline:
+                            raise AcpTimeout("ACP input pipe timed out", phase="input")
+                        done.wait(timeout=min(0.001, max(0.0, deadline - time.monotonic())))
+                        yield None
+                        continue
+                elif service is None:
                     try:
                         error = output.get(timeout=remaining)
                     except queue.Empty:
@@ -505,6 +564,9 @@ class AcpSession:
             raise AcpProtocolError("ACP update handler failed") from None
 
     def _client_request(self, message: dict, deadline: float, *, service=None):
+        return _exhaust(self._iter_client_request(message, deadline, service=service, cooperative=False))
+
+    def _iter_client_request(self, message, deadline, *, service=None, cooperative):
         params = message.get("params", {})
         if params.get("sessionId") != self.session_id or self.session_id is None:
             raise AcpProtocolError("ACP client request belongs to another session")
@@ -530,7 +592,7 @@ class AcpSession:
             if method == "session/request_permission" and self._cancelled:
                 response.pop("error", None)
                 response["result"] = {"outcome": {"outcome": "cancelled"}}
-            self._send(response, deadline, service=service)
+            yield from self._advance(cooperative, 'send', response, deadline, service=service)
 
     def _session_update(self, body, *, starting_session, on_update):
         if starting_session and self.session_id is None:
@@ -553,6 +615,10 @@ class AcpSession:
                 on_update(update)
 
     def _rpc(self, method: str, params: dict, *, on_update=None, service=None, timeout=None) -> dict:
+        return _exhaust(self._iter_rpc(method, params, on_update=on_update, service=service,
+                                      timeout=timeout, cooperative=False))
+
+    def _iter_rpc(self, method, params, *, on_update=None, service=None, timeout=None, cooperative):
         deadline = time.monotonic() + (self.timeout if timeout is None else timeout)
         self._next_id += 1
         request_id = "cater-" + str(self._next_id)
@@ -637,8 +703,9 @@ class AcpSession:
                     self._cancelled = False
                     self._prompt_active = True
             send_deadline = min(deadline, time.monotonic() + self.timeout)
-            self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
-                       send_deadline, service=lambda: during_send(send_deadline))
+            yield from self._advance(cooperative, 'send',
+                {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
+                send_deadline, service=lambda: during_send(send_deadline))
         while True:
             if deferred:
                 if self._closed:
@@ -654,13 +721,16 @@ class AcpSession:
                 message, size = deferred.popleft()
                 deferred_bytes -= size
             else:
-                message = self._receive(deadline, service=service)
+                message = yield from self._advance(cooperative, 'receive', deadline, service=service)
             validate(message)
             if "method" in message:
                 if "id" in message:
-                    self._client_request(message, deadline, service=lambda: during_send(deadline))
+                    yield from self._advance(cooperative, 'client_request', message, deadline,
+                                              service=lambda: during_send(deadline))
                 elif message["method"] == "session/update":
                     notify(message)
+                if cooperative:
+                    yield None
                 continue
             if "error" in message:
                 raise AcpRequestRejected("ACP server rejected the request", rpc_code=message["error"]["code"], rpc_method=method)

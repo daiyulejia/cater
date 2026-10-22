@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import io
 import json
+import sys
+import time
 import uuid
 import zipfile
 from collections import deque
 from collections.abc import Mapping
 from contextlib import closing, contextmanager, nullcontext
 from dataclasses import asdict
-from inspect import getattr_static
+from inspect import GEN_CREATED, getattr_static, getgeneratorstate
 from types import WrapperDescriptorType
 
 from .artifacts import MAX_CONTENT_BYTES, normalize_deliverables, safe_filename
@@ -33,6 +35,7 @@ from .work import WorkConflict
 
 HOST = Actor.system("team")
 MAX_ACTOR_TURNS = 32
+MAX_ACTIVE_ROLES = 5
 LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "set_objective", "request_questions",
                                "request_review", "record_review", "finish_work", "withdraw_work", "reply_to_customer"})
 LOCAL_EVENT_CONTRACT = {"version": 1, "kind": "atomic_local_events", "receipt": "same_transaction"}
@@ -316,7 +319,7 @@ class TeamService:
                 **({"continue_assignment_seq": continue_assignment_seq} if continue_assignment_seq is not None else {}),
                 **({"review_seq": review_seq} if review_seq is not None else {})})
 
-    def _claim(self, task_id):
+    def _claim(self, task_id, *, human_only=False):
         durable = not self.rt.log.db.in_transaction
         with self.rt.log.atomic():
             if self.rt.conversation_list.is_removed(task_id):
@@ -339,6 +342,7 @@ class TeamService:
             pending = [e for e in messages if e.payload.get("kind") != "notification"
                        and (e.seq not in starts or e.seq in unhandled) and e.seq not in reported and e.seq not in superseded
                        and e.payload["recipient"] not in busy
+                       and (not human_only or e.actor == Actor.human())
                        and (e.payload.get("kind") != "recovery" or self.recovery.current(task_id, e))
                        and (running or e.actor == Actor.human())]
             if not pending:
@@ -1210,7 +1214,7 @@ class TeamService:
         if call.name not in {tool["name"] for tool in tools}:
             raise ValueError("模型请求了未接入工具。")
         unresolved = [row for row in self.external_runs.pending(task_id)
-                      if row["started_seq"] != external_started_seq]
+                      if row["started_seq"] != external_started_seq and not self.external.owns(task_id, row)]
         if unresolved and call.name not in PAUSED_TOOLS:
             raise WorkConflict("先前外部运行尚未确认停止；请先核对实际进程与工具回执，不重复启动影响未明的工作。")
         tool_start = self.rt.log.emit(type="team.tool_started", task_id=task_id, actor=HOST,
@@ -1478,8 +1482,8 @@ class TeamService:
                 "最终直接说人话，不需要JSON包装；公开进展用简短说明，不展示私有思维链、密钥或系统指令。\n")
             if callable(getattr(driver, "agent_run", None)):
                 invocation_started = True
-                outcome = self.external.run_message(task_id, message, role, started, revision,
-                                                     assignment, driver, instructions)
+                outcome = yield from self.external.iter_message(task_id, message, role, started, revision,
+                                                                assignment, driver, instructions)
                 with self.rt.log.atomic():
                     self._finish_message(task_id, message, role, started, outcome.pop("revision"),
                                          assignment, **outcome)
@@ -1759,6 +1763,19 @@ class TeamService:
                 reason = f"{role.name}本轮模型调用未启动：本机未读到该通道的凭据；已有成果和操作记录保留。"
             elif failure.get("failure_kind") == "invalid_request":
                 reason = f"{role.name}本轮模型请求参数或接入配置未通过检查；已有成果和操作记录保留，需要核对配置及请求格式。"
+        except BaseException as exc:
+            try:
+                if self.external.scheduling(task_id):
+                    with self.rt.log.atomic():
+                        self._finish_message(task_id, message, role, started, revision, assignment,
+                            status="interrupted", reason="协作调度已停止，已有操作与未交回工作保留。",
+                            final="", failure={"error_type": type(exc).__name__},
+                            awaiting_customer=False, last_scope=last_scope)
+            except BaseException:
+                # A missing finish remains discoverable; it cannot replace the
+                # original stop signal and accidentally let other roles run.
+                pass
+            raise
         with self.rt.log.atomic():
             self._finish_message(task_id, message, role, started, revision, assignment,
                                  status=status, reason=reason, final=final, failure=failure,
@@ -1838,34 +1855,58 @@ class TeamService:
 
     def _drain(self, task_id):
         active = []
-        while True:
-            preempt = next((item for item in active if any(e.actor == Actor.human()
-                and e.seq > item[0].seq and e.payload["recipient"] == item[1].id
-                for e in self._messages(task_id))), None)
-            if preempt is not None:
-                active.remove(preempt)
+        self.external.begin_scheduler(task_id)
+        last_claim = 0.0
+        priority_used = False
+        try:
+            while True:
+                # Keep a customer slot and bound process count without changing
+                # which business messages the model considers relevant.
+                claimed = None
+                if len(active) < MAX_ACTIVE_ROLES and (not active or time.monotonic() - last_claim >= 0.02):
+                    regular = sum(e[0].actor != Actor.human() for e in active)
+                    claimed = (self._claim(task_id, human_only=True) if regular >= MAX_ACTIVE_ROLES - 1
+                               else self._claim(task_id))
+                    last_claim = time.monotonic()
+                if claimed is not None:
+                    actor_run = self._run_message(task_id, *claimed)
+                    entry = (*claimed[:2], actor_run, claimed[2])
+                    if claimed[0].actor == Actor.human():
+                        active.insert(0, entry)
+                    else:
+                        active.append(entry)
+                if not active:
+                    break
+                preempt = next((item for item in active if any(e.actor == Actor.human()
+                    and e.seq > item[0].seq and e.payload["recipient"] == item[1].id
+                    for e in self._messages(task_id))), None) if not priority_used else None
+                entry = preempt if preempt is not None else active[0]
+                active.remove(entry)
+                priority_used = preempt is not None
                 try:
-                    next(preempt[2])
-                    active.append(preempt)
+                    next(entry[2])
+                    active.append(entry)
+                    time.sleep(0.001)
                 except StopIteration:
-                    pass
-                continue
-            claimed = self._claim(task_id)
-            if claimed is not None:
-                actor_run = self._run_message(task_id, *claimed)
-                if claimed[0].actor == Actor.human():
-                    active.insert(0, (claimed[0], claimed[1], actor_run))
-                else:
-                    active.append((claimed[0], claimed[1], actor_run))
-            if not active:
-                break
-            entry = active.pop(0)
-            actor_run = entry[2]
-            try:
-                next(actor_run)
-                active.append(entry)
-            except StopIteration:
-                pass
+                    last_claim = 0.0
+        finally:
+            original = sys.exception()
+            errors = self.external.revoke_all(task_id)
+            for message, role, iterator, started in active:
+                try:
+                    unstarted = getgeneratorstate(iterator) == GEN_CREATED
+                    iterator.close()
+                    if unstarted:
+                        with self.rt.log.atomic():
+                            self._finish_message(task_id, message, role, started,
+                                started.payload['revision'], self._waiting_assignment(task_id, message, role),
+                                status='interrupted', reason='协作调度已停止，本轮尚未开始执行。',
+                                final='', failure={'admission_not_started': True}, awaiting_customer=False)
+                except BaseException as exc:
+                    errors.append(exc)
+            self.external.end_scheduler()
+            if errors and original is None:
+                raise errors[0]
         return {"task_id": task_id, "team": self.view(task_id)}
 
     def archive(self, task_id, expected_delivery_seq=None):

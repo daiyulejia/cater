@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import sys
+import threading
 import time
 
 from .events import Actor
-from .acp import failure_code, rejection_details
+from .acp import _exhaust, failure_code, rejection_details
 from .team_context import model_context, model_json
 from .tool_protocol import json_utf8
 from .usage import valid_token_count
@@ -28,8 +30,56 @@ def driver_fingerprint(driver):
 class TeamExternal:
     def __init__(self, team):
         self.team, self.rt = team, team.rt
+        self._scheduler = None
+        self._live = {}
+
+    def begin_scheduler(self, task_id):
+        if self._scheduler is not None or self._live:
+            raise WorkConflict("协作调度器仍持有活运行，不能重入执行。")
+        self._scheduler = (task_id, threading.get_ident())
+
+    def end_scheduler(self):
+        self._scheduler = None
+
+    def scheduling(self, task_id):
+        return self._scheduler == (task_id, threading.get_ident())
+
+    def revoke_all(self, task_id):
+        errors = []
+        for attempt, run, _ in list(self._live.values()):
+            if attempt.task_id == task_id:
+                try:
+                    run.revoke_tools()
+                except BaseException as exc:
+                    errors.append(exc)
+        return errors
+
+    def owns(self, task_id, row):
+        """Recognize a live handle, never a reconstructed permission or replay grant."""
+        if not self.scheduling(task_id):
+            return False
+        entry = self._live.get(row.get('started_seq'))
+        if entry is None or row.get('outcome') != 'unsettled' or row.get('run_ended') is not False:
+            return False
+        attempt, run, check = entry
+        if (attempt.task_id != task_id or type(row.get('started_seq')) is not int
+                or any(type(row.get(key)) is not type(attempt.payload[key])
+                       or row[key] != attempt.payload[key] for key in ('role', 'run_id', 'message_seq'))):
+            return False
+        stored = next((e for e in self.rt.log.read(task_id=task_id) if e.seq == attempt.seq), None)
+        if stored != attempt or run.state.phase not in {'opening', 'prompting'}:
+            return False
+        try:
+            check(force=True)
+        except Exception:
+            return False
+        return True
 
     def run_message(self, task_id, message, role, started, revision, assignment, driver, instructions):
+        return _exhaust(self.iter_message(task_id, message, role, started, revision,
+                                          assignment, driver, instructions))
+
+    def iter_message(self, task_id, message, role, started, revision, assignment, driver, instructions):
         from .external_agent import ExternalYield, ExternalRunLimit
         from .team import MAX_ACTOR_TURNS
         from .team_reply import TOOL as REPLY
@@ -58,6 +108,9 @@ class TeamExternal:
                 raise WorkConflict("当前通道已达到顾客配置的用量上限，未继续调用。")
             raw, workspace, binding, tools, basis = self.team._model_input(
                 task_id, message, role, run_id=started.payload["run_id"])
+            for pending in raw.get('pending_operations', []):
+                if self.owns(task_id, pending):
+                    pending['scheduler_owned_live'] = True
             last_scope = dict(raw["work_checkpoint"]["scope"])
             context = model_context(raw)
             fingerprint = driver_fingerprint(driver)
@@ -151,7 +204,13 @@ class TeamExternal:
                 run = driver.agent_run(cwd=scratch.path, tools=tools, execute=execute,
                                        check_current=check, on_update=None)
                 try:
-                    result = run.run(prompt)
+                    if self._scheduler == (task_id, threading.get_ident()):
+                        self._live[attempt.seq] = (attempt, run, check)
+                    iterative = getattr(run, 'iter_run', None)
+                    if callable(iterative):
+                        result = yield from iterative(prompt)
+                    else:
+                        result = run.run(prompt)
                     terminal = "returned"
                     check(force=True)
                     final = result.text
@@ -179,34 +238,64 @@ class TeamExternal:
                         failure.update(diagnostics(exc))
                     raise
                 finally:
+                    self._live.pop(attempt.seq, None)
+                    primary = sys.exception()
+                    revoke_error = None
+                    try:
+                        revoke = getattr(run, 'revoke_tools', None)
+                        if callable(revoke):
+                            revoke()
+                        elif run.state.cleanup_complete is not True:
+                            raise WorkConflict('外部运行没有撤权接口，且尚未确认清理完成。')
+                    except BaseException as exc:
+                        revoke_error = exc
+                        failure['revocation_error'] = type(exc).__name__
                     # The adapter closes the process/bridge before these facts
                     # settle. Missing settlement remains discoverable on restart.
                     state = run.state
-                    self.team.external_runs.finish(attempt, phase=state.phase,
-                        prompt_attempted=state.prompt_attempted, cleanup_complete=state.cleanup_complete,
-                        stop_reason=state.stop_reason, session_id=state.session_id, result=terminal)
+                    cleanup_ok = state.cleanup_complete is True and revoke_error is None
+                    try:
+                        self.team.external_runs.finish(attempt, phase=state.phase,
+                            prompt_attempted=state.prompt_attempted,
+                            cleanup_complete=cleanup_ok,
+                            stop_reason=state.stop_reason, session_id=state.session_id, result=terminal)
+                    except BaseException as exc:
+                        if primary is None:
+                            raise
+                        failure['external_settlement_error'] = type(exc).__name__
                     if state.prompt_attempted:
-                        self.rt.log.emit(type="team.model_called", actor=HOST, task_id=task_id, payload={
-                            "role": role.id, "driver": role.driver, "run_id": started.payload["run_id"],
-                            "external_started_seq": attempt.seq, "tokens": 0, "token_usage": "unavailable",
-                            "external_observations": dict(state.observations),
-                            "context_basis": basis, "request_sizes": {
-                                "prompt_utf8_bytes": len(prompt.encode("utf-8")),
-                                "instructions_utf8_bytes": len(prompt_instructions.encode("utf-8")),
-                                "context_json_bytes": len(context_text.encode("utf-8"))}})
-                    if not state.cleanup_complete:
+                        try:
+                            self.rt.log.emit(type="team.model_called", actor=HOST, task_id=task_id, payload={
+                                "role": role.id, "driver": role.driver, "run_id": started.payload["run_id"],
+                                "external_started_seq": attempt.seq, "tokens": 0, "token_usage": "unavailable",
+                                "external_observations": dict(state.observations),
+                                "context_basis": basis, "request_sizes": {
+                                    "prompt_utf8_bytes": len(prompt.encode("utf-8")),
+                                    "instructions_utf8_bytes": len(prompt_instructions.encode("utf-8")),
+                                    "context_json_bytes": len(context_text.encode("utf-8"))}})
+                        except BaseException as exc:
+                            if primary is None:
+                                raise
+                            failure['model_receipt_error'] = type(exc).__name__
+                    if not cleanup_ok:
                         failure.update(external_observations=dict(state.observations),
                                        failure_stage=state.failure_phase or "cleanup")
-                        raise WorkConflict("外部客户端尚未确认清理完成，保留运行记录；请先核对进程，不重放旧工作。")
+                        if primary is None or isinstance(primary, Exception):
+                            raise WorkConflict("外部客户端尚未确认清理完成，保留运行记录；请先核对进程，不重放旧工作。")
             finally:
                 # A local directory residue is not a failed model turn. It has
                 # its own durable receipt and cannot release process/tool holds.
+                primary = sys.exception()
                 try:
-                    scratch.close(client_stopped=run is None or run.state.cleanup_complete)
+                    scratch.close(client_stopped=run is None or run.state.cleanup_complete is True)
                 except (sqlite3.Error, OSError) as exc:
                     # The created receipt stays unconfirmed. Preserve any
                     # primary model/control error, or successful host handoff.
                     failure["launch_directory_settlement_error"] = type(exc).__name__
+                except BaseException as exc:
+                    if primary is None:
+                        raise
+                    failure['launch_directory_settlement_error'] = type(exc).__name__
         except WorkConflict as exc:
             status, reason = "interrupted", str(exc)
             if attempt is None and self.rt.execution_control.view(task_id)["seq"] != started.payload["control_seq"]:

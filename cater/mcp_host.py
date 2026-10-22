@@ -19,6 +19,7 @@ import sys
 import threading
 import time
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 
 from .tool_protocol import ToolCall, json_utf8, strict_json
@@ -36,6 +37,13 @@ class ToolBridgeError(RuntimeError):
 class _ExecutorAbort(BaseException):
     def __init__(self, error):
         self.error = error
+
+
+@dataclass
+class _PendingResponse:
+    data: bytes
+    deadline: float
+    offset: int = 0
 
 
 class McpToolBridge:
@@ -85,6 +93,7 @@ class McpToolBridge:
         self._pumping = False
         self._active = False
         self._revoked = False
+        self._pending_output = None
 
     def activate(self):
         """Enable business calls only after the owner has persisted its run."""
@@ -138,6 +147,59 @@ class McpToolBridge:
         Returns whether a frame was handled, not whether work was completed.
         Callback exceptions abort and propagate; structured errors remain results.
         """
+        return self._advance(timeout, cooperative=False)
+
+    @property
+    def has_pending_output(self) -> bool:
+        """Whether an already-handled frame still has response bytes to send."""
+        return self._pending_output is not None
+
+    def poll(self, timeout: float = 0.001) -> bool:
+        """Handle at most one frame with bounded transport waits on the owner.
+
+        Returns whether a new frame was handled. Pending output alone returns
+        False, even when its last bytes were sent; no next frame is read then.
+        Inspect has_pending_output before closing a revoked terminal tool's
+        bridge. Output has one total deadline, shared with synchronous pump.
+        Tool execution and JSON processing remain synchronous, without an OS
+        sandbox or a preemption guarantee for the executor.
+        """
+        return self._advance(timeout, cooperative=True)
+
+    def _flush_output(self, *, cooperative):
+        """Advance the saved wire bytes; only the synchronous caller drains."""
+        while True:
+            pending = self._pending_output
+            if pending is None:
+                return
+            if self._closed:
+                raise ToolBridgeError("MCP bridge is closed")
+            remaining = pending.deadline - time.monotonic()
+            if remaining <= 0:
+                raise ToolBridgeError("MCP response timed out")
+            self._connection.settimeout(0 if cooperative else remaining)
+            try:
+                sent = self._connection.send(memoryview(pending.data)[
+                    pending.offset:pending.offset + 65536])
+            except (socket.timeout, BlockingIOError):
+                if self._closed:
+                    raise ToolBridgeError("MCP relay disconnected") from None
+                if time.monotonic() >= pending.deadline:
+                    raise ToolBridgeError("MCP response timed out") from None
+                if cooperative:
+                    return
+                continue
+            if self._closed or not sent:
+                raise ToolBridgeError("MCP relay disconnected")
+            if time.monotonic() >= pending.deadline:
+                raise ToolBridgeError("MCP response timed out")
+            pending.offset += sent
+            if pending.offset == len(pending.data):
+                self._pending_output = None
+            if cooperative:
+                return
+
+    def _advance(self, timeout, *, cooperative):
         if threading.get_ident() != self._owner or self._pumping:
             raise ToolBridgeError("MCP bridge must be pumped by its owning runtime thread")
         if type(timeout) not in {int, float} or not math.isfinite(timeout) or not 0 < timeout <= 1:
@@ -146,19 +208,24 @@ class McpToolBridge:
             raise ToolBridgeError("MCP bridge is closed")
         self._pumping = True
         try:
+            if self.has_pending_output:
+                self._flush_output(cooperative=cooperative)
+                return False
+            wait_deadline = time.monotonic() + timeout
             if self._connection is None:
                 self._listener.settimeout(timeout)
                 try:
                     self._connection, _ = self._listener.accept()
-                except socket.timeout:
+                except (socket.timeout, BlockingIOError):
                     return False
                 self._frame_since = time.monotonic()
             connection = self._connection
             if b"\n" not in self._buffer:
                 try:
-                    connection.settimeout(timeout)
+                    connection.settimeout(max(0, wait_deadline - time.monotonic())
+                                          if cooperative else timeout)
                     chunk = connection.recv(min(65536, MAX_BYTES + 2 - len(self._buffer)))
-                except socket.timeout:
+                except (socket.timeout, BlockingIOError):
                     chunk = None
                 except OSError:
                     if not self._authenticated:
@@ -213,8 +280,9 @@ class McpToolBridge:
                 response = {"response": self._dispatch(value)}
             if self._closed:
                 raise ToolBridgeError("MCP bridge closed during execution")
-            connection.settimeout(self._timeout)
-            connection.sendall(self._encode(response))
+            data = self._encode(response)
+            self._pending_output = _PendingResponse(data, time.monotonic() + self._timeout)
+            self._flush_output(cooperative=cooperative)
             return True
         except _ExecutorAbort as failure:
             raise failure.error from None
@@ -309,6 +377,7 @@ class McpToolBridge:
     def close(self):
         self.revoke()
         self._closed = True
+        self._pending_output = None
         for stream in (self._connection, self._listener):
             if stream is not None:
                 try:

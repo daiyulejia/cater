@@ -147,7 +147,7 @@ class QoderAcpDriver:
 
 
 class ExternalAgentRun:
-    """A lazy single-use run. Call run() on the host runtime thread.
+    """A lazy single-use run. Drive run()/iter_run() on the host runtime thread.
 
     check_current may raise a host control exception or return False to stop.
     on_update receives observations only; notifications never execute tools.
@@ -182,6 +182,8 @@ class ExternalAgentRun:
         self._started_at = None
         self._observations = {}
         self._failure_phase = None
+        self._cooperative = False
+        self._deferred_yield = None
 
     @property
     def state(self):
@@ -233,18 +235,35 @@ class ExternalAgentRun:
             except BaseException as exc:
                 self._cancel_failures.append(exc)
 
-    def _current(self):
+    def _has_pending_output(self):
+        return self._cooperative and getattr(self._bridge, "has_pending_output", False) is True
+
+    def _current(self, *, allow_pending=False):
         if self._failure is not None:
             raise self._failure
-        if self._check_current() is False:
-            raise ExternalYield("External run is no longer current")
+        if self._deferred_yield is not None and not (allow_pending and self._has_pending_output()):
+            raise self._deferred_yield
+        try:
+            if self._check_current() is False:
+                raise ExternalYield("External run is no longer current")
+        except ExternalYield as exc:
+            if not (allow_pending and self._has_pending_output()):
+                raise
+            # A settled tool receipt may still be only partly on the wire.
+            # Withdraw authority now; cancel/close only after its output drains.
+            if self._deferred_yield is None:
+                self._deferred_yield = exc
+            self.revoke_tools()
 
     def _service(self):
         try:
-            self._current()
+            self._current(allow_pending=self._cooperative)
             if self._budget is not None:
                 self._budget.check()
-            self._bridge.pump(0.01)
+            if self._cooperative:
+                self._bridge.poll(timeout=0.001)
+            else:
+                self._bridge.pump(0.01)
             if self._budget is not None:
                 self._budget.check()
         except BaseException as exc:
@@ -280,7 +299,7 @@ class ExternalAgentRun:
 
     def _update(self, update):
         try:
-            self._current()
+            self._current(allow_pending=self._cooperative)
             # ACP already discards private thought chunks. Do not persist any
             # update content or arbitrary client-provided category as telemetry.
             if self._phase == "prompting" and update.get("sessionUpdate") in {
@@ -302,7 +321,7 @@ class ExternalAgentRun:
 
     def _request(self, method, params):
         try:
-            self._current()
+            self._current(allow_pending=self._cooperative)
         except BaseException as exc:
             self._stop(exc)
             raise
@@ -341,6 +360,29 @@ class ExternalAgentRun:
             raise AcpProtocolError("Unexpected Qoder model")
 
     def run(self, prompt) -> AcpPromptResult:
+        """Drain the shared lifecycle using the synchronous session entry points."""
+        iterator = self._iter_run(prompt, cooperative=False)
+        while True:
+            try:
+                next(iterator)
+            except StopIteration as done:
+                return done.value
+
+    def iter_run(self, prompt):
+        """Yield None at transport opportunities; return the original prompt result.
+
+        Custom sessions without both iterator entry points use open/prompt once,
+        synchronously. They do not acquire a cooperative scheduling guarantee.
+        Closing a started iterator synchronously revokes and cleans up the run.
+        """
+        return (yield from self._iter_run(prompt, cooperative=True))
+
+    def _session_operation(self, name, *args, **kwargs):
+        if self._cooperative:
+            return (yield from getattr(self._session, "iter_" + name)(*args, **kwargs))
+        return getattr(self._session, name)(*args, **kwargs)
+
+    def _iter_run(self, prompt, *, cooperative):
         with self._start_lock:
             if self._phase != "created":
                 raise RuntimeError("External runs are single-use; prompts cannot be replayed")
@@ -353,6 +395,9 @@ class ExternalAgentRun:
             self._bridge = McpToolBridge(self._tools, self._call, timeout=self._timeout)
             self._session = AcpSession(
                 self._command, cwd=self._cwd, timeout=self._timeout, on_request=self._request,
+            )
+            self._cooperative = cooperative and all(
+                callable(getattr(self._session, name, None)) for name in ("iter_open", "iter_prompt")
             )
             original_close = self._session.close
 
@@ -370,7 +415,7 @@ class ExternalAgentRun:
                     raise
 
             self._session.close = observed_close
-            opened = self._session.open(
+            opened = yield from self._session_operation("open",
                 mcp_servers=[self._bridge.server_config("cater")],
                 client_capabilities={}, on_update=self._update, service=self._service,
             )
@@ -384,13 +429,18 @@ class ExternalAgentRun:
             self._prompt_attempted = True
             self._mark("prompt_attempt_ms")
             if self._max_run_seconds is None:
-                result = self._session.prompt(prompt, on_update=self._update, service=self._service)
+                result = yield from self._session_operation(
+                    "prompt", prompt, on_update=self._update, service=self._service)
             else:
                 self._budget = _ProgressBudget(self._timeout, self._max_run_seconds)
-                result = self._session.prompt(prompt, on_update=self._update, service=self._service,
-                                              timeout=self._max_run_seconds)
+                result = yield from self._session_operation(
+                    "prompt", prompt, on_update=self._update, service=self._service,
+                    timeout=self._max_run_seconds)
             self._mark("response_ms")
             self._text, self._stop_reason = result.text, result.stop_reason
+            while self._has_pending_output():
+                self._service()
+                yield None
             self._current()
             self._phase = "finished"
             return result
