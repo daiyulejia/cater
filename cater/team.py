@@ -377,7 +377,7 @@ class TeamService:
                                   "properties": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
                                                  "label": {"type": "string", "maxLength": 160},
                                                  "recommended": {"type": "boolean"}}}}}}}}, ["title", "questions"]),
-            _tool("delegate", "向伙伴交代一份工作或复核委托。对方执行后会自动回报你。用清晰文本说明目标、背景、输入和交付期待。",
+            _tool("delegate", "向伙伴交代普通工作、讨论或咨询，对方执行后会自动回报你。用清晰文本说明目标、背景、输入和交付期待。需要独立验收成果版本时用request_review，普通委托的回报不是版本批准。",
                   {"recipient": recipient, "instruction": string}, ["recipient", "instruction"]),
             _tool("withdraw_work", "明确撤回本群当前目标里不再需要的普通委托或请求，例如重复的收尾确认。原发件人或店长可决定并说明原因；这是撤回，不伪造完成、回报或复核通过。不会撤回顾客输入、整个子树或当前正式复核，也不解除已启动操作的未知影响。接收者在后续工具边界停止。",
                   {"message_seq": {"type": "integer", "minimum": 1},
@@ -405,7 +405,7 @@ class TeamService:
                    "path": {"type": "string", "description": "仅工程ZIP：文件清单中的完整相对路径。"},
                    "offset": {"type": "integer", "minimum": 0},
                    "length": {"type": "integer", "minimum": 1, "maximum": 16000}}, ["artifact_seq"]),
-            _tool("request_review", "由成果发布作者本人提交当前真实成果给另一位独立伙伴复核，本轮等待结果。店长不是作者时，应通知作者调用本工具，不能代替作者提交。普通delegate或send_message不会创建正式复核请求。修复后先发布新版，再用原review_seq交回同一复核者，不能只说修好了。复核发现的问题必须闭环，店长不会越过未完成复核交付。",
+            _tool("request_review", "需要独立验收时，成果发布作者本人先用publish_artifact、publish_workspace_file或publish_workspace_archive保存待复核版本，再以返回的artifact_seq提交给另一位伙伴；保存版本不是最终交付。本工具会派发复核并等待结果，不必再delegate。店长本人是作者也走同一路径；不是作者时请作者提交，不能代替。普通delegate或send_message不会创建正式复核请求。复核者用record_review记录结论。修复后先发布新版，再用原review_seq交回同一复核者，不能只说修好了。复核发现的问题必须闭环，店长不会越过未完成复核交付。",
                   {"reviewer": recipient, "artifact_seqs": {"type": "array", "minItems": 1, "maxItems": 20,
                       "items": {"type": "integer", "minimum": 1}}, "instruction": string,
                    "review_seq": {"type": "integer", "minimum": 1,
@@ -428,7 +428,7 @@ class TeamService:
                   {"after_seq": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                    "scope": {"type": "string", "enum": ["inbox", "conversation"]},
                    "kind": {"type": "string", "enum": ["all", "notification"]}}, []),
-            _tool("publish_artifact", "保存完整文本成果，供顾客打开下载；如已在工作目录写文件，可用workspace_read读取真实内容后发布。",
+            _tool("publish_artifact", "保存完整文本成果的确切版本并返回artifact_seq，不代表验收或最终交付。需要独立复核时，作者将此序号交给request_review；最终交付由店长finish_work选择版本。已在工作目录写好文件时可用publish_workspace_file直接保存真实文件，避免转写。",
                   {"filename": string, "content": string, "summary": string,
                    "format": {"type": "string", "enum": ["code", "markdown", "text"]}},
                   ["filename", "content", "summary", "format"]),
@@ -485,7 +485,7 @@ class TeamService:
 
                 tools.append(restore_schema())
             tools.append(archive_schema())
-            tools.append(_tool("publish_workspace_file", "直接读取工作目录中已写好的真实UTF-8文件并发布，不必重复复述整份源码。",
+            tools.append(_tool("publish_workspace_file", "直接保存工作目录中已写好的真实UTF-8文件版本并返回artifact_seq，避免转写；不是验收或最终交付。需要独立复核时，作者将此序号交给request_review；最终交付由店长finish_work选择版本。",
                 {"path": string, "summary": string, "format": {"type": "string", "enum": ["code", "markdown", "text"]}},
                 ["path", "summary", "format"]))
         if self.rt.browser_checks.command:
