@@ -191,31 +191,33 @@ class TeamReviews:
                 raise ValueError("找不到本群的完整成果。")
             selected = [artifacts[seq] for seq in seqs]
             authors = {a["actor"] for a in selected}
-            if len(authors) != 1:
+            previous = self._find(task_id, arguments["review_seq"]) if "review_seq" in arguments else None
+            if previous is None and len(authors) != 1:
                 raise ValueError("每份复核由一位作者负责；多位作者可分别提交。")
-            author = next(iter(authors))
-            self.rt.team._role(author)
+            for publisher in authors:
+                self.rt.team._role(publisher)
+            # Continuations keep the review owner, independently of who published the files.
+            author = previous["author"] if previous else next(iter(authors))
             if role.id != author:
+                if previous:
+                    return {"status": "error", "code": "review_author_mismatch", "complete": True,
+                            "outcome": "not_started", "review_seq": previous["request_seq"],
+                            "expected_author": author,
+                            "message": f"这条复核链由 {author} 负责，请交回原负责人修订并提交。"}
                 return {"status": "error", "code": "review_author_mismatch", "complete": True,
                         "outcome": "not_started", "expected_author": author,
                         "message": f"这些成果由 {author} 发布，请通知作者本人提交复核，不能代提交。"}
-            if reviewer.id == author:
+            if reviewer.id == author or reviewer.id in authors:
                 return {"status": "error", "code": "reviewer_mismatch", "complete": True,
                         "outcome": "not_started",
                         "message": "作者不能复核自己的成果，请选择另一位伙伴独立复核。"}
             if len({a["filename"] for a in selected}) != len(selected) or any(
                     self._latest(artifacts).get(a["filename"]) != a["content_sha256"] for a in selected):
                 raise WorkConflict("请提交当前最新版本，不混用同名成果的旧版。")
-            previous = self._find(task_id, arguments["review_seq"]) if "review_seq" in arguments else None
-            overlapping = [r for r in self.view(task_id) if r["status"] != "stale" and r["author"] == author
+            overlapping = [r for r in self.view(task_id) if r["status"] != "stale"
                            and {a["filename"] for a in r["artifacts"]} & {a["filename"] for a in selected}]
             if previous is None and overlapping:
                 raise WorkConflict("这份成果已有复核记录；请用review_seq承接原修复闭环，不另开一份覆盖它。")
-            if previous and previous["author"] != author:
-                return {"status": "error", "code": "review_author_mismatch", "complete": True,
-                        "outcome": "not_started", "review_seq": previous["request_seq"],
-                        "expected_author": previous["author"],
-                        "message": f"这条复核链由 {previous['author']} 负责，请交回原作者修订并提交。"}
             if previous and previous["reviewer"] != reviewer.id:
                 return {"status": "error", "code": "reviewer_mismatch", "complete": True,
                         "outcome": "not_started", "review_seq": previous["request_seq"],

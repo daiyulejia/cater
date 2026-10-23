@@ -30,7 +30,7 @@ def fields():
                 "format": {"type": "string", "enum": ["code", "markdown", "text"]}},
             "required": ["path", "format"]},
         "review_seq": {"type": "integer", "minimum": 1,
-            "description": "同一目标内修订时填写当前复核request_seq，由原作者交回原复核者；本轮需提交完整成果集合，旧批准不覆盖新版。首次提交省略，不填委托或消息编号；已采用新目标且旧复核为stale时，省略旧review_seq，按当前目标另行提交。"},
+            "description": "同一目标内修订时填写当前复核request_seq，由原送审负责人交回原复核者；可直接选伙伴已发布的新版，不重复发布，本轮需提交完整成果集合，旧批准不覆盖新版。首次提交省略，不填委托或消息编号；已采用新目标且旧复核为stale时，省略旧review_seq，按当前目标另行提交。"},
     }
 
 

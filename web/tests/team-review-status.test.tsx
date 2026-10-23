@@ -40,10 +40,18 @@ test.each([
   render(panel({ ...state, reviews: [review(status)] }))
   const region = screen.getByRole('region', { name: '修复与复核' })
   expect(within(region).getByText(label)).toBeTruthy()
-  expect(within(region).getByText(/@月亮 修改 · @罐头 复核/)).toBeTruthy()
+  expect(within(region).getByText(/@月亮 送审 · @罐头 复核/)).toBeTruthy()
   expect(region.textContent).not.toContain('@author')
   expect(region.textContent).not.toContain('@reviewer')
   expect(within(screen.getByRole('region', { name: '团队进度' })).getByRole('region', { name: '修复与复核' })).toBe(region)
+})
+
+test('送审负责人不被误称为实际修改者', () => {
+  render(<TeamProgressPanel team={{ ...state, reviews: [review('pending', { author: 'owner' })] }}
+    events={[]} names={{ ...names, owner: '店长' }} />)
+  const region = screen.getByRole('region', { name: '修复与复核' })
+  expect(within(region).getByText(/@店长 送审 · @罐头 复核/)).toBeTruthy()
+  expect(region.textContent).not.toContain('@店长 修改')
 })
 
 test('旧数据缺少 reviews 或数组为空时不显示空区域', () => {

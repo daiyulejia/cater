@@ -34,7 +34,7 @@ function TeamReviewStatus({ team, names }: { team: TeamState; names: Record<stri
   const active = reviews.filter((review) => review.status !== 'approved' && review.status !== 'stale')
   const closed = reviews.filter((review) => review.status === 'approved' || review.status === 'stale')
   const rows = (items: TeamReview[]) => <ul className="mt-2 space-y-2">{items.map((review) => <li key={`${review.root_seq}:${review.request_seq}`}>
-    <p><strong>{reviewStatuses[review.status]}</strong> · @{names[review.author] ?? review.author} 修改 · @{names[review.reviewer] ?? review.reviewer} 复核</p>
+    <p><strong>{reviewStatuses[review.status]}</strong> · @{names[review.author] ?? review.author} 送审 · @{names[review.reviewer] ?? review.reviewer} 复核</p>
     <details>
       <summary className="cursor-pointer">文件与反馈 · {review.artifacts.length} 份</summary>
       <ul className="mt-1 space-y-1">{review.artifacts.map((artifact) => <li key={artifact.seq}>{artifact.filename} · 成果 #{artifact.seq}</li>)}</ul>

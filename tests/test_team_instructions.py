@@ -61,6 +61,12 @@ class TeamInstructionSelectionTests(unittest.TestCase):
                 with self.subTest(leader=leader, meaning=meaning):
                     self.assertIn(meaning, text)
 
+    def test_rework_guidance_keeps_review_owner_without_republishing_partner_versions(self):
+        for leader in (False, True):
+            text = self.base(leader=leader)
+            for clause in ("首次由成果发布者", "由原送审负责人", "伙伴已发布的版本", "不重复发布或改写发布者"):
+                self.assertIn(clause, text)
+
     def test_structured_state_selects_only_corresponding_note(self):
         states = [
             ({"background": {"source_task_id": "old"}}, "background是建群时冻结"),

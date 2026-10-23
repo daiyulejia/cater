@@ -120,6 +120,7 @@ test('现有协作图与列表呈现接续原委托关系和补充指令', async
     event(3, 'team.message_received', { kind: 'continuation', text: '补查现有成果', recipient: 'dev', continue_assignment_seq: 2, visible: true }, 'store_manager', 'agent'),
   ]))
   fireEvent.click(screen.getByRole('button', { name: '任务脉络' }))
+  await act(async () => { await vi.dynamicImportSettled() })
   const dialog = await screen.findByRole('dialog', { name: '任务脉络' })
   expect(await within(dialog).findByRole('region', { name: '当前团队协作图' })).toBeTruthy()
   fireEvent.click(within(dialog).getByRole('button', { name: '协作列表' }))
@@ -152,6 +153,7 @@ test('原生聊天复用脉络入口且不创建旧计划，打开关闭后保�
   const trigger = screen.getByRole('button', { name: '任务脉络' })
   trigger.focus()
   fireEvent.click(trigger)
+  await act(async () => { await vi.dynamicImportSettled() })
   const dialog = await screen.findByRole('dialog', { name: '任务脉络' })
   expect(await within(dialog).findByRole('region', { name: '当前团队协作图' })).toBeTruthy()
   expect(dialog.textContent).not.toContain('旧命令行进度')

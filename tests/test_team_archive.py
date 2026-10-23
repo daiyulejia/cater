@@ -234,16 +234,46 @@ class TeamArchiveTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(self.f.rt.team.archive(self.f.task))) as archive:
             self.assertEqual(archive.read("result.txt"), b"approved body")
 
-    def test_same_bytes_published_and_approved_by_two_authors_use_latest_approval(self):
+    def test_partner_same_bytes_resubmitted_by_owner_use_latest_approval(self):
         old = self.f.publish("identical body")
         first = self.f.request([old])
         self.assertEqual(self.f.record(first["review_seq"])["status"], "ok")
         self.f.acknowledge_latest_review()
         latest = self.f.publish("identical body", author=self.f.observer)
-        second = self.f.request([latest], requester=self.f.observer)
+        published = self.f.events("deliverable.published")
+        second = self.f.request([latest], review_seq=first["review_seq"])
+        self.assertEqual(second["status"], "ok")
+        self.assertEqual(second["root_seq"], first["root_seq"])
         self.assertEqual(self.f.record(second["review_seq"])["status"], "ok")
+        self.f.acknowledge_latest_review()
+        self.assertEqual(self.f.events("deliverable.published"), published)
+        row, = self.f.rt.team_reviews.view(self.f.task)
+        self.assertEqual((row["status"], row["author"]), ("approved", self.f.worker))
+        self.assertEqual(published[-1].actor.id, self.f.observer)
+        self.assertEqual(self.f.finish()["status"], "ok")
+        completed, = self.f.events("team.objective_completed")
+        self.assertEqual([a["seq"] for a in completed.payload["artifacts"]], [latest])
+        with zipfile.ZipFile(io.BytesIO(self.f.rt.team.archive(self.f.task))) as archive:
+            self.assertEqual(archive.read("result.txt"), b"identical body")
+
+    def test_legacy_same_bytes_published_and_approved_by_two_authors_use_latest_approval(self):
+        old = self.f.publish("identical body")
+        first = self.f.request([old])
+        self.assertEqual(self.f.record(first["review_seq"])["status"], "ok")
+        self.f.acknowledge_latest_review()
+        latest = self.f.publish("identical body", author=self.f.observer)
+        # Older versions permitted a parallel root; retain its archive-selection coverage.
+        original = next(e for e in self.f.events("team.review_requested") if e.seq == first["review_seq"])
+        artifact = next(a for a in self.f.rt.task(self.f.task).deliverables if a["seq"] == latest)
+        second = self.f.rt.log.emit(type="team.review_requested", actor=original.actor, task_id=self.f.task,
+            payload={**original.payload, "root_seq": None, "author": self.f.observer,
+                "requested_by": self.f.observer, "run_id": "legacy-archive-review",
+                "artifacts": [{k: artifact[k] for k in ("seq", "filename", "content_sha256")}]})
+        self.f.rt.team._send(self.f.task, self.f.rt.team._role(self.f.observer), self.f.reviewer,
+            "Inspect the legacy parallel candidate.", "assignment", review_seq=second.seq)
+        self.assertEqual(self.f.record(second.seq)["status"], "ok")
         report = next(e for e in reversed(self.f.rt.team._messages(self.f.task))
-                      if e.payload.get("review_seq") == second["review_seq"] and e.payload.get("kind") == "report")
+                      if e.payload.get("review_seq") == second.seq and e.payload.get("kind") == "report")
         self.f.exchange(self.f.observer, source=report)
         self.assertEqual([r["status"] for r in self.f.rt.team_reviews.view(self.f.task)], ["approved", "approved"])
         self.assertEqual(self.f.finish()["status"], "ok")

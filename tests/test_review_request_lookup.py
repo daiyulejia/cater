@@ -87,6 +87,9 @@ class ReviewRequestLookupTests(unittest.TestCase):
         tools = {tool["name"]: tool for tool in f.driver.calls[-1]["tools"]}
         self.assertIn("成果发布作者本人", tools["request_review"]["description"])
         self.assertIn("普通delegate", tools["request_review"]["description"])
+        self.assertIn("原送审负责人", tools["request_review"]["description"])
+        self.assertIn("保留真实发布者", tools["request_review"]["description"])
+        self.assertIn("原送审负责人", tools["delegate"]["description"])
         request = tools["request_review"]["input_schema"]["properties"]["review_seq"]
         record = tools["record_review"]["input_schema"]["properties"]["review_seq"]
         self.assertIn("首次提交省略", request["description"])
