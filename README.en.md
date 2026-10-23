@@ -6,7 +6,7 @@
 
 Tell the manager what you want to make and work with the team in one conversation. Add requirements, `@` a teammate, and inspect contributions and deliverables without switching between chat and task forms.
 
-Cater is under active development. It offers a Chinese-language local workroom, replayable collaboration, and configurable model connections. **The default is a local demo: it makes no real model calls and does not modify your files or perform engineering work.**
+Cater is under active development, with model tool calls, project file operations, command execution, team handoffs, and version-specific reviews already implemented. **Quick Start runs a local demo by default: it makes no real model calls and does not modify project files or perform engineering work.** Actual execution requires a model connection that supports tool calls and an authorized workspace.
 
 ## Quick Start
 
@@ -32,22 +32,26 @@ If the port is occupied, first check whether Cater is already running. Updating 
 
 Available today:
 
-- **Chat collaboration**: create tasks, mention teammates, add directions, and follow progress.
+- **Chat collaboration**: create tasks, mention teammates, add directions, let teammates delegate work and return results, and follow progress.
 - **Related conversations**: start separate work from a frozen background snapshot while the original task continues.
-- **Readable deliverables**: open, copy, or download published text, Markdown, and code bodies.
+- **Readable deliverables**: open, copy, or download published text, Markdown, and code bodies; publish actual project files and project ZIP snapshots.
+- **Project tools**: bind a workspace to read, search, create, and edit files and run configured commands within its permissions; run checks against copies of exact published artifact versions.
 - **Inspectable records**: explore subtask dependencies, replay collaboration events, and distinguish agent reports from actual check receipts.
-- **Versioned acceptance**: execute work in dependency order and download artifact bodies, a manifest, and handoff notes after whole-task acceptance.
+- **Version-specific review and delivery**: request independent reviews and reviews after revisions; formal delivery checks approved versions and work still awaiting return. Handoff notes can retain actual command receipts and recheck steps. A separate work-item workflow provides dependency scheduling and stage/whole-task acceptance gates.
 - **Configurable teammates**: customize names, responsibilities, and model connections through local CLI drivers or Chat Completions-compatible APIs.
 
 ## Connect Real Models
 
 Try the demo first, then follow the [integration examples](examples/README.md) to configure your model or local CLI. Roles can share a connection or use separate ones.
 
-Keep API keys in environment variables, not role cards, chat messages, or Git. File access and command execution depend on the tools you connect and their permissions. Connecting a chat API alone does not provide those capabilities.
+The built-in Anthropic Messages and Chat Completions-compatible drivers support native tool turns and can execute model-requested tools. Follow [project workspaces and host tools](docs/workspaces.zh-CN.md) to configure and bind a directory with `read_only`, `edit`, or `execute` permissions. Model credentials alone do not grant project access. Local CLI execution capabilities depend on the driver and configuration.
+
+Keep API keys in environment variables, not role cards, chat messages, or Git.
 
 ## Current Limits
 
-- A model's conclusion, vote, or "done" message does not prove correctness. Dependency scheduling and stage/whole-task acceptance gates are implemented; real-model long-task quality, automatic tool execution, and uncertain-result recovery still need work.
+- Tool execution, handoffs, and version-specific reviews are implemented. These mechanisms do not establish reliable long-task completion or high-quality autonomous work with real models, or guarantee completion of arbitrary tasks. Model conclusions, review approvals, and successful command exits still need to be assessed against the actual scope of checks.
+- Interrupted-work continuation, blocking of unknown effects, and manual reconciliation are implemented. When command or publication results are unknown, confirm execution has stopped and inspect actual effects before continuing; operations are not automatically replayed. This does not guarantee automatic recovery from every interruption or correct delivery.
 - Cater does not provide a general filesystem or network sandbox. Role definitions, prompts, and process management are not permission isolation. Run only trusted driver configurations and commands.
 - The workroom binds to loopback by default. Remote access requires explicit opt-in, an access token, and HTTPS or an equivalent controlled network boundary that you provide.
 
@@ -56,6 +60,7 @@ Keep API keys in environment variables, not role cards, chat messages, or Git. F
 The guides below are primarily in Chinese.
 
 - [Integration and configuration](examples/README.md)
+- [Conversational collaboration](docs/team-chat.zh-CN.md)
 - [Deliverables and replay](docs/artifacts.zh-CN.md)
 - [Work items and whole-task acceptance](docs/work-items.zh-CN.md)
 - [Local verification and safety](docs/local-verification.zh-CN.md)
