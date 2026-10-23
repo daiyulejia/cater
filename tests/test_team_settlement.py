@@ -57,6 +57,7 @@ class TeamSettlementTests(unittest.TestCase):
             "load_tools": {"names": ["read_messages"]},
             "delegate": {"recipient": self.worker, "instruction": "Inspect the result"},
             "send_message": {"recipient": self.worker, "text": "Inspect this result"},
+            "return_work": {"text": "Prepared fixture result returned."},
             "set_objective": {"goal": "Adopted new fixture goal"},
             "finish_work": {"summary": "Fixture delivered", "verification": "Text only"},
             "reply_to_customer": {"text": "Fixture answer; no task completion claimed."},
@@ -84,7 +85,11 @@ class TeamSettlementTests(unittest.TestCase):
                 self.rt.team._send(task, self.rt.team._role(self.worker), self.manager, "Review this source", "assignment",
                                    review_seq=request.seq)
                 arguments = {"review_seq": request.seq, "verdict": "approved", "feedback": "Read the source; no execution claimed"}
-        message = self.rt.team.receive(task, "Run the prepared fixture action")
+        if name == "return_work":
+            message = self.rt.team._send(task, self.rt.team._role(self.worker), self.manager,
+                                         "Return this fixture result.", "assignment")
+        else:
+            message = self.rt.team.receive(task, "Run the prepared fixture action")
         run = self.rt.log.emit(type="team.run_started", actor=HOST, task_id=task, payload={
             "message_seq": message.seq, "role": self.manager, "run_id": f"case-{message.seq}", "revision": 0,
             "control_seq": self.rt.execution_control.view(task)["seq"],

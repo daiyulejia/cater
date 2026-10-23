@@ -39,7 +39,7 @@ from .tool_loading import TOOL as LOAD_TOOLS, load_result, select_tools, with_lo
 HOST = Actor.system("team")
 MAX_ACTOR_TURNS = 32
 MAX_ACTIVE_ROLES = 5
-LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "set_objective", "request_questions",
+LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "return_work", "set_objective", "request_questions",
                                "request_review", "record_review", "finish_work", "withdraw_work", "reply_to_customer", LOAD_TOOLS})
 LOCAL_EVENT_CONTRACT = {"version": 1, "kind": "atomic_local_events", "receipt": "same_transaction"}
 EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", PROJECT_RESTORE, "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "browser_check", MCP_CALL})
@@ -387,7 +387,9 @@ class TeamService:
             _tool("withdraw_work", "明确撤回本群当前目标里不再需要的普通委托或请求，例如重复的收尾确认。原发件人或店长可决定并说明原因；这是撤回，不伪造完成、回报或复核通过。不会撤回顾客输入、整个子树或当前正式复核，也不解除已启动操作的未知影响。接收者在后续工具边界停止。",
                   {"message_seq": {"type": "integer", "minimum": 1},
                    "reason": {"type": "string", "minLength": 1, "maxLength": 4000}}, ["message_seq", "reason"]),
-            _tool("send_message", "向伙伴交代工作或提问会唤起对方并承接结果。区分进展知会、正式交回和接续工作；不要要求伙伴在修改或送审前先正式交回。序号或状态不确定先read_checkpoint/read_messages，不重复猜测；已交回后确需补做，用完整新请求承接。",
+            _tool("return_work", "将当前active_assignment的实际结果、证据和未完事项交回原委托人。宿主关联原请求及收件人，无需填写编号；成功后结束本轮，不再修改刚交回的成果。仅有进展用send_message.notify_only；没有当前委托时不猜其他工作。正式复核用record_review，店长最终交付用finish_work。",
+                  {"text": string}, ["text"]),
+            _tool("send_message", "向伙伴交代工作或提问会唤起对方并承接结果。交回当前委托优先return_work，无需猜编号。区分进展知会和接续工作；不要要求伙伴在修改或送审前先正式交回。序号或状态不确定先read_checkpoint/read_messages；已交回后确需补做，用完整新请求承接。",
                   {"recipient": recipient, "text": string, "reply_to": {"type": "integer",
                        "description": "正式交回对方发给你的原请求/委托（也可填有效接续序号），成功后结束你本轮执行。仍要修改、送审或处理反馈时不要用它汇报中间进展。不能填对方的report，也不能替收件人回复自己发出的委托。"},
                    "continue_assignment_seq": {"type": "integer", "minimum": 1,
@@ -887,7 +889,7 @@ class TeamService:
             if self.recovery.run_scope(task_id, started) is None:
                 raise WorkConflict("监督执行的目标、控制、规则或工程范围已变化，未继续旧请求或执行旧响应。")
         if source is not None and source.payload.get("kind") == "continuation" and self._waiting_assignment(task_id, source, role) is None:
-            own_return = any(r.get("run_id") == started.payload["run_id"] and r.get("name") == "send_message"
+            own_return = any(r.get("run_id") == started.payload["run_id"] and r.get("name") in {"send_message", "return_work"}
                 and r.get("result", {}).get("status") == "ok" and any(
                     e.seq == r["result"].get("message_seq") and e.payload.get("kind") == "report"
                     and e.payload.get("reply_to") == source.payload.get("continue_assignment_seq")
@@ -996,7 +998,12 @@ class TeamService:
             e = self._send(task_id, role, arguments["recipient"], arguments["instruction"], "assignment",
                            parent_assignment_seq=assignment.seq if assignment else None)
             return {"status": "ok", "message_seq": e.seq, "recipient": e.payload["recipient"]}
-        if name == "send_message":
+        if name in {"send_message", "return_work"}:
+            if name == "return_work":
+                if assignment is None:
+                    return {"status": "error", "code": "no_current_assignment", "complete": True,
+                        "outcome": "not_started", "message": "本轮没有明确的原委托，未交回任何工作。普通顾客问答用reply_to_customer；需要处理其他工作时先核对read_checkpoint，不猜原请求。"}
+                arguments = {"recipient": assignment.actor.id, "reply_to": assignment.seq, "text": arguments["text"]}
             reply_to = arguments.get("reply_to")
             resolved_reply_to = None
             notify_only = arguments.get("notify_only", False)
@@ -1044,6 +1051,16 @@ class TeamService:
                             "message": "原委托已有正式回报，本次不同正文未再次发送。请先核对原回报；如需补充或更正，再明确发送新的消息或仅知会，不冒充重复交回。"}
                     return {"status": "ok", "message_seq": reported.seq, "already_reported": True,
                             **({"resolved_reply_to": resolved_reply_to} if resolved_reply_to is not None else {})}
+                if type(original.payload.get("review_seq")) is int:
+                    review = next((row for row in self.rt.team_reviews.view(task_id)
+                        if row["request_seq"] == original.payload["review_seq"]
+                        and row.get("message_seq") == original.seq and row["reviewer"] == role.id), None)
+                    if review is not None:
+                        outdated = review["status"] != "pending"
+                        return {"status": "error", "code": "review_version_changed" if outdated else "review_decision_required",
+                            "complete": True, "outcome": "not_started", "review_seq": review["request_seq"],
+                            "message": ("这份复核的成果版本已变化，普通交回未发送。请通知原作者发布并续提交当前版本，再核对新的复核请求；不要按旧版本批准。"
+                                if outdated else "这是正式复核委托，尚未登记结论；普通交回未发送。请核对实际成果后，用record_review提交approved或changes_requested及具体依据，它会自动交回原作者。仅有进展可用send_message.notify_only。")}
             e = self._send(task_id, role, arguments["recipient"], arguments["text"],
                            "continuation" if continuing is not None else "notification" if notify_only else "report" if reply_to is not None else "message",
                            reply_to=reply_to, parent_assignment_seq=assignment.seq if assignment else None, visible=True,
@@ -1755,6 +1772,7 @@ class TeamService:
                 operation_failed = False
                 executed_names = []
                 finish_accepted = False
+                handoff_accepted = False
                 returned = False
                 for call in turn.calls:
                     failure_stage = "tool_dispatch"
@@ -1781,7 +1799,7 @@ class TeamService:
                     if call.name == "reply_to_customer" and result.get("status") == "ok":
                         final, answered = call.arguments["text"].strip(), True
                         break
-                    if (call.name == "send_message" and result.get("status") == "ok"
+                    if (call.name in {"send_message", "return_work"} and result.get("status") == "ok"
                             and assignment is not None and any(
                                 event.seq == result.get("message_seq") and _assignment_report(assignment, event)
                                 for event in self._messages(task_id))):
@@ -1796,7 +1814,7 @@ class TeamService:
                         waiting = awaiting_customer = True
                     if (call.name in {"request_review", "record_review"}
                             or call.name == "delegate" and result.get("waiting_for_review") is True) and result.get("status") == "ok":
-                        waiting = True
+                        waiting = handoff_accepted = True
                         break
                 if answered or returned:
                     with self.rt.log.atomic():
@@ -1831,7 +1849,7 @@ class TeamService:
                             return
                 if finish_accepted:
                     raise WorkConflict("交付已记录，但当前范围或执行收尾已变化，先核对实际交付与未结算操作，不继续执行本批后续请求。")
-                if awaiting_customer or waiting and not operation_failed:
+                if awaiting_customer or handoff_accepted or waiting and not operation_failed:
                     status = "waiting"
                     break
                 yield

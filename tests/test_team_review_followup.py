@@ -307,9 +307,15 @@ class TeamReviewFollowupTests(unittest.TestCase):
             ('send_message', {'recipient': f.worker, 'reply_to': source.seq, 'text': 'First ordinary report'}),
             ('send_message', {'recipient': f.worker, 'reply_to': source.seq, 'text': 'Second ordinary report'}))
         for result in (first, second):
-            self.assertEqual(result['status'], 'ok')
-            self.assertNotIn('already_reported', result)
-        self.assertNotEqual(first['message_seq'], second['message_seq'])
+            self.assertEqual((result['status'], result['code']), ('error', 'review_decision_required'))
+            self.assertEqual(result['review_seq'], request['review_seq'])
+            self.assertNotIn('message_seq', result)
+        self.assertFalse([e for e in f.rt.team._messages(f.task)
+                          if e.payload.get('kind') == 'report' and e.payload.get('reply_to') == source.seq])
+        # Old databases may contain plain reports emitted before the strict handoff check.
+        for text in ('First ordinary report', 'Second ordinary report'):
+            f.rt.team._send(f.task, f.rt.team._role(f.reviewer), f.worker, text,
+                            'report', reply_to=source.seq, visible=True)
         self.assert_open(f, request, source)
         result, = f.exchange(f.worker, ('send_message', {'recipient': f.reviewer,
             'text': 'Register the original exact review after checking.', 'continue_assignment_seq': source.seq}))

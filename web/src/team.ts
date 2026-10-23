@@ -290,6 +290,40 @@ export function resolveTeam(team: TeamState | null | undefined, events: TeamEven
     ...(objective?.type === 'team.objective_completed' ? { status: 'done' } : {}) }
 }
 
+export function isTeamReturnWorkReceipt(start: TeamEvent | undefined, finish: TeamEvent): start is TeamEvent {
+  return Boolean(start && isTeamHost(start) && start.type === 'team.tool_started'
+    && isTeamHost(finish) && finish.type === 'team.tool_finished'
+    && Number.isSafeInteger(start.seq) && start.seq > 0 && Number.isSafeInteger(finish.seq) && start.seq < finish.seq
+    && finish.payload.started_seq === start.seq
+    && start.payload.name === 'return_work' && finish.payload.name === 'return_work'
+    && [start, finish].every(event => event.payload.tool === undefined || event.payload.tool === 'return_work')
+    && typeof start.payload.run_id === 'string' && start.payload.run_id.trim() && finish.payload.run_id === start.payload.run_id
+    && typeof start.payload.role === 'string' && start.payload.role.trim() && finish.payload.role === start.payload.role
+    && ['call_id', 'message_seq'].every(key => finish.payload[key] === undefined || finish.payload[key] === start.payload[key]))
+}
+
+export function teamReturnWorkMessage(start: TeamEvent | undefined, finish: TeamEvent, bySeq: ReadonlyMap<number, TeamEvent>): TeamEvent | undefined {
+  if (!isTeamReturnWorkReceipt(start, finish)) return undefined
+  const raw = finish.payload.result
+  const result = raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {}
+  const message = typeof result.message_seq === 'number' ? bySeq.get(result.message_seq) : undefined
+  if (result.status !== 'ok' || ![undefined, 'ok', 'completed', 'succeeded'].includes(finish.payload.status as string | undefined)
+    || result.complete === false
+    || !message || !Number.isSafeInteger(message.seq) || start.seq >= message.seq || message.seq >= finish.seq
+    || message.type !== 'team.message_received' || message.actor.kind !== 'agent' || message.actor.id !== start.payload.role
+    || message.payload.kind !== 'report' || message.payload.visible !== true
+    || typeof message.payload.text !== 'string' || !message.payload.text.trim()
+    || typeof message.payload.recipient !== 'string' || !message.payload.recipient.trim()
+    || typeof message.payload.reply_to !== 'number' || !Number.isSafeInteger(message.payload.reply_to)
+    || message.payload.reply_to <= 0 || message.payload.reply_to >= start.seq) return undefined
+  // Routing comes from the persisted report; the run's input may be a different message.
+  const source = bySeq.get(message.payload.reply_to)
+  if (source && (source.type !== 'team.message_received' || !['human', 'agent'].includes(source.actor.kind ?? '')
+    || !['assignment', 'message'].includes(String(source.payload.kind))
+    || source.actor.id !== message.payload.recipient || source.payload.recipient !== message.actor.id)) return undefined
+  return message
+}
+
 export function teamMessageEchoes(events: TeamEvent[]): Set<number> {
   // A tool receipt ties the delivered message to a specific model turn.
   const bySeq = new Map(events.map((event) => [event.seq, event]))
@@ -298,6 +332,11 @@ export function teamMessageEchoes(events: TeamEvent[]): Set<number> {
     const p = event.payload
     const result = p.result !== null && typeof p.result === 'object' ? p.result as Record<string, unknown> : {}
     const start = typeof p.started_seq === 'number' ? bySeq.get(p.started_seq) : undefined
+    if (start?.payload.name === 'return_work' || p.name === 'return_work') {
+      const message = teamReturnWorkMessage(start, event, bySeq)
+      return message ? [{ run: p.run_id, actor: message.actor.id, text: message.payload.text,
+        recipient: teamMessageAudience(message, bySeq).recipient, returned: true }] : []
+    }
     const message = typeof result.message_seq === 'number' ? bySeq.get(result.message_seq) : undefined
     if (!start || !isTeamHost(start) || start.type !== 'team.tool_started' || start.payload.name !== 'send_message'
       || typeof start.payload.run_id !== 'string' || !message || message.type !== 'team.message_received'
@@ -305,7 +344,7 @@ export function teamMessageEchoes(events: TeamEvent[]): Set<number> {
         && !(['report', 'continuation'].includes(String(message.payload.kind)) && message.payload.visible === true)) || start.payload.role !== message.actor.id
       || p.role !== message.actor.id || result.status !== 'ok') return []
     return [{ run: start.payload.run_id, actor: message.actor.id, text: message.payload.text,
-      recipient: teamMessageAudience(message, bySeq).recipient }]
+      recipient: teamMessageAudience(message, bySeq).recipient, returned: false }]
   })
   return new Set(events.filter((event) => {
     if (event.type !== 'msg.said' || event.payload.phase !== 'team') return false
@@ -313,6 +352,7 @@ export function teamMessageEchoes(events: TeamEvent[]): Set<number> {
     if (audience.audience === 'customer') return false
     const recipient = audience.recipient ?? (typeof event.payload.recipient === 'string' ? event.payload.recipient : undefined)
     return sent.some((message) => message.run === event.payload.run_id && message.actor === teamSpeaker(event)
+      && (!message.returned || isTeamHost(event) || event.actor.kind === 'agent' && event.actor.id === message.actor)
       && (recipient === undefined || recipient === message.recipient)
       && typeof message.text === 'string' && message.text === event.payload.text)
   }).map((event) => event.seq))

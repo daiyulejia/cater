@@ -202,7 +202,7 @@ class TeamExternal:
                             or call.name == "delegate" and result.get("waiting_for_review") is True):
                         stop_kind = "waiting"
                         awaiting_customer = call.name == "request_questions"
-                    elif call.name == "send_message" and assignment is not None and any(
+                    elif call.name in {"send_message", "return_work"} and assignment is not None and any(
                         event.seq == result.get("message_seq")
                         and event.actor == Actor.agent(role.id, role.role)
                         and event.payload.get("kind") == "report"

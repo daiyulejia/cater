@@ -1,4 +1,4 @@
-import { isTeamHost, teamContinuationSource, teamRuns, teamRunStatus } from './team'
+import { isTeamHost, teamContinuationSource, teamReturnWorkMessage, teamRuns, teamRunStatus } from './team'
 import type { TeamEvent, TeamState, TeamWithdrawal } from './team'
 
 export type TeamGraphEntry = {
@@ -122,8 +122,10 @@ export function projectTeamGraph(team: TeamState, input: readonly TeamEvent[]): 
     if (!isTeamHost(finish) || finish.type !== 'team.tool_finished') continue
     const p = finish.payload, result = record(p.result)
     const start = bySeq.get(Number(p.started_seq)), sent = messages.find(message => message.seq === result.message_seq)
+    if ((start?.payload.name === 'return_work' || p.name === 'return_work')
+      && (!sent || teamReturnWorkMessage(start, finish, bySeq) !== sent)) continue
     if (!start || !isTeamHost(start) || start.type !== 'team.tool_started' || !sent || result.status !== 'ok'
-      || !['delegate', 'send_message', 'request_review'].includes(text(start.payload.name))
+      || !['delegate', 'send_message', 'return_work', 'request_review'].includes(text(start.payload.name))
       || start.seq >= sent.seq || sent.seq >= finish.seq || start.payload.role !== sent.actor.id
       || p.role !== sent.actor.id || p.run_id !== start.payload.run_id
       || (p.name !== undefined && p.name !== start.payload.name)) continue

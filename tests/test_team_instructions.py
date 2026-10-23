@@ -75,6 +75,16 @@ class TeamInstructionSelectionTests(unittest.TestCase):
             self.assertIn(clause, text)
         self.assertNotIn("【店长职责】", self.base(leader=False))
 
+    def test_return_guidance_distinguishes_current_work_from_other_open_work(self):
+        current = context_instructions({"active_assignment": {"seq": 9}, "open_assignments": [{"seq": 10}]})
+        other = context_instructions({"active_assignment": None, "open_assignments": [{"seq": 10}]})
+        self.assertIn("完成时用return_work交回", current)
+        self.assertIn("本轮没有active_assignment", other)
+        self.assertIn("不替其他委托结单", other)
+        self.assertIn("return_work", self.base())
+        self.assertIn("return_work", self.base(leader=False))
+        self.assertIn("return_work", EXTERNAL)
+
     def test_structured_state_selects_only_corresponding_note(self):
         states = [
             ({"background": {"source_task_id": "old"}}, "background是建群时冻结"),

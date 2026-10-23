@@ -631,6 +631,24 @@ test.each(['message', 'report'])('send_message 的显式 %s 即使没有 turn.te
   expect(stream().queryByText('自动进度无需再次展示')).toBeNull()
 })
 
+test.each([false, true])('return_work 保留报告正文、收件人与原委托关系，同轮全文回声不重复（回声=%s）', async echo => {
+  const text = '入口已修复，回归测试通过，交回店长核对。'
+  const events = [event(2, 'team.message_received', { text: '修复入口', kind: 'assignment', recipient: 'dev' }, 'store_manager', 'agent'),
+    event(3, 'team.run_started', { role: 'dev', run_id: 'return-run', message_seq: 2 }),
+    ...(echo ? [event(4, 'msg.said', { phase: 'team', run_id: 'return-run', text, audience: 'team', recipient: 'store_manager', reply_to: 2 }, 'dev', 'agent')] : []),
+    event(5, 'team.tool_started', { name: 'return_work', role: 'dev', run_id: 'return-run', message_seq: 2, arguments: { text } }),
+    event(6, 'team.message_received', { text, kind: 'report', visible: true, recipient: 'store_manager', reply_to: 2 }, 'dev', 'agent'),
+    event(7, 'team.tool_finished', { name: 'return_work', role: 'dev', run_id: 'return-run', started_seq: 5, result: { status: 'ok', message_seq: 6 } }),
+    event(8, 'team.run_finished', { role: 'dev', run_id: 'return-run', message_seq: 2, status: 'completed' })]
+  await mount(detail(events))
+  expect(stream().getAllByText(text)).toHaveLength(1)
+  const row = stream().getByText(text).closest('article')!
+  expect(row.querySelector('[data-actor="dev"].is-agent')).toBeTruthy()
+  expect(within(row).getByText('@店长')).toBeTruthy()
+  expect(within(row).getByText('回复 #2')).toBeTruthy()
+  expect(board().getByText('交回当前工作')).toBeTruthy()
+})
+
 test.each(['message', 'report'])('只有同轮工具明确关联的显式 %s 全文回声去重，相似文本、下一轮与其他角色原话均保留', async (kind) => {
   await mount(detail([
     event(2, 'msg.said', { text: '需要确认入口范围', phase: 'team', run_id: 'run-a' }, 'dev', 'agent'),
