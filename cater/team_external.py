@@ -90,7 +90,6 @@ class TeamExternal:
 
     def iter_message(self, task_id, message, role, started, revision, assignment, driver, instructions):
         from .external_agent import ExternalYield, ExternalRunLimit
-        from .team import MAX_ACTOR_TURNS
         from .team_reply import TOOL as REPLY
 
         def diagnostics(error):
@@ -199,7 +198,8 @@ class TeamExternal:
                     elif call.name == REPLY:
                         stop_kind = "answered"
                         delivered_text = call.arguments["text"].strip()
-                    elif call.name in {"wait_for_reply", "request_questions", "request_review", "record_review"}:
+                    elif (call.name in {"wait_for_reply", "request_questions", "request_review", "record_review"}
+                            or call.name == "delegate" and result.get("waiting_for_review") is True):
                         stop_kind = "waiting"
                         awaiting_customer = call.name == "request_questions"
                     elif call.name == "send_message" and assignment is not None and any(
@@ -210,8 +210,6 @@ class TeamExternal:
                         and event.payload.get("recipient") == assignment.actor.id
                         for event in self.team._messages(task_id)):
                         stop_kind = "returned"
-                if stop_kind is None and calls >= MAX_ACTOR_TURNS:
-                    stop_kind = "checkpoint"
                 # Revoke before acknowledging a terminal host action. A later
                 # model tool request cannot mutate already handed-off work.
                 if stop_kind is not None:
@@ -251,16 +249,13 @@ class TeamExternal:
                         status, reason = "interrupted", "外部伙伴本轮回复结束，但尚未正式交回原委托；需根据成果和回执继续交接。"
                     self.rt._driver_health.record_success(role.driver)
                 except ExternalYield:
-                    if stop_kind not in {"waiting", "checkpoint", "delivered", "delivery_unchanged", "returned", "answered"}:
+                    if stop_kind not in {"waiting", "delivered", "delivery_unchanged", "returned", "answered"}:
                         raise WorkConflict("外部运行停止，但没有对应的宿主交接记录；保留原委托，不按完成处理。")
                     terminal = "yielded"
                     final = run.state.text
                     self.rt._driver_health.record_success(role.driver)
                     if stop_kind == "waiting":
                         status = "waiting"
-                    elif stop_kind == "checkpoint":
-                        status, reason = "interrupted", "本轮到达工具检查点，已有成果和回执保留，接下来核对并继续剩余工作。"
-                        failure["interruption_kind"] = "turn_boundary"
                     elif stop_kind in {"delivered", "delivery_unchanged", "answered"}:
                         final = delivered_text
                 except Exception as exc:

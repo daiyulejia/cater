@@ -51,6 +51,16 @@ class TeamInstructionSelectionTests(unittest.TestCase):
                    "delivery_index": None, "tool_history_window": {"omitted_groups": 0}}
         self.assertEqual(context_instructions(context), "")
 
+    def test_common_example_distinguishes_deliverable_review_from_discussion(self):
+        for leader in (False, True):
+            text = self.base(leader=leader)
+            for meaning in ("检查本次交付文件", "review.workspace_file", "一次保存候选", "review.artifact_seqs",
+                            "读取该版后record_review", "有反馈沿原链修订", "讨论方法仍用不带review的delegate",
+                            "不为无需复核的工作增设检查", "简单成果给简短结果和入口",
+                            "按需放handoff", "避免与主摘要重复"):
+                with self.subTest(leader=leader, meaning=meaning):
+                    self.assertIn(meaning, text)
+
     def test_structured_state_selects_only_corresponding_note(self):
         states = [
             ({"background": {"source_task_id": "old"}}, "background是建群时冻结"),
@@ -217,6 +227,8 @@ class TeamInstructionWireTests(unittest.TestCase):
                 schemas.append(f.driver.calls[0]["tools"])
             prefixes.append(prefix)
         self.assertEqual(prefixes[0], prefixes[1])
+        self.assertIn("review.workspace_file", prefixes[0])
+        self.assertIn("按需放handoff", prefixes[0])
         self.assertEqual(schemas[0], schemas[1])
 
 

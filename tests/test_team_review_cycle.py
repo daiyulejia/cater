@@ -384,8 +384,11 @@ class TeamReviewCycleTests(TeamSupervisionTests):
         self.publish()
         tools = {tool["name"]: tool["input_schema"] for tool in self.driver.calls[-1]["tools"]}
         request = tools["request_review"]
-        self.assertEqual(set(request["required"]), {"reviewer", "artifact_seqs", "instruction"})
-        self.assertEqual(set(request["properties"]), {"reviewer", "artifact_seqs", "instruction", "review_seq"})
+        self.assertEqual(set(request["required"]), {"reviewer", "instruction"})
+        self.assertIn("artifact_seqs", request["properties"])
+        self.assertIn("workspace_file", request["properties"])
+        self.assertEqual(set(request["properties"]["workspace_file"]["required"]), {"path", "format"})
+        self.assertEqual(set(request["properties"]), {"reviewer", "artifact_seqs", "workspace_file", "instruction", "review_seq"})
         self.assertFalse(request["additionalProperties"])
         props = request["properties"]
         self.assertEqual(props["reviewer"]["type"], "string")

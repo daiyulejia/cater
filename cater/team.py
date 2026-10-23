@@ -32,6 +32,7 @@ from .mcp import CALL as MCP_CALL, LIST as MCP_LIST, read_only_call
 from .project_history import ProjectHistory, TOOL as PROJECT_HISTORY
 from .project_restore import TOOL as PROJECT_RESTORE, public_arguments as restore_arguments
 from .work import WorkConflict
+from .team_review_input import ReviewInputError
 
 
 HOST = Actor.system("team")
@@ -359,6 +360,7 @@ class TeamService:
             return message, role, started
 
     def _schemas(self, role, workspace, *, has_background=False, workspace_id=None, has_project_history=False):
+        from .team_review_input import fields as review_fields
         string = {"type": "string"}
         members = [self.rt.organization.leader, *self.rt.roles]
         recipient = {"type": "string", "enum": [r.id for r in members if r.id != role.id]}
@@ -377,8 +379,10 @@ class TeamService:
                                   "properties": {"id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$"},
                                                  "label": {"type": "string", "maxLength": 160},
                                                  "recommended": {"type": "boolean"}}}}}}}}, ["title", "questions"]),
-            _tool("delegate", "向伙伴交代普通工作、讨论或咨询，对方执行后会自动回报你。用清晰文本说明目标、背景、输入和交付期待。需要独立验收成果版本时用request_review，普通委托的回报不是版本批准。",
-                  {"recipient": recipient, "instruction": string}, ["recipient", "instruction"]),
+            _tool("delegate", "向伙伴交代工作、讨论或咨询。需要对方检查交付文件时填review：可直接选择workspace_file的路径和格式，宿主保存候选并登记版本复核，也可选已有artifact_seqs；本轮等待复核回报。修订用原review_seq。不填review仍是普通委托，其回报不是版本批准。用清晰文本说明目标、输入与交付期待。",
+                  {"recipient": recipient, "instruction": string,
+                   "review": {"type": "object", "additionalProperties": False, "properties": review_fields(),
+                       "description": "明确请伙伴复核交付版本时填写；选择workspace_file或artifact_seqs，宿主复用正式复核与返修链，不需另外派发。"}}, ["recipient", "instruction"]),
             _tool("withdraw_work", "明确撤回本群当前目标里不再需要的普通委托或请求，例如重复的收尾确认。原发件人或店长可决定并说明原因；这是撤回，不伪造完成、回报或复核通过。不会撤回顾客输入、整个子树或当前正式复核，也不解除已启动操作的未知影响。接收者在后续工具边界停止。",
                   {"message_seq": {"type": "integer", "minimum": 1},
                    "reason": {"type": "string", "minLength": 1, "maxLength": 4000}}, ["message_seq", "reason"]),
@@ -405,14 +409,11 @@ class TeamService:
                    "path": {"type": "string", "description": "仅工程ZIP：文件清单中的完整相对路径。"},
                    "offset": {"type": "integer", "minimum": 0},
                    "length": {"type": "integer", "minimum": 1, "maximum": 16000}}, ["artifact_seq"]),
-            _tool("request_review", "需要独立验收时，成果发布作者本人先用publish_artifact、publish_workspace_file或publish_workspace_archive保存待复核版本，再以返回的artifact_seq提交给另一位伙伴；保存版本不是最终交付。本工具会派发复核并等待结果，不必再delegate。店长本人是作者也走同一路径；不是作者时请作者提交，不能代替。普通delegate或send_message不会创建正式复核请求。复核者用record_review记录结论。修复后先发布新版，再用原review_seq交回同一复核者，不能只说修好了。复核发现的问题必须闭环，店长不会越过未完成复核交付。",
-                  {"reviewer": recipient, "artifact_seqs": {"type": "array", "minItems": 1, "maxItems": 20,
-                      "items": {"type": "integer", "minimum": 1}}, "instruction": string,
-                   "review_seq": {"type": "integer", "minimum": 1,
-                       "description": "修订时填写当前复核request_seq，由原作者交回原复核者；可改名、增补或拆合成果，但artifact_seqs必须是本轮完整提交集合，旧批准不覆盖新版。首次提交省略，不填委托或消息编号。"}}, ["reviewer", "artifact_seqs", "instruction"]),
+            _tool("request_review", "需要独立验收时，成果发布作者本人提交已有artifact_seqs；未发布的单份目录文件也可用workspace_file保存待复核版本并提交，保存不是最终交付。本工具会派发复核并等待结果，不必再delegate。店长本人是作者也走同一路径；不是作者时请作者提交，不能代替。不带review的普通delegate或send_message不会创建正式复核请求。复核者用record_review记录结论。修复后提交新版并用原review_seq交回同一复核者，不能只说修好了。复核发现的问题必须闭环，店长不会越过未完成复核交付。",
+                  {"reviewer": recipient, "instruction": string, **review_fields()}, ["reviewer", "instruction"]),
             _tool("record_review", "对reviews中指定版本记录独立复核结论并自动回给作者，本轮结束。发现需修复问题用changes_requested，读修正版且确认问题解决才approved；旧版通过不涵盖后续修改。具体写清依据与未验证范围。",
                   {"review_seq": {"type": "integer", "minimum": 1,
-                       "description": "request_review返回的review_seq或reviews[].request_seq；不是委托message_seq、成果seq或回执seq。没有正式请求时先反馈给作者，由作者发布并request_review。"},
+                       "description": "request_review或带review的delegate返回的review_seq，也可取reviews[].request_seq；不是委托message_seq、成果seq或回执seq。没有正式请求时先反馈作者，用delegate.review或request_review提交确切版本，不猜消息号。"},
                    "verdict": {"type": "string", "enum": ["changes_requested", "approved"]},
                    "feedback": string}, ["review_seq", "verdict", "feedback"]),
             _tool("read_receipts", "读取本群真实工具回执。receipt_seq精确读一份既有回执；role、message_seq、name、run_id和before_seq可筛选分页，run_id不是角色名。section=file_reads只列当前目录绑定期间已观察的文件读取元数据，可用file_path精确筛选，再用返回的receipt_seq读原文。first/last_observed不是基线/当前磁盘；节选不补全文，历史不授权写入或证明结论。",
@@ -897,7 +898,7 @@ class TeamService:
                        or (e.type == "team.message_received" and e.actor == Actor.human()
                            and e.seq > source.seq) for e in events)
 
-    def _execute(self, task_id, role, name, arguments, workspace, binding, tool_start, assignment):
+    def _execute(self, task_id, role, name, arguments, workspace, binding, tool_start, assignment, *, review_input=None):
         post_delivery = name == "workspace_run" and any(
             e.seq == tool_start.payload.get("revision") and e.actor == HOST
             for e in self.rt.log.iter_events(task_id=task_id, event_types=("team.objective_completed",)))
@@ -953,8 +954,10 @@ class TeamService:
         if name == "request_questions":
             event = self.rt.questionnaires.request(task_id, role, arguments, tool_start, assignment)
             return {"status": "ok", "question_seq": event.seq, "waiting_for_customer": True}
-        if name == "request_review":
-            return self.rt.team_reviews.request(task_id, role, arguments, tool_start, assignment)
+        if name == "request_review" or name == "delegate" and "review" in arguments:
+            from .team_review_input import request
+
+            return request(self, task_id, role, name, arguments, binding, tool_start, assignment, review_input)
         if name == "record_review":
             return self.rt.team_reviews.record(task_id, role, arguments, tool_start)
         if name == "withdraw_work":
@@ -1018,12 +1021,19 @@ class TeamService:
             return {"status": "ok", "message_seq": e.seq, **({"notified_only": True} if notify_only else {}),
                     **({"resolved_reply_to": resolved_reply_to} if resolved_reply_to is not None else {})}
         if name == "set_objective":
+            from .team_instructions import OBJECTIVE_CHANGED
+
             goal = _text(arguments["goal"], "目标", 12000)
             current_work = self.view(task_id)
-            if current_work["objective"] != goal or current_work["status"] == "done":
-                self.rt.log.emit(type="team.objective_updated", task_id=task_id, actor=HOST,
-                                 payload={"goal": goal, "run_id": tool_start.payload["run_id"]})
-            return {"status": "ok", "goal": goal}
+            changed = current_work["objective"] != goal or current_work["status"] == "done"
+            revision = current_work["revision"]
+            if changed:
+                event = self.rt.log.emit(type="team.objective_updated", task_id=task_id, actor=HOST,
+                                        payload={"goal": goal, "run_id": tool_start.payload["run_id"]})
+                revision = event.seq
+            return {"status": "ok", "goal": goal, "revision": revision,
+                    "work_status": "running" if changed else current_work["status"], "scope_changed": changed,
+                    **({"continuation_note": OBJECTIVE_CHANGED} if changed else {})}
         if name == "read_messages":
             after, limit, kind = arguments.get("after_seq", 0), arguments.get("limit", 20), arguments.get("kind", "all")
             scope = arguments.get("scope", "inbox")
@@ -1203,24 +1213,33 @@ class TeamService:
             return result
 
         try:
+            from .team_review_input import prepare
+
+            self._current(task_id, started, role, revision)
+            invalid = (set(call.arguments) - set(schema["properties"])
+                       or not set(schema["required"]) <= set(call.arguments))
             # Only event-only host tools share a transaction with their receipt.
-            with self.rt.log.atomic() if call.name in LOCAL_EVENT_TOOLS else nullcontext():
-                self._current(task_id, started, role, revision)
-                if (set(call.arguments) - set(schema["properties"])
-                        or not set(schema["required"]) <= set(call.arguments)):
-                    # No executor has run: this is a correctable input error, not an unknown effect.
-                    return settle({"status": "error", "code": "invalid_arguments", "complete": True,
-                        "outcome": "not_started", "message": "工具参数不符合字段要求，未执行工具动作。请按字段说明修正后重试。",
-                        "allowed_fields": sorted(schema["properties"]), "required_fields": sorted(schema["required"])})
-                result = self._execute(task_id, role, call.name, call.arguments, workspace, binding, tool_start, assignment)
-                if (call.name in EXTERNAL_EFFECT_TOOLS and result.get("status") == "error"
-                        and isinstance(result.get("error"), dict) and result["error"].get("code") == "operation_failed"):
-                    result = {**result, "complete": False, "outcome": "effects_unknown"}
-                if call.name in LOCAL_EVENT_TOOLS and result.get("status") != "ok":
-                    raise _RejectedLocalTool(result)
-                return settle(result)
+            with (nullcontext(None) if invalid else prepare(self, task_id, role, call, workspace, binding, tool_start)) as review_input:
+                with self.rt.log.atomic() if call.name in LOCAL_EVENT_TOOLS else nullcontext():
+                    self._current(task_id, started, role, revision)
+                    if invalid:
+                        # No executor has run: this is a correctable input error, not an unknown effect.
+                        return settle({"status": "error", "code": "invalid_arguments", "complete": True,
+                            "outcome": "not_started", "message": "工具参数不符合字段要求，未执行工具动作。请按字段说明修正后重试。",
+                            "allowed_fields": sorted(schema["properties"]), "required_fields": sorted(schema["required"])})
+                    result = self._execute(task_id, role, call.name, call.arguments, workspace, binding, tool_start, assignment,
+                        **({"review_input": review_input} if review_input is not None else {}))
+                    if (call.name in EXTERNAL_EFFECT_TOOLS and result.get("status") == "error"
+                            and isinstance(result.get("error"), dict) and result["error"].get("code") == "operation_failed"):
+                        result = {**result, "complete": False, "outcome": "effects_unknown"}
+                    if call.name in LOCAL_EVENT_TOOLS and result.get("status") != "ok":
+                        raise _RejectedLocalTool(result)
+                    return settle(result)
         except _RejectedLocalTool as exc:
             result = exc.result
+        except ReviewInputError as exc:
+            result = {"status": "error", "code": "invalid_review_source", "complete": True,
+                      "outcome": "not_started", "message": str(exc)}
         except WorkConflict as exc:
             result = {"status": "error", "message": str(exc)}
         except (ValueError, KeyError, TypeError, OSError):
@@ -1662,8 +1681,10 @@ class TeamService:
                         waiting = True
                     if call.name == "request_questions" and result.get("status") == "ok":
                         waiting = awaiting_customer = True
-                    if call.name in {"request_review", "record_review"} and result.get("status") == "ok":
+                    if (call.name in {"request_review", "record_review"}
+                            or call.name == "delegate" and result.get("waiting_for_review") is True) and result.get("status") == "ok":
                         waiting = True
+                        break
                 if answered:
                     with self.rt.log.atomic():
                         self._finish_message(task_id, message, role, started, revision, assignment,
