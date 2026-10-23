@@ -1,10 +1,23 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { expect, test } from 'vitest'
-import { TeamProgressPanel } from '../src/TeamProgressPanel'
-import type { TeamState } from '../src/team'
+import { TeamProgressPanel, TeamToolProgress } from '../src/TeamProgressPanel'
+import type { TeamEvent, TeamState } from '../src/team'
 
 const team: TeamState = { enabled: true, objective: '完整目标与验收范围'.repeat(100), checkpoint: '已收到2条待处理消息',
   status: 'running', pending_count: 2, revision: 1, runs: [], assignments: [] }
+
+test('工具过程将载入说明和真正执行区分，不显示原始工具名或声称检查通过', () => {
+  const actor = { id: 'team', kind: 'system', role: 'team' }
+  const events: TeamEvent[] = [
+    { seq: 3, type: 'team.tool_started', actor, payload: { role: 'dev', run_id: 'run',
+      message_seq: 1, name: 'load_tools', call_id: 'load', arguments: { names: ['workspace_run'] } } },
+    { seq: 4, type: 'team.tool_finished', actor, payload: { role: 'dev', run_id: 'run',
+      name: 'load_tools', started_seq: 3, result: { status: 'ok', loaded_names: ['workspace_run'] } } },
+  ]
+  render(<TeamToolProgress events={events} names={{ dev: '月亮' }} />)
+  expect(screen.getByLabelText('团队工具过程').textContent).toContain('载入工具说明')
+  expect(screen.getByLabelText('团队工具过程').textContent).not.toMatch(/load_tools|检查通过|执行成功|已交付/)
+})
 
 test('目标与最近备注默认折叠，执行状态和待处理事实仍直接可见', () => {
   render(<TeamProgressPanel team={team} events={[]} names={{}} executionState="paused" />)

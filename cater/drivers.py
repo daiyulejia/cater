@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .processes import ProcessScope, worker_python
+from .tool_loading import validate_mode
 from .tool_protocol import (ToolTurn, json_utf8, openai_history, openai_turn, prepare_tool_turn,
                             strict_json, safe_tool_usage, _usage)
 from .usage import usage_source, valid_token_count
@@ -718,6 +719,7 @@ class OpenAICompatibleDriver:
         max_tokens: int | None = None,
         max_completion_tokens: int | None = None,
         tool_response_corrections: int = 1,
+        tool_loading: str = "all",
     ):
         if type(tool_response_corrections) is not int or tool_response_corrections not in (0, 1):
             raise ValueError("tool_response_corrections must be an integer 0 or 1")
@@ -736,6 +738,7 @@ class OpenAICompatibleDriver:
         self.max_tokens = max_tokens
         self.max_completion_tokens = max_completion_tokens
         self.tool_response_corrections = tool_response_corrections
+        self.tool_loading = validate_mode(tool_loading)
 
     def _output_limit(self) -> dict[str, int]:
         # Providers disagree on the field name; never silently switch or retry.
@@ -960,6 +963,7 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
             max_tokens=data.get("max_tokens"),
             max_completion_tokens=data.get("max_completion_tokens"),
             tool_response_corrections=data.get("tool_response_corrections", 1),
+            tool_loading=data.get("tool_loading", "all"),
         )
     raise ValueError(f"unknown driver kind: {kind!r}")
 

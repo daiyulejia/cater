@@ -25,7 +25,7 @@ const toolNames: Record<string, string> = { workspace_run: '运行命令', works
   reply_to_customer: '答复顾客',
   workspace_restore_project_file: '恢复历史工程文件',
   publish_workspace_archive: '发布工程包',
-  list_skills: '查看工作指引目录', read_skill: '阅读工作指引', read_project_history: '读取同项目历史', browser_check: '浏览器检查', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果', read_background: '读取来源材料', read_receipts: '核对执行回执', read_messages: '补读历史消息', read_checkpoint: '读取工作检查点', read_delivery: '读取交付说明', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件', set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复', request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论' }
+  list_skills: '查看工作指引目录', read_skill: '阅读工作指引', load_tools: '载入工具说明', read_project_history: '读取同项目历史', browser_check: '浏览器检查', delegate: '交接工作', send_message: '投递消息', read_artifact: '读取成果', read_background: '读取来源材料', read_receipts: '核对执行回执', read_messages: '补读历史消息', read_checkpoint: '读取工作检查点', read_delivery: '读取交付说明', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件', set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复', request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论' }
 
 const reviewStatuses: Record<TeamReview['status'], string> = {
   pending: '待复核', changes_requested: '待修复', approved: '已复核通过', outdated: '新版待复核', stale: '历史复核',

@@ -10,7 +10,7 @@ const sourceLabels = { artifact: '成果原文', tool_receipt: '历史工具回�
 const statusLabels: Record<string, string> = { ok: '正常返回', error: '返回错误', completed: '已结束', succeeded: '执行成功',
   passed: '检查通过', failed: '执行失败', approved: '伙伴同意', changes_requested: '伙伴建议修改', timeout: '超时', unavailable: '不可用' }
 
-const toolLabels: Record<string, string> = { browser_check: '检查网页交互', workspace_read: '读取文件', workspace_write: '写入文件', workspace_run: '运行命令', workspace_list: '列出目录', workspace_search: '查找文件', read_artifact: '读取成果原文' }
+const toolLabels: Record<string, string> = { browser_check: '检查网页交互', workspace_read: '读取文件', workspace_write: '写入文件', workspace_run: '运行命令', workspace_list: '列出目录', workspace_search: '查找文件', read_artifact: '读取成果原文', load_tools: '载入工具说明' }
 const outcomeLabels = { passed: '检查通过', failed: '执行失败', timeout: '超时', launch_error: '启动失败', effects_unknown: '执行影响待核实', not_started: '未开始执行' }
 
 function SourceQuote({ source, name, reply = false }: { source: HandoffEvidence; name?: (id: string) => string; reply?: boolean }) {

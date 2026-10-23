@@ -172,6 +172,11 @@ cater --drivers examples/openai_compatible_driver_config.json web
 纠正会产生一次新的模型请求，仍计入既有用量保护，不提高额度。仅纠正未执行的工具响应，
 不重放已经成功的动作；网络异常、输出截断、未知操作影响和暂停不据此自动续试。
 
+同样只对这两种原生 API，可选 `"tool_loading": "on_demand"`，让角色按需载入工具参数定义，
+而不是每轮发送全部定义；默认 `"all"` 保持现状。只接受这两个字符串值，不发送给服务商。
+角色仍能发现所有实际授权工具；载入不执行动作或增加权限，但可能增加一次模型请求，
+不保证总 token 或费用下降。外部 ACP/CLI 不切换工具列表。详见 [按需工具说明](../docs/team-chat.zh-CN.md)。
+
 如果想让内阁共用一个账号、执行层共用另一个账号，可成对使用
 [`layered_api_driver_config.json`](layered_api_driver_config.json) 与
 [`layered_api_roles.json`](layered_api_roles.json)：

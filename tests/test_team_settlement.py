@@ -50,9 +50,11 @@ class TeamSettlementTests(unittest.TestCase):
                                 payload={**run.payload, "status": "interrupted", **changes})
 
     def prepare(self, name):
+        self.driver.tool_loading = "on_demand" if name == "load_tools" else "all"
         task = self.rt.create_task(f"Settlement case {name}")
         self.rt.team.enable(task)
         arguments = {
+            "load_tools": {"names": ["read_messages"]},
             "delegate": {"recipient": self.worker, "instruction": "Inspect the result"},
             "send_message": {"recipient": self.worker, "text": "Inspect this result"},
             "set_objective": {"goal": "Adopted new fixture goal"},
@@ -110,9 +112,13 @@ class TeamSettlementTests(unittest.TestCase):
                 self.assertEqual(after[-1].payload["execution_contract"], LOCAL_EVENT_CONTRACT)
                 self.assertEqual(self.rt.team._pending_operations(task)[-1]["outcome"], "unsettled")
                 self.rt.team._retire_interrupted(task)
-                pending, = self.rt.team._pending_operations(task)
-                self.assertEqual(pending["outcome"], "not_committed")
-                self.assertFalse(pending["replay_authorized"])
+                pending = self.rt.team._pending_operations(task)
+                if name == "load_tools":
+                    self.assertEqual(pending, [], "An ended metadata-only load must not block future work")
+                else:
+                    self.assertEqual(len(pending), 1)
+                    self.assertEqual(pending[0]["outcome"], "not_committed")
+                    self.assertFalse(pending[0]["replay_authorized"])
                 self.assertEqual(self.rt.team.view(task)["status"], "running")
                 self.assertFalse(self.rt.log.db.in_transaction)
         self.assertTrue(self.rt.verify_chain().ok)

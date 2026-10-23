@@ -65,6 +65,16 @@ test('来源材料的进行中读取在现有进展条显示中文工具名', ()
   expect(output).not.toContain('read_background')
 })
 
+test.each([false, true])('载入工具说明使用中文且不冒充执行检查或交付：%s', finished => {
+  const events = [human(), start(), tool(3, { name: 'load_tools', arguments: { names: ['workspace_run'] } })]
+  if (finished) events.push(receipt({ name: 'load_tools', result: {
+    status: 'ok', loaded_names: ['workspace_run'], effective: 'next_model_request',
+  } }))
+  const output = text({ events })
+  expect(output).toContain('载入工具说明')
+  expect(output).not.toMatch(/load_tools|检查通过|已确认本次交付|任务已完成/)
+})
+
 test('结构化提问表达等待顾客而非失联，直接聊天后不继续催旧问题', () => {
   const question = event(3, 'team.questions_requested', { role_id: 'dev', message_seq: 1, title: '补充背景' })
   const events = [human(), start(), question, end(4, 'waiting')]

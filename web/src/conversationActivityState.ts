@@ -46,7 +46,7 @@ const tools: Record<string, string> = {
   read_receipts: '核对执行回执', read_messages: '补读历史消息', read_background: '读取来源材料', read_checkpoint: '读取工作检查点', read_delivery: '读取交付说明', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件',
   set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复',
   request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论',
-  list_skills: '查看工作指引目录', read_skill: '阅读工作指引',
+  list_skills: '查看工作指引目录', read_skill: '阅读工作指引', load_tools: '载入工具说明',
   list_mcp_tools: '查看外部工具目录', call_mcp_tool: '调用外部工具',
   read_project_history: '读取同项目历史',
   workspace_restore_project_file: '恢复历史工程文件',

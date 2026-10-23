@@ -33,17 +33,18 @@ from .project_history import ProjectHistory, TOOL as PROJECT_HISTORY
 from .project_restore import TOOL as PROJECT_RESTORE, public_arguments as restore_arguments
 from .work import WorkConflict
 from .team_review_input import ReviewInputError
+from .tool_loading import TOOL as LOAD_TOOLS, load_result, select_tools, with_loader
 
 
 HOST = Actor.system("team")
 MAX_ACTOR_TURNS = 32
 MAX_ACTIVE_ROLES = 5
 LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "set_objective", "request_questions",
-                               "request_review", "record_review", "finish_work", "withdraw_work", "reply_to_customer"})
+                               "request_review", "record_review", "finish_work", "withdraw_work", "reply_to_customer", LOAD_TOOLS})
 LOCAL_EVENT_CONTRACT = {"version": 1, "kind": "atomic_local_events", "receipt": "same_transaction"}
 EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", PROJECT_RESTORE, "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "browser_check", MCP_CALL})
 PAUSED_TOOLS = frozenset({"read_artifact", "read_receipts", "read_messages", "read_background", "read_checkpoint",
-                          "read_delivery", "list_skills", "read_skill", "wait_for_reply", "reply_to_customer", PROJECT_HISTORY})
+                          "read_delivery", "list_skills", "read_skill", "wait_for_reply", "reply_to_customer", PROJECT_HISTORY, LOAD_TOOLS})
 _MISSING_RETURN_FIELD = object()
 _DYNAMIC_RETURN_FIELD = object()
 
@@ -666,6 +667,10 @@ class TeamService:
             contract = p.get("execution_contract")
             local = (isinstance(p.get("name"), str) and p["name"] in LOCAL_EVENT_TOOLS and isinstance(contract, dict)
                      and type(contract.get("version")) is int and contract == LOCAL_EVENT_CONTRACT)
+            if ended and local and p["name"] == LOAD_TOOLS and not finished:
+                # Loading only changes the ended run's ephemeral schema selection.
+                # Its missing receipt cannot hide a file/process effect or block new work.
+                continue
             outcome = "not_committed" if ended and local and not finished else "unknown" if ended else "unsettled"
             rows.append({"seq": start.seq, "started_seq": start.seq,
                 **{key: p.get(key) for key in ("run_id", "role", "message_seq", "name", "arguments")},
@@ -745,6 +750,10 @@ class TeamService:
                 tools = [tool for tool in tools if tool["name"] != "reply_to_customer"]
             if self.rt.execution_control.view(task_id)["state"] != "running":
                 tools = [tool for tool in tools if tool["name"] in PAUSED_TOOLS]
+            driver = self.rt.drivers.get(role.driver)
+            if (getattr(driver, "tool_loading", "all") == "on_demand"
+                    and not callable(getattr(driver, "agent_run", None))):
+                tools = with_loader(tools)
             context, rules = self._context_snapshot(task_id, message, role, run_id=run_id,
                                                    tool_names={tool["name"] for tool in tools})
         applied = self.rt.rulebook._record_snapshot(task_id, rules)
@@ -1285,8 +1294,9 @@ class TeamService:
                         return settle({"status": "error", "code": "invalid_arguments", "complete": True,
                             "outcome": "not_started", "message": "工具参数不符合字段要求，未执行工具动作。请按字段说明修正后重试。",
                             "allowed_fields": sorted(schema["properties"]), "required_fields": sorted(schema["required"])})
-                    result = self._execute(task_id, role, call.name, call.arguments, workspace, binding, tool_start, assignment,
-                        **({"review_input": review_input} if review_input is not None else {}))
+                    result = (load_result(call.arguments, schema) if call.name == LOAD_TOOLS else
+                        self._execute(task_id, role, call.name, call.arguments, workspace, binding, tool_start, assignment,
+                            **({"review_input": review_input} if review_input is not None else {})))
                     if (call.name in EXTERNAL_EFFECT_TOOLS and result.get("status") == "error"
                             and isinstance(result.get("error"), dict) and result["error"].get("code") == "operation_failed"):
                         result = {**result, "complete": False, "outcome": "effects_unknown"}
@@ -1525,6 +1535,10 @@ class TeamService:
                                          assignment, **outcome)
                 return
             history, history_receipts = [], []
+            loaded_tools = set()
+            if (getattr(driver, "tool_loading", "all") == "on_demand"
+                    and self.rt.team_reviews.pending_for(task_id, role, assignment) is not None):
+                loaded_tools.add("record_review")
             tools, binding = None, None
             correction, correction_scope, correction_used = None, None, False
             review_followup = None
@@ -1552,9 +1566,12 @@ class TeamService:
                     raise WorkConflict("工程范围或工具集合已变化，请核对当前工程后从原委托继续；未重放旧操作。")
                 workspace, binding, tools = next_workspace, next_binding, next_tools
                 context = model_context(raw_context)
+                wire_tools, catalog = select_tools(tools, loaded_tools)
+                if catalog is not None:
+                    context["tool_catalog"] = catalog
                 if review_followup is not None:
                     context["review_followup"] = review_followup
-                wire_history, window = history_window(history, history_receipts, tools=tools)
+                wire_history, window = history_window(history, history_receipts, tools=wire_tools)
                 context["tool_history_window"] = {**window, "run_id": started.payload["run_id"]}
                 if correction is not None:
                     context["response_correction"] = correction_context(correction["correction_of"], correction["issue"])
@@ -1564,7 +1581,7 @@ class TeamService:
                 request_sizes = {"prompt_utf8_bytes": len(prompt.encode("utf-8")),
                                  "instructions_utf8_bytes": len(prompt_instructions.encode("utf-8")),
                                  "context_json_bytes": len(context_text.encode("utf-8")),
-                                 "history_json_bytes": json_bytes(wire_history), "tools_json_bytes": json_bytes(tools),
+                                 "history_json_bytes": json_bytes(wire_history), "tools_json_bytes": json_bytes(wire_tools),
                                  "history_omitted_groups": window["omitted_groups"]}
                 self._current(task_id, started, role, revision)
                 live_binding = self.rt.workspaces.view(task_id)
@@ -1602,7 +1619,7 @@ class TeamService:
                             failure["admission_not_started"] = True
                         raise WorkConflict("监督请求前出现未核对操作，先核对实际影响，不重放旧工作。")
                     invocation_started = True
-                    turn = driver.tool_turn(role=role.role, prompt=prompt, history=wire_history, tools=tools)
+                    turn = driver.tool_turn(role=role.role, prompt=prompt, history=wire_history, tools=wire_tools)
                 except DriverProtocolError as error:
                     self.rt._driver_health.record_rejection(role.driver)
                     failure["context_basis"] = basis
@@ -1663,6 +1680,9 @@ class TeamService:
                         call["id"] for row in history if row["role"] == "assistant"
                         for call in row.get("tool_calls", [])}:
                     raise ValueError("模型复用了本轮早先工具调用标识，未执行重复标识的操作。")
+                if catalog is not None and any(call.name not in {tool["name"] for tool in wire_tools}
+                                               for call in turn.calls):
+                    raise ValueError("模型请求了本轮尚未声明的工具，整批未执行；应先载入并在下一次请求使用。")
                 self._current(task_id, started, role, revision)
                 if turn.text.strip():
                     final = turn.text
@@ -1713,7 +1733,7 @@ class TeamService:
                 for call in turn.calls:
                     failure_stage = "tool_dispatch"
                     tool_start, result = self._dispatch_tool(task_id, message, role, started, revision,
-                        call, tools, workspace, binding, context, assignment, on_started=tool_started)
+                        call, wire_tools, workspace, binding, context, assignment, on_started=tool_started)
                     failure_stage = "tool_result_recording"
                     executed_names.append(call.name)
                     history.append({"role": "tool", "tool_call_id": call.id, "is_error": result.get("status") != "ok",
@@ -1721,6 +1741,8 @@ class TeamService:
                     history_receipts.append({"call_id": call.id, "started_seq": tool_start.seq, "name": call.name,
                                              "status": result.get("status")})
                     operation_failed |= result.get("status") != "ok"
+                    if call.name == LOAD_TOOLS and result.get("status") == "ok":
+                        loaded_tools.update(result["loaded_names"])
                     if call.name in {"set_objective", "finish_work"}:
                         revision = self.view(task_id)["revision"]
                     if call.name == "finish_work" and result.get("status") == "ok" and result.get("already_completed") is True:

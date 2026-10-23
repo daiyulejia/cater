@@ -13,6 +13,7 @@ from urllib.request import Request
 from .drivers import (MAX_API_RESPONSE_BYTES, DriverProtocolError, DriverResponse,
                       DriverUnavailable, TextRequestRejected, TextTransportFailure, _open_api_request, _safe_api_endpoint,
                       _retry_after_seconds, _text_only_request, _token_budget, _tool_api_request, _tool_response_error)
+from .tool_loading import validate_mode
 from .tool_protocol import ToolTurn, anthropic_history, anthropic_turn, prepare_tool_turn
 from .usage import valid_token_count
 
@@ -23,7 +24,8 @@ class AnthropicMessagesDriver:
     def __init__(self, name: str, *, endpoint: str, model: str, api_key_env: str,
                  max_tokens: int = 4096, timeout: float = 60.0,
                  version: str = "2023-06-01", token_budget: int | None = None,
-                 thinking: str | None = None, tool_response_corrections: int = 1):
+                 thinking: str | None = None, tool_response_corrections: int = 1,
+                 tool_loading: str = "all"):
         if type(tool_response_corrections) is not int or tool_response_corrections not in (0, 1):
             raise ValueError("tool_response_corrections must be an integer 0 or 1")
         parsed = urlparse(endpoint)
@@ -49,6 +51,7 @@ class AnthropicMessagesDriver:
         self.token_budget = token_budget
         self.thinking = thinking
         self.tool_response_corrections = tool_response_corrections
+        self.tool_loading = validate_mode(tool_loading)
 
     @classmethod
     def from_config(cls, name: str, data: dict[str, Any]) -> AnthropicMessagesDriver:
@@ -58,7 +61,8 @@ class AnthropicMessagesDriver:
         return cls(name, endpoint=endpoint, model=data.get("model"), api_key_env=data.get("api_key_env"),
                    max_tokens=data.get("max_tokens", 4096), timeout=data.get("timeout", 60.0),
                    version=data.get("version", "2023-06-01"), token_budget=_token_budget(data, name),
-                   thinking=data.get("thinking"), tool_response_corrections=data.get("tool_response_corrections", 1))
+                   thinking=data.get("thinking"), tool_response_corrections=data.get("tool_response_corrections", 1),
+                   tool_loading=data.get("tool_loading", "all"))
 
     def tool_turn(self, *, role: str, prompt: str, history: list[dict], tools: list[dict]) -> ToolTurn:
         try:
