@@ -80,7 +80,7 @@ class ReviewEvidenceIdentityTests(unittest.TestCase):
             return result
 
         result = deliver(review["review_seq"])
-        self.assertEqual((result["status"], result["handoff_status"]), ("ok", "omitted_invalid"))
+        self.assertEqual((result["status"], result["handoff_status"]), ("ok", "references_omitted_invalid"))
         completed, = [e for e in f.rt.log.read(task_id=f.task) if e.type == "team.objective_completed"]
         saved = copy.deepcopy(completed.payload)
         retry = deliver(review["decision_seq"])
@@ -88,8 +88,9 @@ class ReviewEvidenceIdentityTests(unittest.TestCase):
                          ("error", "delivery_already_completed", completed.seq))
         self.assertIsNot(retry.get("already_completed"), True)
         self.assertEqual([e.payload for e in f.events("team.objective_completed")], [saved])
-        self.assertNotIn("handoff", completed.payload)
-        self.assertEqual(completed.payload["handoff_status"], "omitted_invalid")
+        self.assertEqual(completed.payload["handoff"]["evidence"], [])
+        self.assertEqual(completed.payload["handoff"]["why"], "Explain the independent review")
+        self.assertEqual(completed.payload["handoff_status"], "references_omitted_invalid")
         self.assertEqual(f.rt.team.view(f.task)["status"], "done")
         self.assertTrue(f.rt.verify_chain().ok)
 

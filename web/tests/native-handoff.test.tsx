@@ -113,6 +113,43 @@ test('省略状态屏蔽夹带的 handoff 与未验证引文，没有 verificati
   for (const source of handoff().evidence) expect(container.textContent).not.toContain(source.quote)
 })
 
+test('引用省略仍保留讲解和运行步骤，但夹带的引文与命令记录不能显示', async () => {
+  const evidence = completion()
+  const warning = '交付讲解已保留；引用核对失败，未保存为验证证据。'
+  Object.assign(evidence.payload, { handoff_status: 'references_omitted_invalid', handoff_warning: warning })
+  const raw = evidence.payload.handoff as Record<string, unknown>
+  raw.command_receipts = [{ private: '不可显示的未核对命令' }]
+  const before = JSON.stringify(evidence)
+  const { fetchMock } = await mount(detail([evidence]))
+  const summary = await stream().findByText(label, { selector: 'summary' })
+  const fold = summary.closest('details')!
+  expect(fold.open).toBe(false)
+  const calls = fetchMock.mock.calls.length
+  fireEvent.click(summary)
+  expect(within(fold).getByText(`可选交付说明：${warning}`)).toBeTruthy()
+  expect(within(fold).getByText(handoff().why)).toBeTruthy()
+  expect(Array.from(fold.querySelectorAll('ol > li')).map(node => node.textContent)).toEqual(handoff().reproduce)
+  expect(within(fold).getByRole('heading', { name: '未验证范围' })).toBeTruthy()
+  expect(fold.querySelector('blockquote, button')).toBeNull()
+  expect(fold.textContent).not.toContain('不可显示的未核对命令')
+  expect(within(fold).queryByRole('heading', { name: '引用来源' })).toBeNull()
+  expect(within(fold).queryByText('成员建议的运行与复查')).toBeNull()
+  expect(fetchMock.mock.calls).toHaveLength(calls)
+  expect(nativeHandoff(evidence)?.evidence).toEqual([])
+  expect(JSON.stringify(evidence)).toBe(before)
+})
+
+test('引用省略只信宿主完成记录，正文无效仍不渲染', () => {
+  const evidence = completion()
+  Object.assign(evidence.payload, { handoff_status: 'references_omitted_invalid', handoff_warning: '引用未核对' })
+  const fake = { ...evidence, actor: { id: 'team', kind: 'agent', role: 'team' } }
+  expect(nativeHandoff(fake)).toBeUndefined()
+  expect(nativeHandoffWarning(fake)).toBeUndefined()
+  ;(evidence.payload.handoff as Record<string, unknown>).reproduce = '不是步骤列表'
+  expect(nativeHandoff(evidence)).toBeUndefined()
+  expect(nativeHandoffWarning(evidence)).toBe('引用未核对')
+})
+
 test.each([
   { handoff_status: undefined, handoff_warning: omittedWarning },
   { handoff_status: 'valid', handoff_warning: omittedWarning },

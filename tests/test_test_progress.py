@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 from types import SimpleNamespace
 import unittest
@@ -23,6 +24,52 @@ from scripts import test_progress as progress
 
 ROOT = Path(__file__).resolve().parents[1]
 PREFIX = "::notice title=Test progress::"
+
+# Request real samples only while the child is held at a known blocking point.
+# The watchdog still classifies the real main-thread stack and uses its own clock.
+STALL_HANDSHAKE = textwrap.dedent('''\
+    import json
+    requested, observed = threading.Event(), threading.Event()
+    expected_phase = None
+    original_stdout = sys.stdout
+
+    def stall(phase):
+        global expected_phase
+        expected_phase = phase
+        observed.clear()
+        requested.set()
+        assert observed.wait(5), "No stalled notice for " + phase
+
+    class Watcher(progress.ProgressWatchdog):
+        def __init__(self, *args):
+            super().__init__(*args)
+            wait = self._stop.wait
+            def wait_for_sample(interval):
+                while not requested.is_set():
+                    if wait(.01):
+                        return True
+                return wait(interval)
+            self._stop.wait = wait_for_sample
+
+    class Sink:
+        def write(self, text):
+            size = original_stdout.write(text)
+            prefix = "::notice title=Test progress::"
+            for line in text.splitlines():
+                if line.startswith(prefix):
+                    item = json.loads(line[len(prefix):].replace("%0D", "\\r").replace("%0A", "\\n").replace("%25", "%"))
+                    if item["phase"] == expected_phase and item["stalled"]:
+                        original_stdout.flush()
+                        requested.clear()
+                        observed.set()
+            return size
+
+        def flush(self):
+            original_stdout.flush()
+
+    runner.ProgressWatchdog = Watcher
+    sys.stdout = Sink()
+''')
 
 
 def notices(output):
@@ -326,12 +373,13 @@ class ProgressChildTests(unittest.TestCase):
         for name in ("run_tests.py", "test_progress.py"):
             shutil.copyfile(ROOT / "scripts" / name, self.root / "scripts" / name)
 
-    def child(self, source, *, args=(), github=True, fault="", after=""):
+    def child(self, source, *, args=(), github=True, fault="", after="", synchronize=False):
         (self.root / "tests/test_block.py").write_text(source, encoding="utf-8")
         script = (
             "import sys, time, threading\n"
             "from scripts import run_tests as runner, test_progress as progress\n"
             "progress.STALL_INTERVAL_SECONDS = .03\n"
+            + (STALL_HANDSHAKE if synchronize else "")
             + fault + "\n"
             "try:\n"
             "    status = runner.main(sys.argv[1:])\n"
@@ -356,8 +404,9 @@ class ProgressChildTests(unittest.TestCase):
         evidence = notices("\n".join(notice_lines))
         self.assertGreaterEqual(len(evidence), 1, result.stdout)
         self.assertLessEqual(len(evidence), 8)
-        self.assertTrue(all(item["phase"] == phase for item in evidence), evidence)
-        self.assertTrue(all(item["case"] == case for item in evidence))
+        target = [item for item in evidence if item["phase"] == phase]
+        self.assertTrue(target, evidence)
+        self.assertTrue(all(item["case"] == case for item in target), target)
         self.assertEqual(result.stdout.splitlines()[-1], "COMPLETE")
         ticks = [item["elapsed_seconds"] for item in evidence]
         self.assertEqual(ticks, sorted(ticks))
@@ -365,7 +414,10 @@ class ProgressChildTests(unittest.TestCase):
             self.assertEqual(set(item), {"phase", "case", "elapsed_seconds", "since_progress_seconds", "stack",
                                          "stalled", "completed_cases", "selected_total"})
             self.assertGreaterEqual(item["since_progress_seconds"], 0)
-            if phase == "discovery":
+            self.assertIn(item["phase"], {"discovery", "fixture_or_suite", phase})
+            if item["phase"] != "case":
+                self.assertIsNone(item["case"])
+            if item["phase"] == "discovery":
                 self.assertIsNone(item["selected_total"])
                 self.assertEqual(item["completed_cases"], 0)
             else:
@@ -380,7 +432,7 @@ class ProgressChildTests(unittest.TestCase):
                 if value is not None:
                     self.assertNotIn("/", value)
                     self.assertNotIn("\\", value)
-        self.assertTrue(any(item["stalled"] for item in evidence), evidence)
+        self.assertTrue(any(item["stalled"] for item in target), target)
         # Ordinary failure annotations retain tracebacks; watchdog notices expose metadata only.
         for text in ("\n".join(notice_lines), json.dumps(evidence, ensure_ascii=False)):
             for private in (str(self.root), "PRIVATE", "ENV_MUST_NOT_APPEAR",
@@ -409,6 +461,29 @@ class ProgressChildTests(unittest.TestCase):
                 self.assertIn("AssertionError: PRIVATE_FAILURE", result.stdout)
                 self.assert_evidence(result, "case", status=1, case="test_block.Case.test_fail")
 
+    def test_evidence_checks_discovery_and_requires_the_target_stall(self):
+        result = self.failure_annotation_evidence()
+        discovery = dict(notices(result.stdout)[0], phase="discovery", case=None,
+                         selected_total=None, elapsed_seconds=.03, since_progress_seconds=.03)
+        prefix = PREFIX + runner.escape_annotation(json.dumps(discovery)) + "\n"
+        result.stdout = prefix + result.stdout
+        self.assert_evidence(result, "case", status=1, case="test_block.Case.test_fail")
+        for mutation in ("missing_target", "target_not_stalled", "wrong_phase", "discovery_count"):
+            with self.subTest(mutation=mutation):
+                items = notices(result.stdout)
+                if mutation == "missing_target":
+                    items = items[:1]
+                elif mutation == "target_not_stalled":
+                    items[1]["stalled"] = False
+                elif mutation == "wrong_phase":
+                    items[1]["phase"] = "module_setup"
+                else:
+                    items[0]["selected_total"] = 1
+                invalid = SimpleNamespace(returncode=1, stderr=result.stderr, stdout="".join(
+                    PREFIX + runner.escape_annotation(json.dumps(item)) + "\n" for item in items) + "COMPLETE\n")
+                with self.assertRaises(AssertionError):
+                    self.assert_evidence(invalid, "case", status=1, case="test_block.Case.test_fail")
+
     def test_evidence_rejects_notice_paths_including_json_escaped_paths(self):
         for path in ("/opt/unrelated/project/test_block.py", "D:\\unrelated\\project\\test_block.py", str(self.root)):
             for field in ("file", "function"):
@@ -433,11 +508,11 @@ class ProgressChildTests(unittest.TestCase):
     def test_real_discovery_import_and_load_tests_stalls(self):
         case = "class Case(unittest.TestCase):\n    def test_ok(self): pass\n"
         for source in (
-                "import time, unittest\ntime.sleep(.4) # SOURCE_MUST_NOT_APPEAR\n" + case,
-                "import time, unittest\n" + case +
-                "def load_tests(loader, tests, pattern):\n    time.sleep(.4)\n    return tests\n"):
+                "import unittest\nfrom __main__ import stall\nstall('discovery') # SOURCE_MUST_NOT_APPEAR\n" + case,
+                "import unittest\nfrom __main__ import stall\n" + case +
+                "def load_tests(loader, tests, pattern):\n    stall('discovery')\n    return tests\n"):
             with self.subTest(source=source[:45]):
-                result = self.child(source)
+                result = self.child(source, synchronize=True)
                 self.assert_evidence(result, "discovery")
 
     def test_real_module_class_fixtures_and_cleanups_outside_test_boundaries(self):
@@ -449,20 +524,25 @@ class ProgressChildTests(unittest.TestCase):
             ("class_teardown", "    @classmethod\n    def tearDownClass(cls): stall()\n"),
             ("class_cleanup", "    @classmethod\n    def setUpClass(cls): cls.addClassCleanup(stall)\n"),
         ):
-            source = ("import time, unittest\ndef stall():\n"
-                      "    private_local = 'LOCAL_MUST_NOT_APPEAR'\n    time.sleep(.4)\n")
+            source = ("import unittest\nfrom __main__ import stall as wait_for_notice\n"
+                      "wait_for_notice('discovery')\ndef stall():\n"
+                      "    private_local = 'LOCAL_MUST_NOT_APPEAR'\n"
+                      f"    wait_for_notice({phase!r})\n")
             source += (body if phase.startswith("module") else "")
             source += "class Case(unittest.TestCase):\n    def test_ok(self): pass\n"
             source += (body if phase.startswith("class") else "")
             with self.subTest(phase=phase):
-                self.assert_evidence(self.child(source), phase)
+                result = self.child(source, synchronize=True)
+                self.assert_evidence(result, phase)
+                self.assertEqual([item["phase"] for item in notices(result.stdout) if item["stalled"]],
+                                 ["discovery", phase])
 
     def test_real_case_stall_and_failure_exit_without_replay(self):
-        source = ("import time, unittest\nclass Case(unittest.TestCase):\n"
+        source = ("import unittest\nfrom __main__ import stall\nclass Case(unittest.TestCase):\n"
                   "    def test_fail(self):\n        print('EXECUTED', flush=True)\n"
                   "        private_local = 'LOCAL_MUST_NOT_APPEAR'\n"
-                  "        time.sleep(.4) # SOURCE_MUST_NOT_APPEAR\n        self.fail('offline failure PRIVATE_FAILURE')\n")
-        result = self.child(source)
+                  "        stall('case') # SOURCE_MUST_NOT_APPEAR\n        self.fail('offline failure PRIVATE_FAILURE')\n")
+        result = self.child(source, synchronize=True)
         self.assert_evidence(result, "case", status=1, case="test_block.Case.test_fail")
         self.assertEqual(result.stdout.count("EXECUTED"), 1)
         errors = [line for line in result.stdout.splitlines() if line.startswith("::error title=")]
@@ -475,32 +555,33 @@ class ProgressChildTests(unittest.TestCase):
 
     def test_real_keyboard_interrupt_in_discovery_and_case_joins_worker(self):
         for source, phase, case in (
-            ("import time\ndef load_tests(loader, tests, pattern):\n"
-             "    time.sleep(.4)\n    raise KeyboardInterrupt()\n", "discovery", None),
-            ("import time, unittest\nclass Case(unittest.TestCase):\n"
-             "    def test_interrupt(self):\n        time.sleep(.4)\n        raise KeyboardInterrupt()\n",
+            ("from __main__ import stall\ndef load_tests(loader, tests, pattern):\n"
+             "    stall('discovery')\n    raise KeyboardInterrupt()\n", "discovery", None),
+            ("import unittest\nfrom __main__ import stall\nclass Case(unittest.TestCase):\n"
+             "    def test_interrupt(self):\n        stall('case')\n        raise KeyboardInterrupt()\n",
              "case", "test_block.Case.test_interrupt"),
         ):
             with self.subTest(phase=phase):
-                self.assert_evidence(self.child(source), phase, status=130, case=case)
+                self.assert_evidence(self.child(source, synchronize=True), phase, status=130, case=case)
 
     def test_real_import_interrupt_keeps_unittest_failed_discovery_semantics(self):
-        result = self.child("import time\ntime.sleep(.4)\nraise KeyboardInterrupt()\n")
+        result = self.child("from __main__ import stall\nstall('discovery')\nraise KeyboardInterrupt()\n",
+                            synchronize=True)
         self.assert_evidence(result, "discovery", status=1)
         self.assertIn("no tests executed", result.stderr)
 
     def test_real_successful_case_and_custom_suite_keep_their_outcomes(self):
-        source = ("import time, unittest\nclass Case(unittest.TestCase):\n"
-                  "    def test_ok(self): time.sleep(.4)\n")
-        self.assert_evidence(self.child(source), "case", case="test_block.Case.test_ok")
-        source = ("import time, unittest\nclass Case(unittest.TestCase):\n"
+        source = ("import unittest\nfrom __main__ import stall\nclass Case(unittest.TestCase):\n"
+                  "    def test_ok(self): stall('case')\n")
+        self.assert_evidence(self.child(source, synchronize=True), "case", case="test_block.Case.test_ok")
+        source = ("import unittest\nfrom __main__ import stall\nclass Case(unittest.TestCase):\n"
                   "    def test_ok(self): pass\n"
                   "class Suite(unittest.TestSuite):\n"
                   "    def run(self, result, debug=False):\n"
-                  "        time.sleep(.4)\n        return super().run(result, debug)\n"
+                  "        stall('fixture_or_suite')\n        return super().run(result, debug)\n"
                   "def load_tests(loader, tests, pattern):\n"
                   "    return Suite([Case('test_ok')])\n")
-        self.assert_evidence(self.child(source), "fixture_or_suite")
+        self.assert_evidence(self.child(source, synchronize=True), "fixture_or_suite")
 
     def test_real_sampling_or_notice_write_fault_cannot_hide_failed_test(self):
         source = ("import time, unittest\nclass Case(unittest.TestCase):\n"

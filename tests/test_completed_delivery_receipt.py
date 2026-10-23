@@ -401,6 +401,21 @@ class CompletedDeliveryReceiptTests(unittest.TestCase):
         self.assert_rejected(self.finish(self.arguments(artifact_seqs=[])), before[-1][0])
         self.assert_unchanged(before)
 
+    def test_omitted_references_still_compare_original_arguments_not_clean_body(self):
+        original = self.arguments(artifact_seqs=[], handoff={"why": "Explanation", "reproduce": [], "limits": [],
+            "evidence": [{"source_seq": True, "quote": "Unverified reference"}]})
+        first = self.finish(original)
+        self.assertEqual((first["status"], first["handoff_status"]), ("ok", "references_omitted_invalid"))
+        before = self.frozen()
+        self.assertEqual(before[-1][2]["handoff"]["evidence"], [])
+        self.assertIs(self.finish(original).get("already_completed"), True)
+        changed = {**original, "handoff": {**original["handoff"],
+            "evidence": [{"source_seq": 1, "quote": "Unverified reference"}]}}
+        self.assert_rejected(self.finish(changed), before[-1][0])
+        clean = {**original, "handoff": {key: value for key, value in original["handoff"].items() if key != "evidence"}}
+        self.assert_rejected(self.finish(clean), before[-1][0])
+        self.assert_unchanged(before)
+
     def test_accepted_native_delivery_keeps_receipt_after_a_correctable_read_error(self):
         f = self.f
         arguments = self.arguments(artifact_seqs=[])

@@ -50,6 +50,13 @@ const clipboard = (writeText = vi.fn().mockResolvedValue(undefined)) => {
   return writeText
 }
 
+test.each(['omitted_invalid', 'references_omitted_invalid'])('省略状态不渲染夹带的命令记录：%s', handoff_status => {
+  const evidence = snapshot()
+  evidence.payload.handoff_status = handoff_status
+  const { container } = render(<NativeCommandReceipts event={evidence} />)
+  expect(container.childElementCount).toBe(0)
+})
+
 test('实际消息详情内嵌默认折叠事实，建议另列；展开和复制都不执行命令', async () => {
   const saved = snapshot()
   const before = JSON.stringify(saved)

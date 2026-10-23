@@ -56,7 +56,7 @@ class HandoffDiagnosticsTests(unittest.TestCase):
         self.assertEqual(normalized["evidence"], expected)
         self.assertEqual(HandoffError("existing message").diagnostics, [])
 
-    def test_finish_dispatch_omits_invalid_note_without_retry_or_public_diagnostics(self):
+    def test_finish_dispatch_omits_invalid_references_without_retry_or_public_diagnostics(self):
         artifact = self.artifact("selected source")
         selected = self.refs()
         arguments = {"summary": "Selected source delivered", "verification": "Source inspection only",
@@ -75,7 +75,7 @@ class HandoffDiagnosticsTests(unittest.TestCase):
                     and e.payload["name"] == "finish_work"]
         self.assertEqual(len(receipts), 1)
         result = receipts[0].payload["result"]
-        self.assertEqual((result["status"], result["handoff_status"]), ("ok", "omitted_invalid"))
+        self.assertEqual((result["status"], result["handoff_status"]), ("ok", "references_omitted_invalid"))
         self.assertNotIn("diagnostics", result)
         self.assertNotIn("available_sources", result)
         self.assertTrue(all(e.actor == HOST for e in receipts))
@@ -86,7 +86,7 @@ class HandoffDiagnosticsTests(unittest.TestCase):
         self.assertEqual(completed.payload["run_id"], run.payload["run_id"])
         self.assertLess(completed.seq, receipts[0].seq)
         self.assertEqual(completed.payload["artifacts"], selected)
-        self.assertNotIn("handoff", completed.payload)
+        self.assertEqual(completed.payload["handoff"], self.normalize(self.handoff()))
         self.assertEqual(completed.payload["handoff_warning"], result["handoff_warning"])
         self.assertEqual(completed.payload["summary"], arguments["summary"])
         self.assertEqual(completed.payload["verification"], arguments["verification"])

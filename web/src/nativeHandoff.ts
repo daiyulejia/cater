@@ -46,6 +46,10 @@ export function nativeHandoff(event: TeamEvent): NativeHandoff | undefined {
   if (!record(value) || value.version !== 1 || !text(value.why)
     || !['changed', 'impact', 'alternatives', 'reproduce', 'limits'].every((key) => strings(value[key]))
     || !Array.isArray(value.evidence)) return undefined
+  if (event.payload.handoff_status === 'references_omitted_invalid') {
+    return { version: 1, why: value.why, changed: value.changed as string[], impact: value.impact as string[],
+      alternatives: value.alternatives as string[], reproduce: value.reproduce as string[], limits: value.limits as string[], evidence: [] }
+  }
   for (const evidence of value.evidence) {
     if (!record(evidence) || !Number.isSafeInteger(evidence.source_seq) || Number(evidence.source_seq) <= 0
       || Number(evidence.source_seq) >= event.seq || !text(evidence.quote) || !text(evidence.source_hash)
@@ -61,6 +65,6 @@ export function nativeHandoff(event: TeamEvent): NativeHandoff | undefined {
 
 export function nativeHandoffWarning(event: TeamEvent): string | undefined {
   if (event.type !== 'team.objective_completed' || !isTeamHost(event)
-    || event.payload.handoff_status !== 'omitted_invalid') return undefined
+    || (event.payload.handoff_status !== 'omitted_invalid' && event.payload.handoff_status !== 'references_omitted_invalid')) return undefined
   return text(event.payload.handoff_warning) ? event.payload.handoff_warning.trim() : undefined
 }

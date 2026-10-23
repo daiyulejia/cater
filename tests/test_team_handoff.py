@@ -118,13 +118,13 @@ class TeamHandoffTests(unittest.TestCase):
         self.assertEqual(completion.payload["handoff"]["evidence"][0]["content_sha256"], artifact["content_sha256"])
         self.assertFalse([e for e in self.events("team.tool_started") if e.payload["name"] == "workspace_run"])
 
-    def test_wrong_quote_omits_optional_handoff_without_partial_evidence(self):
+    def test_wrong_quote_preserves_prose_without_partial_evidence(self):
         source = self.artifact()
         result = self.finish(self.handoff([{"source_seq": source.seq, "quote": "all tests passed"}]))
         self.assertEqual(result["status"], "ok")
-        self.assertEqual(result["handoff_status"], "omitted_invalid")
+        self.assertEqual(result["handoff_status"], "references_omitted_invalid")
         event, = self.events("team.objective_completed")
-        self.assertNotIn("handoff", event.payload)
+        self.assertEqual(event.payload["handoff"], self.normalize(self.handoff()))
         self.assertEqual(event.payload["handoff_warning"], result["handoff_warning"])
         self.assertEqual(self.rt.team.view(self.task)["status"], "done")
 

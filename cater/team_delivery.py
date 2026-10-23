@@ -11,6 +11,7 @@ from .review_contract import browser_observations
 
 
 HOST = Actor.system("team")
+REFERENCES_OMITTED_WARNING = "讲解已保留，引用核对失败未保存，不视为验证证据。"
 
 
 def omission_reason(value):
@@ -306,6 +307,11 @@ class TeamDelivery:
             raise HandoffError("交付说明超过24KB，请保留关键原因、步骤、边界及必要引用。")
         return result
 
+    def normalize_without_references(self, task_id, value, *, artifacts, revision):
+        if isinstance(value, dict):
+            value = {key: item for key, item in value.items() if key not in {"evidence", "command_receipts"}}
+        return self.normalize(task_id, value, artifacts=artifacts, revision=revision)
+
     def index(self, task_id):
         event = next((e for e in reversed(self.rt.log.read(task_id=task_id))
                       if e.type == "team.objective_completed" and e.actor == HOST), None)
@@ -334,6 +340,8 @@ class TeamDelivery:
                  "## 当时记录的验证范围", "", str(event.payload.get("verification", "")), "",
                  "## 为什么这样做", "", note["why"], ""]
         lines += omission
+        if event.payload.get("handoff_status") == "references_omitted_invalid":
+            lines += ["## 引用说明", "", REFERENCES_OMITTED_WARNING, ""]
         for key, title in (("changed", "改动"), ("impact", "影响"), ("alternatives", "取舍与其他考虑"),
                            ("reproduce", "成员建议的运行与复查"), ("limits", "未验证范围")):
             if note[key]:
@@ -386,6 +394,6 @@ class TeamDelivery:
             raise ValueError("找不到本群这次交付记录。")
         return {"status": "ok", "delivery": {"seq": event.seq,
                 **{k: event.payload[k] for k in ("summary", "verification", "artifacts", "handoff",
-                    "omitted_approved_artifacts_reason") if k in event.payload}},
+                    "handoff_status", "handoff_warning", "omitted_approved_artifacts_reason") if k in event.payload}},
                 "historical": self.team.view(task_id)["revision"] != event.seq,
                 "note": "保存的版本说明；步骤未因此执行，引用摘录匹配不证明判断正确或当前文件未变化。"}

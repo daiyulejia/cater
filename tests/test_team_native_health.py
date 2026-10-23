@@ -37,8 +37,18 @@ def rejected_replies(cls):
 
 
 class TeamNativeHealthTests(unittest.TestCase):
-    # Reuse only the session, so importing this module does not rerun its tests.
-    session = protocol.ProtocolUsageTests.session
+    @contextmanager
+    def session(self, cls, replies, *, tool_response_corrections=0, process_transport=False):
+        # Health transitions need real HTTP and parsing, but not a worker spawn per
+        # matrix entry. Binding the unchanged method selects the driver's supported
+        # synchronous path; the process path is covered explicitly below.
+        with protocol.ProtocolUsageTests.session(self, cls, replies,
+                tool_response_corrections=tool_response_corrections, timeout=10) as session:
+            _, driver, _ = session
+            # This is fixture communication headroom, not a health/deadline assertion.
+            transport = nullcontext() if process_transport else patch.object(driver, "tool_turn", driver.tool_turn)
+            with transport:
+                yield session
 
     @contextmanager
     def observations(self, fixture):
@@ -108,6 +118,27 @@ class TeamNativeHealthTests(unittest.TestCase):
                 self.assertEqual(f.rt._reported_driver_tokens("team_test"), 14)
                 self.assert_members(f.rt, "available", "recent_success")
                 self.assertEqual(trace.mock_calls, [call.record_success("team_test")])
+                self.assert_failure_count(f.rt._driver_health, 0)
+
+    def test_process_transport_records_success_then_rejection_without_retry(self):
+        for cls in protocol.CLASSES:
+            with self.subTest(protocol=cls.__name__), self.session(cls, [
+                    (200, protocol.response(cls)), (200, b"INVALID_JSON")],
+                    process_transport=True) as (f, _, requests):
+                with self.observations(f) as trace:
+                    self.run_message(f)
+                    self.assertEqual(len(requests), 1)
+                    self.assert_members(f.rt, "available", "recent_success")
+                    self.run_message(f)
+                self.assertEqual(len(requests), 2)
+                self.assertEqual(trace.mock_calls, [call.record_success("team_test"),
+                                                   call.record_rejection("team_test")])
+                self.assertEqual([event.payload["status"] for event in f.events("team.run_finished")],
+                                 ["completed", "failed"])
+                self.assertEqual(f.events("team.tool_started"), [])
+                self.assertEqual(f.events("team.response_correction_requested"), [])
+                self.assertEqual(f.rt._reported_driver_tokens("team_test"), 14)
+                self.assert_members(f.rt, "unverified", "recent_failure")
                 self.assert_failure_count(f.rt._driver_health, 0)
 
     def test_rejected_native_response_replaces_previous_success_without_retry(self):

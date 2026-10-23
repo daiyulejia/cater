@@ -21,7 +21,7 @@ from .events import Actor, Event
 from .drivers import DriverProtocolError, tool_failure_diagnostics, tool_protocol_error_usage
 from .room_dialogue import addressed_role
 from .team_recovery import RECOVERY_CONTRACT, TeamRecovery, _same_scope
-from .team_delivery import HandoffError, TeamDelivery, handoff_schema, omission_reason
+from .team_delivery import HandoffError, REFERENCES_OMITTED_WARNING, TeamDelivery, handoff_schema, omission_reason
 from .team_browser import BROWSER_CONTRACT, TeamBrowser, browser_schema
 from .team_context import history_window, json_bytes, model_context, model_json
 from .delivery_followup_sources import delivery_followup_sources
@@ -387,11 +387,13 @@ class TeamService:
             _tool("withdraw_work", "明确撤回本群当前目标里不再需要的普通委托或请求，例如重复的收尾确认。原发件人或店长可决定并说明原因；这是撤回，不伪造完成、回报或复核通过。不会撤回顾客输入、整个子树或当前正式复核，也不解除已启动操作的未知影响。接收者在后续工具边界停止。",
                   {"message_seq": {"type": "integer", "minimum": 1},
                    "reason": {"type": "string", "minLength": 1, "maxLength": 4000}}, ["message_seq", "reason"]),
-            _tool("send_message", "向伙伴交代工作或提问会唤起对方并承接结果。回答问题或交还已有委托时，reply_to填对方发给你的原消息序号；也可填当前接续消息序号，宿主会核对并归回原委托。不能替收件人回复自己发出的消息；跟进自己发出的工作用continue_assignment_seq。只是同步进展、不要求对方回复或执行时设置notify_only=true，保留记录供对方下一轮阅读，不唤醒对方；notify_only不能和reply_to同时使用。",
-                  {"recipient": recipient, "text": string, "reply_to": {"type": "integer"},
+            _tool("send_message", "向伙伴交代工作或提问会唤起对方并承接结果。区分进展知会、正式交回和接续工作；不要要求伙伴在修改或送审前先正式交回。序号或状态不确定先read_checkpoint/read_messages，不重复猜测；已交回后确需补做，用完整新请求承接。",
+                  {"recipient": recipient, "text": string, "reply_to": {"type": "integer",
+                       "description": "正式交回对方发给你的原请求/委托（也可填有效接续序号），成功后结束你本轮执行。仍要修改、送审或处理反馈时不要用它汇报中间进展。不能填对方的report，也不能替收件人回复自己发出的委托。"},
                    "continue_assignment_seq": {"type": "integer", "minimum": 1,
                        "description": "继续你先前发出的未交还委托时填原序号，说明核实后的下一步，不重新派一份相同工作；不能与reply_to或notify_only同用。"},
-                   "notify_only": {"type": "boolean"}}, ["recipient", "text"]),
+                   "notify_only": {"type": "boolean",
+                       "description": "true仅知会进展，不唤醒对方、不交回委托，你可继续执行。不能与reply_to或continue_assignment_seq同用。"}}, ["recipient", "text"]),
             _tool("read_checkpoint", "读取当前目标及未交还工作，按原委托序号分页；或仅传review_seq读取本群复核完整记录，包括旧目标的stale记录。历史复核不是当前验收或重放授权。review_seq不能与分页参数混用。",
                   {"after_seq": {"type": "integer", "minimum": 0},
                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
@@ -462,8 +464,8 @@ class TeamService:
                 _tool("set_objective", "采用顾客当前目标或更换实现方向。记录成功后再安排相应工作；普通追问不用更换目标。",
                       {"goal": string}, ["goal"]),
                 _tool("finish_work", "店长确认当前工作可以交付。summary是顾客看到的最终答复，给实际答案；长细节按需放可选handoff。verification写实际验证结果与范围，区分源码推导和未验证建议，不等同于宿主证明正确。",
-                      {"summary": {**string, "description": "直接回答本次问题，收束必要结论、数字及口径或成果入口、最短操作及关键原因或风险；不重复长细节，顾客要求全文或数字时不省略。不只说已完成，也不让顾客翻内部记录拼答案。"},
-                       "verification": string, "handoff": handoff_schema(),
+                      {"summary": {**string, "description": "直接回答本次问题，给必要结论、数字及口径或成果入口、最短操作与关键原因或风险。非必要内部编号、逐次检查和长细节按需放handoff，不重复整份报告；顾客要求全文或数字时保留。位置优先写文件与函数，行号须核对对应版本。不只说已完成，也不让顾客翻内部记录拼答案。"},
+                       "verification": {**string, "description": "按已有回执说明实际检查、结果、运行条件及未测范围。文档的最低版本、配置要求和伙伴自述不等于实际运行环境；未测得就说明未记录，不猜版本或性能。来源支持的推导与实测分开，此要求同样适用于summary和handoff。需要补查时按实际缺口核验，不为交付重复已覆盖当前版本的检查。"}, "handoff": handoff_schema(),
                        "artifact_seqs": {"type": "array", "maxItems": 128, "items": {"type": "integer", "minimum": 1},
                            "description": "可选：明确选择本次交付的文件事件序号，包括需要沿用的旧文件；空数组是明确不附文件，不是默认占位。不填时只收本轮目标内每个文件名的最新发布，不自动带上旧目标文件。本轮已有获批成果却一份都未选时，需核对选择或说明有意不附的原因。"},
                        "omitted_approved_artifacts_reason": {"type": "string", "minLength": 1, "maxLength": 1000,
@@ -1484,9 +1486,16 @@ class TeamService:
                     payload["handoff"] = self.delivery.normalize(task_id, arguments["handoff"],
                         artifacts=payload["artifacts"], revision=current_work["revision"])
                 except HandoffError:
-                    # Optional explanation failure must not turn draft citations into evidence.
-                    omitted = {"handoff_status": "omitted_invalid",
-                               "handoff_warning": "可选交付说明未通过校验，未保存；主要交付结论与成果已保留。"}
+                    # Revalidate only the prose; no draft reference survives this fallback.
+                    try:
+                        payload["handoff"] = self.delivery.normalize_without_references(task_id, arguments["handoff"],
+                            artifacts=payload["artifacts"], revision=current_work["revision"])
+                    except HandoffError:
+                        omitted = {"handoff_status": "omitted_invalid",
+                                   "handoff_warning": "可选交付说明未通过校验，未保存；主要交付结论与成果已保留。"}
+                    else:
+                        omitted = {"handoff_status": "references_omitted_invalid",
+                                   "handoff_warning": REFERENCES_OMITTED_WARNING}
                     payload.update(omitted)
                     result.update(omitted)
             self.rt.log.emit(type="team.objective_completed", task_id=task_id, actor=HOST, payload=payload)

@@ -44,7 +44,10 @@ def advance_to_response_boundary(running, fixture, requests, *, event_type, time
             try:
                 next(running)
             except StopIteration:
-                raise AssertionError(f"Run ended before response boundary {sorted(required)}") from None
+                finishes = [event.payload for event in fixture.events("team.run_finished")
+                            if event.payload.get("run_id") == run_id]
+                raise AssertionError(f"Run ended before response boundary {sorted(required)}; "
+                                     f"requests={len(requests)}, finishes={finishes}") from None
     except BaseException:
         running.close()
         raise
@@ -85,12 +88,17 @@ def malformed(cls):
 
 class ProtocolUsageTests(unittest.TestCase):
     @contextmanager
-    def session(self, cls, replies, *, tool_response_corrections=0):
+    def session(self, cls, replies, *, tool_response_corrections=0, timeout=2):
         # Legacy containment cases explicitly exercise the supported strict mode.
         fixture = simple.SimpleTeamTests()
         fixture.setUp()
         requests = []
         pending = list(replies)
+        ready = threading.Event()
+
+        class Server(ThreadingHTTPServer):
+            def service_actions(self):
+                ready.set()
 
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self):
@@ -108,16 +116,17 @@ class ProtocolUsageTests(unittest.TestCase):
 
         try:
             with ExitStack() as resources:
-                server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+                server = Server(("127.0.0.1", 0), Handler)
                 server.daemon_threads = False
                 resources.callback(server.server_close)
                 thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01))
                 thread.start()
                 resources.callback(thread.join)
                 resources.callback(server.shutdown)
+                self.assertTrue(ready.wait(5), "Loopback server did not enter its accept loop")
                 resources.enter_context(patch.dict(os.environ, {KEY: "synthetic-only-key"}))
                 driver = cls("team_test", endpoint=f"http://127.0.0.1:{server.server_port}/fixture",
-                             model="synthetic-only", api_key_env=KEY, timeout=2,
+                             model="synthetic-only", api_key_env=KEY, timeout=timeout,
                              tool_response_corrections=tool_response_corrections)
                 fixture.rt.drivers["team_test"] = driver
                 yield fixture, driver, requests

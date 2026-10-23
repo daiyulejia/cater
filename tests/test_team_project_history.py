@@ -109,7 +109,7 @@ class TeamProjectHistoryTests(unittest.TestCase):
         foreign, = self.exchange(("finish_work", {"summary": "新功能交付", "verification": "已运行实际断言",
             "handoff": {"why": "新增平均数并保留总数接口", "reproduce": ["运行 Python 断言"], "limits": [],
                         "evidence": [{"source_seq": published["artifact_seq"], "quote": "return sum(values)"}]}}))
-        self.assertEqual((foreign["status"], foreign["handoff_status"]), ("ok", "omitted_invalid"))
+        self.assertEqual((foreign["status"], foreign["handoff_status"]), ("ok", "references_omitted_invalid"))
         completed, = self.events("team.objective_completed")
         saved = copy.deepcopy(completed.payload)
         final, = self.exchange(("finish_work", {"summary": "平均数功能交付", "verification": "已独立运行当前版本断言",
@@ -120,8 +120,9 @@ class TeamProjectHistoryTests(unittest.TestCase):
                          ("error", "delivery_already_completed", completed.seq))
         self.assertIsNot(final.get("already_completed"), True)
         self.assertEqual([e.payload for e in self.events("team.objective_completed")], [saved])
-        self.assertNotIn("handoff", completed.payload)
-        self.assertEqual(completed.payload["handoff_status"], "omitted_invalid")
+        self.assertEqual(completed.payload["handoff"]["evidence"], [])
+        self.assertEqual(completed.payload["handoff"]["why"], "新增平均数并保留总数接口")
+        self.assertEqual(completed.payload["handoff_status"], "references_omitted_invalid")
         with zipfile.ZipFile(io.BytesIO(self.rt.team.archive(self.task))) as archive:
             self.assertEqual(archive.read("totals.py"), (roots["new"] / "totals.py").read_bytes())
             self.assertEqual(archive.read("totals.py"), NEW.encode())

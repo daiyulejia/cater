@@ -219,6 +219,7 @@ function ReceiptDetails({ entry, historical, name, deliveryArtifacts }: { entry:
 export function NativeCommandReceipts({ event, historical = false, name }: { event: TeamEvent; historical?: boolean; name?: (id: string) => string }) {
   if (!record(event.actor) || !['id', 'kind', 'role'].every(key => Object.hasOwn(event.actor, key)) || !isTeamHost(event)
     || event.type !== 'team.objective_completed' || !seq(event.seq) || !record(event.payload)
+    || event.payload.handoff_status === 'omitted_invalid' || event.payload.handoff_status === 'references_omitted_invalid'
     || !record(event.payload.handoff) || !Object.hasOwn(event.payload.handoff, 'command_receipts')) return null
   const raw = event.payload.handoff.command_receipts
   if (Array.isArray(raw) && raw.length === 0) return null

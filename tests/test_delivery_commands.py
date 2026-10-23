@@ -582,9 +582,9 @@ class DeliveryCommandTests(unittest.TestCase):
     def test_invalid_optional_reference_is_omitted_and_does_not_create_approval_gate(self):
         seq = self.archive()
         result = self.finish(self.handoff([999999]), artifact_seqs=[seq])
-        self.assertEqual((result["status"], result["handoff_status"]), ("ok", "omitted_invalid"))
+        self.assertEqual((result["status"], result["handoff_status"]), ("ok", "references_omitted_invalid"))
         completed, = self.events("team.objective_completed")
-        self.assertNotIn("handoff", completed.payload)
+        self.assertEqual(completed.payload["handoff"], self.normalize(self.handoff()))
         self.assertEqual(completed.payload["handoff_warning"], result["handoff_warning"])
         self.assertEqual(self.events("team.review_requested"), [])
         saved = copy.deepcopy(completed.payload)

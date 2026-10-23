@@ -3,8 +3,9 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from cater.acp import AcpSession, AcpTimeout
 from cater.external_agent import ExternalRunLimit, QoderAcpDriver, _ProgressBudget
@@ -88,8 +89,24 @@ class ProgressBudgetTests(unittest.TestCase):
 
 
 class ProgressBudgetTransportTests(unittest.TestCase):
+    @staticmethod
+    def cleanup_directory(directory):
+        # Closing a Windows Job initiates descendant termination; directory
+        # handles can outlive the already-waited main process briefly.
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                directory.cleanup()
+                return
+            except PermissionError as error:
+                if sys.platform != 'win32' or getattr(error, 'winerror', None) != 32 or time.monotonic() >= deadline:
+                    raise
+                time.sleep(.01)
+
     def exercise(self, mode, *, total):
-        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.cleanup_directory, directory)
+        root = Path(directory.name)
         driver = QoderAcpDriver('offline', 'never-real-qoder', 'ExactModel', timeout=2, max_run_seconds=total)
         sessions, calls = [], []
         peer = Path(__file__).parent / 'fixtures/external_budget_peer.py'
@@ -117,6 +134,30 @@ class ProgressBudgetTransportTests(unittest.TestCase):
         self.assertEqual(sessions[0].timeout, 2)
         self.assertRaises(RuntimeError, run.run, 'never replay')
         return result, run, calls
+
+    def test_cleanup_waits_only_for_transient_windows_directory_handle(self):
+        busy = PermissionError('fixture directory still held')
+        busy.winerror = 32
+        directory = Mock()
+        directory.cleanup.side_effect = [busy, None]
+        with patch.object(sys, 'platform', 'win32'), patch('time.monotonic', side_effect=[0, .1]), patch('time.sleep') as sleep:
+            self.cleanup_directory(directory)
+        self.assertEqual(directory.cleanup.call_count, 2)
+        sleep.assert_called_once_with(.01)
+
+    def test_cleanup_keeps_persistent_busy_and_other_errors_visible(self):
+        for platform, code, times, count in (('win32', 32, [0, .1, 2], 2),
+                                            ('win32', 5, [0], 1), ('linux', 32, [0], 1)):
+            with self.subTest(platform=platform, code=code):
+                error = PermissionError('fixture cleanup failure')
+                error.winerror = code
+                directory = Mock()
+                directory.cleanup.side_effect = error
+                with patch.object(sys, 'platform', platform), patch('time.monotonic', side_effect=times), patch('time.sleep'):
+                    with self.assertRaises(PermissionError) as caught:
+                        self.cleanup_directory(directory)
+                self.assertIs(caught.exception, error)
+                self.assertEqual(directory.cleanup.call_count, count)
 
     def test_real_stdio_progress_outlives_idle_window_within_fixed_total(self):
         result, run, calls = self.exercise('progress', total=7)
