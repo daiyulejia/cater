@@ -294,17 +294,26 @@ class ExternalAgentRun:
                 self._deferred_yield = exc
             self.revoke_tools()
 
+    def _check_budget(self):
+        if self._budget is None:
+            return
+        try:
+            self._budget.check()
+        except ExternalRunLimit:
+            if getattr(self._session, "input_write_pending", False) is True:
+                raise AcpTimeout("Local budget expired with unfinished ACP input",
+                                 phase="input", prompt_may_have_run=True) from None
+            raise
+
     def _service(self):
         try:
             self._current(allow_pending=self._cooperative)
-            if self._budget is not None:
-                self._budget.check()
+            self._check_budget()
             if self._cooperative:
                 self._bridge.poll(timeout=0.001)
             else:
                 self._bridge.pump(0.01)
-            if self._budget is not None:
-                self._budget.check()
+            self._check_budget()
         except BaseException as exc:
             self._stop(exc)
             raise
@@ -315,8 +324,7 @@ class ExternalAgentRun:
             self._current()
             if self._tools_revoked:
                 raise ExternalYield("External tools have been revoked")
-            if self._budget is not None:
-                self._budget.check()
+            self._check_budget()
             self._mark("first_tool_ms")
             dispatched = True
             self._observations["tool_calls"] = self._observations.get("tool_calls", 0) + 1

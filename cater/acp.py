@@ -185,6 +185,13 @@ class AcpSession:
         self._pending_updates: list[dict] = []
         self._pending_session_id: str | None = None
 
+    @property
+    def input_write_pending(self) -> bool:
+        """Observe this thread's unfinished write, not remote acceptance or execution."""
+        with self._state_lock:
+            return (self._write_owner == threading.get_ident() and self._write_done is not None
+                    and not self._write_done.is_set())
+
     @contextmanager
     def _operation(self):
         if not self._operation_lock.acquire(blocking=False):
