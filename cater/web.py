@@ -993,15 +993,19 @@ class ActivityRunner:
                     return
                 runtime._active_activity_id = activity_id
                 if action == "run":
-                    if "resume_seq" in binding and _team_enabled(runtime, task_id):
-                        runtime.team.recovery.resume(task_id, binding["resume_seq"])
-                    if "expected_scope" in binding:
-                        result = runtime.collaborate(task_id, expected_scope=binding["expected_scope"])
-                    else:
-                        result = runtime.collaborate(task_id)
+                    resuming = "resume_seq" in binding and _team_enabled(runtime, task_id)
+                    supervision = runtime.team.recovery.resume(task_id, binding["resume_seq"]) if resuming else None
+                    options = {"expected_scope": binding["expected_scope"]} if "expected_scope" in binding else {}
+                    result = runtime.collaborate(task_id, **options)
                     if isinstance(result, dict) and result.get("consumer_owned") is False:
                         # Observation is not completion. Preserve the durable queue for its live owner or recovery.
                         return
+                    # A queued progress message can defer resume supervision until its inbox drains.
+                    if (resuming and supervision is None and runtime.team.recovery.assignments(task_id)
+                            and runtime.team.recovery.resume(task_id, binding["resume_seq"]) is not None):
+                        result = runtime.collaborate(task_id, **options)
+                        if isinstance(result, dict) and result.get("consumer_owned") is False:
+                            return
                 elif action == "battle":
                     if "expected_scope" in binding:
                         runtime.battle(task_id, expected_scope=binding["expected_scope"])
