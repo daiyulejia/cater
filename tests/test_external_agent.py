@@ -352,7 +352,8 @@ class ExternalAgentTests(unittest.TestCase):
                             release.set()
 
                     def execute(call):
-                        self.assertTrue(entered.is_set())
+                        # The peer can see flushed bytes before the writer marks the barrier.
+                        self.assertTrue(entered.wait(self.driver.timeout), "Input writer did not enter the barrier")
                         self.execute(call)
                         raise signal
 

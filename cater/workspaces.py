@@ -487,8 +487,9 @@ class WorkspaceService:
     @staticmethod
     def _public_arguments(name, arguments):
         # Persist file identities and command parameters, but not a second copy of source bodies.
-        excluded = {"content", "old_text"} if name == "workspace_write" else {"content"}
-        public = {key: value for key, value in arguments.items() if key not in excluded}
+        public = ({key: arguments[key] for key in ("path", "expected_sha256") if key in arguments}
+                  if name == "workspace_write" else
+                  {key: value for key, value in arguments.items() if key != "content"})
         if name == "workspace_write" and isinstance(arguments.get("old_text"), str):
             try:
                 before = arguments["old_text"].encode("utf-8")
@@ -496,6 +497,28 @@ class WorkspaceService:
                 public["old_text_encoding"] = "invalid_utf8"
             else:
                 public.update(old_text_bytes=len(before), old_text_sha256=hashlib.sha256(before).hexdigest())
+        if name == "workspace_write" and "edits" in arguments:
+            from .workspace_tools import MAX_EDITS
+            edits = arguments["edits"]
+            if isinstance(edits, list):
+                public["edit_count"] = len(edits)
+                summaries = []
+                for edit in edits[:MAX_EDITS]:
+                    summary = {}
+                    if isinstance(edit, dict):
+                        for key in ("old_text", "content"):
+                            if isinstance(edit.get(key), str):
+                                try:
+                                    body = edit[key].encode("utf-8")
+                                except UnicodeError:
+                                    summary[key + "_encoding"] = "invalid_utf8"
+                                else:
+                                    summary[key + "_bytes"] = len(body)
+                                    summary[key + "_sha256"] = hashlib.sha256(body).hexdigest()
+                    summaries.append(summary)
+                public["edit_summaries"] = summaries
+            else:
+                public["edits_invalid"] = True
         try:
             json.dumps(public, ensure_ascii=False).encode("utf-8")
         except UnicodeEncodeError:

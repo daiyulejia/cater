@@ -90,7 +90,7 @@ class WorkspaceEditTests(unittest.TestCase):
     def test_schema_keeps_required_fields_and_optional_old_text(self):
         schema = next(s["input_schema"] for s in self.executor.schemas()
                       if s["name"] == "workspace_write")
-        self.assertEqual(set(schema["required"]), {"path", "content", "expected_sha256"})
+        self.assertEqual(set(schema["required"]), {"path", "expected_sha256"})
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(schema["properties"]["old_text"]["type"], "string")
         self.assertEqual(schema["properties"]["old_text"]["minLength"], 1)

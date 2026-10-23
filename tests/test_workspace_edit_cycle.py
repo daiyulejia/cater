@@ -21,6 +21,46 @@ CHECK = ("import hashlib,json,pathlib; p=pathlib.Path('result.py'); raw=p.read_b
 
 
 class WorkspaceEditCycleTests(unittest.TestCase):
+    def test_native_batch_edits_record_one_effect_and_actual_final_file(self):
+        f = reviews.TeamReviewCycleTests()
+        f.setUp()
+        self.addCleanup(f.doCleanups)
+        project = f.root / 'project'
+        project.mkdir()
+        config = f.root / 'batch-workspaces.json'
+        config.write_text(json.dumps({'workspaces': [{'id': 'project', 'title': 'Batch fixture',
+            'root': str(project), 'mode': 'execute',
+            'commands': {'python': [sys.executable, '-I', '-B']}, 'timeout': 5}]}), encoding='utf-8')
+        f.rt.workspaces = WorkspaceService(f.rt, config)
+        f.rt.workspaces.bind(f.task, 'project', expected_revision=None)
+        original = 'alpha=1\r\nbeta=2\r\nprint(alpha+beta)\r\n'
+        written, = f.exchange(f.worker, ('workspace_write', {
+            'path': 'real.py', 'content': original, 'expected_sha256': None}))
+        edits = [{'old_text': 'beta=2', 'content': 'beta=20'},
+                 {'old_text': 'alpha=1', 'content': 'alpha=10'}]
+        changed, = f.exchange(f.worker, ('workspace_write', {
+            'path': 'real.py', 'edits': edits, 'expected_sha256': written['sha256']}))
+        expected = b'alpha=10\r\nbeta=20\r\nprint(alpha+beta)\r\n'
+        self.assertEqual(changed['status'], 'ok')
+        self.assertEqual(changed['replacements'], 2)
+        self.assertEqual(changed['sha256'], hashlib.sha256(expected).hexdigest())
+        self.assertEqual((project / 'real.py').read_bytes(), expected)
+        checked, = f.exchange(f.worker, ('workspace_run', {'command': 'python', 'args': ['real.py']}))
+        self.assertEqual(checked['status'], 'ok')
+        self.assertEqual(checked['outcome'], 'passed')
+        self.assertIn('30', json.dumps(checked))
+        starts = [e for e in f.rt.log.read(task_id=f.task) if e.type == 'team.tool_started'
+                  and e.payload['name'] == 'workspace_write']
+        self.assertEqual(len(starts), 2)
+        arguments = starts[-1].payload['arguments']
+        self.assertNotIn('edits', arguments)
+        self.assertNotIn('beta=20', json.dumps(arguments))
+        self.assertEqual(arguments['edit_count'], 2)
+        self.assertEqual(f.rt.team._pending_operations(f.task), [])
+        self.assertEqual(f.rt.workspaces.pending(task_id=f.task), [])
+        self.assertTrue(f.rt.verify_chain().ok)
+        self.assertEqual(f.protocol_errors, [])
+
     def test_file_removed_after_hash_is_a_prepublication_conflict_not_unknown(self):
         f = reviews.TeamReviewCycleTests()
         f.setUp()

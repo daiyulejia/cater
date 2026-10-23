@@ -40,7 +40,7 @@ class ToolPreflightTests(unittest.TestCase):
         self.assertEqual(results[0]["code"], "invalid_arguments")
         self.assertEqual(results[0]["outcome"], "not_started")
         self.assertTrue(results[0]["complete"])
-        self.assertEqual(results[0]["required_fields"], ["content", "expected_sha256", "path"])
+        self.assertEqual(results[0]["required_fields"], ["expected_sha256", "path"])
         self.assertEqual([r["status"] for r in results], ["error", "ok", "ok"])
         self.assertIn("actual-output", json.dumps(results[2]))
         self.assertEqual((self.project / "hello.py").read_text(), "print('actual-output')")

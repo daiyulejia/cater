@@ -88,6 +88,25 @@ class WorkspaceWriteModeTests(unittest.TestCase):
         self.assertEqual((self.root / 'note.md').read_bytes(), b'Complete new document\n')
         self.assertFalse(list(self.root.glob('.workspace-tmp-*')))
 
+    def test_mcp_preserves_batch_shape_and_commits_same_original_once(self):
+        original = 'from decimal import Decimal\r\nvalue = Decimal("1")\r\nprint(value)\r\n'
+        created = self.call('workspace_write', path='note.md', content=original, expected_sha256=None)
+        edits = [{'old_text': 'print(value)', 'content': 'print(value + CENT)'},
+                 {'old_text': 'value =', 'content': 'CENT = Decimal("0.01")\r\nvalue ='},
+                 {'old_text': 'import Decimal', 'content': 'import Decimal, ROUND_HALF_UP'}]
+        result = self.call('workspace_write', path='note.md', edits=edits,
+                           expected_sha256=created['sha256'])
+        expected = ('from decimal import Decimal, ROUND_HALF_UP\r\n'
+                    'CENT = Decimal("0.01")\r\nvalue = Decimal("1")\r\nprint(value + CENT)\r\n').encode()
+        self.assertEqual(result['status'], 'ok')
+        self.assertEqual(result['replacements'], 3)
+        self.assertEqual(result['before_sha256'], created['sha256'])
+        self.assertEqual(result['sha256'], hashlib.sha256(expected).hexdigest())
+        self.assertEqual((self.root / 'note.md').read_bytes(), expected)
+        self.assertEqual(self.calls[-1].arguments['edits'], edits)
+        self.assertNotIn('content', self.calls[-1].arguments)
+        self.assertFalse(list(self.root.glob('.workspace-tmp-*')))
+
 
 if __name__ == '__main__':
     unittest.main()

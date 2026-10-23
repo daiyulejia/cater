@@ -36,6 +36,7 @@ from .tool_protocol import strict_json
 from .verification import _Capture
 
 MAX_FILE_BYTES = 1024 * 1024
+MAX_EDITS = 32
 MAX_INSTALL_BYTES = 32 * 1024 * 1024
 DEFAULT_READ_BYTES = 16000
 MAX_READ_BYTES = 65536
@@ -249,7 +250,7 @@ def _argument_valid(value: object, field: dict) -> bool:
     expected = field.get("type")
     expected = expected if isinstance(expected, list) else [expected]
     actual = {type(None): "null", bool: "boolean", str: "string", int: "integer",
-              float: "number", list: "array"}.get(type(value))
+              float: "number", list: "array", dict: "object"}.get(type(value))
     if actual is None or actual not in expected and not (actual == "integer" and "number" in expected):
         return False
     if "enum" in field and value not in field["enum"]:
@@ -274,6 +275,13 @@ def _argument_valid(value: object, field: dict) -> bool:
                 or not isinstance(field.get("items"), dict)):
             return False
         return all(_argument_valid(item, field["items"]) for item in value)
+    if isinstance(value, dict):
+        properties = field.get("properties", {})
+        if (not set(field.get("required", [])) <= value.keys()
+                or field.get("additionalProperties") is False and value.keys() - properties.keys()):
+            return False
+        return all(_argument_valid(value[key], declaration)
+                   for key, declaration in properties.items() if key in value)
     return True
 
 
@@ -337,14 +345,20 @@ class WorkspaceExecutor:
               "limit": {"type": "integer", "minimum": 1, "maximum": MAX_MATCHES, "default": 50}}, ["query"]),
         ]
         if self.policy.mode in {"edit", "execute"}:
-            definitions.append(("workspace_write", "Atomically create or replace a whole UTF-8 file, or edit one exact fragment. Omit old_text for a whole-file write; set old_text only for a fragment edit, with just its replacement in content. For existing files, first workspace_read and use its whole-file sha256; JSON null creates a missing file only. After a conflict, re-read and reconcile before choosing either mode. This is not a verification tool: use actual reads or runs to check results; writing a check script does not execute it.",
+            definitions.append(("workspace_write", "Atomically write UTF-8: content alone replaces the whole file; old_text plus content replaces one exact fragment; edits replaces several fragments together (omit root content and old_text). For existing files, first workspace_read and use its whole-file sha256; JSON null creates a missing file only. After a conflict, re-read and reconcile. This is not a verification tool: actually read or run checks; writing a check script does not execute it.",
                                 {"path": relative, "content": {**string, "maxLength": MAX_FILE_BYTES, "description":
                                     "Complete new file text when old_text is omitted. When old_text is supplied, only its replacement text: everything outside the one match stays unchanged. An empty replacement deletes that fragment."}, "expected_sha256": {
                                     "type": ["string", "null"], "minLength": 64, "maxLength": 64, "description":
                                     "For a new file pass JSON null, never an empty string or the string null. For an existing file copy the 64 lowercase hex characters from its latest workspace_read.sha256."},
                                  "old_text": {**string, "minLength": 1, "maxLength": MAX_FILE_BYTES,
-                                    "description": "Omit this field for a whole-file write; do not send null or an empty placeholder. For a fragment edit, supply exact old text that matches once, including whitespace and newlines. content is only its replacement, not the whole file. No regex or normalization."}},
-                                ["path", "content", "expected_sha256"]))
+                                    "description": "Omit this field for a whole-file write; do not send null or an empty placeholder. For a fragment edit, supply exact old text that matches once, including whitespace and newlines. content is only its replacement, not the whole file. No regex or normalization."},
+                                 "edits": {"type": "array", "minItems": 1, "maxItems": MAX_EDITS,
+                                    "description": "Alternative to root content/old_text. All unique literal matches use the SAME original file, may not overlap, and commit once or not at all. Requires an existing file hash. Combined old/replacement UTF-8 text and final file each at most 1 MiB. Use for related edits, then actually check the result.",
+                                    "items": {"type": "object", "properties": {
+                                        "old_text": {**string, "minLength": 1, "maxLength": MAX_FILE_BYTES},
+                                        "content": {**string, "maxLength": MAX_FILE_BYTES}},
+                                        "required": ["old_text", "content"], "additionalProperties": False}}},
+                                ["path", "expected_sha256"]))
         if self.policy.mode == "execute":
             definitions.append(("workspace_run", "Run a trusted host program alias (not an OS sandbox or task acceptance). The alias selects a fixed host-configured argv prefix; args are appended as literal arguments, not interpreted by an extra host shell. The program may itself invoke shells. The launch environment is minimal with an explicit allowlist; PATH need not match the user's terminal. A lookup miss here does not prove a program is uninstalled on the machine. Supported arguments and test discovery depend on that program, not the alias name. A zero exit code or outcome=passed does not prove a requested script or newly added tests ran: check the receipt argv and reported test names/counts before claiming coverage. If the intended check did not run, report the missing capability instead of claiming success. Long stdout/stderr previews have separate excerpt and tail_excerpt (preview_mode=head_tail); the missing middle is not saved. complete means capture finished, not that the preview is the full log. Each stream's utf8_valid describes captured byte validity: false means UTF-8 decoding lost information, null or absent means unknown, true does not undo preview truncation. Do not treat replacement characters as the original output or guess another encoding; report the limitation and use a verified encoding or ASCII-safe diagnostic for future checks, without blindly rerunning side effects.",
                                 {"command": {"type": "string", "enum": sorted(self.policy.commands),
@@ -377,7 +391,19 @@ class WorkspaceExecutor:
                 except UnicodeError:
                     invalid.append("stdin")
                 invalid = sorted(set(invalid))
-            if name == "workspace_write" and isinstance(arguments, dict) and "old_text" in arguments:
+            if name == "workspace_write" and isinstance(arguments, dict):
+                if "edits" in arguments:
+                    if "content" in arguments or "old_text" in arguments:
+                        invalid.append("edits")
+                    if "edits" not in invalid:
+                        size = sum(len(edit[key].encode("utf-8")) for edit in arguments["edits"]
+                                   for key in ("old_text", "content"))
+                        if size > MAX_FILE_BYTES:
+                            invalid.append("edits")
+                elif "content" not in arguments:
+                    invalid.append("content")
+            if (name == "workspace_write" and isinstance(arguments, dict)
+                    and ("old_text" in arguments or "edits" in arguments)):
                 expected = arguments.get("expected_sha256")
                 if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
                     invalid.append("expected_sha256")
@@ -528,41 +554,58 @@ class WorkspaceExecutor:
         return {"path": self._relative(target), "matches": matches, "scanned_bytes": scanned,
                 "truncated": truncated}
 
-    def _write(self, path: str, content: str, expected_sha256: str | None, old_text: str | None = None) -> dict:
+    def _write(self, path: str, content: str | None = None, expected_sha256: str | None = None,
+               old_text: str | None = None, edits: list[dict] | None = None) -> dict:
         # Validate the entire request before creating even a parent directory.
         target = self.policy.root.joinpath(*_parts(path))
         _directories(self.policy.root)
-        if target == self.policy.root or not isinstance(content, str):
+        if target == self.policy.root or (edits is None and not isinstance(content, str)):
             _deny("invalid_arguments", "A file path and UTF-8 content are required.")
-        if len(content) > MAX_FILE_BYTES:
+        if content is not None and len(content) > MAX_FILE_BYTES:
             _deny("too_large", "Content exceeds the file size limit.")
-        body = content.encode("utf-8")
+        body = content.encode("utf-8") if content is not None else b""
         if len(body) > MAX_FILE_BYTES:
             _deny("too_large", "Content exceeds the file size limit.")
         _text(body)
         if expected_sha256 is not None and (not isinstance(expected_sha256, str)
                                            or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)):
             _deny("invalid_arguments", "expected_sha256 must be null or a lowercase SHA-256 digest.")
-        if old_text is not None:
-            if expected_sha256 is None or not isinstance(old_text, str) or not old_text:
+        fragments = edits if edits is not None else (
+            [{"old_text": old_text, "content": content}] if old_text is not None else [])
+        for fragment in fragments:
+            previous, replacement = fragment["old_text"], fragment["content"]
+            if expected_sha256 is None or not isinstance(previous, str) or not previous:
                 _deny("invalid_arguments", "old_text requires nonempty literal text and the existing file's sha256.")
-            if len(old_text.encode("utf-8")) > MAX_FILE_BYTES:
+            if len(previous.encode("utf-8")) > MAX_FILE_BYTES:
                 _deny("too_large", "Old text exceeds the file size limit.")
-            _text(old_text.encode("utf-8"))
+            _text(previous.encode("utf-8"))
+            _text(replacement.encode("utf-8"))
         with _write_lock(self.policy.root):
             # _path permits missing parents only for a validated creation request.
             try:
                 target = self._path(path, create_parents=expected_sha256 is None)
                 original = self._check_expected(target, expected_sha256)
-                if old_text is not None:
+                if fragments:
                     before, signature = _read_file(target)
                     if signature != original or hashlib.sha256(before).hexdigest() != expected_sha256:
                         _deny("conflict", "File changed before preparing the edit.")
                     text = _text(before)
-                    index = text.find(old_text)
-                    if index < 0 or text.find(old_text, index + 1) >= 0:
-                        _deny("conflict", "old_text must match exactly once, including overlapping matches; this request did not write the file. Re-read and choose unique literal context, or omit old_text to replace the whole file with complete content and the latest workspace_read.sha256.")
-                    body = (text[:index] + content + text[index + len(old_text):]).encode("utf-8")
+                    spans = []
+                    for fragment in fragments:
+                        previous = fragment["old_text"]
+                        index = text.find(previous)
+                        if index < 0 or text.find(previous, index + 1) >= 0:
+                            _deny("conflict", "old_text must match exactly once, including overlapping matches; this request did not write the file. Re-read and choose unique literal context, or omit old_text and edits to replace the whole file with complete content and the latest workspace_read.sha256.")
+                        spans.append((index, index + len(previous), fragment["content"]))
+                    # Every position refers to the same original text, never a prior replacement.
+                    pieces, end = [], 0
+                    for start, stop, replacement in sorted(spans):
+                        if start < end:
+                            _deny("conflict", "Edit ranges overlap; no changes were written. Re-read and reconcile the edits.")
+                        pieces.extend((text[end:start], replacement))
+                        end = stop
+                    pieces.append(text[end:])
+                    body = "".join(pieces).encode("utf-8")
                     if len(body) > MAX_FILE_BYTES:
                         _deny("too_large", "Edited content exceeds the file size limit.")
             except FileNotFoundError:
@@ -593,7 +636,7 @@ class WorkspaceExecutor:
                     staging.unlink()
         return {"path": self._relative(target), "sha256": hashlib.sha256(body).hexdigest(),
                 "bytes": len(body), "created": original is None, "truncated": False,
-                **({"replacements": 1, "before_sha256": expected_sha256} if old_text is not None else {})}
+                **({"replacements": len(fragments), "before_sha256": expected_sha256} if fragments else {})}
 
     def install_bytes(self, path: str, body: bytes, *, executable: bool = False, guard=None) -> dict:
         """Install trusted host bytes without replacing an existing file.
