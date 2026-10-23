@@ -96,7 +96,7 @@ class TeamSkillsTests(unittest.TestCase):
         self.rt.team.receive(self.task, "只讨论社区活动清单的最小范围", request_id="scope-guidance-001")
         self.run_ok()
         self.assertEqual(len(prompts), 1)
-        self.assertIn("按当前任务类型和顾客范围选择方法", prompts[0])
+        self.assertIn("按任务类型和顾客范围选择方法", prompts[0])
         self.assertIn("不把偏好或假设升级成新验收条件", prompts[0])
         self.assertIn("workspace_run", {tool["name"] for tool in self.driver.calls[0]["tools"]})
         self.assertEqual([e.payload["name"] for e in self.events("team.tool_started")], ["reply_to_customer"])

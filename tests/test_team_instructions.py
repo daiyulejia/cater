@@ -75,6 +75,33 @@ class TeamInstructionSelectionTests(unittest.TestCase):
             self.assertIn(clause, text)
         self.assertNotIn("【店长职责】", self.base(leader=False))
 
+    def test_manager_reuses_current_version_evidence_before_filling_actual_gaps(self):
+        text = self.base()
+        clauses = ("核对已有复核的对应版本结论与原回执", "按真实缺口补证",
+                   "不重跑已覆盖当前版本的检查", "无缺口就finish_work", "作者收尾时不交付")
+        for clause in clauses:
+            with self.subTest(clause=clause):
+                self.assertIn(clause, text)
+                self.assertNotIn(clause, self.base(leader=False))
+        self.assertEqual([text.index(clause) for clause in clauses],
+                         sorted(text.index(clause) for clause in clauses))
+        for boundary in ("即使已批准又改动，也须复核新版，旧结论不覆盖新版",
+                         "用实际成果和工具回执说明事实", "未收回工作、未知操作或复核未闭环时不能宣称交付",
+                         "核验中途失败时说明哪些已观察、哪些未到达，不补称成功"):
+            self.assertIn(boundary, text)
+
+    def test_successful_review_ends_turn_without_settling_other_assignments(self):
+        terminal = "return_work、request_review或record_review成功即结束本轮，不安排其后再调用工具"
+        context = {"active_assignment": {"seq": 9}, "open_assignments": [{"seq": 10}]}
+        for leader in (False, True):
+            for suffix in ("", EXTERNAL):
+                with self.subTest(leader=leader, external=bool(suffix)):
+                    text = self.base(leader=leader) + context_instructions(context) + suffix
+                    self.assertIn(terminal, text)
+                    self.assertIn("复核不代其他原委托结单", text)
+                    self.assertIn("open_assignments保留其他未交回工作", text)
+                    self.assertIn("后续修改等待新输入，不在交回后接着改同一份成果", text)
+
     def test_return_guidance_distinguishes_current_work_from_other_open_work(self):
         current = context_instructions({"active_assignment": {"seq": 9}, "open_assignments": [{"seq": 10}]})
         other = context_instructions({"active_assignment": None, "open_assignments": [{"seq": 10}]})
@@ -253,6 +280,12 @@ class TeamInstructionWireTests(unittest.TestCase):
         self.assertEqual(prefixes[0], prefixes[1])
         self.assertIn("review.workspace_file", prefixes[0])
         self.assertIn("按需放handoff", prefixes[0])
+        for prefix in prefixes:
+            for clause in ("核对已有复核的对应版本结论与原回执", "按真实缺口补证",
+                           "不重跑已覆盖当前版本的检查", "无缺口就finish_work",
+                           "return_work、request_review或record_review成功即结束本轮，不安排其后再调用工具",
+                           "复核不代其他原委托结单", "旧结论不覆盖新版"):
+                self.assertIn(clause, prefix)
         self.assertEqual(schemas[0], schemas[1])
         objective, = [tool for tool in schemas[0] if tool["name"] == "set_objective"]
         for clause in ("替换交付目标", "切换工作版本", "已发生的操作不会撤销",
