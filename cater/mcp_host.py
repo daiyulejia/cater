@@ -47,9 +47,11 @@ class _PendingResponse:
 
 
 class McpToolBridge:
-    def __init__(self, tools: list[dict], execute, *, timeout: float = 30):
+    def __init__(self, tools: list[dict], execute, *, timeout: float = 30, on_rejection=None):
         if not callable(execute):
             raise ValueError("MCP tool executor must be callable")
+        if on_rejection is not None and not callable(on_rejection):
+            raise ValueError("MCP rejection observer must be callable")
         if (type(timeout) not in {int, float} or not math.isfinite(timeout)
                 or not 0 < timeout <= 3600):
             raise ValueError("MCP timeout must be between zero and one hour")
@@ -70,6 +72,7 @@ class McpToolBridge:
         self._encode({"tools": list(definitions.values())})
         self._definitions = definitions
         self._execute = execute
+        self._on_rejection = on_rejection
         self._owner = threading.get_ident()
         self._timeout = float(timeout)
         self._secret = secrets.token_urlsafe(32)
@@ -145,7 +148,7 @@ class McpToolBridge:
         """Process at most one frame, with execution on this calling thread.
 
         Returns whether a frame was handled, not whether work was completed.
-        Callback exceptions abort and propagate; structured errors remain results.
+        Executor exceptions abort and propagate; structured errors remain results.
         """
         return self._advance(timeout, cooperative=False)
 
@@ -296,6 +299,14 @@ class McpToolBridge:
     def _error(identifier, code, message):
         return {"jsonrpc": "2.0", "id": identifier, "error": {"code": code, "message": message}}
 
+    def _observe_rejection(self, reason):
+        if self._authenticated and self._pumping and self._on_rejection is not None:
+            try:
+                self._on_rejection(reason)
+            except BaseException:
+                # Diagnostics must not replace the protocol result or abort cleanup.
+                pass
+
     def _dispatch(self, request):
         if (not isinstance(request, dict) or request.get("jsonrpc") != "2.0"
                 or not isinstance(request.get("method"), str)
@@ -327,6 +338,8 @@ class McpToolBridge:
         elif method == "ping":
             result = {}
         elif not self._ready:
+            if method == "tools/call":
+                self._observe_rejection("not_initialized")
             return self._error(identifier, -32600, "MCP session is not initialized")
         elif method == "tools/list":
             if params.get("cursor") is not None:
@@ -334,9 +347,14 @@ class McpToolBridge:
             result = {"tools": list(self._definitions.values())}
         elif method == "tools/call":
             if not self._active or self._revoked or self._closed:
+                self._observe_rejection("inactive")
                 return self._error(identifier, -32600, "Host tools are not active for this run")
             name, arguments = params.get("name"), params.get("arguments", {})
-            if not isinstance(name, str) or name not in self._definitions or not isinstance(arguments, dict):
+            if not isinstance(name, str) or name not in self._definitions:
+                self._observe_rejection("unknown_tool")
+                return self._error(identifier, -32602, "Unknown tool or invalid arguments")
+            if not isinstance(arguments, dict):
+                self._observe_rejection("arguments_not_object")
                 return self._error(identifier, -32602, "Unknown tool or invalid arguments")
             self._sequence += 1
             try:

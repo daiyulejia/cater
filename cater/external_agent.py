@@ -20,6 +20,10 @@ from .mcp_host import McpToolBridge
 from .tool_protocol import json_utf8
 
 
+_DIAGNOSTIC_COUNT_LIMIT = 2**31 - 1
+_BRIDGE_REJECTIONS = frozenset({"not_initialized", "inactive", "unknown_tool", "arguments_not_object"})
+
+
 class ExternalYield(Exception):
     """The host has successfully waited/delivered and wants this run to stop."""
 
@@ -220,6 +224,7 @@ class ExternalAgentRun:
         self._start_lock = threading.Lock()
         self._started_at = None
         self._observations = {}
+        self._client_tool_failures = {}
         self._failure_phase = None
         self._cooperative = False
         self._deferred_yield = None
@@ -236,6 +241,49 @@ class ExternalAgentRun:
     def _mark(self, name, *, latest=False):
         if self._started_at is not None and (latest or name not in self._observations):
             self._observations[name] = max(0, int((time.monotonic() - self._started_at) * 1000))
+
+    def _count_observation(self, name):
+        self._observations[name] = min(_DIAGNOSTIC_COUNT_LIMIT, self._observations.get(name, 0) + 1)
+
+    def _start_tool_diagnostics(self):
+        self._observations.setdefault("client_tool_diagnostics_version", 1)
+        for name in ("client_tool_updates", "client_tool_failed_calls", "client_tool_diagnostics_dropped"):
+            self._observations.setdefault(name, 0)
+        for reason in _BRIDGE_REJECTIONS:
+            self._observations.setdefault("host_bridge_rejected_" + reason, 0)
+
+    def _bridge_rejection(self, reason):
+        if isinstance(reason, str) and reason in _BRIDGE_REJECTIONS:
+            self._count_observation("host_bridge_rejected_" + reason)
+
+    def _observe_tool_update(self, update):
+        if (self._phase != "prompting" or not isinstance(update, dict)
+                or update.get("sessionUpdate") not in ("tool_call", "tool_call_update")):
+            return
+        self._start_tool_diagnostics()
+        self._count_observation("client_tool_updates")
+        identity, status = update.get("toolCallId"), update.get("status")
+        if (not isinstance(identity, str) or not identity.strip() or len(identity) > 512 or "\0" in identity
+                or "status" in update and (not isinstance(status, str)
+                    or status not in {"pending", "in_progress", "completed", "failed"})):
+            self._count_observation("client_tool_diagnostics_dropped")
+            return
+        try:
+            key = hashlib.sha256(identity.encode("utf-8")).digest()
+        except UnicodeError:
+            self._count_observation("client_tool_diagnostics_dropped")
+            return
+        # IDs are kept only as bounded, in-memory digests; no payloads or names enter telemetry.
+        if key not in self._client_tool_failures:
+            if len(self._client_tool_failures) >= 256:
+                self._count_observation("client_tool_diagnostics_dropped")
+                return
+            self._client_tool_failures[key] = False
+        if status == "failed" and not self._client_tool_failures[key]:
+            self._client_tool_failures[key] = True
+            self._count_observation("client_tool_failed_calls")
+            self._mark("first_client_tool_failure_ms")
+            self._mark("last_client_tool_failure_ms", latest=True)
 
     def revoke_tools(self):
         """Withdraw tool authority without cancelling or losing the current receipt.
@@ -347,6 +395,7 @@ class ExternalAgentRun:
     def _update(self, update):
         try:
             self._current(allow_pending=self._cooperative)
+            self._observe_tool_update(update)
             # ACP already discards private thought chunks. Do not persist any
             # update content or arbitrary client-provided category as telemetry.
             if self._phase == "prompting" and update.get("sessionUpdate") in {
@@ -450,7 +499,8 @@ class ExternalAgentRun:
             if not isinstance(prompt, str) or not prompt.strip():
                 raise ValueError("External prompt must be nonempty text")
             self._current()
-            self._bridge = McpToolBridge(self._tools, self._call, timeout=self._timeout)
+            self._bridge = McpToolBridge(self._tools, self._call, timeout=self._timeout,
+                                         on_rejection=self._bridge_rejection)
             self._session = AcpSession(
                 self._command, cwd=self._cwd, timeout=self._timeout, on_request=self._request,
                 on_activity=self._activity,
@@ -485,6 +535,7 @@ class ExternalAgentRun:
             if not self._tools_revoked:
                 self._bridge.activate()
             self._phase = "prompting"
+            self._start_tool_diagnostics()
             self._prompt_attempted = True
             self._mark("prompt_attempt_ms")
             if self._max_run_seconds is None:

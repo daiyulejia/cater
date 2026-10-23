@@ -167,7 +167,10 @@ class ExternalAgentTests(unittest.TestCase):
             run.run("PRIVATE_PROMPT")
         self.assertEqual(run.state.failure_phase, "opening")
         facts = dict(run.state.observations)
-        self.assertEqual(set(facts), {"failure_ms", "settled_ms"})
+        self.assertEqual(set(facts), {"failure_ms", "settled_ms", "host_bridge_rejected_inactive"})
+        self.assertEqual(facts["host_bridge_rejected_inactive"], 1)
+        self.assertEqual(self.calls, [])
+        self.assertFalse(run.state.prompt_attempted)
         self.assertLessEqual(facts["failure_ms"], facts["settled_ms"])
 
     def test_exact_flags_lazy_construction_and_configuration_close(self):
