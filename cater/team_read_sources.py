@@ -24,6 +24,7 @@ _SOURCE_FIELDS = tuple((f"$.{key}", maximum) for key, maximum in {
     "message_seq": 0, "root": 8192, "revision": 0, "recipient": 128, "kind": 128,
     "arguments.path": 8192, "arguments.offset": 0, "arguments.limit": 0,
     "recovery_of": 0, "interrupted_seq": 0, "recovery_hash": 64, "trigger": 128,
+    "resume_seq": 0, "resume_hash": 64, "previous_seq": 0, "action": 128, "state": 128,
     "recovery_contract": 4096, "recovery_scope": 4096, "scope": 4096,
     "status": 128, "interruption_kind": 128,
 }.items())
@@ -248,7 +249,11 @@ class TeamReadSources:
         if (message is None or message.type != "team.message_received" or message.seq >= runs[0].seq
                 or message.payload.get("recipient") != s["role"]):
             return None
-        if message.payload.get("kind") == "recovery":
+        if message.payload.get("kind") == "recovery" and message.payload.get("trigger") == "control_resume":
+            proof = self._resume_proof(task_id, message)
+            if proof is None or not self.team.recovery.is_message(message, proof):
+                return None
+        elif message.payload.get("kind") == "recovery":
             # Recovery proofs are targeted too; no whole conversation fallback.
             recovery_start = self._one(task_id, message.payload.get("recovery_of"))
             recovery_end = self._one(task_id, message.payload.get("interrupted_seq"))
@@ -264,6 +269,55 @@ class TeamReadSources:
         elif not (message.actor == Actor.human() or message.actor.kind == "agent" and message.actor.id in members):
             return None
         return start
+
+    def _resume_proof(self, task_id, message):
+        # Read the control lineage and its objective boundaries, not conversation bodies.
+        proof = [message]
+        control = self._one(task_id, message.payload.get("resume_seq"))
+        if control is None:
+            return proof
+        proof.append(control)
+        previous = control
+        while (previous.actor == Actor.human() and previous.type == "task.execution_controlled"
+                and previous.payload.get("action") == "resume" and previous.payload.get("state") == "running"):
+            candidate = self._one(task_id, previous.payload.get("previous_seq"))
+            if candidate is None or candidate.seq >= previous.seq:
+                break
+            proof.append(candidate)
+            previous = candidate
+        try:
+            for cutoff in (control.seq, message.seq):
+                objective = self._proof_candidate(task_id, cutoff,
+                    "type IN ('team.objective_updated', 'team.objective_completed')")
+                if objective is not None:
+                    proof.append(objective)
+            duplicate = self._proof_candidate(task_id, message.seq,
+                "type = 'team.message_received' AND (NOT (" + self._guard() + ") OR ("
+                "json_extract(payload_json, '$.kind') = 'recovery' "
+                "AND json_extract(payload_json, '$.trigger') = 'control_resume' "
+                "AND json_extract(payload_json, '$.resume_seq') = ?))", (control.seq,))
+            if duplicate is not None:
+                proof.append(duplicate)
+        except (ValueError, TypeError, UnicodeError, sqlite3.Error):
+            return None
+        return sorted(proof, key=lambda event: event.seq)
+
+    def _proof_candidate(self, task_id, before, condition, parameters=()):
+        # An unreadable veto is not absence: do not skip it and accept an older boundary.
+        cursor = self.rt.log.db.execute("SELECT seq, actor_json FROM events WHERE task_id = ? "
+            "AND seq < ? AND (" + condition + ") ORDER BY seq DESC", (task_id, before, *parameters))
+        try:
+            for row in cursor:
+                actor = Actor(**json.loads(row["actor_json"], object_pairs_hook=_unambiguous))
+                if actor != HOST:
+                    continue
+                event = self._one(task_id, row["seq"])
+                if event is None:
+                    raise ValueError("Recovery proof metadata unavailable")
+                return event
+        finally:
+            cursor.close()
+        return None
 
     def _scope(self, task_id):
         self.rt.workspaces._refresh()
