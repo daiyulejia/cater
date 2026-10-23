@@ -95,7 +95,9 @@ class TeamReviews:
                                    "可先向委托人反馈阅读意见，但这不等于正式批准。")
             raise WorkConflict("这次复核请求已有后续提交，请读取reviews中的当前request_seq，不沿用旧请求编号。")
         if row["status"] == "stale":
-            raise WorkConflict("这次复核已被新的提交或目标替代，请读取reviews中的当前记录。")
+            raise WorkConflict("这次复核已被新的提交或目标替代。旧目标记录仍可读取，但不能续签。"
+                               "请由成果作者按当前目标决定是否提交待验版本；如需新复核，省略旧review_seq，"
+                               "用request_review或delegate.review创建当前目标的复核，不沿用旧目标的批准。")
         return row
 
     def read(self, task_id, review_seq):

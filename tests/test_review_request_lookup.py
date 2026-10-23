@@ -55,6 +55,32 @@ class ReviewRequestLookupTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkConflict, "目标替代"):
             f.rt.team_reviews._find(f.task, request["review_seq"])
 
+    def test_stale_chain_guides_current_goal_submission_without_changing_old_approval(self):
+        f = self.f
+        request = f.request([f.publish()])
+        decision = f.record(request["review_seq"])
+        self.assertEqual(decision["status"], "ok")
+        old_decisions = f.events("team.review_recorded")
+        f.exchange(f.manager, ("set_objective", {"goal": "Correct the document for a new goal"}))
+        revised = f.publish("Actual revised version for the current goal")
+        requests = f.events("team.review_requested")
+        rejected = f.request([revised], review_seq=request["review_seq"])
+        self.assertEqual(rejected["status"], "error")
+        self.assertIn("旧目标记录仍可读取", rejected["message"])
+        self.assertIn("省略旧review_seq", rejected["message"])
+        self.assertIn("由成果作者", rejected["message"])
+        self.assertEqual(f.events("team.review_requested"), requests)
+        self.assertEqual(f.events("team.review_recorded"), old_decisions)
+        current = f.request([revised])
+        self.assertEqual(current["status"], "ok")
+        self.assertNotEqual(current["root_seq"], request["root_seq"])
+        self.assertEqual(f.record(current["review_seq"])["status"], "ok")
+        historical = f.rt.team_reviews.read(f.task, request["review_seq"])
+        self.assertEqual(historical["status"], "stale")
+        self.assertEqual(historical["decision_seq"], decision["decision_seq"])
+        self.assertEqual(f.events("team.review_recorded")[0], old_decisions[0])
+        self.assertTrue(f.rt.verify_chain().ok)
+
     def test_native_schemas_explain_author_and_request_identity(self):
         f = self.f
         f.publish()
@@ -64,6 +90,8 @@ class ReviewRequestLookupTests(unittest.TestCase):
         request = tools["request_review"]["input_schema"]["properties"]["review_seq"]
         record = tools["record_review"]["input_schema"]["properties"]["review_seq"]
         self.assertIn("首次提交省略", request["description"])
+        self.assertIn("同一目标内", request["description"])
+        self.assertIn("stale", request["description"])
         self.assertIn("reviews[].request_seq", record["description"])
         self.assertIn("不是委托message_seq", record["description"])
 
