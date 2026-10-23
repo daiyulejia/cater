@@ -216,7 +216,8 @@ class TeamResponseCorrectionTests(unittest.TestCase):
                 message, role, started = f.rt.team._claim(f.task)
                 running = f.rt.team._run_message(f.task, message, role, started)
                 self.addCleanup(running.close)
-                next(running)
+                protocol.advance_to_response_boundary(running, f, requests,
+                                                      event_type='team.response_correction_requested')
                 original = f.rt.team._pending_operations
                 committed = []
                 def pending_then_new_input(task_id):

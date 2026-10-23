@@ -576,7 +576,8 @@ class TeamReviewFollowupTests(unittest.TestCase):
             with self.subTest(cls=cls.__name__), self.loopback(cls, [(200, protocol.response(cls)),
                     (200, protocol.response(cls))]) as (f, request, source, driver, requests):
                 running, started = self.start(f, source)
-                next(running)
+                protocol.advance_to_response_boundary(running, f, requests,
+                                                      event_type='team.review_followup_requested')
                 original = f.rt.team._pending_operations
                 committed = []
                 def pending_then_customer(task_id):
@@ -612,7 +613,8 @@ class TeamReviewFollowupTests(unittest.TestCase):
                     driver.token_budget = tokens + 100000
                     task_events = [e for e in f.rt.log.read() if e.type == 'task.created']
                     running, started = self.start(f, source)
-                    next(running)
+                    protocol.advance_to_response_boundary(running, f, requests,
+                                                          event_type='team.review_followup_requested')
                     first_calls = [e for e in f.events('team.model_called')
                                    if e.payload['run_id'] == started.payload['run_id']]
                     self.assertEqual(len(first_calls), 1)

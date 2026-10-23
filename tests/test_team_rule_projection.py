@@ -12,7 +12,7 @@ import test_simple_team
 class TeamRuleProjectionTests(unittest.TestCase):
     setUp = test_simple_team.SimpleTeamTests.setUp
 
-    def test_next_tool_turn_sees_updated_rule_without_parsing_foreign_task_bodies(self):
+    def test_next_input_sees_updated_rule_and_old_response_cannot_execute(self):
         project = self.rt.rulebook.create_project("当前项目")["id"]
         self.rt.rulebook.bind_project(self.task, project)
         rule = self.rt.rulebook.record("保留原接口", scope="project", project_id=project)
@@ -41,6 +41,12 @@ class TeamRuleProjectionTests(unittest.TestCase):
             return convert(row)
 
         with patch.object(self.rt.log, "_row_to_event", side_effect=scoped):
+            self.rt.collaborate(self.task)
+            self.assertEqual(after, [])
+            finished = list(self.rt.log.iter_events(task_id=self.task, event_types=("team.run_finished",)))
+            self.assertEqual(finished[-1].payload["status"], "interrupted")
+            self.assertEqual(list(self.rt.log.iter_events(task_id=self.task, event_types=("team.tool_started",))), [])
+            self.rt.team.receive(self.task, "按当前店规重新核对", request_id="native-rule-refreshed-input")
             self.rt.collaborate(self.task)
         self.assertEqual([(r["text"], r["revision"]) for r in before], [("保留原接口", 1)])
         self.assertEqual([(r["text"], r["revision"]) for r in after], [("保留原接口并说明验证范围", 2)])

@@ -78,11 +78,14 @@ class ProjectMetadataTests(unittest.TestCase):
             self.assertEqual(context["project_history"]["project_id"], self.project)
             self.rt.log.emit(type="task.project_bound", actor=Actor.human(), task_id=self.task, payload={"project_id": other})
             return test_simple_team.turn("", (TOOL, {"section": "index"}))
-        result, = self.exchange(step=change)
-        self.assertEqual((result["code"], result["outcome"]), ("project_history_scope_changed", "not_started"))
-        self.assertNotIn("PRIVATE_", json.dumps(result))
-        start = self.events("team.tool_started")[-1]
-        self.assertEqual(start.payload["project_scope"], self.project)
+        started_before = list(self.events("team.tool_started"))
+        tokens_before = self.rt._reported_driver_tokens(self.driver.name)
+        with patch.object(self.rt.team.project_history, "read", side_effect=AssertionError("Old response must not read the new project")):
+            self.assertEqual(self.exchange(step=change), [])
+        self.assertEqual(self.events("team.tool_started"), started_before)
+        self.assertEqual(self.events("team.run_finished")[-1].payload["status"], "interrupted")
+        self.assertEqual(self.rt._reported_driver_tokens(self.driver.name), tokens_before + 7)
+        self.assertTrue(self.rt.verify_chain().ok)
 
     def test_scope_change_between_host_guard_and_catalog_cannot_read_new_project(self):
         other = self.rt.rulebook.create_project("另一个项目")["id"]

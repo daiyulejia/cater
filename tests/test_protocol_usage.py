@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 import threading
+import time
 import traceback
 import unittest
 from unittest.mock import patch
@@ -18,6 +19,35 @@ import test_simple_team as simple
 
 CLASSES = (OpenAICompatibleDriver, AnthropicMessagesDriver)
 KEY = "CATER_PROTOCOL_USAGE_FIXTURE"
+
+
+def advance_to_response_boundary(running, fixture, requests, *, event_type, timeout=5.0):
+    """Stop at the first response's durable boundary, before another HTTP call."""
+    run_id = fixture.events("team.run_started")[-1].payload["run_id"]
+    required = {"team.model_called", event_type}
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            if len(requests) > 1:
+                raise AssertionError("Another HTTP request started before the response boundary")
+            events = [event for event in fixture.rt.log.read(task_id=fixture.task)
+                      if event.payload.get("run_id") == run_id]
+            observed = {event.type for event in events}
+            if required <= observed:
+                if len(requests) != 1:
+                    raise AssertionError("The response boundary must belong to exactly one HTTP request")
+                return
+            if "team.model_called" in observed:
+                raise AssertionError(f"Response recorded without {event_type}; refusing to start another request")
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"Timed out after {timeout:g}s waiting for {sorted(required)}")
+            try:
+                next(running)
+            except StopIteration:
+                raise AssertionError(f"Run ended before response boundary {sorted(required)}") from None
+    except BaseException:
+        running.close()
+        raise
 
 
 def usage(cls):

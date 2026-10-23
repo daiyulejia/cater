@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+from dataclasses import replace
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -16,6 +17,9 @@ from .drivers import (MAX_API_RESPONSE_BYTES, DriverProtocolError, DriverRespons
 from .tool_loading import validate_mode
 from .tool_protocol import ToolTurn, anthropic_history, anthropic_turn, prepare_tool_turn
 from .usage import valid_token_count
+
+
+_DEFAULT_API_OPENER = _open_api_request
 
 
 class AnthropicMessagesDriver:
@@ -64,7 +68,8 @@ class AnthropicMessagesDriver:
                    thinking=data.get("thinking"), tool_response_corrections=data.get("tool_response_corrections", 1),
                    tool_loading=data.get("tool_loading", "all"))
 
-    def tool_turn(self, *, role: str, prompt: str, history: list[dict], tools: list[dict]) -> ToolTurn:
+    def _tool_input(self, *, role: str, prompt: str, history: list[dict],
+                    tools: list[dict]) -> tuple[dict, dict, list[dict], set[str]]:
         try:
             system, transcript, definitions, seen = prepare_tool_turn(role=role, prompt=prompt, history=history, tools=tools)
             body = {"model": self.model, "max_tokens": self.max_tokens, "stream": False,
@@ -78,14 +83,46 @@ class AnthropicMessagesDriver:
         key = os.environ.get(self.api_key_env)
         if not key:
             raise DriverUnavailable(f"{self.name} API key is unavailable; set {self.api_key_env}")
-        data = _tool_api_request(endpoint=self.endpoint, body=body,
-            headers={"X-Api-Key": key, "anthropic-version": self.version,
-                     "Content-Type": "application/json", "Accept": "application/json"},
-            name=self.name, timeout=self.timeout, opener=_open_api_request, byte_limit=MAX_API_RESPONSE_BYTES)
+        headers = {"X-Api-Key": key, "anthropic-version": self.version,
+                   "Content-Type": "application/json", "Accept": "application/json"}
+        return body, headers, definitions, seen
+
+    def _tool_result(self, data: dict, definitions: list[dict], seen: set[str]) -> ToolTurn:
         try:
             return anthropic_turn(data, driver=self.name, names={t["name"] for t in definitions}, seen=seen)
         except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
             raise _tool_response_error("Invalid Anthropic tool response", data, anthropic=True) from None
+
+    def tool_turn(self, *, role: str, prompt: str, history: list[dict], tools: list[dict]) -> ToolTurn:
+        body, headers, definitions, seen = self._tool_input(role=role, prompt=prompt, history=history, tools=tools)
+        data = _tool_api_request(endpoint=self.endpoint, body=body, headers=headers,
+            name=self.name, timeout=self.timeout, opener=_open_api_request, byte_limit=MAX_API_RESPONSE_BYTES)
+        return self._tool_result(data, definitions, seen)
+
+    def iter_tool_turn(self, *, role: str, prompt: str, history: list[dict], tools: list[dict],
+                       check_current=None):
+        turn = self.tool_turn
+        # Preserve synchronous billing guards and caller-supplied transports.
+        if ("tool_turn" in self.__dict__
+                or getattr(turn, "__func__", None) is not _ANTHROPIC_TOOL_TURN
+                or _open_api_request is not _DEFAULT_API_OPENER):
+            if check_current is not None:
+                check_current()
+            return turn(role=role, prompt=prompt, history=history, tools=tools)
+        from .native_transport import cleanup_failed, iter_request
+
+        body, headers, definitions, seen = self._tool_input(role=role, prompt=prompt, history=history, tools=tools)
+        data = yield from iter_request(endpoint=self.endpoint, body=body, headers=headers,
+            name=self.name, timeout=self.timeout, byte_limit=MAX_API_RESPONSE_BYTES, check_current=check_current)
+        try:
+            result = self._tool_result(data, definitions, seen)
+        except Exception as error:
+            if cleanup_failed(data):
+                error.native_cleanup_failed = True
+            raise
+        if cleanup_failed(data):
+            result = replace(result, meta={**(result.meta or {}), "native_cleanup_failed": True})
+        return result
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
         key = os.environ.get(self.api_key_env)
@@ -163,3 +200,6 @@ class AnthropicMessagesDriver:
             text = json.dumps({"stance": "challenge", "claim": "模型未完整返回文本回应。",
                                "text": "模型输出已截断、要求工具或缺少可用正文，需要核对后再继续。", "evidence": []}, ensure_ascii=False)
         return DriverResponse(text=text, tokens=tokens, meta=meta)
+
+
+_ANTHROPIC_TOOL_TURN = AnthropicMessagesDriver.tool_turn

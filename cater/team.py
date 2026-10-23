@@ -1583,6 +1583,15 @@ class TeamService:
                                  "context_json_bytes": len(context_text.encode("utf-8")),
                                  "history_json_bytes": json_bytes(wire_history), "tools_json_bytes": json_bytes(wire_tools),
                                  "history_omitted_groups": window["omitted_groups"]}
+                request_scope = dict(last_scope)
+
+                def check_request():
+                    with self._context_read():
+                        self._current(task_id, started, role, revision)
+                        live_scope = self.recovery.scope(task_id)
+                    if not _same_scope(request_scope, live_scope):
+                        raise WorkConflict("目标、规则、控制或工程权限已变化，未继续采用旧范围的模型响应。")
+
                 self._current(task_id, started, role, revision)
                 live_binding = self.rt.workspaces.view(task_id)
                 if any(binding.get(key) != live_binding.get(key)
@@ -1619,7 +1628,12 @@ class TeamService:
                             failure["admission_not_started"] = True
                         raise WorkConflict("监督请求前出现未核对操作，先核对实际影响，不重放旧工作。")
                     invocation_started = True
-                    turn = driver.tool_turn(role=role.role, prompt=prompt, history=wire_history, tools=wire_tools)
+                    iter_turn = getattr(driver, "iter_tool_turn", None)
+                    if callable(iter_turn):
+                        turn = yield from iter_turn(role=role.role, prompt=prompt, history=wire_history,
+                            tools=wire_tools, check_current=check_request)
+                    else:
+                        turn = driver.tool_turn(role=role.role, prompt=prompt, history=wire_history, tools=wire_tools)
                 except DriverProtocolError as error:
                     self.rt._driver_health.record_rejection(role.driver)
                     failure["context_basis"] = basis
@@ -1652,6 +1666,9 @@ class TeamService:
                     "token_usage": meta.get("token_usage", "unavailable"), "request_sizes": request_sizes, "context_basis": basis,
                     "usage": safe_tool_usage(meta.get("usage")), **response_diagnostics,
                     **({"response_client_tools_executed": False} if response_diagnostics else {}), **request_correction})
+                if type(meta) is dict and meta.get("native_cleanup_failed") is True:
+                    failure["native_cleanup_failed"] = True
+                    raise WorkConflict("模型已完整返回并记录可用用量，但本机请求进程或管道收尾存在异常；未采用本轮文本或工具动作。")
                 if meta.get("contained"):
                     failure.update(response_diagnostics)
                     failure["response_client_tools_executed"] = False
@@ -1683,7 +1700,7 @@ class TeamService:
                 if catalog is not None and any(call.name not in {tool["name"] for tool in wire_tools}
                                                for call in turn.calls):
                     raise ValueError("模型请求了本轮尚未声明的工具，整批未执行；应先载入并在下一次请求使用。")
-                self._current(task_id, started, role, revision)
+                check_request()
                 if turn.text.strip():
                     final = turn.text
                     completed = next((e for e in reversed(self.rt.log.read(task_id=task_id))
@@ -1823,12 +1840,17 @@ class TeamService:
                     failure["interruption_kind"] = "turn_boundary"
         except WorkConflict as exc:
             status, reason = "interrupted", str(exc)
+            if vars(exc).get("native_cleanup_failed") is True:
+                failure["native_cleanup_failed"] = True
+                reason += " 本机模型请求的收尾也未确认，不能据此证明远端未处理或计费。"
             if not invocation_started and self.rt.execution_control.view(task_id)["seq"] != started.payload["control_seq"]:
                 failure["admission_not_started"] = True
         except Exception as exc:
             status, reason = "failed", f"{role.name}的本轮调用未完成，已有成果和操作记录保留；需要核对接入或执行记录。"
             failure["error_type"] = type(exc).__name__
             failure["failure_stage"] = failure_stage
+            if vars(exc).get("native_cleanup_failed") is True:
+                failure["native_cleanup_failed"] = True
             failure.update(tool_failure_diagnostics(exc))
             code = getattr(exc, "status_code", None)
             if failure.get("response_status") == "contained":

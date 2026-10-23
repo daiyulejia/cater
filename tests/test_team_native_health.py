@@ -181,7 +181,7 @@ class TeamNativeHealthTests(unittest.TestCase):
 
                 with self.observations(f) as trace, patch.object(
                         f.rt.team, "_execute", side_effect=execute_after_success) as host:
-                    next(running)
+                    protocol.advance_to_response_boundary(running, f, requests, event_type="team.tool_finished")
                     host.assert_called_once()
                     self.assertEqual(len(requests), 1)
                     self.assertEqual(trace.mock_calls, [call.record_success("team_test")])
@@ -202,7 +202,8 @@ class TeamNativeHealthTests(unittest.TestCase):
                 f.rt._driver_health.record_failure("team_test")
                 running = self.start(f)
                 with self.observations(f) as trace:
-                    next(running)
+                    protocol.advance_to_response_boundary(running, f, requests,
+                                                          event_type="team.response_correction_requested")
                     self.assertEqual(len(requests), 1)
                     self.assertEqual(trace.mock_calls, [call.record_rejection("team_test")])
                     self.assert_members(f.rt, "unverified", "recent_failure")
@@ -279,7 +280,8 @@ class TeamNativeHealthTests(unittest.TestCase):
                         running = self.start(f, worker=change == "version")
                         expected = call.record_rejection("team_test") if rejected else call.record_success("team_test")
                         with self.observations(f) as trace:
-                            next(running)
+                            protocol.advance_to_response_boundary(running, f, requests,
+                                event_type="team.response_correction_requested" if rejected else "team.tool_finished")
                             self.assertEqual(len(requests), 1)
                             self.assertEqual(trace.mock_calls, [expected])
                             self.change(f, driver, change)

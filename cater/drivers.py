@@ -13,7 +13,7 @@ import subprocess
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from http.client import HTTPException, IncompleteRead, RemoteDisconnected
@@ -94,6 +94,9 @@ class _RejectRedirects(HTTPRedirectHandler):
 def _open_api_request(request: Request, *, timeout: float):
     """Open a configured model endpoint without implicit cross-host redirects."""
     return build_opener(_RejectRedirects()).open(request, timeout=timeout)
+
+
+_DEFAULT_API_OPENER = _open_api_request
 
 
 @dataclass(frozen=True)
@@ -233,8 +236,7 @@ def _tool_failure(error: DriverError, kind: str, phase: str | None = None,
     return error
 
 
-def _tool_api_request(*, endpoint: str, body: dict, headers: dict, name: str,
-                      timeout: float, opener: Any, byte_limit: int) -> dict:
+def _encode_tool_request(*, endpoint, body, headers, timeout, byte_limit):
     invalid = False
     try:
         if not isinstance(endpoint, str) or not _safe_api_endpoint(endpoint):
@@ -264,6 +266,13 @@ def _tool_api_request(*, endpoint: str, body: dict, headers: dict, name: str,
         pass
     if encoded is None:
         raise _tool_failure(DriverProtocolError("Tool request is not valid JSON"), "invalid_request") from None
+    return encoded
+
+
+def _tool_api_request(*, endpoint: str, body: dict, headers: dict, name: str,
+                      timeout: float, opener: Any, byte_limit: int) -> dict:
+    encoded = _encode_tool_request(endpoint=endpoint, body=body, headers=headers,
+                                   timeout=timeout, byte_limit=byte_limit)
     phase = "request"
     failure = None
     try:
@@ -748,7 +757,8 @@ class OpenAICompatibleDriver:
             return {"max_completion_tokens": self.max_completion_tokens}
         return {}
 
-    def tool_turn(self, *, role: str, prompt: str, history: list[dict], tools: list[dict]) -> ToolTurn:
+    def _tool_input(self, *, role: str, prompt: str, history: list[dict],
+                    tools: list[dict]) -> tuple[dict, dict, list[dict], set[str]]:
         try:
             system, transcript, definitions, seen = prepare_tool_turn(role=role, prompt=prompt, history=history, tools=tools)
             payload = {"model": self.model, "stream": False, "messages": openai_history(system, prompt, transcript)}
@@ -764,13 +774,45 @@ class OpenAICompatibleDriver:
         key = os.environ.get(self.api_key_env)
         if not key:
             raise _tool_failure(DriverUnavailable("Tool API credentials are unavailable"), "missing_credentials")
-        data = _tool_api_request(endpoint=self.endpoint, body=payload,
-            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json", "Accept": "application/json"},
-            name=self.name, timeout=self.timeout, opener=_open_api_request, byte_limit=MAX_API_RESPONSE_BYTES)
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json", "Accept": "application/json"}
+        return payload, headers, definitions, seen
+
+    def _tool_result(self, data: dict, definitions: list[dict], seen: set[str]) -> ToolTurn:
         try:
             return openai_turn(data, driver=self.name, names={t["name"] for t in definitions}, seen=seen)
         except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
             raise _tool_response_error("Invalid OpenAI tool response", data, anthropic=False) from None
+
+    def tool_turn(self, *, role: str, prompt: str, history: list[dict], tools: list[dict]) -> ToolTurn:
+        body, headers, definitions, seen = self._tool_input(role=role, prompt=prompt, history=history, tools=tools)
+        data = _tool_api_request(endpoint=self.endpoint, body=body, headers=headers,
+            name=self.name, timeout=self.timeout, opener=_open_api_request, byte_limit=MAX_API_RESPONSE_BYTES)
+        return self._tool_result(data, definitions, seen)
+
+    def iter_tool_turn(self, *, role: str, prompt: str, history: list[dict], tools: list[dict],
+                       check_current=None):
+        turn = self.tool_turn
+        # Preserve synchronous billing guards and caller-supplied transports.
+        if ("tool_turn" in self.__dict__
+                or getattr(turn, "__func__", None) is not _OPENAI_TOOL_TURN
+                or _open_api_request is not _DEFAULT_API_OPENER):
+            if check_current is not None:
+                check_current()
+            return turn(role=role, prompt=prompt, history=history, tools=tools)
+        from .native_transport import cleanup_failed, iter_request
+
+        body, headers, definitions, seen = self._tool_input(role=role, prompt=prompt, history=history, tools=tools)
+        data = yield from iter_request(endpoint=self.endpoint, body=body, headers=headers,
+            name=self.name, timeout=self.timeout, byte_limit=MAX_API_RESPONSE_BYTES, check_current=check_current)
+        try:
+            result = self._tool_result(data, definitions, seen)
+        except Exception as error:
+            if cleanup_failed(data):
+                error.native_cleanup_failed = True
+            raise
+        if cleanup_failed(data):
+            result = replace(result, meta={**(result.meta or {}), "native_cleanup_failed": True})
+        return result
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
         api_key = os.environ.get(self.api_key_env)
@@ -860,6 +902,9 @@ class OpenAICompatibleDriver:
             tokens=tokens if reported else 0,
             meta=meta,
         )
+
+
+_OPENAI_TOOL_TURN = OpenAICompatibleDriver.tool_turn
 
 
 def _openai_response_text(data: dict[str, Any]) -> str:
