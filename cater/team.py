@@ -1265,8 +1265,7 @@ class TeamService:
         with self.rt.log.atomic():
             current_work = self.view(task_id)
             if current_work["status"] == "done":
-                return {"status": "ok", "delivery_seq": current_work["revision"],
-                        "note": "当前目标已有交付结论，不重复登记；普通补充可直接回复，确需新工作请先采用新目标。"}
+                return self.delivery.repeat(task_id, arguments, current_work["revision"])
             self.rt.team_reviews._guard(task_id, role, tool_start)
             unknown = self.rt.workspaces.pending(task_id=task_id, effects_only=True)
             unknown_seqs = {e.seq for e in unknown}
@@ -1631,23 +1630,33 @@ class TeamService:
                 waiting = False
                 answered = False
                 operation_failed = False
-                check_unsettled = False
+                executed_names = []
+                finish_accepted = False
                 for call in turn.calls:
                     failure_stage = "tool_dispatch"
                     tool_start, result = self._dispatch_tool(task_id, message, role, started, revision,
                         call, tools, workspace, binding, context, assignment, on_started=tool_started)
                     failure_stage = "tool_result_recording"
+                    executed_names.append(call.name)
                     history.append({"role": "tool", "tool_call_id": call.id, "is_error": result.get("status") != "ok",
                                     "content": model_json(result)})
                     history_receipts.append({"call_id": call.id, "started_seq": tool_start.seq, "name": call.name,
                                              "status": result.get("status")})
                     operation_failed |= result.get("status") != "ok"
-                    check_unsettled |= result.get("complete") is False or result.get("outcome") in {
-                        "failed", "timeout", "effects_unknown"}
                     if call.name in {"set_objective", "finish_work"}:
                         revision = self.view(task_id)["revision"]
+                    if call.name == "finish_work" and result.get("status") == "ok" and result.get("already_completed") is True:
+                        final, answered = result["note"], True
+                        self.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
+                            payload={"text": final, "claim": final[:180], "phase": "team",
+                                "run_id": started.payload["run_id"], "reply_to": message.seq,
+                                "response_kind": "reply", "audience": "customer", "recipient": "human"})
+                        break
                     if call.name == "reply_to_customer" and result.get("status") == "ok":
                         final, answered = call.arguments["text"].strip(), True
+                        break
+                    if call.name == "finish_work" and result.get("status") == "ok":
+                        finish_accepted = True
                         break
                     if call.name == "wait_for_reply" and result.get("status") == "ok":
                         waiting = True
@@ -1661,9 +1670,9 @@ class TeamService:
                             status=status, reason=reason, final=final, failure=failure,
                             awaiting_customer=False, last_scope=last_scope)
                     return
-                substantive = [call.name for call in turn.calls if call.name != "wait_for_reply"]
-                if (substantive and substantive[-1] == "finish_work" and not operation_failed
-                        and not check_unsettled and not awaiting_customer and role.id == self.rt.organization.leader.id):
+                substantive = [name for name in executed_names if name != "wait_for_reply"]
+                if (substantive and substantive[-1] == "finish_work"
+                        and not awaiting_customer and role.id == self.rt.organization.leader.id):
                     with self.rt.log.atomic():
                         current_work = self.view(task_id)
                         events = self.rt.log.read(task_id=task_id)
@@ -1686,6 +1695,8 @@ class TeamService:
                                 status=status, reason=reason, final=final, failure=failure,
                                 awaiting_customer=awaiting_customer, last_scope=last_scope)
                             return
+                if finish_accepted:
+                    raise WorkConflict("交付已记录，但当前范围或执行收尾已变化，先核对实际交付与未结算操作，不继续执行本批后续请求。")
                 if awaiting_customer or waiting and not operation_failed:
                     status = "waiting"
                     break

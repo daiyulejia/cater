@@ -113,8 +113,11 @@ class OptionalHandoffTests(unittest.TestCase):
         saved = copy.deepcopy(completed.payload)
         with patch.object(self.rt.team.delivery, "normalize", side_effect=AssertionError("Unexpected retry")):
             result = self.finish(self.handoff([{"source_seq": artifact.seq, "quote": "actual source"}]))
-        self.assertEqual(result["status"], "ok")
+        self.assertEqual((result["status"], result["code"], result["delivery_seq"]),
+                         ("error", "delivery_already_completed", completed.seq))
+        self.assertIsNot(result.get("already_completed"), True)
         self.assertEqual([e.payload for e in self.events("team.objective_completed")], [saved])
+        self.assertEqual(self.rt.team.delivery.read(self.task, {})["delivery"]["seq"], completed.seq)
 
     def test_unexpected_normalizer_failure_still_does_not_commit(self):
         self.artifact()

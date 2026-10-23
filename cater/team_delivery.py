@@ -28,6 +28,33 @@ def omission_reason(value):
     return reason
 
 
+def _completion_request(arguments):
+    if not isinstance(arguments, dict) or any(not isinstance(arguments.get(key), str)
+            or not arguments[key].strip() or len(arguments[key]) > 32000 for key in ("summary", "verification")):
+        return None
+    request = dict(arguments)
+    for key in ("summary", "verification"):
+        if isinstance(request.get(key), str):
+            request[key] = request[key].strip()
+    if "artifact_seqs" in request:
+        seqs = request["artifact_seqs"]
+        if (not isinstance(seqs, list) or len(seqs) > 128
+                or any(type(seq) is not int or seq <= 0 for seq in seqs)
+                or len(set(seqs)) != len(seqs)):
+            return None
+        request["artifact_seqs"] = sorted(seqs)
+    if "omitted_approved_artifacts_reason" in request:
+        reason = omission_reason(request["omitted_approved_artifacts_reason"])
+        if reason is None:
+            return None
+        request["omitted_approved_artifacts_reason"] = reason
+    try:
+        # Canonical JSON distinguishes bool from int, unlike Python container equality.
+        return json.dumps(request, sort_keys=True, ensure_ascii=True, allow_nan=False)
+    except (TypeError, ValueError):
+        return None
+
+
 class HandoffError(ValueError):
     """Controlled public diagnostics; never echo arbitrary source payloads."""
 
@@ -108,6 +135,27 @@ def receipt_metadata(result, *, role, name):
 class TeamDelivery:
     def __init__(self, team):
         self.team, self.rt = team, team.rt
+
+    def repeat(self, task_id, arguments, delivery_seq):
+        events = self.rt.log.read(task_id=task_id)
+        completed = next((e for e in events if e.seq == delivery_seq
+            and e.actor == HOST and e.type == "team.objective_completed"), None)
+        original = next((e for e in reversed(events) if completed is not None
+            and e.seq < completed.seq and e.actor == HOST and e.type == "team.tool_started"
+            and e.payload.get("name") == "finish_work" and completed.payload.get("run_id")
+            and e.payload.get("run_id") == completed.payload["run_id"]), None)
+        receipted = original is not None and any(e.actor == HOST and e.type == "team.tool_finished"
+            and e.seq > completed.seq and e.payload.get("started_seq") == original.seq
+            and e.payload.get("run_id") == completed.payload["run_id"] and e.payload.get("name") == "finish_work"
+            and isinstance(e.payload.get("result"), dict) and e.payload["result"].get("status") == "ok" for e in events)
+        requested = _completion_request(arguments)
+        if receipted and requested is not None and requested == _completion_request(original.payload.get("arguments")):
+            return {"status": "ok", "delivery_seq": delivery_seq, "already_completed": True,
+                "note": f"这份相同请求已有交付记录 #{delivery_seq}；本次没有新增交付，也没有改写文件或保存新的说明。"}
+        return {"status": "error", "code": "delivery_already_completed", "delivery_seq": delivery_seq,
+            "message": "当前目标已有冻结的交付记录，本次不同参数未保存，文件清单和说明均未改写，不是补交成功。"
+                "请用read_delivery核对原记录；普通追问用reply_to_customer答复。确需补交、修改或重新交付时，"
+                "先用set_objective明确这次新工作，再按实际版本finish_work；可显式沿用本群未改动的成果，不必重做源码或无故重新开会。"}
 
     def _sources(self, task_id, artifacts, revision):
         events = self.rt.log.read(task_id=task_id)

@@ -1,4 +1,5 @@
 """Final-answer guidance reaches native tools without adding a content gate."""
+import copy
 import json
 import unittest
 from unittest.mock import patch
@@ -68,7 +69,7 @@ class DeliveryAnswerGuidanceTests(unittest.TestCase):
         self.assertEqual([e.payload["text"] for e in visible], [answer])
         self.assertEqual(f.events("team.run_finished")[-1].payload["status"], "completed")
 
-    def test_external_followup_using_idempotent_finish_does_not_replace_original_delivery(self):
+    def test_external_followup_using_customer_reply_does_not_replace_original_delivery(self):
         f = external.TeamExternalTests()
         f.setUp()
         self.addCleanup(f.doCleanups)
@@ -77,12 +78,13 @@ class DeliveryAnswerGuidanceTests(unittest.TestCase):
         explanation = "解压后进入目录，运行 python -m unittest -v。"
         f.driver.scripts[manager] = [
             lambda run: run.call("finish_work", summary=original, verification="Fixture only."),
-            lambda run: run.call("finish_work", summary=explanation, verification="Explanation only."),
+            lambda run: run.call("reply_to_customer", text=explanation),
         ]
         task = f.rt.create_task("交付后追问")
         f.rt.team.enable(task)
         f.rt.team.receive(task, "交付已有结果")
         f.rt.collaborate(task)
+        saved = copy.deepcopy(f.rt.team.delivery.read(task, {})["delivery"])
         f.rt.team.receive(task, "我在 Windows 上怎么运行？")
         f.rt.collaborate(task)
         events = f.rt.log.read(task_id=task)
@@ -91,7 +93,11 @@ class DeliveryAnswerGuidanceTests(unittest.TestCase):
         self.assertEqual([e.payload["text"] for e in messages], [original, explanation])
         self.assertEqual([e.payload["text"] for e in messages if e.payload.get("delivery_seq") == delivery.seq], [original])
         self.assertEqual(messages[-1].payload["audience"], "customer")
+        self.assertNotIn("delivery_seq", messages[-1].payload)
         self.assertEqual(delivery.payload["summary"], original)
+        self.assertEqual(f.rt.team.delivery.read(task, {})["delivery"], saved)
+        self.assertEqual([e.payload["name"] for e in events if e.type == "team.tool_started"],
+                         ["finish_work", "reply_to_customer"])
         self.assertEqual(len(f.driver.runs), 2)
         self.assertEqual(f.driver.errors, [])
 
@@ -107,25 +113,44 @@ class DeliveryAnswerGuidanceTests(unittest.TestCase):
         self.assertIn("复查命令应完整可用", body["content"])
         self.assertEqual(f.events("team.objective_completed"), [])
 
-    def test_finish_does_not_skip_later_tools_in_same_batch(self):
+    def test_delivery_read_on_followup_returns_saved_record_to_model(self):
         f = self.f
         f.driver.steps[f.manager] = [simple.turn("", ("finish_work", {
-            "summary": "已核对结果。", "verification": "Fixture only."}), ("read_delivery", {})), simple.turn("核对记录后确认结果。")]
+            "summary": "已核对结果。", "verification": "Fixture only."}))]
         f.rt.team.receive(f.task, "交付并保留说明")
         f.run_ok()
-        self.assertEqual(len(f.driver.calls), 2)
+        delivery, = f.events("team.objective_completed")
+        saved = copy.deepcopy(delivery.payload)
+        f.driver.steps[f.manager] = [simple.turn("", ("read_delivery", {})), simple.turn("核对记录后确认结果。")]
+        f.rt.team.receive(f.task, "核对刚才保存的交付记录")
+        f.run_ok()
+        self.assertEqual(len(f.driver.calls), 3)
         self.assertEqual([e.payload["name"] for e in f.events("team.tool_finished")], ["finish_work", "read_delivery"])
-        self.assertTrue(any('"delivery"' in row.get("content", "") for row in f.driver.calls[-1]["history"] if row["role"] == "tool"))
+        returned, = [json.loads(row["content"]) for row in f.driver.calls[-1]["history"] if row["role"] == "tool"]
+        self.assertEqual(returned["delivery"]["seq"], delivery.seq)
+        self.assertEqual(returned["delivery"]["summary"], saved["summary"])
+        self.assertEqual([e.payload for e in f.events("team.objective_completed")], [saved])
+        self.assertEqual(len([e for e in f.events("msg.said") if "delivery_seq" in e.payload]), 1)
+        self.assertNotIn("delivery_seq", f.events("msg.said")[-1].payload)
 
-    def test_new_objective_in_same_batch_continues_without_reusing_old_final(self):
+    def test_new_objective_on_followup_continues_without_reusing_old_final(self):
         f = self.f
         f.driver.steps[f.manager] = [simple.turn("", ("finish_work", {
-            "summary": "旧结果。", "verification": "Fixture only."}),
-            ("set_objective", {"goal": "处理新的说明"})), simple.turn("正在处理新的说明。")]
+            "summary": "旧结果。", "verification": "Fixture only."}))]
         f.rt.team.receive(f.task, "收好已有结果，再处理新说明")
         f.run_ok()
-        self.assertEqual(len(f.driver.calls), 2)
+        delivery, = f.events("team.objective_completed")
+        saved = copy.deepcopy(delivery.payload)
+        f.driver.steps[f.manager] = [simple.turn("", ("set_objective", {"goal": "处理新的说明"})),
+                                    simple.turn("正在处理新的说明。")]
+        f.rt.team.receive(f.task, "现在开始处理新的说明")
+        f.run_ok()
+        self.assertEqual(len(f.driver.calls), 3)
         self.assertEqual(f.rt.team.view(f.task)["status"], "running")
+        self.assertEqual(f.rt.team.view(f.task)["objective"], "处理新的说明")
+        self.assertEqual([e.payload for e in f.events("team.objective_completed")], [saved])
+        self.assertEqual([e.payload["text"] for e in f.events("msg.said")
+                          if e.payload.get("delivery_seq") == delivery.seq], [saved["summary"]])
         self.assertEqual(f.events("msg.said")[-1].payload["text"], "正在处理新的说明。")
         self.assertNotIn("delivery_seq", f.events("msg.said")[-1].payload)
 
@@ -157,12 +182,25 @@ class DeliveryAnswerGuidanceTests(unittest.TestCase):
     def test_correcting_read_after_delivery_does_not_duplicate_final_message(self):
         f = self.f
         f.driver.steps[f.manager] = [simple.turn("", ("finish_work", {
-            "summary": "结果已保存。", "verification": "Fixture only."}),
-            ("read_delivery", {"delivery_seq": 0})), simple.turn("", ("read_delivery", {})), simple.turn("核对结果后收束。")]
+            "summary": "结果已保存。", "verification": "Fixture only."}))]
         f.rt.team.receive(f.task, "交付并核对记录")
         f.run_ok()
         delivery, = f.events("team.objective_completed")
-        self.assertEqual(len(f.driver.calls), 3)
+        saved = copy.deepcopy(delivery.payload)
+        f.driver.steps[f.manager] = [simple.turn("", ("read_delivery", {"delivery_seq": 0})),
+                                    simple.turn("", ("read_delivery", {})), simple.turn("核对结果后收束。")]
+        followup = f.rt.team.receive(f.task, "请读取刚才的记录，序号有误则纠正后答复")
+        f.run_ok()
+        self.assertEqual(len(f.driver.calls), 4)
+        reads = [e.payload["result"] for e in f.events("team.tool_finished") if e.payload["name"] == "read_delivery"]
+        self.assertEqual([result["status"] for result in reads], ["error", "ok"])
+        self.assertEqual(reads[-1]["delivery"]["seq"], delivery.seq)
+        returned = [json.loads(row["content"]) for row in f.driver.calls[-1]["history"] if row["role"] == "tool"]
+        self.assertEqual(returned, reads)
+        self.assertEqual([e.payload for e in f.events("team.objective_completed")], [saved])
+        self.assertEqual(f.events("msg.said")[-1].payload["reply_to"], followup.seq)
+        self.assertEqual(f.events("msg.said")[-1].payload["text"], "核对结果后收束。")
+        self.assertNotIn("delivery_seq", f.events("msg.said")[-1].payload)
         self.assertEqual(len([e for e in f.events("msg.said") if e.payload.get("delivery_seq") == delivery.seq]), 1)
 
     def test_successful_tool_envelope_with_failed_check_is_returned_to_model(self):
@@ -172,8 +210,9 @@ class DeliveryAnswerGuidanceTests(unittest.TestCase):
             if args[2] == "read_delivery":
                 return {"status": "ok", "outcome": "failed", "complete": True, "note": "Simulated check envelope."}
             return execute(*args, **kwargs)
-        f.driver.steps[f.manager] = [simple.turn("", ("read_delivery", {}), ("finish_work", {
-            "summary": "已保存的结论。", "verification": "Fixture only."})), simple.turn("需要检查工具结果。")]
+        f.driver.steps[f.manager] = [simple.turn("", ("read_delivery", {})),
+                                    simple.turn("需要检查工具结果。", ("finish_work", {
+                                        "summary": "已保存的结论。", "verification": "Fixture only."}))]
         f.rt.team.receive(f.task, "检查后交付")
         with patch.object(f.rt.team, "_execute", side_effect=checked):
             f.run_ok()
@@ -189,6 +228,9 @@ class DeliveryAnswerGuidanceTests(unittest.TestCase):
         self.assertEqual(finished.payload["result"], expected)
         self.assertEqual(json.loads(returned["content"]), expected)
         self.assertFalse(returned["is_error"], "An ok envelope still carries the actual failed outcome")
+        delivery, = f.events("team.objective_completed")
+        reply, = [e for e in f.events("msg.said") if e.payload.get("delivery_seq") == delivery.seq]
+        self.assertEqual(reply.payload["text"], delivery.payload["summary"])
 
     def test_new_customer_message_after_finish_preempts_terminal_reply(self):
         f = self.f
@@ -228,13 +270,27 @@ class DeliveryAnswerGuidanceTests(unittest.TestCase):
     def test_idempotent_finish_after_read_error_emits_only_one_final_reply(self):
         f = self.f
         args = {"summary": "已保存答案。", "verification": "Fixture only."}
-        f.driver.steps[f.manager] = [simple.turn("", ("finish_work", args), ("read_delivery", {"delivery_seq": 0})),
-                                    simple.turn("确认已保存。", ("finish_work", args))]
+        f.driver.steps[f.manager] = [simple.turn("", ("finish_work", args))]
         f.rt.team.receive(f.task, "交付并核对")
         f.run_ok()
-        self.assertEqual(len(f.driver.calls), 2)
-        self.assertEqual(len(f.events("team.objective_completed")), 1)
-        self.assertEqual(len(f.events("team.run_finished")), 1)
+        delivery, = f.events("team.objective_completed")
+        saved = copy.deepcopy(delivery.payload)
+        f.driver.steps[f.manager] = [simple.turn("", ("read_delivery", {"delivery_seq": 0})),
+                                    simple.turn("确认已保存。", ("finish_work", args))]
+        followup = f.rt.team.receive(f.task, "再次核对已经保存的结果")
+        f.run_ok()
+        self.assertEqual(len(f.driver.calls), 3)
+        self.assertEqual([e.payload for e in f.events("team.objective_completed")], [saved])
+        self.assertEqual(len(f.events("team.run_finished")), 2)
+        reads = [e.payload["result"] for e in f.events("team.tool_finished") if e.payload["name"] == "read_delivery"]
+        self.assertEqual([result["status"] for result in reads], ["error"])
+        self.assertEqual(json.loads(f.driver.calls[-1]["history"][-1]["content"]), reads[0])
+        retry = f.events("team.tool_finished")[-1].payload["result"]
+        self.assertIs(retry.get("already_completed"), True)
+        self.assertEqual(retry["delivery_seq"], delivery.seq)
+        self.assertEqual(f.events("msg.said")[-1].payload["reply_to"], followup.seq)
+        self.assertEqual(f.events("msg.said")[-1].payload["text"], retry["note"])
+        self.assertNotIn("delivery_seq", f.events("msg.said")[-1].payload)
         self.assertEqual(len([e for e in f.events("msg.said") if "delivery_seq" in e.payload]), 1)
 
     def test_pause_after_finish_preempts_shortcut(self):

@@ -150,24 +150,53 @@ class ContinuationContextTests(unittest.TestCase):
     def test_native_supervisor_reads_queued_and_running_then_delivers_returned_bytes(self):
         source, sender = self.job()
         continuation = self.resume(source, sender)
+        observed = []
         def queued(context, history, tools):
             row, = context['outgoing_work']
             self.assertEqual(row['status'], 'queued')
             self.assertEqual(row['latest_message_seq'], continuation.seq)
+            observed.append(row['status'])
             return self.native_turn('', ('read_checkpoint', {}))
         def running(context, history, tools):
-            self.assertEqual(context['outgoing_work'][0]['status'], 'running')
+            row, = context['outgoing_work']
+            self.assertEqual(row['status'], 'running')
+            self.assertEqual(row['latest_message_seq'], continuation.seq)
+            observed.append(row['status'])
             return self.native_turn('', ('wait_for_reply', {}))
         self.driver.steps = {self.manager: [queued, running,
             self.native_turn('', ('finish_work', {'summary': '原委托的说明已交付', 'verification': '只核对文件正文'})),
             self.native_turn('说明已交回，转换执行仍未验证。')], self.worker: [
             self.native_turn('', ('publish_artifact', {'filename': 'guide.md', 'content': '# 接续结果\n未执行转换。',
                 'summary': '实际保存的说明', 'format': 'markdown'})), self.native_turn('原委托已完成，说明已保存。')]}
-        self.rt.team.receive(self.task, '现在原工作进行到哪里了', request_id='continuation-context-native')
+        progress = self.rt.team.receive(self.task, '现在原工作进行到哪里了', request_id='continuation-context-native')
+        message, role, started = self.rt.team._claim(self.task)
+        self.assertEqual((message.seq, role.id), (progress.seq, self.manager))
+        manager_run = self.rt.team._run_message(self.task, message, role, started)
+        self.addCleanup(manager_run.close)
+        # Advance actual native runs explicitly; scheduler wall time cannot pick these stages.
+        next(manager_run)
+        self.assertEqual(observed, ['queued'])
+        message, role, started = self.rt.team._claim(self.task)
+        self.assertEqual((message.seq, role.id), (continuation.seq, self.worker))
+        worker_run = self.rt.team._run_message(self.task, message, role, started)
+        self.addCleanup(worker_run.close)
+        next(worker_run)
+        with self.assertRaises(StopIteration):
+            next(manager_run)
+        self.assertEqual(observed, ['queued', 'running'])
+        list(worker_run)
+        resumed, = [e for e in self.events('team.run_finished')
+                    if e.payload['message_seq'] == continuation.seq]
+        self.assertEqual(resumed.payload['status'], 'completed')
+        returned, = [e for e in self.events('team.message_received')
+                     if e.actor.id == self.worker and e.payload.get('kind') == 'report'
+                     and e.payload.get('reply_to') == source.seq]
         self.rt.collaborate(self.task)
         self.assertEqual(self.rt.team.view(self.task)['status'], 'done')
         artifact, = self.rt.task(self.task).deliverables
         delivery, = self.events('team.objective_completed')
+        self.assertLess(resumed.seq, returned.seq)
+        self.assertLess(returned.seq, delivery.seq)
         self.assertEqual(delivery.payload['artifacts'][0]['seq'], artifact['seq'])
         body = Path(artifact['local_path']).read_bytes()
         with zipfile.ZipFile(io.BytesIO(self.rt.team.archive(self.task))) as archive:

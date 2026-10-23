@@ -49,15 +49,28 @@ class TeamAudienceTests(SimpleTeamTests):
         self.assertNotIn("delivery_seq", latest.payload)
         self.assertEqual(len([e for e in self.events("msg.said") if "delivery_seq" in e.payload]), 1)
 
-    def test_reopening_work_in_same_run_does_not_label_new_work_as_delivered(self):
+    def test_reopening_work_on_new_input_does_not_label_new_work_as_delivered(self):
         self.driver.steps[self.manager] = [turn("",
             ("finish_work", {"summary": "First delivery", "verification": "Fixture only"}),
             ("set_objective", {"goal": "Next objective"})), turn("The next objective is not delivered yet.")]
         self.rt.team.receive(self.task, "Finish one thing then adopt the next", request_id="audience-reopen")
         self.run_ok()
+        completed, = self.events("team.objective_completed")
+        self.assertEqual(self.rt.team.view(self.task)["status"], "done")
+        self.assertEqual(self.events("team.objective_updated"), [])
+        official, = [e for e in self.events("msg.said") if "delivery_seq" in e.payload]
+        self.assertEqual(official.payload["delivery_seq"], completed.seq)
+        self.assertEqual(official.payload["text"], completed.payload["summary"])
+        self.driver.steps[self.manager] = [turn("", ("set_objective", {"goal": "Next objective"})),
+                                          turn("The next objective is not delivered yet.")]
+        self.rt.team.receive(self.task, "Now adopt the next objective", request_id="audience-next-input")
+        self.run_ok()
         latest = self.events("msg.said")[-1]
         self.assertNotIn("delivery_seq", latest.payload)
         self.assertEqual(self.rt.team.view(self.task)["status"], "running")
+        self.assertEqual(self.rt.team.view(self.task)["objective"], "Next objective")
+        self.assertEqual(self.events("team.objective_completed"), [completed])
+        self.assertEqual(len([e for e in self.events("msg.said") if "delivery_seq" in e.payload]), 1)
 
     def test_old_goal_interruption_does_not_bounce_obsolete_callbacks(self):
         self.driver.steps[self.manager] = [turn("", ("delegate", {

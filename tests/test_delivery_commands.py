@@ -587,8 +587,14 @@ class DeliveryCommandTests(unittest.TestCase):
         self.assertNotIn("handoff", completed.payload)
         self.assertEqual(completed.payload["handoff_warning"], result["handoff_warning"])
         self.assertEqual(self.events("team.review_requested"), [])
-        self.assertEqual(self.finish(self.handoff(), artifact_seqs=[seq])["status"], "ok")
+        saved = copy.deepcopy(completed.payload)
+        retry = self.finish(self.handoff(), artifact_seqs=[seq])
+        self.assertEqual((retry["status"], retry["code"], retry["delivery_seq"]),
+                         ("error", "delivery_already_completed", completed.seq))
+        self.assertIsNot(retry.get("already_completed"), True)
+        self.assertEqual([e.payload for e in self.events("team.objective_completed")], [saved])
         self.assertEqual(self.events("team.objective_completed"), [completed])
+        self.assertEqual(self.events("team.review_requested"), [])
 
     def test_old_handoff_omits_command_field_and_does_not_read_new_command_sources(self):
         with patch("cater.delivery_commands.normalize", side_effect=AssertionError("Old handoff must not normalize command sources")):

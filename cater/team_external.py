@@ -188,8 +188,14 @@ class TeamExternal:
                         revision = self.team.view(task_id)["revision"]
                         last_scope = self.team.recovery.run_scope(task_id, started, observed=last_scope)
                     if call.name == "finish_work":
-                        stop_kind = "delivered"
-                        delivered_text = call.arguments["summary"]
+                        if result.get("already_completed") is True:
+                            stop_kind, delivered_text = "delivery_unchanged", result["note"]
+                        else:
+                            stop_kind = "delivered"
+                            completed = next(event for event in reversed(self.rt.log.read(task_id=task_id))
+                                if event.type == "team.objective_completed" and event.actor == HOST
+                                and event.seq == revision and event.payload.get("run_id") == started.payload["run_id"])
+                            delivered_text = completed.payload["summary"]
                     elif call.name == REPLY:
                         stop_kind = "answered"
                         delivered_text = call.arguments["text"].strip()
@@ -245,7 +251,7 @@ class TeamExternal:
                         status, reason = "interrupted", "外部伙伴本轮回复结束，但尚未正式交回原委托；需根据成果和回执继续交接。"
                     self.rt._driver_health.record_success(role.driver)
                 except ExternalYield:
-                    if stop_kind not in {"waiting", "checkpoint", "delivered", "returned", "answered"}:
+                    if stop_kind not in {"waiting", "checkpoint", "delivered", "delivery_unchanged", "returned", "answered"}:
                         raise WorkConflict("外部运行停止，但没有对应的宿主交接记录；保留原委托，不按完成处理。")
                     terminal = "yielded"
                     final = run.state.text
@@ -255,7 +261,7 @@ class TeamExternal:
                     elif stop_kind == "checkpoint":
                         status, reason = "interrupted", "本轮到达工具检查点，已有成果和回执保留，接下来核对并继续剩余工作。"
                         failure["interruption_kind"] = "turn_boundary"
-                    elif stop_kind in {"delivered", "answered"}:
+                    elif stop_kind in {"delivered", "delivery_unchanged", "answered"}:
                         final = delivered_text
                 except Exception as exc:
                     if not isinstance(exc, WorkConflict):
@@ -373,6 +379,8 @@ class TeamExternal:
         if final.strip() and stop_kind != "answered":
             if stop_kind == "delivered" and run is not None and not run.state.cleanup_complete:
                 final += "\n\n已发布成果可下载；外部客户端清理尚未确认，需核对进程，不能将本次交付理解为所有执行均已停止。"
+            elif stop_kind == "delivery_unchanged" and run is not None and not run.state.cleanup_complete:
+                final += "\n\n外部客户端清理尚未确认，需核对进程；本次没有新增交付，不表示所有执行均已停止。"
             current = self.team.view(task_id)
             completed = next((event for event in reversed(self.rt.log.read(task_id=task_id))
                               if event.type == "team.objective_completed" and event.actor == HOST

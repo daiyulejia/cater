@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 from pathlib import Path
@@ -109,12 +110,16 @@ class TeamProjectHistoryTests(unittest.TestCase):
             "handoff": {"why": "新增平均数并保留总数接口", "reproduce": ["运行 Python 断言"], "limits": [],
                         "evidence": [{"source_seq": published["artifact_seq"], "quote": "return sum(values)"}]}}))
         self.assertEqual((foreign["status"], foreign["handoff_status"]), ("ok", "omitted_invalid"))
+        completed, = self.events("team.objective_completed")
+        saved = copy.deepcopy(completed.payload)
         final, = self.exchange(("finish_work", {"summary": "平均数功能交付", "verification": "已独立运行当前版本断言",
             "handoff": {"why": "依据历史接口新增平均数，实际重新验证", "reproduce": ["from totals import average; assert average([]) == 0"],
                         "limits": ["受控脚本，不是真实模型质量证明"],
                         "evidence": [{"source_seq": result["artifact_seq"], "quote": "def average(values):"}]}}))
-        self.assertEqual(final["status"], "ok", final)
-        completed, = [e for e in self.rt.log.read(task_id=self.task) if e.type == "team.objective_completed"]
+        self.assertEqual((final["status"], final["code"], final["delivery_seq"]),
+                         ("error", "delivery_already_completed", completed.seq))
+        self.assertIsNot(final.get("already_completed"), True)
+        self.assertEqual([e.payload for e in self.events("team.objective_completed")], [saved])
         self.assertNotIn("handoff", completed.payload)
         self.assertEqual(completed.payload["handoff_status"], "omitted_invalid")
         with zipfile.ZipFile(io.BytesIO(self.rt.team.archive(self.task))) as archive:

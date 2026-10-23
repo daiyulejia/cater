@@ -1,4 +1,5 @@
 """Review tools expose the decision identity without weakening citation checks."""
+import copy
 import unittest
 
 from cater.team_delivery import HandoffError, handoff_schema
@@ -80,8 +81,13 @@ class ReviewEvidenceIdentityTests(unittest.TestCase):
 
         result = deliver(review["review_seq"])
         self.assertEqual((result["status"], result["handoff_status"]), ("ok", "omitted_invalid"))
-        self.assertEqual(deliver(review["decision_seq"])["status"], "ok")
         completed, = [e for e in f.rt.log.read(task_id=f.task) if e.type == "team.objective_completed"]
+        saved = copy.deepcopy(completed.payload)
+        retry = deliver(review["decision_seq"])
+        self.assertEqual((retry["status"], retry["code"], retry["delivery_seq"]),
+                         ("error", "delivery_already_completed", completed.seq))
+        self.assertIsNot(retry.get("already_completed"), True)
+        self.assertEqual([e.payload for e in f.events("team.objective_completed")], [saved])
         self.assertNotIn("handoff", completed.payload)
         self.assertEqual(completed.payload["handoff_status"], "omitted_invalid")
         self.assertEqual(f.rt.team.view(f.task)["status"], "done")

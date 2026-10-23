@@ -232,7 +232,7 @@ class TeamSupervisionTests(unittest.TestCase):
                               if artifact.get("filename") == "obsolete.txt"])
         self.assertEqual(self.rt.team.view(self.task)["status"], "done")
 
-    def test_manager_finish_batch_allows_reads_but_no_new_writes(self):
+    def test_manager_finish_stops_batch_then_allows_reads_on_followup(self):
         root = self.bind_workspace()
         (root / "input.txt").write_text("readable after completion", encoding="utf-8")
         self.driver.steps[self.manager] = [self.native_turn("",
@@ -243,6 +243,19 @@ class TeamSupervisionTests(unittest.TestCase):
                                   "summary": "Late publication", "format": "text"})),
             self.native_turn("Completion and read-only inspection recorded.")]
         self.rt.team.receive(self.task, "Finish and inspect", request_id="finish-manager-batch")
+        self.run_team()
+        completed, = self.events("team.objective_completed")
+        saved = copy.deepcopy(completed.payload)
+        self.assertEqual([e.payload["name"] for e in self.events("team.tool_started")], ["finish_work"])
+        self.assertFalse((root / "after-finish.txt").exists())
+        self.assertEqual(self.rt.task(self.task).deliverables, [])
+        self.driver.steps[self.manager] = [self.native_turn("",
+            ("workspace_read", {"path": "input.txt"}),
+            ("workspace_write", {"path": "after-finish.txt", "content": "must not be written", "expected_sha256": None}),
+            ("publish_artifact", {"filename": "after-finish.txt", "content": "must not be published",
+                                  "summary": "Late publication", "format": "text"})),
+            self.native_turn("Read-only inspection recorded; no new goal was adopted.")]
+        self.rt.team.receive(self.task, "Read the saved input without adopting new work", request_id="finish-manager-followup")
         self.run_team()
         with self.subTest("read executes"):
             read, = self.results("workspace_read")
@@ -256,6 +269,9 @@ class TeamSupervisionTests(unittest.TestCase):
             publish, = self.results("publish_artifact")
             self.assertEqual(publish["status"], "error")
             self.assertEqual(self.rt.task(self.task).deliverables, [])
+        self.assertEqual([e.payload for e in self.events("team.objective_completed")], [saved])
+        self.assertEqual(len([e for e in self.events("msg.said") if e.payload.get("delivery_seq") == completed.seq]), 1)
+        self.assertNotIn("delivery_seq", self.events("msg.said")[-1].payload)
 
     def test_busy_manager_prioritizes_new_direction_with_complete_native_history(self):
         root = self.bind_workspace()
