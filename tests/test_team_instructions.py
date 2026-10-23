@@ -67,6 +67,14 @@ class TeamInstructionSelectionTests(unittest.TestCase):
             for clause in ("首次由成果发布者", "由原送审负责人", "伙伴已发布的版本", "不重复发布或改写发布者"):
                 self.assertIn(clause, text)
 
+    def test_manager_distinguishes_continuation_from_objective_replacement(self):
+        text = self.base()
+        for clause in ("current_work", "原目标未交付", "接续原委托与复核",
+                       "不因重述需求", "真正更换交付目标", "已交付后开始新工作",
+                       "旧委托和复核不再适用于新目标"):
+            self.assertIn(clause, text)
+        self.assertNotIn("【店长职责】", self.base(leader=False))
+
     def test_structured_state_selects_only_corresponding_note(self):
         states = [
             ({"background": {"source_task_id": "old"}}, "background是建群时冻结"),
@@ -236,6 +244,10 @@ class TeamInstructionWireTests(unittest.TestCase):
         self.assertIn("review.workspace_file", prefixes[0])
         self.assertIn("按需放handoff", prefixes[0])
         self.assertEqual(schemas[0], schemas[1])
+        objective, = [tool for tool in schemas[0] if tool["name"] == "set_objective"]
+        for clause in ("替换交付目标", "切换工作版本", "已发生的操作不会撤销",
+                       "返修", "不用本工具重述需求"):
+            self.assertIn(clause, objective["description"])
 
 
 if __name__ == "__main__":

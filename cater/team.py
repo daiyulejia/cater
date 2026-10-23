@@ -461,7 +461,7 @@ class TeamService:
                            "description": "index每页1-50项，默认20；goal/source/artifact每页1-16000字符，默认8000。"}}, ["section"]))
         if role.id == self.rt.organization.leader.id:
             tools += [
-                _tool("set_objective", "采用顾客当前目标或更换实现方向。记录成功后再安排相应工作；普通追问不用更换目标。",
+                _tool("set_objective", "替换交付目标，或在已交付后开始新工作。不同目标文本会切换工作版本，旧委托和复核不再适用于新目标，已发生的操作不会撤销。原目标内的反馈、返修、调整做法或进度追问直接接续，不用本工具重述需求。真正换目标时记录成功后再安排相应工作。",
                       {"goal": string}, ["goal"]),
                 _tool("finish_work", "店长确认当前工作可以交付。summary是顾客看到的最终答复，给实际答案；长细节按需放可选handoff。verification写实际验证结果与范围，区分源码推导和未验证建议，不等同于宿主证明正确。",
                       {"summary": {**string, "description": "直接回答本次问题，给必要结论、数字及口径或成果入口、最短操作与关键原因或风险。非必要内部编号、逐次检查和长细节按需放handoff，不重复整份报告；顾客要求全文或数字时保留。位置优先写文件与函数，行号须核对对应版本。不只说已完成，也不让顾客翻内部记录拼答案。"},
