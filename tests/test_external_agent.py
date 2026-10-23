@@ -281,6 +281,10 @@ class ExternalAgentTests(unittest.TestCase):
             with self.subTest(signal=type(signal)):
                 self.events.clear()
                 def execute(call):
+                    # The peer can request a tool before the input writer reports completion.
+                    pending = self.sessions[-1]._write_done
+                    if pending is not None:
+                        self.assertTrue(pending.wait(self.driver.timeout), "ACP input did not finish")
                     self.execute(call)
                     raise signal
                 run = self.new_run(execute=execute)
@@ -298,6 +302,87 @@ class ExternalAgentTests(unittest.TestCase):
                 self.assertLess(self.events.index("revoke"), self.events.index("wire-cancel"))
                 self.assertLess(self.events.index("wire-cancel"), self.events.index("bridge-close"))
                 self.assert_stopped(run)
+
+    def test_executor_control_exception_during_input_aborts_without_interleaving_cancel(self):
+        owner = self
+        original_send, original_cancel = AcpSession._iter_send, AcpSession.cancel
+        for cooperative in (False, True):
+            for signal in (ExternalYield("waited"), ValueError("scope"), KeyboardInterrupt()):
+                with self.subTest(cooperative=cooperative, signal=type(signal)):
+                    self.events.clear()
+                    entered, release = threading.Event(), threading.Event()
+                    cancel_results = []
+
+                    class PendingInput:
+                        def __init__(self, stream):
+                            self.stream = stream
+
+                        def __getattr__(self, name):
+                            return getattr(self.stream, name)
+
+                        def write(self, data):
+                            return self.stream.write(data)
+
+                        def flush(self):
+                            self.stream.flush()
+                            entered.set()
+                            if not release.wait(owner.driver.timeout):
+                                raise OSError("Fixture input barrier was not released")
+
+                    def send(session, value, deadline, **kwargs):
+                        if not isinstance(value, dict) or value.get("id") != "barrier" or "method" in value:
+                            return (yield from original_send(session, value, deadline, **kwargs))
+                        # Deliver the permission response but hold its writer completion.
+                        stream = session._proc.stdin
+                        session._proc.stdin = PendingInput(stream)
+                        try:
+                            return (yield from original_send(session, value, deadline, **kwargs))
+                        finally:
+                            session._proc.stdin = stream
+
+                    def cancel(session):
+                        try:
+                            owner.assertTrue(entered.is_set())
+                            owner.assertEqual(session._write_owner, threading.get_ident())
+                            owner.assertFalse(session._write_done.is_set())
+                            result = original_cancel(session)
+                            cancel_results.append(result)
+                            return result
+                        finally:
+                            release.set()
+
+                    def execute(call):
+                        self.assertTrue(entered.is_set())
+                        self.execute(call)
+                        raise signal
+
+                    run = self.new_run(execute=execute)
+                    before = len(self.calls)
+                    try:
+                        with patch.object(AcpSession, "_iter_send", send), patch.object(AcpSession, "cancel", cancel):
+                            with self.assertRaises(type(signal)) as caught:
+                                if cooperative:
+                                    list(run.iter_run("stop during input"))
+                                else:
+                                    run.run("stop during input")
+                    finally:
+                        release.set()
+                    self.assertIs(caught.exception, signal)
+                    self.assertEqual(len(self.calls) - before, 1)
+                    self.assertEqual(run.state.failure_phase, "tool_execution")
+                    self.assertEqual(cancel_results, [False])
+                    self.assertNotIn("wire-cancel", self.events)
+                    self.assertLess(self.events.index("revoke"), self.events.index("cancel"))
+                    self.assertLess(self.events.index("cancel"), self.events.index("bridge-close"))
+                    self.assertFalse(run.state.cancel_failed)
+                    self.assertIsNone(run.state.stop_reason)
+                    self.assertNotIn("response_ms", dict(run.state.observations))
+                    self.assertTrue(self.sessions[-1]._input_failed)
+                    self.assertFalse(self.sessions[-1]._prompt_active)
+                    self.assertTrue(all(not writer.is_alive() for writer in self.sessions[-1]._writers))
+                    self.assert_stopped(run)
+                    with self.assertRaises(RuntimeError):
+                        run.run("must not replay")
 
     def test_observer_control_exception_survives_acp_wrapping(self):
         signal = ExternalYield("observer stopped")

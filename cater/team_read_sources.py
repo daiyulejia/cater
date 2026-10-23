@@ -408,9 +408,12 @@ class TeamReadSources:
             if scope != self._scope(task_id):
                 return {"status": "error", "code": "file_read_scope_changed", "message": "目录绑定已变化，请重新查询来源。"}
             page = list(reversed(rows[:limit]))
+            query_state = "scope_unavailable" if scope is None else "matched_records" if page else "no_matching_records"
+            scope_note = ("当前工作目录绑定范围不可查询，空列表不表示没有历史读取，也不证明发生过解绑或权限变更。"
+                          if scope is None else "当前筛选条件下没有匹配记录，不证明文件从未读过。" if not page else "")
             return {"status": "ok", "observations": page, "workspace_binding": self._public_scope(scope),
-                    "scope_available": scope is not None, "has_more": len(rows) > limit,
-                    "next_before_seq": page[0]["seq"] if len(rows) > limit else None, "note": NOTE}
+                    "scope_available": scope is not None, "query_state": query_state, "has_more": len(rows) > limit,
+                    "next_before_seq": page[0]["seq"] if len(rows) > limit else None, "note": scope_note + NOTE}
         except (sqlite3.Error, ValueError, TypeError, UnicodeError):
             return {"status": "error", "code": "file_read_metadata_unavailable",
                     "message": "文件读取元数据暂不可用，未回退加载整段历史正文。"}

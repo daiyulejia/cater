@@ -15,6 +15,9 @@ import { NativeArtifactVersionsReceipt } from './NativeArtifactVersionsReceipt'
 import { nativeArtifactReceiptStatus } from './conversationActivityState'
 import { isFrozenArchiveReceipt, nativeFrozenArchiveReceiptStatus, teamToolReceipt } from './conversationActivityState'
 import { NativeFrozenArchiveReceipt } from './NativeFrozenArchiveReceipt'
+import { NativeReceiptRead } from './NativeReceiptRead'
+import { hasReceiptReadMetadata, receiptReadProvenance } from './receiptReadStatus'
+import { receiptReadArguments } from './conversationActivityState'
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
 const excerpt = (value: unknown, limit = 800): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（仅显示部分内容）' : '') : ''
@@ -79,6 +82,7 @@ export function NativeSkillReceipt({ event }: { event: TeamEvent }) {
 }
 
 function ToolReceipt({ event, full = false }: { event: TeamEvent; full?: boolean }) {
+  if (hasReceiptReadMetadata(event)) return <NativeReceiptRead event={event} />
   if (isFrozenArchiveReceipt(event)) return <NativeFrozenArchiveReceipt event={event} />
   if ((event.payload.name ?? event.payload.tool) === 'read_artifact') return <NativeArtifactReceipt event={event} />
   if ((event.payload.name ?? event.payload.tool) === 'read_project_history') return <NativeProjectHistoryReceipt event={event} />
@@ -163,9 +167,11 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
       const p = finished?.payload ?? event.payload, result = record(p.result)
       const name = excerpt(event.payload.name ?? event.payload.tool, 100) || '工具调用'
       const historyReceipt = ['read_project_history', 'workspace_restore_project_file'].includes(name) ? projectHistoryReadArguments(finished ?? event, receipts) : undefined
+      const readReceipt = hasReceiptReadMetadata(finished ?? event) ? receiptReadArguments(finished ?? event, events) : undefined
       const role = typeof p.role === 'string' ? p.role : event.actor.id
       const status = p.status ?? result.status ?? result.outcome
-      const label = name === 'browser_check' ? nativeBrowserReceiptStatus(finished ?? event)
+      const label = readReceipt ? receiptReadProvenance(readReceipt)!.status
+        : name === 'browser_check' ? nativeBrowserReceiptStatus(finished ?? event)
         : isFrozenArchiveReceipt({ ...(finished ?? event), payload: { ...event.payload, ...p } }) ? nativeFrozenArchiveReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } })
         : name === 'read_artifact' ? nativeArtifactReceiptStatus({ ...(finished ?? event), payload: { ...event.payload, ...p } })
         : historyReceipt ? name === 'workspace_restore_project_file' ? nativeProjectRestoreReceiptStatus(historyReceipt) : nativeProjectHistoryReceiptStatus(historyReceipt)
@@ -179,7 +185,7 @@ export function TeamToolProgress({ events, names, full = false }: { events: Team
         : ['ok', 'done', 'completed', 'succeeded', 'passed', 'success'].includes(String(status)) ? '工具已完成' : '工具结果待确认'
       return <li key={event.seq}>
         <p><strong>{isNativeMcpTool(name) ? nativeMcpToolTitle(name) : toolNames[name] ?? name}</strong> · {label} · @{names[role] ?? role}</p>
-        <ToolReceipt event={historyReceipt ?? { ...(finished ?? event), payload: { ...event.payload, ...p } }} full={full} />
+        <ToolReceipt event={readReceipt ?? historyReceipt ?? { ...(finished ?? event), payload: { ...event.payload, ...p } }} full={full} />
       </li>
     })}</ol>
   </details>

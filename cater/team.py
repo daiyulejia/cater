@@ -17,7 +17,7 @@ from types import WrapperDescriptorType
 
 from .artifacts import MAX_CONTENT_BYTES, normalize_deliverables, safe_filename
 from .activity_owner import activity_owner
-from .events import Actor
+from .events import Actor, Event
 from .drivers import DriverProtocolError, tool_failure_diagnostics, tool_protocol_error_usage
 from .room_dialogue import addressed_role
 from .team_recovery import RECOVERY_CONTRACT, TeamRecovery, _same_scope
@@ -419,7 +419,7 @@ class TeamService:
                        "description": "request_review或带review的delegate返回的review_seq，也可取reviews[].request_seq；不是委托message_seq、成果seq或回执seq。没有正式请求时先反馈作者，用delegate.review或request_review提交确切版本，不猜消息号。"},
                    "verdict": {"type": "string", "enum": ["changes_requested", "approved"]},
                    "feedback": string}, ["review_seq", "verdict", "feedback"]),
-            _tool("read_receipts", "读取本群真实工具回执。receipt_seq精确读一份既有回执；role、message_seq、name、run_id和before_seq可筛选分页，run_id不是角色名。section=file_reads只列当前目录绑定期间已观察的文件读取元数据，可用file_path精确筛选，再用返回的receipt_seq读原文。first/last_observed不是基线/当前磁盘；节选不补全文，历史不授权写入或证明结论。",
+            _tool("read_receipts", "读取本群已保存的工具回执，不重新执行原操作。record_read标记本次查询，原观察轮次看每条记录的run_id；本轮读回执不等于本轮重新核验。receipt_seq精确读一份既有回执；role、message_seq、name、run_id和before_seq可筛选分页，run_id不是角色名。section=file_reads只列当前目录绑定期间已观察的文件读取元数据，可用file_path精确筛选，再用返回的receipt_seq读原文。first/last_observed不是基线/当前磁盘；节选不补全文，历史不授权写入或证明结论。",
                   {"run_id": string, "role": {"type": "string", "enum": [r.id for r in members]},
                    "section": {"type": "string", "enum": ["receipts", "file_reads"]},
                    "receipt_seq": {"type": "integer", "minimum": 1, "description": "工具完成回执seq，不是started_seq、消息号或运行ID。"},
@@ -1108,6 +1108,20 @@ class TeamService:
                     "content_complete": offset == 0 and end == len(content)}}
             return {"status": "ok", **artifact}
         if name == "read_receipts":
+            record_read = {"kind": "persisted_events", "reexecutes_operations": False}
+            if (isinstance(tool_start, Event) and tool_start.actor == HOST
+                    and tool_start.type == "team.tool_started" and tool_start.task_id == task_id):
+                reader = tool_start.payload
+                reader_seq = tool_start.seq
+                if (reader.get("name") == name and reader.get("role") == role.id
+                        and isinstance(reader.get("run_id"), str) and reader["run_id"].strip()
+                        and len(reader["run_id"]) <= 128
+                        and type(reader.get("message_seq")) is int and reader["message_seq"] > 0
+                        and type(reader_seq) is int and reader["message_seq"] < reader_seq < 2 ** 63 - 1
+                        and next(self.rt.log.iter_events(task_id=task_id, event_types=("team.tool_started",),
+                            after_seq=reader_seq - 1, before_seq=reader_seq + 1), None) == tool_start):
+                    record_read.update(reader_run_id=reader["run_id"], reader_message_seq=reader["message_seq"],
+                                       reader_started_seq=reader_seq)
             limit = arguments.get("limit", 20)
             if type(limit) is not int or not 1 <= limit <= 50:
                 raise ValueError("回执数量应为1到50。")
@@ -1127,7 +1141,7 @@ class TeamService:
             if section == "file_reads":
                 if "receipt_seq" in arguments or "include_pending" in arguments:
                     raise ValueError("文件读取目录仅返回已记录元数据；精确原文请另用receipt_seq读取。")
-                return self.read_sources.read(task_id, arguments)
+                return {**self.read_sources.read(task_id, arguments), "record_read": record_read}
             if "file_path" in arguments:
                 raise ValueError("按路径查询读取来源时，请使用section=file_reads。")
             if "receipt_seq" in arguments and arguments.get("include_pending"):
@@ -1135,7 +1149,8 @@ class TeamService:
             if "receipt_seq" in arguments:
                 with self._context_read():
                     page = self.read_sources.exact(task_id, arguments)
-                return {"status": "ok", "receipts": page, "has_more": False, "next_before_seq": None}
+                return {"status": "ok", "receipts": page, "has_more": False, "next_before_seq": None,
+                        "record_read": record_read}
             if "run_id" in arguments and not any(e.actor == HOST and e.payload.get("run_id") == arguments["run_id"]
                     for e in self.rt.log.iter_events(task_id=task_id, event_types=("team.run_started",))):
                 return {"status": "error", "message": "找不到本群的这个运行ID；角色名请用role筛选，委托序号请用message_seq，真实运行ID见receipt_index。"}
@@ -1144,7 +1159,8 @@ class TeamService:
                 and ("before_seq" not in arguments or row["seq"] < arguments["before_seq"])]
             page = receipts[-limit:]
             response = {"status": "ok", "receipts": page, "has_more": len(receipts) > limit,
-                        "next_before_seq": page[0]["seq"] if len(receipts) > limit else None}
+                        "next_before_seq": page[0]["seq"] if len(receipts) > limit else None,
+                        "record_read": record_read}
             if arguments.get("include_pending"):
                 pending = [row for row in self._pending_operations(task_id)
                     if all(key not in arguments or row.get(key) == arguments[key] for key in ("run_id", "role", "message_seq", "name"))

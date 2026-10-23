@@ -5,6 +5,7 @@ import { artifactHistoryReceipt, isArtifactHistoryReceipt } from './artifactHist
 import { commonResponseDiagnostics, requestFailureFields, responseDiagnosticFields, responseDiagnostics } from './responseDiagnostics'
 import { publicReports } from './publicProgress'
 import type { PublicProgressSnapshot } from './publicProgress'
+import { hasReceiptReadMetadata, receiptReadProvenance } from './receiptReadStatus'
 
 type TimedEvent = TeamEvent & { ts?: string }
 export type ConversationActivityInput = {
@@ -553,7 +554,28 @@ export function teamToolReceipt(start: TeamEvent, events: TeamEvent[]) {
       || (event.payload.name ?? event.payload.tool) === (start.payload.name ?? start.payload.tool)))
 }
 
+export function receiptReadArguments<T extends TeamEvent>(event: T, events: TeamEvent[]): T {
+  if (!hasReceiptReadMetadata(event) || event.type !== 'team.tool_finished') return event
+  const invalid = (): T => ({ ...event, payload: { ...event.payload, arguments: null } })
+  if (!isTeamHost(event) || !historyPositive(event.payload.started_seq)) return invalid()
+  const matches = events.filter(start => start.seq === event.payload.started_seq)
+  if (matches.length !== 1) return invalid()
+  const start = matches[0], p = start.payload, args = p.arguments
+  if (!isTeamHost(start) || start.type !== 'team.tool_started' || start.seq >= event.seq
+    || [start, event].some(item => ['name', 'tool'].some(key => Object.hasOwn(item.payload, key) && item.payload[key] !== 'read_receipts'))
+    || (p.name ?? p.tool) !== 'read_receipts'
+    || ['role', 'run_id'].some(key => !historyId(p[key]) || p[key] !== event.payload[key])
+    || !skillText(p.call_id) || p.call_id.length > 256 || !historyPositive(p.message_seq) || p.message_seq >= start.seq
+    || teamToolReceipt(start, [event]) !== event || args === null || typeof args !== 'object' || Array.isArray(args)
+    || Object.hasOwn(event.payload, 'arguments') && (event.payload.arguments === null || typeof event.payload.arguments !== 'object'
+      || Array.isArray(event.payload.arguments) || Object.keys(object(event.payload.arguments)).length !== Object.keys(args).length
+      || Object.entries(args).some(([key, value]) => object(event.payload.arguments)[key] !== value))) return invalid()
+  return { ...event, payload: { ...event.payload, arguments: args, message_seq: p.message_seq } }
+}
+
 function toolOutcome(event: TeamEvent, name = event.payload.name) {
+  const read = receiptReadProvenance(event)
+  if (read) return read.status
   if (isFrozenArchiveReceipt(event)) return nativeFrozenArchiveReceiptStatus(event)
   if (name === 'read_artifact') return nativeArtifactReceiptStatus(event)
   if (name === 'read_project_history') return nativeProjectHistoryReceiptStatus(event)
@@ -717,9 +739,10 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   let anyOpenTool = false
   for (const role of roles) {
     const run = roleRuns.get(role), tool = latestTools.get(role)
-    const toolName = tool?.payload.name ?? (isNativeMcpTool(tool?.payload.tool) || ['read_project_history', 'read_artifact', 'read_background', 'workspace_restore_project_file'].includes(String(tool?.payload.tool)) ? tool?.payload.tool : undefined)
+    const toolName = tool?.payload.name ?? (isNativeMcpTool(tool?.payload.tool) || ['read_receipts', 'read_project_history', 'read_artifact', 'read_background', 'workspace_restore_project_file'].includes(String(tool?.payload.tool)) ? tool?.payload.tool : undefined)
     const receipt = tool ? teamToolReceipt(tool, hosts) : undefined
-    const finished = receipt && (toolName === 'workspace_restore_project_file' || toolName === 'read_project_history'
+    const finished = receipt && hasReceiptReadMetadata(receipt) ? receiptReadArguments(receipt, events)
+      : receipt && (toolName === 'workspace_restore_project_file' || toolName === 'read_project_history'
       && (Object.hasOwn(object(receipt.payload.result), 'archive_read') || object(object(receipt.payload.result).source).format === 'archive'))
       ? projectHistoryReadArguments(receipt, events)
       : receipt && tool && (['list_skills', 'read_skill'].includes(String(tool.payload.name)) || isNativeMcpTool(toolName) || ['read_project_history', 'read_artifact', 'read_background'].includes(String(toolName)))
@@ -754,7 +777,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
     }
     lines.push({ id: role, role, text: `${label(role)} · ${text}`, moving,
       ...(report ? { publicText: report.text, publicTruncated: report.truncated } : {}),
-      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回', '历史目录已读取', '历史交付说明已读取', '历史文件已读取', '成果正文已读取', '成果本页已读取', '成果发布历史已读取，未读正文', '工程文件清单已读取', '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对', '历史文件已创建', '已有相同文件，未重写'].includes(toolOutcome(finished, toolName))) })
+      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已存回执已读取', '已存文件读取观察已读取', '当前筛选无匹配文件读取记录', '已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回', '历史目录已读取', '历史交付说明已读取', '历史文件已读取', '成果正文已读取', '成果本页已读取', '成果发布历史已读取，未读正文', '工程文件清单已读取', '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对', '历史文件已创建', '已有相同文件，未重写'].includes(toolOutcome(finished, toolName))) })
   }
   const reported = new Set(events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'agent'
     && event.payload.kind === 'report' && (() => {
