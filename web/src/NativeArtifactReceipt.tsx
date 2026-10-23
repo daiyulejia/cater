@@ -1,8 +1,25 @@
 import { artifactReceiptContent, nativeArtifactReceiptStatus } from './conversationActivityState'
 import { archiveEntries } from './archiveManifest'
+import { artifactHistoryReceipt } from './artifactHistoryReceipt'
 import type { TeamEvent } from './team'
 
 export function NativeArtifactReceipt({ event }: { event: TeamEvent }) {
+  const history = artifactHistoryReceipt(event)
+  if (history) return <div key={JSON.stringify([event.seq, history])} aria-label="成果发布历史回执"
+    className="mt-1 min-w-0 max-w-full space-y-2 [overflow-wrap:anywhere]">
+    <p className="whitespace-pre-wrap font-semibold">成果发布历史 · {history.filename}</p>
+    <p>本群同名发布元数据 · 本页 {history.versions.length} 条 / 共 {history.total} 条 · 所选成果 #{history.artifactSeq}</p>
+    <p>仅按本群确切文件名列出发布记录；同名不代表同一目标或返修关系。</p>
+    <p>未读取正文或当前磁盘文件；不代表复核通过、验证完成或任务交付。</p>
+    <p>{history.hasMore ? `还有后续发布记录 · 本页末条 #${history.nextSeq}。` : '已到发布历史末页，无下一页。'}</p>
+    <details>
+      <summary className="cursor-pointer font-semibold">发布序号 · 本页 {history.versions.length} 条</summary>
+      {history.versions.length ? <ul aria-label="本页发布序号" tabIndex={0}
+        className="mt-1 max-h-48 min-w-0 max-w-full overflow-x-hidden overflow-y-auto">
+        {history.versions.map(row => <li key={row.seq} className="py-1">发布版本 #{row.seq}</li>)}
+      </ul> : <p>此游标之后没有发布记录。</p>}
+    </details>
+  </div>
   const status = nativeArtifactReceiptStatus(event)
   if (!['成果正文已读取', '成果本页已读取', '成果仅有元数据，正文不可读', '工程文件清单已读取',
     '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对'].includes(status)) return null

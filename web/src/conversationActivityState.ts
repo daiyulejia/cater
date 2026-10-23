@@ -1,6 +1,7 @@
 import { isTeamHost, isTeamRecovery, teamMessageAudience, teamProgressMessages, teamSpeaker } from './team'
 import type { TeamEvent, TeamRun, TeamState } from './team'
 import { archiveEntries, portableArchivePart } from './archiveManifest'
+import { artifactHistoryReceipt, isArtifactHistoryReceipt } from './artifactHistoryReceipt'
 import { commonResponseDiagnostics, requestFailureFields, responseDiagnosticFields, responseDiagnostics } from './responseDiagnostics'
 import { publicReports } from './publicProgress'
 import type { PublicProgressSnapshot } from './publicProgress'
@@ -66,6 +67,10 @@ export function nativeArtifactReceiptStatus(event: TeamEvent): string {
   if (event.type === 'team.tool_started') return '已发起，等待回执'
   if (event.type !== 'team.tool_finished') return uncertain
   const raw = object(event.payload.result), args = object(event.payload.arguments)
+  if (isArtifactHistoryReceipt(event)) {
+    if ([event.payload.status, raw.status].some(value => ['error', 'failed', 'blocked', 'cancelled'].includes(String(value)))) return '成果读取未完成'
+    return artifactHistoryReceipt(event) ? '成果发布历史已读取，未读正文' : uncertain
+  }
   const result = artifactReceiptContent(raw)
   if ([event.payload.status, result.status].some(value => ['error', 'failed', 'blocked', 'cancelled'].includes(String(value)))) return '成果读取未完成'
   if (result.status !== 'ok' || ![undefined, 'ok', 'completed', 'succeeded'].includes(event.payload.status as string | undefined)
@@ -749,7 +754,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
     }
     lines.push({ id: role, role, text: `${label(role)} · ${text}`, moving,
       ...(report ? { publicText: report.text, publicTruncated: report.truncated } : {}),
-      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回', '历史目录已读取', '历史交付说明已读取', '历史文件已读取', '成果正文已读取', '成果本页已读取', '工程文件清单已读取', '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对', '历史文件已创建', '已有相同文件，未重写'].includes(toolOutcome(finished, toolName))) })
+      warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回', '历史目录已读取', '历史交付说明已读取', '历史文件已读取', '成果正文已读取', '成果本页已读取', '成果发布历史已读取，未读正文', '工程文件清单已读取', '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对', '历史文件已创建', '已有相同文件，未重写'].includes(toolOutcome(finished, toolName))) })
   }
   const reported = new Set(events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'agent'
     && event.payload.kind === 'report' && (() => {

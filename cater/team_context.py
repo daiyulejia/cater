@@ -111,8 +111,15 @@ def model_context(context):
         selected.append(preview)
         total += cost
     result["conversation"] = list(reversed(selected))
-    latest = {row["filename"]: row for row in context["artifacts"]}
-    result["artifacts"] = [_preview(row, "summary", 512) for row in latest.values()]
+    latest, version_counts = {}, {}
+    for row in context["artifacts"]:
+        filename = row["filename"]
+        latest[filename] = row
+        if isinstance(filename, str) and filename:
+            version_counts[filename] = version_counts.get(filename, 0) + 1
+    result["artifacts"] = [{**_preview(row, "summary", 512),
+        **({"versions_total": version_counts[row["filename"]]} if version_counts.get(row["filename"], 0) > 1 else {})}
+        for row in latest.values()]
     result["context_window"] = {
         "conversation_bytes": json_bytes(result["conversation"]),
         "conversation_budget_bytes": CONVERSATION_BYTES,
@@ -121,6 +128,8 @@ def model_context(context):
         "work_reader": "read_checkpoint", "receipt_reader": "read_receipts",
         "review_reader": {"name": "read_checkpoint", "argument": "review_seq", "source": "reviews[].request_seq"},
         "artifact_versions_total": len(context["artifacts"]),
+        **({"artifact_versions_reader": {"name": "read_artifact", "section": "versions", "argument": "artifact_seq"}}
+           if any(count > 1 for count in version_counts.values()) else {}),
         "note": "聊天和工作索引可能是节选，不是完整要求或验收结论。message、active_assignment、最新顾客消息及当前目标reviews保留原文；旧目标复核节选可按review_reader读回。",
     }
     return _reference_inputs(result)

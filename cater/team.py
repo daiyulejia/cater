@@ -404,8 +404,11 @@ class TeamService:
                    "expected_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
                    "offset": {"type": "integer", "minimum": 0},
                    "limit": {"type": "integer", "minimum": 1, "maximum": 12000}}, ["skill_id"]),
-            _tool("read_artifact", "读取本群确切版本成果。文本不带offset/length返回完整正文；工程ZIP默认返回文件清单，指定path读取其中UTF8文本分页，二进制仅返回元信息。局部核对按Unicode字符分页，offset默认0，length默认8000、最多16000；尾页不等于读过全文，读取不等于复核通过。",
+            _tool("read_artifact", "读取本群确切版本成果。文本不带offset/length返回完整正文；工程ZIP默认返回文件清单，指定path读取其中UTF8文本分页，二进制仅返回元信息。局部核对按Unicode字符分页，offset默认0，length默认8000、最多16000；尾页不等于读过全文，读取不等于复核通过。section=versions按所选成果的确切文件名列本群发布历史元数据，用after_seq/limit分页，不读正文或磁盘；旧新基线由你明确选择。同名不代表同一目标或返修关系，发布者不等于实际编辑者。",
                   {"artifact_seq": {"type": "integer", "minimum": 1},
+                   "section": {"type": "string", "enum": ["content", "versions"]},
+                   "after_seq": {"type": "integer", "minimum": 0, "description": "仅section=versions，继续读取next_seq之后的发布元数据。"},
+                   "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "仅section=versions，默认20；不是正文字符数。"},
                    "path": {"type": "string", "description": "仅工程ZIP：文件清单中的完整相对路径。"},
                    "offset": {"type": "integer", "minimum": 0},
                    "length": {"type": "integer", "minimum": 1, "maximum": 16000}}, ["artifact_seq"]),
@@ -834,7 +837,7 @@ class TeamService:
             "pending_operations": [{k: row[k] for k in row if k != "arguments"} for row in pending[-20:]],
             "pending_operations_truncated": len(pending) > 20,
             "conversation": history[-60:], "artifacts": [{k: a.get(k) for k in
-                ("seq", "filename", "summary", "content_sha256", "local_path", "format")} for a in task.deliverables],
+                ("seq", "filename", "actor", "source", "summary", "content_bytes", "content_sha256", "local_path", "format")} for a in task.deliverables],
             "questionnaires": self.rt.questionnaires.view(task_id)[-5:],
             "workspace": workspace_state, "rules": rules["rules"],
             "background": dialogue_background(background, reader="read_background") if background is not None else None}, rules
@@ -1056,9 +1059,32 @@ class TeamService:
         if name == "read_artifact":
             if type(arguments["artifact_seq"]) is not int or arguments["artifact_seq"] < 1:
                 raise ValueError("成果序号需要正整数。")
-            artifact = next((a for a in self.rt.task(task_id).deliverables if a["seq"] == arguments["artifact_seq"]), None)
+            artifacts = self.rt.task(task_id).deliverables
+            artifact = next((a for a in artifacts if a["seq"] == arguments["artifact_seq"]), None)
             if artifact is None:
                 raise ValueError("找不到本群成果。")
+            section = arguments.get("section", "content")
+            if section not in {"content", "versions"}:
+                raise ValueError("成果读取section无效。")
+            if section == "versions":
+                if any(key in arguments for key in ("path", "offset", "length")):
+                    raise ValueError("发布历史目录不能混用正文或ZIP成员读取参数。")
+                after, limit = arguments.get("after_seq", 0), arguments.get("limit", 20)
+                if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 50:
+                    raise ValueError("版本目录需要非负整数after_seq和1到50的整数limit。")
+                filename = artifact.get("filename")
+                if not isinstance(filename, str) or not filename:
+                    raise ValueError("这份历史成果未记录文件名，无法按同名列版本；仍可按原序号读取。")
+                versions = [a for a in artifacts if a.get("filename") == filename]
+                remaining = [a for a in versions if a["seq"] > after]
+                page = remaining[:limit]
+                fields = ("seq", "filename", "actor", "source", "format", "content_bytes", "content_sha256", "content_error")
+                return {"status": "ok", "section": "versions", "artifact_seq": artifact["seq"], "filename": filename,
+                    "scope": "same_filename_in_this_chat", "versions": [{k: a[k] for k in fields if k in a} for a in page],
+                    "versions_total": len(versions), "has_more": len(remaining) > limit,
+                    "next_seq": page[-1]["seq"] if page else after}
+            if any(key in arguments for key in ("after_seq", "limit")):
+                raise ValueError("版本目录分页参数仅用于section=versions，不会据此截断正文。")
             if "path" in arguments:
                 if artifact.get("format") != "archive":
                     raise ValueError("只有工程ZIP可以按path读取文件。")

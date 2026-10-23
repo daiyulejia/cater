@@ -24,15 +24,17 @@ export type DetailEvent = {
 
 export type EventDetailsProps = { event: DetailEvent; actorName?: (id: string) => string; contextEvents?: DetailEvent[] }
 
-function frozenReadArguments(event: DetailEvent, events: DetailEvent[]): DetailEvent {
-  if (!isTeamHost(event) || event.type !== 'team.tool_finished' || !isFrozenArchiveReceipt(event)
+function readArguments(event: DetailEvent, events: DetailEvent[]): DetailEvent {
+  const name = event.payload.name ?? event.payload.tool
+  if (!isTeamHost(event) || event.type !== 'team.tool_finished'
+    || !(name === 'read_artifact' || name === 'read_background' && isFrozenArchiveReceipt(event))
     || Object.hasOwn(event.payload, 'arguments') || !Number.isSafeInteger(event.payload.started_seq)) return event
   const matches = events.filter(start => start.seq === event.payload.started_seq)
   if (matches.length !== 1) return event
   const start = matches[0]
   const args = start.payload.arguments
   if (!isTeamHost(start) || start.type !== 'team.tool_started' || start.seq >= event.seq
-    || (start.payload.name ?? start.payload.tool) !== 'read_background'
+    || (start.payload.name ?? start.payload.tool) !== name
     || ['role', 'run_id'].some(key => typeof start.payload[key] !== 'string' || !start.payload[key]
       || start.payload[key] !== event.payload[key])
     || typeof start.payload.call_id !== 'string' || !start.payload.call_id
@@ -555,7 +557,7 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
 }
 
 export function EventDetails({ event: original, actorName, contextEvents = [] }: EventDetailsProps) {
-  const event = projectHistoryReadArguments(frozenReadArguments(original, contextEvents), contextEvents)
+  const event = projectHistoryReadArguments(readArguments(original, contextEvents), contextEvents)
   const { fields, status, note } = describe(event, actorName)
   const displaySeq = positiveSeq(event.seq) ? event.seq : '待核对'
   const developerBase = hasCorrectionReference(event) ? { seq: positiveSeq(event.seq) ? event.seq : null, type: event.type } : event
