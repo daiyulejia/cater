@@ -52,4 +52,4 @@ Python 接口为 `Runtime(..., skills_path=...)`；Web 的 `serve`、`make_handl
 
 提供范围用于相关性筛选，不是同群保密 ACL。已读正文会进入本群工具历史，后续可能由伙伴和操作者查看；撤销配置不会擦掉历史。不要在指引中放 API Key、凭据或不应向群内公开的内容。普通工作区命令仍在宿主权限下运行，这不是 OS 沙箱。
 
-这也不是 MCP 接入：当前尚无通用 MCP 服务发现、工具调用和进程托管。详见[当前执行能力](capabilities.zh-CN.md)、[工程工作目录](workspaces.zh-CN.md)。
+Skill 不等于 MCP 接入。当前另有可选的[本地 MCP stdio 工具](mcp.zh-CN.md)，仅连接宿主明确配置的服务，按需列工具和调用；不支持通用远程服务发现、HTTP/SSE、OAuth 或自动安装。详见[当前执行能力](capabilities.zh-CN.md)、[工程工作目录](workspaces.zh-CN.md)。

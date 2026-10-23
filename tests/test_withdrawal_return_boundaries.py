@@ -291,18 +291,16 @@ class WithdrawalReturnBoundaryTests(unittest.TestCase):
         self.assertEqual(self.reports_to(parent), [])
         self.assertFalse(self.rt.team._pending_operations(self.task))
 
-    def test_running_author_remains_protected_after_formal_return(self):
+    def test_legacy_running_author_remains_protected_after_formal_return(self):
         self.f.publish('Published result')
         source = self.assign()
         started, running = self.run_steps(
             source,
-            self.f.native_turn('', ('send_message', {
-                'recipient': self.f.manager, 'reply_to': source.seq, 'text': 'Result returned.',
-            })),
             self.f.native_turn('', ('wait_for_reply', {})),
         )
-        # Send a real report, then let the manager run before the author ends.
-        next(running)
+        # Preserve the old in-flight shape: new native returns now finish atomically.
+        self.rt.team._send(self.task, self.rt.team._role(self.f.worker), self.f.manager,
+                           'Result returned.', 'report', reply_to=source.seq)
         report, = self.reports_to(source)
         self.assertGreater(report.seq, started.seq)
         active, = [r for r in self.rt.team.view(self.task)['runs']

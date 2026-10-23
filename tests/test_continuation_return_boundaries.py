@@ -45,30 +45,26 @@ class ContinuationReturnBoundaryTests(unittest.TestCase):
         self.assertTrue(self.rt.verify_chain().ok)
         return report
 
-    def assert_idempotent_pair(self, first_target, second_target):
+    def assert_batch_ends_at_return(self, first_target, second_target):
         before = len(self.rt.team._messages(self.task))
-        first, second = self.f.exchange(
+        first, = self.f.exchange(
             self.f.worker, self.reply(first_target), self.reply(second_target),
-            source=self.continuation)
-        self.assertEqual(second['status'], 'ok', second)
-        self.assertIs(second.get('already_reported'), True)
-        self.assertEqual(second['message_seq'], first['message_seq'])
-        if second_target == self.continuation.seq:
-            self.assertEqual(second['resolved_reply_to'], self.original.seq)
+            source=self.continuation, expected_result_count=1)
+        self.assertEqual(len(self.f.results('send_message')), 2)  # continuation and one return
         self.assertEqual(len(self.rt.team._messages(self.task)), before + 1)
         self.assert_single_return(first)
 
-    def test_same_turn_same_continuation_text_is_idempotent(self):
-        self.assert_idempotent_pair(self.continuation.seq, self.continuation.seq)
+    def test_batch_stops_after_continuation_return_before_duplicate(self):
+        self.assert_batch_ends_at_return(self.continuation.seq, self.continuation.seq)
 
-    def test_same_turn_same_original_text_is_idempotent(self):
-        self.assert_idempotent_pair(self.original.seq, self.original.seq)
+    def test_batch_stops_after_original_return_before_duplicate(self):
+        self.assert_batch_ends_at_return(self.original.seq, self.original.seq)
 
-    def test_original_then_continuation_reuses_report(self):
-        self.assert_idempotent_pair(self.original.seq, self.continuation.seq)
+    def test_batch_stops_after_original_before_continuation_return(self):
+        self.assert_batch_ends_at_return(self.original.seq, self.continuation.seq)
 
-    def test_continuation_then_original_reuses_report(self):
-        self.assert_idempotent_pair(self.continuation.seq, self.original.seq)
+    def test_batch_stops_after_continuation_before_original_return(self):
+        self.assert_batch_ends_at_return(self.continuation.seq, self.original.seq)
 
     def test_new_input_repeated_text_reuses_report_for_both_targets(self):
         first, = self.f.exchange(self.f.worker, self.reply(self.continuation.seq),
@@ -85,15 +81,13 @@ class ContinuationReturnBoundaryTests(unittest.TestCase):
                 self.assertEqual(len(self.rt.team._messages(self.task)), before + 1)
                 self.assertEqual(self.assert_single_return(first), report)
 
-    def test_same_turn_different_text_is_explicitly_rejected(self):
+    def test_same_turn_different_text_is_not_executed_after_return(self):
         before = len(self.rt.team._messages(self.task))
-        first, changed = self.f.exchange(
+        first, = self.f.exchange(
             self.f.worker, self.reply(self.continuation.seq),
             self.reply(self.original.seq, 'Correction: the check failed.'),
-            source=self.continuation)
-        self.assertEqual((changed['status'], changed.get('code')),
-                         ('error', 'assignment_already_returned'), changed)
-        self.assertEqual(changed['message_seq'], first['message_seq'])
+            source=self.continuation, expected_result_count=1)
+        self.assertEqual(len(self.f.results('send_message')), 2)
         self.assertEqual(len(self.rt.team._messages(self.task)), before + 1)
         self.assert_single_return(first)
 

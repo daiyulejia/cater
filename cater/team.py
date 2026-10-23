@@ -518,10 +518,26 @@ class TeamService:
                          and e.seq not in _reported_messages(self._messages(task_id))), None)
         response = message.payload.get("questionnaire") if message.actor == Actor.human() else None
         if message.actor == Actor.human():
-            question = next((e for e in reversed(self.rt.log.read(task_id=task_id))
+            events = self.rt.log.read(task_id=task_id)
+            question = next((e for e in reversed(events)
                              if e.type == "team.questions_requested" and e.actor == HOST and e.seq < message.seq
                              and e.payload.get("role_id") == role.id
                              and (not isinstance(response, dict) or e.seq == response.get("question_seq"))), None)
+            if question is not None and not isinstance(response, dict):
+                inputs = {e.seq for e in events if question.seq < e.seq < message.seq
+                          and e.type == "team.message_received" and e.actor == Actor.human()
+                          and e.payload.get("recipient") == role.id}
+                starts = {e.payload.get("run_id"): e for e in events
+                          if e.actor == HOST and e.type == "team.run_started"
+                          and e.payload.get("message_seq") in inputs and e.payload.get("role") == role.id}
+                # Only an unconsumed answer inherits the question's original work.
+                # Superseded/failed attempts are not evidence that it was consumed.
+                if any(e.actor == HOST and e.type == "team.run_finished" and e.seq < message.seq
+                       and e.payload.get("status") in {"completed", "waiting"}
+                       and (start := starts.get(e.payload.get("run_id"))) is not None
+                       and start.seq < e.seq and all(e.payload.get(key) == start.payload.get(key)
+                           for key in ("message_seq", "role")) for e in events):
+                    question = None
             if question is not None:
                 source = next((e for e in self._messages(task_id) if e.seq == question.payload.get("assignment_seq")
                                and e.payload.get("recipient") == role.id), None)
@@ -1693,6 +1709,7 @@ class TeamService:
                 operation_failed = False
                 executed_names = []
                 finish_accepted = False
+                returned = False
                 for call in turn.calls:
                     failure_stage = "tool_dispatch"
                     tool_start, result = self._dispatch_tool(task_id, message, role, started, revision,
@@ -1716,6 +1733,12 @@ class TeamService:
                     if call.name == "reply_to_customer" and result.get("status") == "ok":
                         final, answered = call.arguments["text"].strip(), True
                         break
+                    if (call.name == "send_message" and result.get("status") == "ok"
+                            and assignment is not None and any(
+                                event.seq == result.get("message_seq") and _assignment_report(assignment, event)
+                                for event in self._messages(task_id))):
+                        final, returned = call.arguments["text"].strip(), True
+                        break
                     if call.name == "finish_work" and result.get("status") == "ok":
                         finish_accepted = True
                         break
@@ -1727,7 +1750,7 @@ class TeamService:
                             or call.name == "delegate" and result.get("waiting_for_review") is True) and result.get("status") == "ok":
                         waiting = True
                         break
-                if answered:
+                if answered or returned:
                     with self.rt.log.atomic():
                         self._finish_message(task_id, message, role, started, revision, assignment,
                             status=status, reason=reason, final=final, failure=failure,

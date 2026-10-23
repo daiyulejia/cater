@@ -23,7 +23,7 @@ class TeamReviewCycleTests(TeamSupervisionTests):
         self._exchange_number = 0
 
     def exchange(self, role_id, *calls, task_id=None, source=None,
-                 expected_statuses=("waiting", "completed")):
+                 expected_statuses=("waiting", "completed"), expected_result_count=None):
         """Settle a native turn without consuming unrelated queued assignments."""
         task_id = task_id or self.task
         role = self.rt.team._role(role_id)
@@ -52,7 +52,7 @@ class TeamReviewCycleTests(TeamSupervisionTests):
                    if event.type == "team.tool_finished"
                    and event.payload["run_id"] == started.payload["run_id"]
                    and event.payload["name"] != "wait_for_reply"]
-        self.assertEqual(len(results), len(calls))
+        self.assertEqual(len(results), len(calls) if expected_result_count is None else expected_result_count)
         return results
 
     def publish(self, content="version one\n", *, author=None, filename="result.txt", task_id=None):
@@ -229,7 +229,10 @@ class TeamReviewCycleTests(TeamSupervisionTests):
         self.assertLess(decisions[-1].seq, parent_reports[0].seq)
         self.assertLess(parent_reports[0].seq, completed.seq)
         runs = self.rt.team.view(self.task)["runs"]
-        self.assertTrue(all(row["status"] == "waiting" for row in runs if row["role"] in {self.worker, self.reviewer}))
+        worker_runs = [row for row in runs if row["role"] == self.worker]
+        self.assertTrue(all(row["status"] == "waiting" for row in worker_runs[:-1]))
+        self.assertEqual(worker_runs[-1]["status"], "completed")
+        self.assertTrue(all(row["status"] == "waiting" for row in runs if row["role"] == self.reviewer))
         self.assertEqual(self.rt.team.view(self.task)["status"], "done")
         self.assertEqual(self.rt.team.view(self.task)["pending_count"], 0)
         self.assert_one_run_per_role()
