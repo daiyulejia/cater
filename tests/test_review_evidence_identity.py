@@ -95,6 +95,8 @@ class ReviewEvidenceIdentityTests(unittest.TestCase):
         self.assertTrue(f.rt.verify_chain().ok)
 
     def test_schema_explains_decision_identity_at_the_citation_field(self):
-        schema = handoff_schema()["properties"]["evidence"]["items"]["properties"]["source_seq"]
+        branches = handoff_schema()["properties"]["evidence"]["items"]["oneOf"]
+        schema, = [branch["properties"]["source_seq"] for branch in branches
+                   if branch["required"] == ["source_seq", "quote"]]
         for term in ("decision_seq", "review_seq/request_seq", "message_seq", "record_review"):
             self.assertIn(term, schema["description"])

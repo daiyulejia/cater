@@ -62,7 +62,7 @@ class RecordedToolResult(dict):
             raise ValueError("Invalid recorded receipt pointer")
         return {"source_seq": seq, "source_hash": fingerprint, "read_tool": "read_receipts",
                 "read_args": {"receipt_seq": seq},
-                "note": "这是本次工具的宿主完成回执编号，引用原文时使用此source_seq，不猜started_seq。状态与退出码会自动附在引用上，不拼成正文quote；记录不认证观点正确。"}
+                "note": "本工具完成编号，按read_args读回；答复引用用source_seq。交付说明由店长用read_handoff_sources选来源。状态和退出码不是正文quote，记录不认证观点。"}
 
 
 @dataclass(frozen=True)

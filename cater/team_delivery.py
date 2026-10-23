@@ -82,16 +82,20 @@ def handoff_schema():
 
     strings = {"type": "array", "maxItems": 12, "items": {"type": "string", "maxLength": 1000}}
     return {"type": "object", "additionalProperties": False, "required": ["why", "reproduce", "limits"],
-        "description": "可选的对客原因、长细节与证据，在此折叠保存；关键结论留主摘要，不是私有思维。完整说明（含宿主补充引用信息）总计不超过24KB UTF-8。quote从文件正文、回执stdout/stderr/content、浏览器实际观测或当前复核反馈逐字摘录，不引用计划标签作为执行证据。",
+        "description": "可选的对客原因、长细节与证据，折叠保存；关键结论留主摘要，不是私有思维。完整说明（含宿主补充引用信息）不超过24KB UTF-8。需要引用时可先用read_handoff_sources选evidence_id，由宿主保存实际片段；也可逐字填写source_seq和quote。片段不认证观点或覆盖率。",
         "properties": {"why": {"type": "string", "maxLength": 4000},
             **{key: strings for key in ("changed", "impact", "alternatives", "reproduce", "limits")},
             "reproduce": {**strings, "description": "成员建议的使用和复查步骤：给出适用目录、完整命令及环境，区分已运行与建议，不凭说明声称执行。Cater工具JSON字段不是终端参数，客户端临时目录不是工程；实际命令可选用command_receipts引用宿主记录，不必重新编写。"},
             "command_receipts": command_schema(),
-            "evidence": {"type": "array", "maxItems": 16, "items": {"type": "object", "additionalProperties": False,
+            "evidence": {"type": "array", "maxItems": 16, "items": {"oneOf": [
+                {"type": "object", "additionalProperties": False, "required": ["evidence_id"],
+                 "properties": {"evidence_id": {"type": "string", "pattern": "^ev1_[a-f0-9]{64}$",
+                     "description": "read_handoff_sources返回的确切片段编号；交付时仍核对当前目标与所选成果。"}}},
+                {"type": "object", "additionalProperties": False,
                 "required": ["source_seq", "quote"], "properties": {
                     "source_seq": {"type": "integer", "minimum": 1,
                         "description": "成果用artifact seq，工作区/浏览器检查用工具回执seq；伙伴复核用record_review返回或reviews中的decision_seq，不是review_seq/request_seq、message_seq或record_review工具回执seq。"},
-                    "quote": {"type": "string", "maxLength": 2000}}}}}}
+                    "quote": {"type": "string", "maxLength": 2000}}}]}}}}
 
 
 def _receipt_text(result):
@@ -257,6 +261,62 @@ class TeamDelivery:
                 "available_sources_note": "这是本次选定版本与当前目标下可摘录的来源索引，不是检查通过或结论正确的证明。"
                     "请按 read_tool/read_args 读取原文，再选择必要引文；未列全时仍可核对已有的其他合法来源。"}
 
+    def read_sources(self, task_id, arguments):
+        from .handoff_sources import choices
+
+        allowed = {"artifact_seqs", "source_seq", "before_seq", "limit"}
+        if not isinstance(arguments, dict) or set(arguments) - allowed:
+            raise HandoffError("引用来源读取参数不正确。")
+        limit = arguments.get("limit", 6)
+        if type(limit) is not int or not 1 <= limit <= 6:
+            raise HandoffError("引用来源每页需要1至6项。")
+        for field in ("source_seq", "before_seq"):
+            if field in arguments and (type(arguments[field]) is not int or not 0 < arguments[field] < 2 ** 63):
+                raise HandoffError("引用来源需要有效的正整数事件序号。")
+        if "source_seq" in arguments and "before_seq" in arguments:
+            raise HandoffError("精确来源读取不能同时使用分页边界。")
+        with self.team._context_read():
+            current = self.team.view(task_id)
+            artifacts = self.rt.task(task_id).deliverables
+            retired = self.rt.team_reviews.superseded_artifacts(task_id, reviews=current["reviews"])
+            if "artifact_seqs" in arguments:
+                seqs = arguments["artifact_seqs"]
+                available = {a["seq"]: a for a in artifacts if a.get("filename") and a.get("content_sha256")}
+                if (not isinstance(seqs, list) or len(seqs) > 128
+                        or any(type(seq) is not int or seq not in available or seq in retired for seq in seqs)
+                        or len(set(seqs)) != len(seqs)):
+                    raise HandoffError("请选择本群未被替代的确切成果序号。")
+                selected = [available[seq] for seq in seqs]
+                if len({a["filename"] for a in selected}) != len(selected):
+                    raise HandoffError("同一文件名只能选择一个成果版本。")
+            else:
+                boundary = max((e.seq for e in self.rt.log.read(task_id=task_id) if e.actor == HOST
+                    and e.type in {"team.started", "team.objective_updated"}), default=0)
+                latest = {a["filename"]: a for a in artifacts if a["seq"] > boundary
+                          and a.get("filename") and a.get("content_sha256")}
+                selected = [a for a in latest.values() if a["seq"] not in retired]
+            refs = [{key: a[key] for key in ("seq", "filename", "content_sha256")} for a in selected]
+            sources = self._sources(task_id, refs, current["revision"])
+            grouped = {}
+            for option, event, _metadata in choices(sources, current["revision"]):
+                if ("source_seq" in arguments and event.seq != arguments["source_seq"]
+                        or "before_seq" in arguments and event.seq >= arguments["before_seq"]):
+                    continue
+                grouped.setdefault(event.seq, []).append(option)
+            ordered = sorted(grouped, reverse=True)
+            page = ordered[:limit]
+            rows = []
+            for seq in page:
+                catalog = self._source_catalog({seq: sources[seq]})["available_sources"]
+                if catalog:
+                    rows.append({**catalog[0], "evidence_options": grouped[seq]})
+            return {"status": "ok", "revision": current["revision"],
+                    "artifact_seqs": [a["seq"] for a in selected], "sources": rows,
+                    "has_more": len(ordered) > limit,
+                    "next_before_seq": page[-1] if len(ordered) > limit else None,
+                    "note": "选定片段后可在handoff.evidence中只填evidence_id，无需重抄quote。"
+                        "片段可能为节选；来源状态不认证观点、测试覆盖或当前文件正确性。读取不执行原操作，也不登记批准或交付。"}
+
     def normalize(self, task_id, value, *, artifacts, revision):
         allowed = {"why", "changed", "impact", "alternatives", "reproduce", "limits", "evidence", "command_receipts"}
         if (not isinstance(value, dict) or set(value) - allowed
@@ -271,7 +331,20 @@ class TeamDelivery:
         normalized = []
         diagnostics = []
         seen = set()
+        selections = None
         for evidence_index, ref in enumerate(evidence):
+            if isinstance(ref, dict) and set(ref) == {"evidence_id"}:
+                identity = ref["evidence_id"]
+                if not isinstance(identity, str) or re.fullmatch(r"ev1_[a-f0-9]{64}", identity) is None:
+                    raise HandoffError("请选择read_handoff_sources返回的有效引用编号。")
+                if selections is None:
+                    from .handoff_sources import choices
+
+                    selections = {option["evidence_id"]: {"source_seq": event.seq, "quote": option["quote"]}
+                                  for option, event, _metadata in choices(sources, revision)}
+                if identity not in selections:
+                    raise HandoffError("引用编号不适用于当前目标或所选成果，请重新读取read_handoff_sources。")
+                ref = selections[identity]
             if (not isinstance(ref, dict) or set(ref) != {"source_seq", "quote"}
                     or type(ref["source_seq"]) is not int or ref["source_seq"] < 1):
                 raise HandoffError("交付引用需要本群有效事件序号与原文摘录。")

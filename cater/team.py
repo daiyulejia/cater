@@ -44,7 +44,7 @@ LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "return_work", "set_o
 LOCAL_EVENT_CONTRACT = {"version": 1, "kind": "atomic_local_events", "receipt": "same_transaction"}
 EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", PROJECT_RESTORE, "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "browser_check", MCP_CALL})
 PAUSED_TOOLS = frozenset({"read_artifact", "read_receipts", "read_messages", "read_background", "read_checkpoint",
-                          "read_delivery", "list_skills", "read_skill", "wait_for_reply", "reply_to_customer", PROJECT_HISTORY, LOAD_TOOLS})
+                          "read_delivery", "read_handoff_sources", "list_skills", "read_skill", "wait_for_reply", "reply_to_customer", PROJECT_HISTORY, LOAD_TOOLS})
 _MISSING_RETURN_FIELD = object()
 _DYNAMIC_RETURN_FIELD = object()
 
@@ -463,6 +463,12 @@ class TeamService:
                            "description": "index每页1-50项，默认20；goal/source/artifact每页1-16000字符，默认8000。"}}, ["section"]))
         if role.id == self.rt.organization.leader.id:
             tools += [
+                _tool("read_handoff_sources", "按需读取交付说明可引用的实际片段。选择返回的evidence_id即可，无需手抄引文或猜编号种类；片段可能为节选，不认证观点。artifact_seqs与拟交付文件一致；不填时看当前目标最新成果。source_seq精确读取一个来源，before_seq/limit倒序分页。只读，不执行检查或交付。",
+                      {"artifact_seqs": {"type": "array", "maxItems": 128,
+                           "items": {"type": "integer", "minimum": 1}},
+                       "source_seq": {"type": "integer", "minimum": 1},
+                       "before_seq": {"type": "integer", "minimum": 1},
+                       "limit": {"type": "integer", "minimum": 1, "maximum": 6}}, []),
                 _tool("set_objective", "替换交付目标，或在已交付后开始新工作。不同目标文本会切换工作版本，旧委托和复核不再适用于新目标，已发生的操作不会撤销。原目标内的反馈、返修、调整做法或进度追问直接接续，不用本工具重述需求。真正换目标时记录成功后再安排相应工作。",
                       {"goal": string}, ["goal"]),
                 _tool("finish_work", "店长确认当前工作可以交付。summary是顾客看到的最终答复，给实际答案；长细节按需放可选handoff。verification写实际验证结果与范围，区分源码推导和未验证建议，不等同于宿主证明正确。",
@@ -971,6 +977,8 @@ class TeamService:
             return self.recovery.read(task_id, arguments)
         if name == "read_delivery":
             return self.delivery.read(task_id, arguments)
+        if name == "read_handoff_sources":
+            return self.delivery.read_sources(task_id, arguments)
         if name == "list_skills":
             try:
                 return {"status": "ok", **self.rt.skills.index(**self._skill_scope(task_id, role), **arguments)}
