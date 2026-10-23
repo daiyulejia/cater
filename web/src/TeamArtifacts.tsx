@@ -1,11 +1,32 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import { Download, LoaderCircle } from 'lucide-react'
+import * as Dialog from '@radix-ui/react-dialog'
+import { Download, GitCompareArrows, LoaderCircle, X } from 'lucide-react'
 import type { Artifact } from './Artifact'
 import type { TeamEvent, TeamState } from './team'
 import { teamArtifactCatalog } from './artifactCatalog'
 import { request } from './request'
+import { hasComparisonCandidates } from './artifactComparisonData'
+import { AsyncPanel } from './AsyncPanel'
 
 const ArtifactPreview = lazy(() => import('./Artifact').then(module => ({ default: module.ArtifactPreview })))
+const ArtifactComparison = lazy(() => import('./ArtifactComparison').then(module => ({ default: module.ArtifactComparison })))
+
+function ComparisonEntry({ artifacts, events, preferred, names, categories }: { artifacts: Artifact[]; events: TeamEvent[]; preferred: Artifact[]; names: Record<string, string>; categories: Record<number, string> }) {
+  const [open, setOpen] = useState(false)
+  return <Dialog.Root open={open} onOpenChange={setOpen}>
+    <Dialog.Trigger asChild><button type="button" className="artifact-tool" title="对照已发布版本" aria-label="对照已发布版本"><GitCompareArrows size={17} aria-hidden="true" /></button></Dialog.Trigger>
+    {open && <Dialog.Portal><Dialog.Overlay className="artifact-overlay" />
+      <Dialog.Content className="artifact-reader comparison-panel overflow-y-auto p-5 sm:p-8">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0"><Dialog.Title className="text-lg font-bold">版本对照</Dialog.Title>
+            <Dialog.Description className="mt-1 text-xs leading-5 text-[#687e73]">已发布文本的差异，不代表返修关系或验收结论。</Dialog.Description></div>
+          <Dialog.Close asChild><button type="button" className="artifact-tool shrink-0" title="回到成果" aria-label="关闭版本对照"><X size={19} /></button></Dialog.Close>
+        </div>
+        <AsyncPanel fallback={<p role="status" className="mt-4 text-sm">正在读取版本…</p>}><ArtifactComparison artifacts={artifacts} events={events} preferred={preferred} names={names} categories={categories} /></AsyncPanel>
+      </Dialog.Content>
+    </Dialog.Portal>}
+  </Dialog.Root>
+}
 
 function DeliveryDownload({ taskId, seq, accessToken }: { taskId: string; seq: number; accessToken: string }) {
   const scope = useMemo(() => ({ taskId, seq, accessToken }), [taskId, seq, accessToken])
@@ -79,11 +100,17 @@ export function TeamArtifacts({ team, taskId, artifacts, events, names, accessTo
   team: TeamState; taskId: string; artifacts: Artifact[]; events: TeamEvent[]; names: Record<string, string>; accessToken?: string
 }) {
   const catalog = teamArtifactCatalog(team, artifacts, events)
+  const comparable = useMemo(() => hasComparisonCandidates(artifacts), [artifacts])
   const title = catalog.kind === 'delivery' ? '本次交付文件' : catalog.kind === 'current' ? '本轮发布' : '已发布版本'
+  const categories = Object.fromEntries([...catalog.primary.map(item => [item.seq, title]),
+    ...catalog.history.map(item => [item.seq, '历史发布']), ...catalog.later.map(item => [item.seq, '交付后发布，不在本次交付包内'])])
   return <section aria-label="成果版本" className="min-w-0 border-t border-[#eaded1] pt-4 [overflow-wrap:anywhere]">
     <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
       <h2 className="text-sm font-semibold">{title}<span className="ml-2 text-[11px] font-normal text-[#728679]">{catalog.primary.length} 份</span></h2>
-      {catalog.kind === 'delivery' && catalog.primary.length > 0 && <DeliveryDownload key={`${taskId}:${catalog.deliverySeq}`} taskId={taskId} seq={catalog.deliverySeq!} accessToken={accessToken} />}
+      <div className="flex shrink-0 gap-1">
+        {comparable && <ComparisonEntry key={`${taskId}:${team.revision}:${accessToken}`} artifacts={artifacts} events={events} preferred={catalog.primary} names={names} categories={categories} />}
+        {catalog.kind === 'delivery' && catalog.primary.length > 0 && <DeliveryDownload key={`${taskId}:${catalog.deliverySeq}`} taskId={taskId} seq={catalog.deliverySeq!} accessToken={accessToken} />}
+      </div>
     </div>
     <p className="mb-3 text-[11px] leading-5 text-[#728679]">{catalog.kind === 'delivery' ? `店长交付记录 #${catalog.deliverySeq} · 验证范围以交付说明及实际回执为准。`
       : catalog.kind === 'current' ? '本轮最新发布，尚未确认交付。' : '发布记录不等于当前交付版本。'}</p>

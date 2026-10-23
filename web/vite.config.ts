@@ -12,6 +12,11 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              name: 'diff-vendor',
+              test: /[\\/]node_modules[\\/]diff[\\/]/,
+              priority: 30,
+            },
+            {
               name: 'chat-controls',
               test: /[\\/]src[\\/](?:ChatFilters|ConversationMembers|TaskControlMenu|WorkspacePanel)\.tsx$/,
               priority: 20,
