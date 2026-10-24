@@ -177,6 +177,9 @@ cater --drivers examples/openai_compatible_driver_config.json web
 角色仍能发现所有实际授权工具；载入不执行动作或增加权限，但可能增加一次模型请求，
 不保证总 token 或费用下降。外部 ACP/CLI 不切换工具列表。详见 [按需工具说明](../docs/team-chat.zh-CN.md)。
 
+`qoder_acp` 省略该项或显式设置 `"all"` 时保留完整工具定义；配置 `"on_demand"` 会明确报错，
+不会静默忽略后继续发送全部定义。这不代表外部客户端已经支持会话内动态工具载入。
+
 如果想让内阁共用一个账号、执行层共用另一个账号，可成对使用
 [`layered_api_driver_config.json`](layered_api_driver_config.json) 与
 [`layered_api_roles.json`](layered_api_roles.json)：

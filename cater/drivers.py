@@ -974,6 +974,8 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
         from .anthropic import AnthropicMessagesDriver
         return AnthropicMessagesDriver.from_config(name, data)
     if kind == "qoder_acp":
+        if "tool_loading" in data and validate_mode(data["tool_loading"]) != "all":
+            raise ValueError("qoder_acp supports only tool_loading='all'; on_demand requires a native API driver")
         from .external_agent import QoderAcpDriver
         return QoderAcpDriver(name, executable=data.get("executable"), model=data.get("model"),
                               timeout=data.get("timeout", 120), token_budget=_token_budget(data, name),
