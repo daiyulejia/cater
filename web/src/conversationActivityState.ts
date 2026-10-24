@@ -1,4 +1,4 @@
-import { isTeamHost, isTeamRecovery, isTeamReturnWorkReceipt, teamMessageAudience, teamProgressMessages, teamSpeaker } from './team'
+import { isTeamHost, isTeamRecovery, isTeamReturnWorkReceipt, isTeamContinueWorkReceipt, teamMessageAudience, teamProgressMessages, teamSpeaker } from './team'
 import type { TeamEvent, TeamRun, TeamState } from './team'
 import { archiveEntries, portableArchivePart } from './archiveManifest'
 import { artifactHistoryReceipt, isArtifactHistoryReceipt } from './artifactHistoryReceipt'
@@ -42,7 +42,7 @@ const tools: Record<string, string> = {
   reply_to_customer: '答复顾客',
   publish_workspace_archive: '发布工程包',
   workspace_read: '读取文件', workspace_run: '运行命令', workspace_write: '写入文件', workspace_search: '查找文件',
-  workspace_list: '列出目录', browser_check: '浏览器检查', delegate: '交接工作', send_message: '投递消息', return_work: '交回当前工作', read_artifact: '读取成果',
+  workspace_list: '列出目录', browser_check: '浏览器检查', delegate: '交接工作', send_message: '投递消息', return_work: '交回当前工作', continue_work: '接续原工作', read_artifact: '读取成果',
   read_receipts: '核对执行回执', read_messages: '补读历史消息', read_background: '读取来源材料', read_checkpoint: '读取工作检查点', read_delivery: '读取交付说明', publish_artifact: '发布成果', publish_workspace_file: '发布本地文件',
   set_objective: '更新目标', finish_work: '记录交付', wait_for_reply: '等待伙伴回复',
   request_questions: '发送补充问题', request_review: '请求复核', record_review: '记录复核结论',
@@ -552,6 +552,7 @@ export function nativeBrowserReceiptStatus(event: TeamEvent): string {
 
 export function teamToolReceipt(start: TeamEvent, events: TeamEvent[]) {
   return events.find((event) => isTeamHost(event) && event.type === 'team.tool_finished' && event.seq > start.seq
+    && (!(start.payload.name === 'continue_work' || event.payload.name === 'continue_work') || isTeamContinueWorkReceipt(start, event))
     && (!(start.payload.name === 'return_work' || event.payload.name === 'return_work') || isTeamReturnWorkReceipt(start, event))
     && (typeof event.payload.started_seq === 'number' ? event.payload.started_seq === start.seq
       : typeof start.payload.call_id === 'string' && event.payload.call_id === start.payload.call_id)

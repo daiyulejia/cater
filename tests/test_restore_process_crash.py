@@ -12,13 +12,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
-import sys
 import tempfile
 import time
 import unittest
 from unittest.mock import patch
 
 import cater
+from cater.processes import worker_python
 from cater.events import Actor
 from cater.workspace_tools import WorkspaceExecutor
 from cater.work import WorkConflict
@@ -45,7 +45,7 @@ class RestoreProcessCrashTests(unittest.TestCase):
             # All parent setup guards and Runtime have exited before Popen.
             with (root / "stdout.log").open("wb") as stdout, (root / "stderr.log").open("wb") as stderr:
                 process = subprocess.Popen([
-                    sys.executable, "-I", "-S", str(Path(harness.__file__).resolve()),
+                    worker_python(), "-B", "-I", "-S", str(Path(harness.__file__).resolve()),
                     str(root), str(package_root), stage], cwd=root, env=launch_env, stdin=subprocess.DEVNULL,
                     stdout=stdout, stderr=stderr,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -60,6 +60,7 @@ class RestoreProcessCrashTests(unittest.TestCase):
                             self.fail("marker observation timed out; this does not establish process death")
                         time.sleep(0.02)
                 self.assertEqual((marker["pid"], marker["stage"]), (process.pid, stage))
+                self.assertIs(marker["dont_write_bytecode"], True)
                 self.assertTrue(marker["environment_empty"])
                 self.assertEqual(marker["guard_checks"], {"socket": True, "connection": True, "process": True})
                 self.assertEqual(Path(marker["package"]).parent, package_root / "cater")

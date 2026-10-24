@@ -39,7 +39,7 @@ from .tool_loading import TOOL as LOAD_TOOLS, load_result, select_tools, with_lo
 HOST = Actor.system("team")
 MAX_ACTOR_TURNS = 32
 MAX_ACTIVE_ROLES = 5
-LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "return_work", "set_objective", "request_questions",
+LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "continue_work", "return_work", "set_objective", "request_questions",
                                "request_review", "record_review", "finish_work", "withdraw_work", "reply_to_customer", LOAD_TOOLS})
 LOCAL_EVENT_CONTRACT = {"version": 1, "kind": "atomic_local_events", "receipt": "same_transaction"}
 EXTERNAL_EFFECT_TOOLS = frozenset({"workspace_write", "workspace_run", PROJECT_RESTORE, "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "browser_check", MCP_CALL})
@@ -389,7 +389,10 @@ class TeamService:
                    "reason": {"type": "string", "minLength": 1, "maxLength": 4000}}, ["message_seq", "reason"]),
             _tool("return_work", "将当前active_assignment的实际结果、证据和未完事项交回原委托人。宿主关联原请求及收件人，无需填写编号；成功后结束本轮，不再修改刚交回的成果。仅有进展用send_message.notify_only；没有当前委托时不猜其他工作。正式复核用record_review，店长最终交付用finish_work。",
                   {"text": string}, ["text"]),
-            _tool("send_message", "向伙伴交代工作或提问会唤起对方并承接结果。交回当前委托优先return_work，无需猜编号。区分进展知会和接续工作；不要要求伙伴在修改或送审前先正式交回。序号或状态不确定先read_checkpoint/read_messages；已交回后确需补做，用完整新请求承接。",
+            _tool("continue_work", "跟进你先前发出、尚未交回的原工作，填写outgoing_work或read_checkpoint中的原序号及核对现状后的下一步。宿主取得原接收者，补充同一委托而非另派一份工作；对方仍向原委托交回。不用此工具代签回报、重放未知操作或重启旧目标。在途工作安静等待；新工作用delegate，普通消息用send_message。",
+                  {"assignment_seq": {"type": "integer", "minimum": 1}, "instruction": string},
+                  ["assignment_seq", "instruction"]),
+            _tool("send_message", "向伙伴交代工作或提问会唤起对方并承接结果。交回当前委托优先return_work，跟进原工作优先continue_work。区分进展知会和接续工作；不要要求伙伴在修改或送审前先正式交回。序号或状态不确定先read_checkpoint/read_messages；已交回后确需补做，用完整新请求承接。",
                   {"recipient": recipient, "text": string, "reply_to": {"type": "integer",
                        "description": "正式交回对方发给你的原请求/委托（也可填有效接续序号），成功后结束你本轮执行。仍要修改、送审或处理反馈时不要用它汇报中间进展。不能填对方的report，也不能替收件人回复自己发出的委托。"},
                    "continue_assignment_seq": {"type": "integer", "minimum": 1,
@@ -948,7 +951,7 @@ class TeamService:
         if post_delivery and not self._post_delivery_command(task_id, role, tool_start):
             raise WorkConflict("交付后命令仅响应当前有效的顾客新输入；已有交付保留，未继续旧操作。")
         if self.view(task_id)["status"] == "done" and name in {
-                "delegate", "withdraw_work", "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "workspace_write", "workspace_run", PROJECT_RESTORE, MCP_CALL, "request_review", "record_review"} and not post_delivery:
+                "delegate", "continue_work", "withdraw_work", "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "workspace_write", "workspace_run", PROJECT_RESTORE, MCP_CALL, "request_review", "record_review"} and not post_delivery:
             raise WorkConflict("当前工作已交付；如需继续修改，请先由店长采用新的工作目标。")
         if name == "wait_for_reply":
             return {"status": "ok", "waiting": True}
@@ -1011,7 +1014,11 @@ class TeamService:
             e = self._send(task_id, role, arguments["recipient"], arguments["instruction"], "assignment",
                            parent_assignment_seq=assignment.seq if assignment else None)
             return {"status": "ok", "message_seq": e.seq, "recipient": e.payload["recipient"]}
-        if name in {"send_message", "return_work"}:
+        if name in {"send_message", "continue_work", "return_work"}:
+            if name == "continue_work":
+                source = self.recovery.continuation_source(task_id, role, arguments["assignment_seq"])
+                arguments = {"recipient": source["recipient"], "text": arguments["instruction"],
+                             "continue_assignment_seq": source["seq"]}
             if name == "return_work":
                 if assignment is None:
                     return {"status": "error", "code": "no_current_assignment", "complete": True,
@@ -1026,7 +1033,8 @@ class TeamService:
             if "continue_assignment_seq" in arguments:
                 if reply_to is not None or notify_only:
                     raise ValueError("接续原委托不能同时作为回报或知会。")
-                self.recovery.continuation(task_id, role, arguments["recipient"], continuing)
+                if name != "continue_work":
+                    self.recovery.continuation(task_id, role, arguments["recipient"], continuing)
             if reply_to is not None:
                 messages = {e.seq: e for e in self._messages(task_id)}
                 original = messages.get(reply_to) if type(reply_to) is int else None

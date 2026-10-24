@@ -74,7 +74,7 @@ def context_instructions(context):
     elif context.get("open_assignments"):
         notes.append("open_assignments列出尚未交还的原委托，但本轮没有active_assignment，不用return_work猜选其他工作；按当前输入理解是否继续或补充，普通问答不替其他委托结单。")
     if context.get("outgoing_work"):
-        notes.append("outgoing_work是已派出但尚未收回的工作，waiting不等于完成。跟进原委托用continue_assignment_seq，不重复delegate；确实多余的普通委托可说明原因撤回，撤回不是通过验收或撤销副作用。")
+        notes.append("outgoing_work是已派出但未收回的工作，waiting不等于完成。跟进用continue_work填原assignment_seq与下一步，不重复delegate；旧send_message.continue_assignment_seq兼容。多余委托可撤回，撤回不是通过或撤销副作用。")
     if context.get("notifications"):
         notes.append("notifications是知会，不是开工委托；需要对方回答时实际投递请求，不能只在等待结束语中提问。")
     if (context.get("work_checkpoint") or {}).get("open_work_count"):

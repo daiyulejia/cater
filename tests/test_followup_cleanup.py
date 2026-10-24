@@ -35,6 +35,7 @@ class FollowupCleanupTests(unittest.TestCase):
         threads, servers, directories, drivers, deletions = [], [], [], [], []
         wait_failures, requests, command_failures = [], [], []
         probe, acknowledged = threading.Event(), threading.Event()
+        collaboration_entered = threading.Event()
         injected = AssertionError("injected follow-up command assertion")
         factory_error = RuntimeError("injected pre-construction follow-up factory failure")
         factory_failures, captured_failures, failure_events = [], [], []
@@ -59,6 +60,7 @@ class FollowupCleanupTests(unittest.TestCase):
             def collaborate(self, *args, **kwargs):
                 driver = self.drivers["blocking"]
                 drivers.append(driver)
+                collaboration_entered.set()
                 if mode == "wait-failure":
                     deadline = time.monotonic() + 8
                     while not driver.release.wait(timeout=0.01):
@@ -176,6 +178,15 @@ class FollowupCleanupTests(unittest.TestCase):
             check.assertTrue(url.startswith("http://127.0.0.1:"), url)
             requests.append((url, kwargs.get("timeout")))
             response = real_urlopen(request, **kwargs)
+            if mode in {"normal", "command-failure", "late-battle"} and url.endswith("/api/tasks"):
+                # These cases test cleanup, not scheduling within the fixture's one-second wait.
+                # Intentional startup/wait failures still use that original failure path.
+                try:
+                    check.assertTrue(collaboration_entered.wait(timeout=5), "fixture collaboration never entered")
+                    check.assertTrue(drivers[0].started.wait(timeout=5), "fixture driver never reached its start barrier")
+                except BaseException:
+                    response.close()
+                    raise
             if mode in {"command-failure", "late-battle"} and url.endswith("/command"):
                 with response:
                     response.read()
@@ -279,6 +290,39 @@ class FollowupCleanupTests(unittest.TestCase):
 
     def test_preconstruction_factory_failure_preserves_started_assertion(self):
         self.check_cleanup(METHODS[0], "startup-failure")
+
+    def test_start_barrier_precedes_positive_wait_without_hiding_injected_wait_failure(self):
+        original = fixtures.BlockingDriver
+        for mode in ("normal", "command-failure", "wait-failure"):
+            with self.subTest(mode=mode):
+                waits = []
+                gate = threading.Event()
+
+                class StartSignal(threading.Event):
+                    def wait(self, timeout=None):
+                        waits.append(timeout)
+                        if timeout == 5:
+                            gate.set()
+                        return super().wait(timeout)
+
+                class GatedDriver(original):
+                    def __init__(self):
+                        super().__init__()
+                        self.started = StartSignal()
+
+                    def complete(self, **kwargs):
+                        if not gate.wait(timeout=5):
+                            raise AssertionError("fixture start barrier was never observed")
+                        return super().complete(**kwargs)
+
+                with patch.object(fixtures, "BlockingDriver", GatedDriver):
+                    self.check_cleanup(METHODS[1], mode)
+                if mode == "wait-failure":
+                    self.assertEqual(waits, [1])
+                    self.assertFalse(gate.is_set())
+                else:
+                    self.assertEqual(waits[:2], [5, 1])
+                    self.assertTrue(gate.is_set())
 
 
 if __name__ == "__main__":

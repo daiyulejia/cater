@@ -12,6 +12,7 @@ from .work import WorkConflict
 
 HOST = Actor.system("team")
 RECOVERY_CONTRACT = {"version": 1, "kind": "fresh_supervision"}
+_UNSPECIFIED_RECIPIENT = object()
 
 
 def _same_scope(left, right):
@@ -508,13 +509,18 @@ class TeamRecovery:
                 "has_more": len(rows) > limit, "next_seq": page[-1]["seq"] if page else after}
 
     def continuation(self, task_id, role, recipient, seq):
+        return self.continuation_source(task_id, role, seq, recipient=recipient)
+
+    def continuation_source(self, task_id, role, seq, *, recipient=_UNSPECIFIED_RECIPIENT):
+        """Resolve an explicit outgoing job, never infer one from conversation text."""
         if type(seq) is not int or seq < 1:
             raise ValueError("接续需要本群原委托的有效序号。")
         source = next((r for r in self.assignments(task_id) if r["seq"] == seq), None)
-        if source is None or source["sender"] != role.id or source["recipient"] != recipient:
+        if (source is None or source["sender"] != role.id
+                or recipient is not _UNSPECIFIED_RECIPIENT and source["recipient"] != recipient):
             raise WorkConflict("只能由原发件人接续当前未交还的原委托，不能重开旧目标或代替其他伙伴派活。")
         if source["status"] in {"queued", "running"} or any(
-                r["role"] == recipient and r["status"] == "running" for r in self.team.view(task_id)["runs"]):
+                r["role"] == source["recipient"] and r["status"] == "running" for r in self.team.view(task_id)["runs"]):
             raise WorkConflict("原接收者已有待处理或在途工作，不重复投递接续。")
         return source
 

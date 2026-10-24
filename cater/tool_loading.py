@@ -4,7 +4,7 @@ from __future__ import annotations
 
 
 TOOL = "load_tools"
-CORE = frozenset({TOOL, "wait_for_reply", "send_message", "return_work",
+CORE = frozenset({TOOL, "wait_for_reply", "send_message", "continue_work", "return_work",
                   "set_objective", "finish_work", "reply_to_customer", "read_receipts",
                   "list_skills", "read_skill"})
 

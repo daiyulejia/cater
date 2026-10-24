@@ -68,6 +68,16 @@ class TeamSettlementTests(unittest.TestCase):
             original = self.rt.team._send(task, self.rt.organization.leader, self.worker,
                 "Superseded fixture request", "assignment")
             arguments = {"message_seq": original.seq, "reason": "This fixture request is no longer needed."}
+        if name == "continue_work":
+            original = self.rt.team._send(task, self.rt.organization.leader, self.worker,
+                "Inspect the existing result", "assignment")
+            waiting = {"message_seq": original.seq, "role": self.worker,
+                       "run_id": f"waiting-{original.seq}", "revision": 0,
+                       "control_seq": self.rt.execution_control.view(task)["seq"]}
+            self.rt.log.emit(type="team.run_started", actor=HOST, task_id=task, payload=waiting)
+            self.rt.log.emit(type="team.run_finished", actor=HOST, task_id=task,
+                             payload={**waiting, "status": "waiting", "reason": "Fixture awaits the next instruction"})
+            arguments = {"assignment_seq": original.seq, "instruction": "Check the remaining evidence"}
         if name in {"request_review", "record_review"}:
             author = self.manager if name == "request_review" else self.worker
             payload, = normalize_deliverables([{"filename": "result.txt", "title": "Fixture", "summary": "Fixture",
@@ -94,6 +104,7 @@ class TeamSettlementTests(unittest.TestCase):
             "message_seq": message.seq, "role": self.manager, "run_id": f"case-{message.seq}", "revision": 0,
             "control_seq": self.rt.execution_control.view(task)["seq"],
         })
+        self.assertIsInstance(arguments, dict, f"Missing prepared arguments for local action {name}")
         self.driver.steps[self.manager] = [test_simple_team.turn("", (name, arguments)), test_simple_team.turn("Action settled.")]
         return task, message, run
 

@@ -140,6 +140,7 @@ def worker(root, package_root, stage):
         with runtime(root, driver) as rt, ExitStack() as stack:
             def stop():
                 marker = {"pid": os.getpid(), "stage": stage, "package": str(Path(cater.__file__).resolve()),
+                          "dont_write_bytecode": sys.dont_write_bytecode,
                           "environment_empty": not os.environ, "disk": disk(root / "target"),
                           "guard_checks": {}}
                 for name, call in (("socket", socket.socket), ("connection", socket.create_connection),
