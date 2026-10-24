@@ -1,13 +1,13 @@
 // @vitest-environment node
 import { createRequire } from 'node:module'
-import { mkdir, writeFile } from 'node:fs/promises'
-import { resolve } from 'node:path'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createServer } from 'vite'
 import { expect, test } from 'vitest'
 import { detail, event, leader, members } from './native-handoff.fixtures'
 
-const artifacts = fileURLToPath(new URL('../../.cater/qa/frontend-flake-20261017/', import.meta.url))
+const artifactRoot = fileURLToPath(new URL('../../.cater/qa/graph-loading-layout/', import.meta.url))
 const viewports = [{ width: 1440, height: 900 }, { width: 390, height: 844 }, { width: 320, height: 900 }]
 const privateError = 'PRIVATE_MODULE_ERROR_do_not_render_credential_fixture'
 const graphModule = (path: string) => /\/src\/TaskGraph\.tsx$/.test(path) || /\/TaskGraph-[^/]+\.js$/.test(path)
@@ -21,6 +21,9 @@ test.skipIf(process.env.CATER_WEB_BROWSER_TESTS !== '1')('isolated Chromium keep
   const runLabel = process.env.CATER_GRAPH_UI_LABEL ?? ''
   if (runLabel && !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(runLabel)) throw new Error('CATER_GRAPH_UI_LABEL must be a filename-safe label')
   if (overrideRoot && !runLabel) throw new Error('A root override requires CATER_GRAPH_UI_LABEL to preserve source evidence')
+  await mkdir(artifactRoot, { recursive: true })
+  const artifacts = await mkdtemp(join(artifactRoot, 'run-'))
+  console.info(`Graph layout artifacts: ${artifacts}`)
   const prefix = runLabel ? `${runLabel}-` : ''
   const artifactPath = (name: string) => `${artifacts}/${prefix}${name}`
   const { chromium } = createRequire(new URL('../../tools/browser-check/package.json', import.meta.url))('playwright')
@@ -172,6 +175,8 @@ test.skipIf(process.env.CATER_WEB_BROWSER_TESTS !== '1')('isolated Chromium keep
           // Import resolution is observed by reopening the loaded graph, not a fixed sleep.
           expect(await dialog.isVisible()).toBe(false)
           await trigger.click()
+          expect(await dialog.getByRole('button', { name: '协作列表', exact: true }).getAttribute('aria-pressed')).toBe(viewport.width <= 760 ? 'true' : 'false')
+          if (viewport.width <= 760) await dialog.getByRole('button', { name: '协作图', exact: true }).click()
           await dialog.getByRole('region', { name: '当前团队协作图', exact: true }).waitFor()
           await checkShell()
           await page.screenshot({ path: artifactPath(`graph-loaded-${label}.png`) })

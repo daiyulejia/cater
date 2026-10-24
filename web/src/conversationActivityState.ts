@@ -49,7 +49,13 @@ const tools: Record<string, string> = {
   list_skills: '查看工作指引目录', read_skill: '阅读工作指引', load_tools: '载入工具说明',
   list_mcp_tools: '查看外部工具目录', call_mcp_tool: '调用外部工具',
   read_project_history: '读取同项目历史',
+  read_handoff_sources: '读取交付依据',
   workspace_restore_project_file: '恢复历史工程文件',
+}
+
+export function toolTitle(name: unknown): string {
+  if (typeof name !== 'string' || !name.trim()) return '工具调用'
+  return Object.hasOwn(tools, name) ? tools[name] : name
 }
 
 const skillCount = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
