@@ -178,7 +178,7 @@ class AcpDuplexBoundaryTests(unittest.TestCase):
         self.enterContext(patch.object(session, "_send", send))
         return outgoing
 
-    def external(self, *, pipe, timeout=2, total=None, incoming=(), send=None):
+    def external(self, *, pipe, timeout=2, total=None, incoming=(), send=None, tools=None):
         bridges = []
         execute = Mock(side_effect=AssertionError("No real tool may execute"))
 
@@ -211,7 +211,7 @@ class AcpDuplexBoundaryTests(unittest.TestCase):
         driver = QoderAcpDriver("offline", "never-launch", "ExactModel",
                                 timeout=timeout, max_run_seconds=total)
         updates = []
-        run = driver.agent_run(cwd=Path(__file__).resolve().parent, tools=[], execute=execute,
+        run = driver.agent_run(cwd=Path(__file__).resolve().parent, tools=[] if tools is None else tools, execute=execute,
                                check_current=lambda: None, on_update=updates.append)
         return run, bridges, execute, updates
 

@@ -180,6 +180,11 @@ cater --drivers examples/openai_compatible_driver_config.json web
 `qoder_acp` 省略该项或显式设置 `"all"` 时保留完整工具定义；配置 `"on_demand"` 会明确报错，
 不会静默忽略后继续发送全部定义。这不代表外部客户端已经支持会话内动态工具载入。
 
+`qoder_acp` 另有可选的 `"tool_surface": "catalog"` 固定目录入口，默认 `"all"` 保持原工具列表。
+该入口通过 `describe_tools` 按需读取原参数定义，再用 `invoke_tool` 调用原工具，不依赖客户端动态新增函数。
+原权限、参数校验、工程回执和交接终态保持不变；读目录不是执行或验收，也不要求每次调用前重复读取。
+这是不同于原生 API `tool_loading` 的适配选项，可能增加查询往返，不保证总 token、费用或耗时下降。
+
 如果想让内阁共用一个账号、执行层共用另一个账号，可成对使用
 [`layered_api_driver_config.json`](layered_api_driver_config.json) 与
 [`layered_api_roles.json`](layered_api_roles.json)：

@@ -18,6 +18,7 @@ import time
 from .acp import AcpPromptResult, AcpProtocolError, AcpSession, AcpTimeout
 from .mcp_host import McpToolBridge
 from .tool_protocol import json_utf8
+from .external_catalog import ExternalToolCatalog, GUIDANCE, validate_surface
 
 
 _DIAGNOSTIC_COUNT_LIMIT = 2**31 - 1
@@ -138,7 +139,9 @@ class ExternalAgentState:
 class QoderAcpDriver:
     execution_profile = "qoder-managed-v1"
 
-    def __init__(self, name, executable, model, timeout=120, token_budget=None, max_run_seconds=None):
+    def __init__(self, name, executable, model, timeout=120, token_budget=None, max_run_seconds=None,
+                 tool_surface="all"):
+        self.tool_surface = validate_surface(tool_surface)
         try:
             executable = os.fspath(executable)
         except TypeError:
@@ -209,6 +212,9 @@ class ExternalAgentRun:
         self._max_run_seconds = driver.max_run_seconds
         self._budget = None
         self._tools = deepcopy(tools)
+        self._catalog = (ExternalToolCatalog(self._tools, self._call)
+                         if getattr(driver, "tool_surface", "all") == "catalog" and self._tools else None)
+        self._wire_tools = self._catalog.tools if self._catalog is not None else self._tools
         self._execute, self._check_current, self._on_update = execute, check_current, on_update
         self._session = self._bridge = None
         self._phase = "created"
@@ -392,6 +398,17 @@ class ExternalAgentRun:
             self._stop(exc, phase="tool_execution" if dispatched else None)
             raise
 
+    def _catalog_call(self, call):
+        try:
+            self._current()
+            if self._tools_revoked:
+                raise ExternalYield("External tools have been revoked")
+            self._check_budget()
+            return self._catalog.dispatch(call)
+        except BaseException as exc:
+            self._stop(exc, phase="tool_execution")
+            raise
+
     def _update(self, update):
         try:
             self._current(allow_pending=self._cooperative)
@@ -442,7 +459,7 @@ class ExternalAgentRun:
         meta = tool.get("_meta") if isinstance(tool, dict) else None
         qoder = meta.get("qoder") if isinstance(meta, dict) else None
         name = qoder.get("toolName") if isinstance(qoder, dict) else None
-        allowed = {f"mcp__cater__{tool['name']}" for tool in self._tools}
+        allowed = {f"mcp__cater__{tool['name']}" for tool in self._wire_tools}
         options = params.get("options")
         if not isinstance(name, str) or name not in allowed or not isinstance(options, list):
             return denied
@@ -498,8 +515,10 @@ class ExternalAgentRun:
         try:
             if not isinstance(prompt, str) or not prompt.strip():
                 raise ValueError("External prompt must be nonempty text")
+            if self._catalog is not None:
+                prompt = GUIDANCE + prompt
             self._current()
-            self._bridge = McpToolBridge(self._tools, self._call, timeout=self._timeout,
+            self._bridge = McpToolBridge(self._wire_tools, self._catalog_call if self._catalog is not None else self._call, timeout=self._timeout,
                                          on_rejection=self._bridge_rejection)
             self._session = AcpSession(
                 self._command, cwd=self._cwd, timeout=self._timeout, on_request=self._request,

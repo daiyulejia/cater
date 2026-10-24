@@ -116,9 +116,8 @@ class ExternalInputBudgetEdgeTests(unittest.TestCase):
                       }}
         with self.fixture(now) as fixture:
             run, bridges, execute, updates = fixture.external(
-                pipe=pipe, total=total, incoming=[memory.frame(permission),
+                pipe=pipe, total=total, tools=[{"name": "inspect"}], incoming=[memory.frame(permission),
                     memory.frame(memory.update("after-permission")), memory.frame(memory.result())])
-            run._tools = [{"name": "inspect"}]
             pending = []
 
             def current():

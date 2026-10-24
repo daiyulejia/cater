@@ -979,7 +979,7 @@ def driver_from_dict(data: dict[str, Any]) -> Driver:
         from .external_agent import QoderAcpDriver
         return QoderAcpDriver(name, executable=data.get("executable"), model=data.get("model"),
                               timeout=data.get("timeout", 120), token_budget=_token_budget(data, name),
-                              max_run_seconds=data.get("max_run_seconds"))
+                              max_run_seconds=data.get("max_run_seconds"), tool_surface=data.get("tool_surface", "all"))
     if kind == "openai_compatible":
         endpoint = data.get("endpoint")
         model = data.get("model")

@@ -24,6 +24,8 @@ def driver_fingerprint(driver):
     data = {"implementation": type(driver).__module__ + "." + type(driver).__qualname__}
     for key in ("command", "model", "execution_profile", "timeout", "max_run_seconds"):
         data[key] = getattr(driver, key, None)
+    if getattr(driver, "tool_surface", "all") != "all":
+        data["tool_surface"] = driver.tool_surface
     return hashlib.sha256(json_utf8(data, sort_keys=True, allow_nan=False)).hexdigest()
 
 
