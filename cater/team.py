@@ -15,7 +15,7 @@ from dataclasses import asdict
 from inspect import GEN_CREATED, getattr_static, getgeneratorstate
 from types import WrapperDescriptorType
 
-from .artifacts import MAX_CONTENT_BYTES, normalize_deliverables, safe_filename
+from .artifacts import MAX_CONTENT_BYTES, content_metrics, normalize_deliverables, safe_filename
 from .activity_owner import activity_owner
 from .events import Actor, Event
 from .drivers import DriverProtocolError, tool_failure_diagnostics, tool_protocol_error_usage
@@ -412,7 +412,7 @@ class TeamService:
                    "expected_sha256": {"type": "string", "pattern": "^[a-fA-F0-9]{64}$"},
                    "offset": {"type": "integer", "minimum": 0},
                    "limit": {"type": "integer", "minimum": 1, "maximum": 12000}}, ["skill_id"]),
-            _tool("read_artifact", "读取本群确切版本成果。文本不带offset/length返回完整正文；工程ZIP默认返回文件清单，指定path读取其中UTF8文本分页，二进制仅返回元信息。局部核对按Unicode字符分页，offset默认0，length默认8000、最多16000；尾页不等于读过全文，读取不等于复核通过。section=versions按所选成果的确切文件名列本群发布历史元数据，用after_seq/limit分页，不读正文或磁盘；旧新基线由你明确选择。同名不代表同一目标或返修关系，发布者不等于实际编辑者。",
+            _tool("read_artifact", "读取本群确切版本成果。文本不带offset/length返回完整正文；普通文本的content_metrics由宿主按完整保存原文计算，包含Markdown，分页也不按节选计数；它不是渲染后正文的字数，不推断要求阈值或认证通过。工程ZIP默认返回文件清单，指定path读取其中UTF8文本分页，二进制仅返回元信息。局部核对按Unicode字符分页，offset默认0，length默认8000、最多16000；尾页不等于读过全文，读取不等于复核通过。section=versions按所选成果的确切文件名列本群发布历史元数据，用after_seq/limit分页，不读正文或磁盘；旧新基线由你明确选择。同名不代表同一目标或返修关系，发布者不等于实际编辑者。",
                   {"artifact_seq": {"type": "integer", "minimum": 1},
                    "section": {"type": "string", "enum": ["content", "versions"]},
                    "after_seq": {"type": "integer", "minimum": 0, "description": "仅section=versions，继续读取next_seq之后的发布元数据。"},
@@ -1128,6 +1128,7 @@ class TeamService:
             artifact = next((a for a in artifacts if a["seq"] == arguments["artifact_seq"]), None)
             if artifact is None:
                 raise ValueError("找不到本群成果。")
+            artifact = {key: value for key, value in artifact.items() if key != "content_metrics"}
             section = arguments.get("section", "content")
             if section not in {"content", "versions"}:
                 raise ValueError("成果读取section无效。")
@@ -1156,6 +1157,12 @@ class TeamService:
                 from .team_archive import read_member
 
                 return read_member(self.rt.log, artifact, arguments, guide_missing=True)
+            if artifact.get("format") != "archive" and isinstance(artifact.get("content"), str):
+                try:
+                    artifact["content_metrics"] = content_metrics(artifact["content"])
+                except UnicodeEncodeError:
+                    # Older malformed text remains readable without invented counts.
+                    pass
             if "offset" in arguments or "length" in arguments:
                 offset, length = arguments.get("offset", 0), arguments.get("length", 8000)
                 if (type(offset) is not int or offset < 0 or type(length) is not int or not 1 <= length <= 16000):

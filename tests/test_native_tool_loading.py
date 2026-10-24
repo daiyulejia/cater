@@ -8,6 +8,7 @@ import sys
 import unittest
 from unittest.mock import patch
 
+from cater.artifacts import content_metrics
 from cater.team_context import history_window, json_bytes
 from cater.tool_loading import CORE, TOOL, load_result, select_tools, with_loader
 from cater.tool_protocol import prepare_tool_turn
@@ -319,6 +320,8 @@ class NativeToolLoadingTests(unittest.TestCase):
                 return f.native_turn('', ('read_artifact', {'artifact_seq': artifact}))
             if name == 'read_artifact':
                 self.assertEqual(last(history)['content'].encode(), source_bytes)
+                self.assertEqual(last(history)['content_metrics'],
+                                 content_metrics(source_bytes.decode('utf-8')))
                 return f.native_turn('', ('workspace_run', {'command': 'python', 'args': ['answer.py'],
                     'artifact_seqs': [artifact]}))
             self.assertEqual(name, 'workspace_run')

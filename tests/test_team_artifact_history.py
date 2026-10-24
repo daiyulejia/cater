@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from cater.artifacts import normalize_deliverables
+from cater.artifacts import content_metrics, normalize_deliverables
 from cater.events import Actor
 from cater.team import HOST
 import test_team_external
@@ -37,8 +37,10 @@ class TeamArtifactHistoryTests(unittest.TestCase):
         artifact, = self.f.rt.task(self.f.task).deliverables
         for arguments in ({}, {"section": "content"}):
             with self.subTest(arguments=arguments):
-                self.assertEqual(self.read(seq, **arguments), {"status": "ok", **artifact})
-        page = {"status": "ok", **artifact, "content": content[2:9], "read_range": {
+                self.assertEqual(self.read(seq, **arguments), {"status": "ok", **artifact,
+                    "content_metrics": content_metrics(content)})
+        page = {"status": "ok", **artifact, "content_metrics": content_metrics(content),
+            "content": content[2:9], "read_range": {
             "unit": "unicode_codepoints", "offset": 2, "returned_chars": 7,
             "total_chars": len(content), "has_more": True, "next_offset": 9,
             "content_complete": False}}
@@ -123,7 +125,8 @@ class TeamArtifactHistoryTests(unittest.TestCase):
             unnamed = self.f.rt.log.emit(type="deliverable.published", task_id=self.f.task,
                 actor=Actor.agent(self.f.worker, self.f.rt.team._role(self.f.worker).role), payload=payload)
             self.assertEqual(self.read(unnamed.seq, section="versions")["status"], "error")
-            self.assertEqual(self.read(unnamed.seq), {"status": "ok", **payload,
+            metrics = {"content_metrics": content_metrics(content)} if content is not None else {}
+            self.assertEqual(self.read(unnamed.seq), {"status": "ok", **payload, **metrics,
                 "seq": unnamed.seq, "actor": self.f.worker})
 
     def test_archive_history_and_workspace_publication_never_read_blobs_or_files(self):
@@ -290,7 +293,8 @@ class ExternalArtifactHistoryTests(unittest.TestCase):
             self.assertEqual(tail, {**result, "versions": expected[1:], "has_more": False,
                                     "next_seq": expected[1]["seq"]})
             body = run.call("read_artifact", artifact_seq=expected[0]["seq"])
-            self.assertEqual(body, {"status": "ok", **f.rt.task(f.task).deliverables[0]})
+            self.assertEqual(body, {"status": "ok", **f.rt.task(f.task).deliverables[0],
+                                   "content_metrics": content_metrics("external body")})
 
         f.driver.scripts = {f.manager: [publish_and_read]}
         f.receive("Inspect persisted versions through external callbacks")

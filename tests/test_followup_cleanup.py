@@ -311,7 +311,8 @@ class FollowupCleanupTests(unittest.TestCase):
                         self.started = StartSignal()
 
                     def complete(self, **kwargs):
-                        if not gate.wait(timeout=5):
+                        # Cleanup releases the driver without observing the positive start barrier.
+                        if not self.release.is_set() and not gate.wait(timeout=5):
                             raise AssertionError("fixture start barrier was never observed")
                         return super().complete(**kwargs)
 

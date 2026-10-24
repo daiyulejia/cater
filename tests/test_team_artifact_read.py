@@ -10,7 +10,7 @@ import unittest
 import zipfile
 
 from cater.events import Actor
-from cater.artifacts import normalize_deliverables
+from cater.artifacts import content_metrics, normalize_deliverables
 import test_team_review_cycle
 
 
@@ -28,7 +28,8 @@ class TeamArtifactReadTests(unittest.TestCase):
         content = "月亮\n" * 5000
         seq = self.f.publish(content)
         artifact, = self.f.rt.task(self.f.task).deliverables
-        self.assertEqual(self.read(seq), {"status": "ok", **artifact})
+        self.assertEqual(self.read(seq), {"status": "ok", **artifact,
+                                         "content_metrics": content_metrics(content)})
         self.assertEqual(len(self.read(seq)["content"]), len(content))
         self.assertNotIn("read_range", self.read(seq))
 
@@ -43,7 +44,8 @@ class TeamArtifactReadTests(unittest.TestCase):
             self.assertEqual(page["content_sha256"], hashlib.sha256(content.encode()).hexdigest())
             self.assertEqual(page["content_bytes"], len(content.encode()))
             self.assertEqual({k: v for k, v in page.items() if k not in {"status", "content", "read_range"}},
-                             {k: v for k, v in artifact.items() if k != "content"})
+                             {**{k: v for k, v in artifact.items() if k != "content"},
+                              "content_metrics": content_metrics(content)})
             coverage = page["read_range"]
             chunks.append(page["content"])
             end = offset + len(page["content"])
