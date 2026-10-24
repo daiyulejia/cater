@@ -18,7 +18,7 @@ def schema():
     return {"name": TOOL, "description": (
         "发布工作目录中明确选择的真实文件为工程ZIP，保留目录、空文件和二进制；"
         "paths填相对文件路径，不填目录，不自动包含整个仓库。保存候选版本并返回artifact_seq；"
-        "需要独立复核时，作者以此序号request_review，最终由店长finish_work选择版本。"
+        "需要独立复核时，可用此序号request_review或交给送审负责人，最终由店长finish_work选择版本。"
         "ZIP发布不是最终交付，也不代表验证通过。最多256个文件，单文件32MiB，总64MiB。"),
         "input_schema": {"type": "object", "additionalProperties": False,
             "properties": {"filename": {"type": "string"}, "summary": {"type": "string"},

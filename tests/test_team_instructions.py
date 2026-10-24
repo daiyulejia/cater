@@ -64,8 +64,10 @@ class TeamInstructionSelectionTests(unittest.TestCase):
     def test_rework_guidance_keeps_review_owner_without_republishing_partner_versions(self):
         for leader in (False, True):
             text = self.base(leader=leader)
-            for clause in ("首次由成果发布者", "由原送审负责人", "伙伴已发布的版本", "不重复发布或改写发布者"):
+            for clause in ("确切伙伴版本", "不必再叫发布者送审", "负责人及发布者不自审",
+                           "由原送审负责人", "伙伴已发布的版本", "不重复发布或改写发布者"):
                 self.assertIn(clause, text)
+            self.assertNotIn("首次由成果发布者", text)
 
     def test_manager_distinguishes_continuation_from_objective_replacement(self):
         text = self.base()

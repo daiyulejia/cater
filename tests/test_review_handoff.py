@@ -138,15 +138,21 @@ class ReviewHandoffTests(unittest.TestCase):
         self.assertNotIn("review_seq", assignment.payload)
         self.assert_no_publication(f, before)
 
-    def test_existing_artifact_cannot_be_submitted_by_another_author(self):
+    def test_existing_artifact_can_be_coordinated_without_changing_publisher(self):
         for tool in ("delegate", "request_review"):
             with self.subTest(tool=tool):
                 f = self.fixture()
                 artifact = f.publish(author=f.worker)
-                before = self.before(f)
+                published = f.events("deliverable.published")
+                saved = f.events("team.artifact_saved")
                 result = self.exchange(f, tool, {"artifact_seqs": [artifact]}, author=f.manager)
-                self.assertEqual(result["status"], "error", result)
-                self.assert_no_publication(f, before)
+                request, _ = self.assert_waiting(f, tool, result)
+                self.assertEqual(request.payload["owner"], f.manager)
+                self.assertEqual(request.payload["author"], f.manager)
+                self.assertEqual(request.payload["publishers"], [f.worker])
+                self.assertEqual([a["seq"] for a in request.payload["artifacts"]], [artifact])
+                self.assertEqual(f.events("deliverable.published"), published)
+                self.assertEqual(f.events("team.artifact_saved"), saved)
 
     def test_two_valid_sources_are_rejected_instead_of_selecting_one(self):
         for tool in ("delegate", "request_review"):

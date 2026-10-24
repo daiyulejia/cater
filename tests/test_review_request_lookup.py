@@ -68,7 +68,8 @@ class ReviewRequestLookupTests(unittest.TestCase):
         self.assertEqual(rejected["status"], "error")
         self.assertIn("旧目标记录仍可读取", rejected["message"])
         self.assertIn("省略旧review_seq", rejected["message"])
-        self.assertIn("由成果作者", rejected["message"])
+        self.assertIn("创建当前目标的复核", rejected["message"])
+        self.assertIn("不沿用旧目标的批准", rejected["message"])
         self.assertEqual(f.events("team.review_requested"), requests)
         self.assertEqual(f.events("team.review_recorded"), old_decisions)
         current = f.request([revised])
@@ -85,10 +86,11 @@ class ReviewRequestLookupTests(unittest.TestCase):
         f = self.f
         f.publish()
         tools = {tool["name"]: tool for tool in f.driver.calls[-1]["tools"]}
-        self.assertIn("成果发布作者本人", tools["request_review"]["description"])
-        self.assertIn("普通delegate", tools["request_review"]["description"])
-        self.assertIn("原送审负责人", tools["request_review"]["description"])
-        self.assertIn("保留真实发布者", tools["request_review"]["description"])
+        self.assertIn("伙伴已发布的artifact_seqs", tools["request_review"]["description"])
+        self.assertIn("普通委托不创建正式复核", tools["request_review"]["description"])
+        self.assertIn("修订由原负责人", tools["request_review"]["description"])
+        self.assertIn("真实publishers", tools["request_review"]["description"])
+        self.assertIn("复核者不能是负责人或本版任一发布者", tools["request_review"]["description"])
         self.assertIn("原送审负责人", tools["delegate"]["description"])
         request = tools["request_review"]["input_schema"]["properties"]["review_seq"]
         record = tools["record_review"]["input_schema"]["properties"]["review_seq"]

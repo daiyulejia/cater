@@ -273,13 +273,20 @@ class TeamReviewCycleTests(TeamSupervisionTests):
 
     def test_only_author_requests_and_only_named_reviewer_records(self):
         artifact = self.publish()
-        for requester, reviewer in [(self.observer, self.reviewer), (self.manager, self.reviewer),
-                                    (self.worker, self.worker)]:
+        for requester, reviewer in [(self.worker, self.worker), (self.manager, self.worker),
+                                    (self.observer, self.observer)]:
             with self.subTest(requester=requester, reviewer=reviewer):
                 self.assertEqual(self.request([artifact], requester=requester, reviewer=reviewer)["status"], "error")
         self.assertEqual(self.events("team.review_requested"), [])
-        request = self.request([artifact])
+        publications = self.events("deliverable.published")
+        request = self.request([artifact], requester=self.observer)
         self.assertEqual(request["status"], "ok")
+        self.assertEqual(self.events("deliverable.published"), publications)
+        requested, = self.events("team.review_requested")
+        self.assertEqual(requested.payload["owner"], self.observer)
+        self.assertEqual(requested.payload["author"], self.observer)
+        self.assertEqual(requested.payload["requested_by"], self.observer)
+        self.assertEqual(requested.payload["publishers"], [self.worker])
         for role_id in (self.worker, self.manager, self.observer):
             with self.subTest(reviewer=role_id):
                 self.assertEqual(self.record(request["review_seq"], reviewer=role_id)["status"], "error")
@@ -288,6 +295,9 @@ class TeamReviewCycleTests(TeamSupervisionTests):
         manager_artifact = self.publish(author=self.manager, filename="manager.txt")
         manager_request = self.request([manager_artifact], requester=self.manager)
         self.assertEqual(manager_request["status"], "ok", "The manager may review-submit their own publication")
+        partner_artifact = self.publish(author=self.worker, filename="partner.txt")
+        partner_request = self.request([partner_artifact], requester=self.manager)
+        self.assertEqual(partner_request["status"], "ok", "The manager may select a partner's current publication")
 
     def test_resubmission_rejects_old_sequence_changed_author_or_changed_reviewer(self):
         artifact = self.publish()
@@ -335,13 +345,13 @@ class TeamReviewCycleTests(TeamSupervisionTests):
             self.assertNotIn(sentinel, visible)
         self.assertEqual(self.context(role_id=self.reviewer)["reviews"], [])
 
-    def test_artifact_contract_rejects_invalid_refs_and_mixed_authors(self):
+    def test_artifact_contract_rejects_invalid_refs_but_allows_mixed_publishers(self):
         artifact = self.publish()
         other = self.publish(author=self.observer, filename="other.txt")
         old = self.publish("old body", filename="changed.txt")
         latest = self.publish("latest body", filename="changed.txt")
         for refs in ([], [artifact] * 21, [artifact, artifact], [True], [str(artifact)], [0], [-1],
-                     [99999999], "not-an-array", [artifact, other], [old], [old, latest]):
+                     [99999999], "not-an-array", [old], [old, latest]):
             with self.subTest(refs=refs):
                 self.assertEqual(self.request(refs)["status"], "error")
         self.assertEqual(self.events("team.review_requested"), [])
@@ -350,6 +360,11 @@ class TeamReviewCycleTests(TeamSupervisionTests):
             "reviewer": self.reviewer, "artifact_seqs": [artifact], "instruction": "   ",
         }))
         self.assertEqual(result["status"], "error")
+        combined = self.request([artifact, other], requester=self.manager)
+        self.assertEqual(combined["status"], "ok")
+        row, = self.rt.team_reviews.view(self.task)
+        self.assertEqual(row["owner"], self.manager)
+        self.assertEqual(row["publishers"], sorted([self.worker, self.observer]))
 
     def test_twenty_real_artifacts_are_hash_bound_in_context_and_persist_after_reopen(self):
         refs = []

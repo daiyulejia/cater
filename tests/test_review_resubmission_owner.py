@@ -181,12 +181,25 @@ class ReviewResubmissionOwnerTests(unittest.TestCase):
         f = self.f
         manager_file = f.publish(author=f.manager, filename="manager.txt")
         partner_file = f.publish(author=f.worker, filename="partner.txt")
-        self.reject(lambda: f.request([partner_file], requester=f.manager),
-                    code="review_author_mismatch", expected=("author", f.worker))
-        for requester in (f.manager, f.worker):
-            self.reject(lambda: f.request([manager_file, partner_file], requester=requester))
-        self.assertEqual(f.rt.team_reviews.view(f.task), [])
-        self.start(manager_file)
+        publications = f.events("deliverable.published")
+        first = self.start(partner_file)
+        request = self.event(first["review_seq"])
+        self.assertEqual(request.payload["owner"], f.manager)
+        self.assertEqual(request.payload["author"], f.manager)
+        self.assertEqual(request.payload["requested_by"], f.manager)
+        self.assertEqual(request.payload["publishers"], [f.worker])
+        self.assertEqual(f.events("deliverable.published"), publications)
+        # Use a disjoint set so this checks another initial request, not takeover.
+        another = f.publish(author=f.worker, filename="another.txt")
+        publications = f.events("deliverable.published")
+        second = self.ok(f.request([manager_file, another], requester=f.worker))
+        request = self.event(second["review_seq"])
+        self.assertEqual(request.payload["owner"], f.worker)
+        self.assertEqual(request.payload["author"], f.worker)
+        self.assertEqual(request.payload["requested_by"], f.worker)
+        self.assertEqual(request.payload["publishers"], sorted([f.manager, f.worker]))
+        self.assertEqual(f.events("deliverable.published"), publications)
+        self.assertEqual(len(f.rt.team_reviews.view(f.task)), 2)
 
     def test_partner_republication_cannot_open_parallel_root_then_owner_can_continue(self):
         f = self.f
@@ -213,7 +226,8 @@ class ReviewResubmissionOwnerTests(unittest.TestCase):
         partner_file = f.publish("previous parallel candidate\n", author=f.worker)
         # Reproduce a parallel root persisted by the former author-filtered guard.
         legacy = f.rt.log.emit(type="team.review_requested", actor=self.event(first["review_seq"]).actor,
-            task_id=f.task, payload={**self.event(first["review_seq"]).payload,
+            task_id=f.task, payload={**{key: value for key, value in self.event(first["review_seq"]).payload.items()
+                                      if key not in {"owner", "publishers"}},
                 "root_seq": None, "author": f.worker, "requested_by": f.worker,
                 "artifacts": self.refs(partner_file), "run_id": "legacy-parallel-root"})
         message = f.rt.team._send(f.task, f.rt.team._role(f.worker), f.reviewer,

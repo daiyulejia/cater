@@ -91,12 +91,12 @@ class TeamReviews:
                 event_types=("team.review_requested",)) if e.seq == review_seq and e.actor == HOST), None)
             if previous is None:
                 raise WorkConflict("本群没有对应的正式复核请求。review_seq应取request_review返回的review_seq或reviews[].request_seq，"
-                                   "不是普通委托、消息、成果或工具回执编号。若reviews为空，请让成果作者先发布实际版本并调用request_review；"
+                                   "不是普通委托、消息、成果或工具回执编号。若reviews为空，请选择实际发布版本并调用request_review；"
                                    "可先向委托人反馈阅读意见，但这不等于正式批准。")
             raise WorkConflict("这次复核请求已有后续提交，请读取reviews中的当前request_seq，不沿用旧请求编号。")
         if row["status"] == "stale":
             raise WorkConflict("这次复核已被新的提交或目标替代。旧目标记录仍可读取，但不能续签。"
-                               "请由成果作者按当前目标决定是否提交待验版本；如需新复核，省略旧review_seq，"
+                               "请按当前目标决定是否提交待验版本；如需新复核，省略旧review_seq，"
                                "用request_review或delegate.review创建当前目标的复核，不沿用旧目标的批准。")
         return row
 
@@ -163,6 +163,27 @@ class TeamReviews:
                 retired.update(a["seq"] for a in previous["artifacts"])
         return retired - retained
 
+    def chain_publishers(self, task_id, *, reviews=None, artifacts=None):
+        """Replacement versions do not return their old publishers' open work."""
+        reviews = self.view(task_id) if reviews is None else reviews
+        artifacts = self._artifacts(task_id) if artifacts is None else artifacts
+        current = {row["root_seq"]: row for row in reviews if row["status"] != "stale"}
+        publishers = set()
+        for event in self.rt.log.iter_events(task_id=task_id, event_types=("team.review_requested",)):
+            if event.actor != HOST:
+                continue
+            p = event.payload
+            head = current.get(p.get("root_seq") or event.seq)
+            if (head is None or event.seq > head["request_seq"]
+                    or any(p.get(key) != head.get(key) for key in ("author", "reviewer", "revision"))):
+                continue
+            for ref in p["artifacts"]:
+                source = artifacts.get(ref["seq"]) if type(ref.get("seq")) is int else None
+                if source is not None and all(source.get(key) == ref.get(key)
+                                               for key in ("filename", "content_sha256")):
+                    publishers.add(source["actor"])
+        return publishers
+
     def _guard(self, task_id, role, tool_start):
         view = self.rt.team.view(task_id)
         if (view["status"] == "done" or view["revision"] != tool_start.payload["revision"]
@@ -192,25 +213,22 @@ class TeamReviews:
             selected = [artifacts[seq] for seq in seqs]
             authors = {a["actor"] for a in selected}
             previous = self._find(task_id, arguments["review_seq"]) if "review_seq" in arguments else None
-            if previous is None and len(authors) != 1:
-                raise ValueError("每份复核由一位作者负责；多位作者可分别提交。")
             for publisher in authors:
                 self.rt.team._role(publisher)
-            # Continuations keep the review owner, independently of who published the files.
-            author = previous["author"] if previous else next(iter(authors))
+            # `author` remains the legacy owner alias, not a claim of authorship.
+            # Actual publishers are preserved independently for every submission.
+            author = previous["author"] if previous else role.id
+            if previous and "owner" in previous and previous["owner"] != author:
+                raise WorkConflict("复核负责人记录不一致，请核对原始请求，不能据此更换负责人。")
             if role.id != author:
-                if previous:
-                    return {"status": "error", "code": "review_author_mismatch", "complete": True,
-                            "outcome": "not_started", "review_seq": previous["request_seq"],
-                            "expected_author": author,
-                            "message": f"这条复核链由 {author} 负责，请交回原负责人修订并提交。"}
                 return {"status": "error", "code": "review_author_mismatch", "complete": True,
-                        "outcome": "not_started", "expected_author": author,
-                        "message": f"这些成果由 {author} 发布，请通知作者本人提交复核，不能代提交。"}
+                        "outcome": "not_started", "review_seq": previous["request_seq"],
+                        "expected_author": author, "expected_owner": author,
+                        "message": f"这条复核链由 {author} 负责，请将修订版本交回原负责人续提。"}
             if reviewer.id == author or reviewer.id in authors:
                 return {"status": "error", "code": "reviewer_mismatch", "complete": True,
                         "outcome": "not_started",
-                        "message": "作者不能复核自己的成果，请选择另一位伙伴独立复核。"}
+                        "message": "送审负责人或本版任一发布者不能自行复核，请选择另一位伙伴。"}
             if len({a["filename"] for a in selected}) != len(selected) or any(
                     self._latest(artifacts).get(a["filename"]) != a["content_sha256"] for a in selected):
                 raise WorkConflict("请提交当前最新版本，不混用同名成果的旧版。")
@@ -227,7 +245,8 @@ class TeamReviews:
                 raise WorkConflict("尚未发布本轮反馈后的新提交；请先发布当前实际成果，再交回复核，不沿用旧提交序号。")
             refs = [{k: a[k] for k in ("seq", "filename", "content_sha256")} for a in selected]
             request = self.rt.log.emit(type="team.review_requested", actor=HOST, task_id=task_id, payload={
-                "root_seq": previous["root_seq"] if previous else None, "author": author, "reviewer": reviewer.id,
+                "root_seq": previous["root_seq"] if previous else None, "author": author, "owner": author,
+                "publishers": sorted(authors), "reviewer": reviewer.id,
                 "artifacts": refs, "revision": tool_start.payload["revision"], "instruction": instruction,
                 **({"previous_review_seq": previous["request_seq"],
                     "previous_artifacts": previous["artifacts"]} if previous else {}),
@@ -266,7 +285,7 @@ class TeamReviews:
             if verdict not in {"changes_requested", "approved"}:
                 raise ValueError("复核需要明确通过或具体的修复要求。")
             if row["status"] not in {"pending"}:
-                raise WorkConflict("版本已变化或本轮已有结论；请作者提交修正版后重新复核。")
+                raise WorkConflict("版本已变化或本轮已有结论；请原送审负责人提交修正版后重新复核。")
             message = self._request_message(task_id, row)
             if message is None:
                 raise WorkConflict("没有找到本次实际投递的复核委托。")
@@ -274,8 +293,8 @@ class TeamReviews:
                 "root_seq": row["root_seq"], "review_seq": row["request_seq"], "reviewer": role.id,
                 "verdict": verdict, "feedback": feedback, "run_id": tool_start.payload["run_id"]})
             text = ("复核通过。" if verdict == "approved" else "本轮需要修复，尚未验收。") + feedback
-            text += ("\n请向原委托人交回这版成果。若继续修改，需将新版再次交回复核。" if verdict == "approved" else
-                     f"\n请修改并发布新版后，调用request_review，review_seq={row['request_seq']}，仍交给我复核；不把修复自述当成验收。")
+            text += ("\n请收齐这版成果与相关工作回报，再向原委托人交回或由店长整体交付。若继续修改，需将新版再次交回复核。" if verdict == "approved" else
+                     f"\n请协调实际修复并取得新版后，调用request_review，review_seq={row['request_seq']}，仍交给我复核；不把修复自述当成验收。")
             sent = self.rt.team._send(task_id, role, row["author"], text, "report", reply_to=message.seq,
                                       visible=True, review_seq=row["request_seq"])
             return {"status": "ok", "review_seq": row["request_seq"], "decision_seq": decision.seq,

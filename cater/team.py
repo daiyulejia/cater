@@ -417,9 +417,9 @@ class TeamService:
                    "path": {"type": "string", "description": "仅工程ZIP：文件清单中的完整相对路径。"},
                    "offset": {"type": "integer", "minimum": 0},
                    "length": {"type": "integer", "minimum": 1, "maximum": 16000}}, ["artifact_seq"]),
-            _tool("request_review", "需要独立验收时，首次由成果发布作者本人提交已有artifact_seqs；未发布的单份目录文件也可用workspace_file保存待复核版本并提交，保存不是最终交付。店长本人是作者也走同一路径。修订由原送审负责人用原review_seq续提，可直接选伙伴已发布的当前版本，保留真实发布者、不重复发布，仍交原复核者；本版任何发布者都不能自行复核。本工具会派发复核并等待结果，不必再delegate。不是首次作者或原送审负责人时请交回相应负责人。不带review的普通delegate或send_message不会创建正式复核请求。复核者用record_review记录结论，不能只说修好了。复核发现的问题必须闭环，店长不会越过未完成复核交付。",
+            _tool("request_review", "需要独立验收时，你可直接提交伙伴已发布的artifact_seqs，包括多位发布者的整组成果，不需重复发布或再唤醒发布者送审。未发布的单份目录文件也可用workspace_file保存候选并提交，保存不是最终交付。首次提交者负责收取反馈、协调修复；宿主记录owner与其历史别名author、真实publishers，不作为调用参数。修订由原负责人用当前review_seq续提，仍交原复核者。复核者不能是负责人或本版任一发布者。本工具会派发复核并等待，不必再delegate；普通委托不创建正式复核。复核者用record_review登记结论，有问题继续修复复审，不把修复自述当成验收。",
                   {"reviewer": recipient, "instruction": string, **review_fields()}, ["reviewer", "instruction"]),
-            _tool("record_review", "对reviews中指定版本记录独立复核结论并自动回给作者，本轮结束。发现需修复问题用changes_requested，读修正版且确认问题解决才approved；旧版通过不涵盖后续修改。具体写清依据与未验证范围。",
+            _tool("record_review", "对reviews中指定版本记录独立复核结论并自动回给送审负责人，本轮结束。发现需修复问题用changes_requested，读修正版且确认问题解决才approved；旧版通过不涵盖后续修改。具体写清依据与未验证范围。",
                   {"review_seq": {"type": "integer", "minimum": 1,
                        "description": "request_review或带review的delegate返回的review_seq，也可取reviews[].request_seq；不是委托message_seq、成果seq或回执seq。没有正式请求时先反馈作者，用delegate.review或request_review提交确切版本，不猜消息号。"},
                    "verdict": {"type": "string", "enum": ["changes_requested", "approved"]},
@@ -437,7 +437,7 @@ class TeamService:
                   {"after_seq": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 50},
                    "scope": {"type": "string", "enum": ["inbox", "conversation"]},
                    "kind": {"type": "string", "enum": ["all", "notification"]}}, []),
-            _tool("publish_artifact", "保存完整文本成果的确切版本并返回artifact_seq，不代表验收或最终交付。需要独立复核时，作者将此序号交给request_review；最终交付由店长finish_work选择版本。已在工作目录写好文件时可用publish_workspace_file直接保存真实文件，避免转写。",
+            _tool("publish_artifact", "保存完整文本成果的确切版本并返回artifact_seq，不代表验收或最终交付。需要独立复核时，可自行request_review或将版本交给送审负责人，不为送审重复发布；最终由店长finish_work选择版本。已在工作目录写好文件时可用publish_workspace_file直接保存真实文件，避免转写。",
                   {"filename": string, "content": string, "summary": string,
                    "format": {"type": "string", "enum": ["code", "markdown", "text"]}},
                   ["filename", "content", "summary", "format"]),
@@ -500,7 +500,7 @@ class TeamService:
 
                 tools.append(restore_schema())
             tools.append(archive_schema())
-            tools.append(_tool("publish_workspace_file", "直接保存工作目录中已写好的真实UTF-8文件版本并返回artifact_seq，避免转写；不是验收或最终交付。需要独立复核时，作者将此序号交给request_review；最终交付由店长finish_work选择版本。",
+            tools.append(_tool("publish_workspace_file", "直接保存工作目录中已写好的真实UTF-8文件版本并返回artifact_seq，避免转写；不是验收或最终交付。需要独立复核时，可自行request_review或将版本交给送审负责人，不为送审重复发布；最终由店长finish_work选择版本。",
                 {"path": string, "summary": string, "format": {"type": "string", "enum": ["code", "markdown", "text"]}},
                 ["path", "summary", "format"]))
         if self.rt.browser_checks.command:
@@ -1072,8 +1072,8 @@ class TeamService:
                         outdated = review["status"] != "pending"
                         return {"status": "error", "code": "review_version_changed" if outdated else "review_decision_required",
                             "complete": True, "outcome": "not_started", "review_seq": review["request_seq"],
-                            "message": ("这份复核的成果版本已变化，普通交回未发送。请通知原作者发布并续提交当前版本，再核对新的复核请求；不要按旧版本批准。"
-                                if outdated else "这是正式复核委托，尚未登记结论；普通交回未发送。请核对实际成果后，用record_review提交approved或changes_requested及具体依据，它会自动交回原作者。仅有进展可用send_message.notify_only。")}
+                            "message": ("这份复核的成果版本已变化，普通交回未发送。请通知原送审负责人取得新版并续提，再核对新的复核请求；不要按旧版本批准。"
+                                if outdated else "这是正式复核委托，尚未登记结论；普通交回未发送。请核对实际成果后，用record_review提交approved或changes_requested及具体依据，它会自动交回送审负责人。仅有进展可用send_message.notify_only。")}
             e = self._send(task_id, role, arguments["recipient"], arguments["text"],
                            "continuation" if continuing is not None else "notification" if notify_only else "report" if reply_to is not None else "message",
                            reply_to=reply_to, parent_assignment_seq=assignment.seq if assignment else None, visible=True,
@@ -1415,13 +1415,17 @@ class TeamService:
             superseded = self._inactive_messages(task_id)
             messages = [e for e in self._messages(task_id) if e.seq not in superseded]
             reported = _reported_messages(messages)
-            authors = {a.get("actor") for a in self.rt.task(task_id).deliverables}
+            published = self.rt.task(task_id).deliverables
+            authors = {a.get("actor") for a in published}
+            publication_sources = {a["seq"]: a for a in published}
             current_reviews = {r["request_seq"] for r in current_work["reviews"] if r["status"] not in {"stale", "outdated"}}
             current_messages = [e for e in messages if e.payload.get("kind") != "report"
                                 or "review_seq" not in e.payload or e.payload["review_seq"] in current_reviews]
             started_messages = {r["message_seq"] for r in current_work["runs"]}
             relevant = {r["role"] for r in current_work["runs"] if r["status"] == "running"}
             relevant |= {r["author"] for r in current_work["reviews"] if r["status"] != "stale"}
+            relevant |= self.rt.team_reviews.chain_publishers(task_id,
+                reviews=current_work["reviews"], artifacts=publication_sources)
             relevant |= {e.payload["recipient"] for e in current_messages if e.payload.get("kind") == "report"
                          and e.seq not in started_messages and e.payload.get("revision") == current_work["revision"]}
             open_authors = [{"seq": e.seq, "author": e.payload["recipient"]} for e in messages

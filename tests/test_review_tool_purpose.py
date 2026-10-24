@@ -29,7 +29,7 @@ class ReviewToolPurposeTests(unittest.TestCase):
                 for meaning in ("artifact_seq", "request_review", "finish_work", "最终交付"):
                     self.assertIn(meaning, description)
         review = schemas["request_review"]["description"]
-        for meaning in ("作者", "店长本人是作者", "保存待复核版本", "不必再delegate", "record_review"):
+        for meaning in ("伙伴已发布", "首次提交者负责收取反馈", "保存候选", "不必再delegate", "record_review"):
             self.assertIn(meaning, review)
         self.assertNotIn("复核委托", schemas["delegate"]["description"])
         self.assertIn("不是版本批准", schemas["delegate"]["description"])
