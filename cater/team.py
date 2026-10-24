@@ -815,6 +815,9 @@ class TeamService:
             **{key: row["result"][key] for key in ("status", "outcome", "exit_code")
                if isinstance(row.get("result"), dict) and key in row["result"]}}
             for row in receipts[-20:]]
+        from .delivery_commands import index_records
+
+        receipt_index = index_records(self, task_id, receipt_index, revision=revision, events=events)
         observation_bytes = 0
         indexed = {row["seq"]: row for row in receipts[-20:]}
         observed = 0
@@ -868,6 +871,8 @@ class TeamService:
                 "sender_name": name(message.actor.id), "sender_kind": message.actor.kind, **message.payload},
             "latest_customer_message": next((row for row in reversed(history) if row.get("sender_kind") == "human"), None),
             "receipt_index": receipt_index, "receipts_truncated": len(receipts) > 20,
+            **({"command_record_note": "command_record是配对原回执的历史请求、原环境argv与目录，不是当前文件验收、覆盖证明或顾客终端的复现命令；状态仍看原回执，stdin仅保留指纹。省略项按自身seq作为receipt_seq用read_receipts读原完成结果，该回读不含原工具请求；不能从argv倒推请求。"}
+               if any("command_record" in row for row in receipt_index) else {}),
             **({"file_read_sources": file_sources} if file_sources is not None else {}),
             "pending_operations": [{k: row[k] for k in row if k != "arguments"} for row in pending[-20:]],
             "pending_operations_truncated": len(pending) > 20,

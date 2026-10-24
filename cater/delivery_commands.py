@@ -143,6 +143,22 @@ def _execution_context(value):
     return dict(value)
 
 
+def _command_identity(arguments, result):
+    request, complete, stdin = _request(arguments)
+    value = {'request': request, 'request_complete': complete, 'stdin': stdin,
+             'argv': _argv(result.get('argv')), 'cwd': _text(result.get('cwd')),
+             'environment': result.get('environment') if isinstance(result.get('environment'), str)
+                and result['environment'] in ENVIRONMENTS else None,
+             'complete': result['complete'] if type(result.get('complete')) is bool else None}
+    context = _execution_context(result.get('execution_context'))
+    if context is not None:
+        value['execution_context'] = context
+    if any(isinstance(result.get(key), dict) and result[key].get('complete') is False
+           for key in ('stdout', 'stderr')):
+        value['complete'] = False
+    return value
+
+
 def _event(team, task_id, seq, kind):
     row = team.rt.log.db.execute('SELECT * FROM events WHERE task_id = ? AND seq = ? AND type = ?',
                                 (task_id, seq, kind)).fetchone()
@@ -180,31 +196,21 @@ def normalize(team, task_id, seqs, *, revision, artifacts):
             if len(duplicates) != 1:
                 raise CommandRecordError('同一命令存在矛盾或重复完成记录，不能选为确切执行来源。')
             result = p['result']
-            request, complete, stdin = _request(s.get('arguments'))
-            argv = _argv(result.get('argv'))
             checked = _artifacts(result.get('checked_artifacts'))
             records.append({'version': 1, 'source_seq': event.seq, 'source_hash': event.hash,
                 'started_seq': start.seq, 'started_hash': start.hash, 'role': s['role'], 'tool': 'workspace_run',
-                'request': request, 'request_complete': complete, 'stdin': stdin, 'argv': argv,
-                'authorized_root': _text(s.get('root')), 'cwd': _text(result.get('cwd')),
-                'environment': result.get('environment') if isinstance(result.get('environment'), str)
-                    and result['environment'] in ENVIRONMENTS else None,
+                **_command_identity(s.get('arguments'), result),
+                'authorized_root': _text(s.get('root')),
                 'status': result['status'], 'outcome': result.get('outcome') if isinstance(result.get('outcome'), str)
                     and result['outcome'] in OUTCOMES else None,
                 'exit_code': result.get('exit_code') if type(result.get('exit_code')) is int
                     and -(2 ** 31) <= result['exit_code'] < 2 ** 32 else None,
                 **{key: result[key] if type(result.get(key)) is bool else None for key in (
-                    'complete', 'scope_current', 'artifacts_unchanged', 'artifact_check_valid', 'selected_versions_current')},
+                    'scope_current', 'artifacts_unchanged', 'artifact_check_valid', 'selected_versions_current')},
                 'stdout': _output(result.get('stdout')), 'stderr': _output(result.get('stderr')),
                 'checked_artifacts': checked,
                 'delivery_artifact_seqs': [row['seq'] for row in checked or [] if any(
                     all(row[key] == ref[key] for key in ('seq', 'filename', 'content_sha256')) for ref in artifacts)]})
-            execution_context = _execution_context(result.get('execution_context'))
-            if execution_context is not None:
-                records[-1]['execution_context'] = execution_context
-            if any(isinstance(result.get(key), dict) and result[key].get('complete') is False
-                   for key in ('stdout', 'stderr')):
-                records[-1]['complete'] = False
     except CommandRecordError:
         raise
     except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, sqlite3.Error, OSError):
@@ -216,6 +222,51 @@ def _fenced(value, language):
     length = max((len(match.group()) for match in re.finditer(r'`+', value)), default=0)
     fence = '`' * max(3, length + 1)
     return [fence + language, value, fence, '']
+
+
+def index_records(team, task_id, rows, *, revision, events=None):
+    """Bound historical command identity, without copying logs or certifying files."""
+    from .tool_protocol import json_utf8
+
+    entries = [dict(row) for row in rows]
+    events = team.rt.log.read(task_id=task_id) if events is None else events
+    by_seq = {event.seq: event for event in events if event.task_id == task_id}
+    size = attempts = 0
+    for entry in reversed(entries):
+        if entry.get('name') != 'workspace_run':
+            continue
+        event = by_seq.get(entry.get('seq')) if _integer(entry.get('seq')) else None
+        p = event.payload if event is not None and isinstance(event.payload, dict) else {}
+        start = by_seq.get(p['started_seq']) if _integer(p.get('started_seq')) else None
+        if (start is None or not isinstance(start.payload, dict)
+                or not isinstance(event.hash, str) or not HASH.fullmatch(event.hash)
+                or not isinstance(start.hash, str) or not HASH.fullmatch(start.hash)
+                or type(revision) is not int or type(start.payload.get('revision')) is not int
+                or start.payload['revision'] != revision or not isinstance(p.get('result'), dict)):
+            continue
+        # Reject obvious omissions before expensive authentication. Only the
+        # original normalizer may authorize attaching a projected record.
+        identity = _command_identity(start.payload.get('arguments'), p['result'])
+        if not identity['argv'] or identity['request'] is None:
+            continue
+        value = {'source_seq': event.seq, 'source_hash': event.hash,
+                 'started_seq': start.seq, 'started_hash': start.hash, **identity,
+                 'recorded_revision': revision, 'read_args': {'receipt_seq': event.seq}}
+        length = len(json_utf8(value))
+        if size + length > 2400:
+            continue
+        attempts += 1
+        try:
+            record, = normalize(team, task_id, [entry['seq']], revision=revision, artifacts=[])
+        except CommandRecordError:
+            record = None
+        if record is not None and all(record.get(key) == item for key, item in value.items()
+                                      if key not in {'recorded_revision', 'read_args'}):
+            entry['command_record'] = value
+            size += length
+        if attempts == 3:
+            break
+    return entries
 
 
 def _state(value, yes, no):
