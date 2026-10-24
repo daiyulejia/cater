@@ -430,11 +430,11 @@ class TeamService:
             _tool("read_receipts", "读取本群已保存的工具回执，不重新执行原操作。record_read标记本次查询，原观察轮次看每条记录的run_id；本轮读回执不等于本轮重新核验。receipt_seq精确读一份既有回执；role、message_seq、name、run_id和before_seq可筛选分页，run_id不是角色名。section=file_reads只列当前目录绑定期间已观察的文件读取元数据，可用file_path精确筛选，再用返回的receipt_seq读原文。first/last_observed不是基线/当前磁盘；节选不补全文，历史不授权写入或证明结论。",
                   {"run_id": string, "role": {"type": "string", "enum": [r.id for r in members]},
                    "section": {"type": "string", "enum": ["receipts", "file_reads"]},
-                   "receipt_seq": {"type": "integer", "minimum": 1, "description": "工具完成回执seq，不是started_seq、消息号或运行ID。"},
+                   "receipt_seq": {"type": "integer", "minimum": 1, "description": "工具完成回执seq，不是started_seq、消息号或运行ID；不与include_pending=true或section=file_reads合用。"},
                    "file_path": {"type": "string", "description": "仅section=file_reads，当前绑定内已记录读取的相对路径，不扫描磁盘。"},
                    "message_seq": {"type": "integer", "minimum": 1}, "name": string,
                    "before_seq": {"type": "integer", "minimum": 1},
-                   "include_pending": {"type": "boolean", "description": "同时读取未结算操作详情；上下文pending_operations提供索引。继续读取旧项时将pending_next_before_seq填入before_seq。这不代表可以重放原操作。"},
+                   "include_pending": {"type": "boolean", "description": "分页时同时读取未结算操作详情；不与receipt_seq或section=file_reads合用。上下文pending_operations提供索引，旧项用pending_next_before_seq填before_seq。不授权重放。"},
                    "limit": {"type": "integer", "minimum": 1, "maximum": 50}}, []),
             _tool("read_messages", "按序号分页补读消息原文，不重新执行。默认inbox读取发给你的历史消息/知会；scope=conversation读取模型共享聊天窗口对应的本群对话，用于核对节选外的上下文。",
                   {"after_seq": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 50},
@@ -1173,6 +1173,8 @@ class TeamService:
                     "content_complete": offset == 0 and end == len(content)}}
             return {"status": "ok", **artifact}
         if name == "read_receipts":
+            from .team_read_sources import invalid_query
+
             record_read = {"kind": "persisted_events", "reexecutes_operations": False}
             if (isinstance(tool_start, Event) and tool_start.actor == HOST
                     and tool_start.type == "team.tool_started" and tool_start.task_id == task_id):
@@ -1189,28 +1191,32 @@ class TeamService:
                                        reader_started_seq=reader_seq)
             limit = arguments.get("limit", 20)
             if type(limit) is not int or not 1 <= limit <= 50:
-                raise ValueError("回执数量应为1到50。")
+                return invalid_query("limit需要1到50的整数。", "limit")
             if type(arguments.get("include_pending", False)) is not bool:
-                raise ValueError("include_pending需要布尔值。")
+                return invalid_query("include_pending需要布尔值。", "include_pending")
             for key in ("run_id", "role", "name"):
                 if key in arguments:
-                    _text(arguments[key], key, 128)
+                    if not isinstance(arguments[key], str) or not arguments[key].strip() or len(arguments[key]) > 128:
+                        return invalid_query("筛选字段需要非空且不超过128字符的字符串；角色用role，真实运行ID用run_id。", key)
             if "role" in arguments:
-                self._role(arguments["role"])
+                if arguments["role"] not in {member.id for member in [self.rt.organization.leader, *self.rt.roles]}:
+                    return invalid_query("role需要已配置伙伴的角色ID，而不是显示名称或运行ID。", "role")
             for key in ("message_seq", "before_seq", "receipt_seq"):
                 if key in arguments and (type(arguments[key]) is not int or arguments[key] < 1):
-                    raise ValueError("回执筛选序号需要正整数。")
+                    return invalid_query("回执筛选序号需要正整数；receipt_seq是完成回执号，message_seq是输入消息号。", key)
             section = arguments.get("section", "receipts")
-            if section not in {"receipts", "file_reads"}:
-                raise ValueError("回执读取section无效。")
+            if not isinstance(section, str) or section not in {"receipts", "file_reads"}:
+                return invalid_query("section只接受receipts或file_reads。", "section")
             if section == "file_reads":
                 if "receipt_seq" in arguments or "include_pending" in arguments:
-                    raise ValueError("文件读取目录仅返回已记录元数据；精确原文请另用receipt_seq读取。")
+                    return invalid_query("section=file_reads只读元数据，请省略receipt_seq和include_pending；精确原文另用receipt_seq读取。",
+                                         "section", *(key for key in ("receipt_seq", "include_pending") if key in arguments))
                 return {**self.read_sources.read(task_id, arguments), "record_read": record_read}
             if "file_path" in arguments:
-                raise ValueError("按路径查询读取来源时，请使用section=file_reads。")
+                return invalid_query("使用file_path查询读取来源时，请指定section=file_reads。", "file_path", "section")
             if "receipt_seq" in arguments and arguments.get("include_pending"):
-                raise ValueError("receipt_seq只定位已完成回执；未结算操作请用原分页筛选。")
+                return invalid_query("receipt_seq只定位已完成回执，请省略include_pending或设为false；未结算操作另用include_pending=true分页查询，不填写receipt_seq。",
+                                     "receipt_seq", "include_pending")
             if "receipt_seq" in arguments:
                 with self._context_read():
                     page = self.read_sources.exact(task_id, arguments)

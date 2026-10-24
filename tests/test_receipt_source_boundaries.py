@@ -303,8 +303,15 @@ class ReceiptSourceBoundaryTests(unittest.TestCase):
     def test_exact_and_source_sequences_do_not_coerce_types(self):
         start, finish = self.command()
         for value in (True, None, float(finish.seq)):
-            with self.subTest(selector=value), self.assertRaises(ValueError):
-                self.query({"receipt_seq": value})
+            with self.subTest(selector=value), patch.object(self.team.read_sources, "exact") as exact:
+                result = self.query({"receipt_seq": value})
+                self.assertEqual(result["status"], "error", result)
+                self.assertEqual(result["code"], "invalid_receipt_query", result)
+                self.assertEqual(result["fields"], ["receipt_seq"])
+                self.assertIs(result["complete"], True)
+                self.assertEqual(result["outcome"], "not_started")
+                self.assertNotIn("receipts", result)
+                exact.assert_not_called()
         for event, key, value in ((start, "message_seq", float(start.payload["message_seq"])),
                                   (finish, "started_seq", float(start.seq)),
                                   (finish, "started_seq", True), (finish, "started_seq", None)):

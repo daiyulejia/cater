@@ -19,6 +19,12 @@ NOTE = ("这里只列当前工作目录绑定期间已记录的成功读取，�
         "first_observed不等于原始基线，last_observed不等于当前文件；目标变化后仍可能是历史。"
         "读取可能为节选，按read_args读回确切回执再比较；历史不授权写入，也不证明解释正确。")
 
+
+def invalid_query(message, *fields):
+    """Only caller-authored input diagnostics belong here, never exception text."""
+    return {"status": "error", "code": "invalid_receipt_query", "complete": True,
+            "outcome": "not_started", "message": message, "fields": list(fields)}
+
 _SOURCE_FIELDS = tuple((f"$.{key}", maximum) for key, maximum in {
     "started_seq": 0, "run_id": 128, "role": 128, "name": 128, "call_id": 256,
     "message_seq": 0, "root": 8192, "revision": 0, "recipient": 128, "kind": 128,
@@ -444,7 +450,10 @@ class TeamReadSources:
         limit = arguments.get("limit", 20)
         path = None
         if "file_path" in arguments:
-            file_path(arguments["file_path"])
+            try:
+                file_path(arguments["file_path"])
+            except ValueError:
+                return invalid_query("file_path需要具体的工作目录相对文件路径，不使用绝对路径、父级路径或目录。", "file_path")
             path = arguments["file_path"]
         try:
             with self.team._context_read():
