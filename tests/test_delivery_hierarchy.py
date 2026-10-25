@@ -170,7 +170,8 @@ class DeliveryHierarchyTests(unittest.TestCase):
                     fixture.rt.team.receive(fixture.task, "给出文字建议")
                     fixture.rt.collaborate(fixture.task)
                 self.assertEqual(len(prompts), 1)
-                self.assertIn("交付不只说完成", prompts[0])
+                self.assertIn("交付回答实际结果、关键原因、最短使用或复查方法和未验证边界", prompts[0])
+                self.assertIn("普通聊天不套交付模板", prompts[0])
                 self.assertEqual(len(fixture.events("team.objective_completed")), 1)
                 tools = fixture.driver.calls[0]["tools"] if mode == "native" else fixture.driver.runs[0].tools
                 schema = next(tool for tool in tools if tool["name"] == "finish_work")["input_schema"]

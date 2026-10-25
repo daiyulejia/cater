@@ -494,7 +494,7 @@ class TeamService:
                     tool["input_schema"]["properties"]["artifact_seqs"] = {
                         "type": "array", "minItems": 1, "maxItems": 128,
                         "items": {"type": "integer", "minimum": 1},
-                        "description": "可选：检查本群当前已发布的确切版本，而非工程目录。列出全部文本文件或完整工程ZIP，最多128文件、单16MiB、总32MiB。宿主校验并放入临时副本，cwd相对此副本（ZIP有父目录时填实际目录）。沿用当前命令别名和权限，不复制工程中未发布的输入或依赖；也不是OS沙箱。"}
+                        "description": "可选：检查本群当前已发布的确切版本，而非工程目录。列出全部文本文件或完整工程ZIP，最多128文件、单16MiB、总32MiB。宿主校验并放入临时副本；ZIP自动解为成员文件，不放入原ZIP本体。cwd相对此副本（ZIP有父目录时填实际目录）。每次临时目录独立，不复用上次路径；未发布的辅助检查脚本不会复制，可按程序支持的方式用stdin传入。沿用当前命令别名和权限，不复制未选入的工程输入或依赖；也不是OS沙箱。"}
                     tool["description"] += " 可用artifact_seqs直接运行指定成果副本，无须手写ZIP解压或子进程日志解码脚本。检查checked_artifacts、artifacts_unchanged和scope_current；结果不自动批准复核。"
                     tool["description"] += " 比较确切旧新版时，改用artifact_versions按directory并列挂载；cwd相对副本根，路径为directory/原成员路径。scope_current不代表所选版本最新，另看selected_versions_current。"
                     tool["input_schema"]["properties"]["cwd"]["description"] += " 提供artifact_seqs或artifact_versions时改为相对成果副本根目录。"
