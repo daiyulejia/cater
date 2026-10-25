@@ -21,6 +21,117 @@ def _recorded_arguments(value):
     return value
 
 
+def _message_input(team, task_id, message, events, by_seq):
+    """Resolve the input of a host-paired ordinary message, never a reply hint."""
+    from .team import HOST, LOCAL_EVENT_CONTRACT
+
+    for receipt in events:
+        r = receipt.payload
+        result = r.get("result")
+        if (receipt.type != "team.tool_finished" or receipt.actor != HOST
+                or not isinstance(result, dict) or result.get("status") != "ok"
+                or type(result.get("message_seq")) is not int or result["message_seq"] != message.seq
+                or type(r.get("started_seq")) is not int):
+            continue
+        tool = by_seq.get(r["started_seq"])
+        if (tool is None or tool.type != "team.tool_started" or tool.actor != HOST
+                or not tool.seq < message.seq < receipt.seq
+                or r.get("name") not in {"delegate", "send_message", "return_work"}
+                or any(r.get(key) != tool.payload.get(key) for key in ("name", "role", "run_id"))
+                or r.get("role") != message.actor.id
+                or type(tool.payload.get("revision")) is not int
+                or tool.payload["revision"] != message.payload.get("revision")):
+            continue
+        contract = tool.payload.get("execution_contract")
+        if (not isinstance(contract, dict) or contract != LOCAL_EVENT_CONTRACT
+                or type(contract.get("version")) is not int):
+            continue
+        args = _recorded_arguments(tool.payload.get("arguments"))
+        if not isinstance(args, dict):
+            continue
+        name, kind = r["name"], message.payload.get("kind")
+        text = args.get("instruction" if name == "delegate" else "text")
+        if not isinstance(text, str) or text.strip() != message.payload.get("text"):
+            continue
+        if name == "delegate":
+            if kind != "assignment" or "review" in args or args.get("recipient") != message.payload.get("recipient"):
+                continue
+        elif name == "return_work":
+            if kind != "report":
+                continue
+        else:
+            if (args.get("notify_only", False) is not False or "continue_assignment_seq" in args
+                    or args.get("recipient") != message.payload.get("recipient")):
+                continue
+            if kind == "report":
+                if type(args.get("reply_to")) is not int or args["reply_to"] != message.payload.get("reply_to"):
+                    continue
+            elif kind != "message" or "reply_to" in args:
+                continue
+        runs = [e for e in events if e.type == "team.run_started" and e.actor == HOST
+                and e.payload.get("run_id") == r.get("run_id")]
+        source_seq = tool.payload.get("message_seq")
+        source = by_seq.get(source_seq) if type(source_seq) is int else None
+        if (len(runs) == 1 and source is not None and source.type == "team.message_received"
+                and source.payload.get("recipient") == message.actor.id
+                and source.seq < runs[0].seq < tool.seq
+                and all(runs[0].payload.get(key) == tool.payload.get(key)
+                        for key in ("role", "run_id", "message_seq", "revision"))
+                and not any(e.type == "team.run_finished" and e.actor == HOST and e.seq < receipt.seq
+                            and all(e.payload.get(key) == runs[0].payload.get(key)
+                                    for key in ("role", "run_id", "message_seq")) for e in events)):
+            if name == "return_work":
+                try:
+                    role = team._role(message.actor.id)
+                except (KeyError, ValueError):
+                    continue
+                assignment = team._waiting_assignment(task_id, source, role,
+                    events=[e for e in events if e.seq < tool.seq])
+                if assignment is None or assignment.seq != message.payload.get("reply_to"):
+                    continue
+            return source
+    return None
+
+
+def customer_source(team, task_id, message, role, *, events=None, before_seq=None):
+    """Let the addressed role answer its current, host-paired consultation."""
+    from .team import HOST, _assignment_report
+
+    events = [e for e in (team.rt.log.read(task_id=task_id) if events is None else events)
+              if e.task_id == task_id and (before_seq is None or e.seq < before_seq)]
+    by_seq = {e.seq: e for e in events}
+    if (message is None or type(message.seq) is not int or by_seq.get(message.seq) != message
+            or message.type != "team.message_received" or message.payload.get("recipient") != role.id):
+        return None
+    if message.actor == Actor.human() and message.payload.get("kind") == "message":
+        return message
+    objective = next((e for e in reversed(events) if e.actor == HOST
+                      and e.type in {"team.objective_updated", "team.objective_completed"}), None)
+    revision = objective.seq if objective is not None else 0
+    current = message
+    while current is not None and current.actor.kind == "agent":
+        seq = current.payload.get("reply_to")
+        request = by_seq.get(seq) if type(seq) is int else None
+        if (request is None or request.actor != Actor.agent(role.id, role.role)
+                or request.type != "team.message_received" or request.seq >= current.seq
+                or type(request.payload.get("review_seq")) is int
+                or not _assignment_report(request, current)
+                or type(current.payload.get("revision")) is not int
+                or request.payload.get("revision") != current.payload["revision"]
+                or current.payload["revision"] != revision
+                or _message_input(team, task_id, current, events, by_seq) is None):
+            return None
+        current = _message_input(team, task_id, request, events, by_seq)
+        if current is not None and current.payload.get("recipient") != role.id:
+            return None
+    if (current is not None and current.actor == Actor.human() and current.payload.get("kind") == "message"
+            and current.seq > revision
+            and not any(e.type == "team.message_received" and e.actor == Actor.human()
+                        and e.payload.get("recipient") == role.id and e.seq > current.seq for e in events)):
+        return current
+    return None
+
+
 def _omitted(result):
     return (result.get("reply_evidence_status") == "omitted_invalid"
             and result.get("reply_evidence_warning") == OMITTED_WARNING
@@ -42,11 +153,11 @@ def committed_reply(team, start, events):
     by_seq = {event.seq: event for event in events}
     p = start.payload
     source_seq = p.get("message_seq")
-    source = by_seq.get(source_seq) if type(source_seq) is int else None
+    incoming = by_seq.get(source_seq) if type(source_seq) is int else None
     if (by_seq.get(start.seq) != start or start.actor != HOST or start.type != "team.run_started"
-            or source is None or source.type != "team.message_received" or source.actor != Actor.human()
-            or source.payload.get("kind") != "message" or source.payload.get("recipient") != p.get("role")
-            or not source.seq < start.seq or not isinstance(p.get("run_id"), str) or not p["run_id"]):
+            or incoming is None or incoming.type != "team.message_received"
+            or incoming.payload.get("recipient") != p.get("role")
+            or not incoming.seq < start.seq or not isinstance(p.get("run_id"), str) or not p["run_id"]):
         return None
     try:
         role = team._role(p["role"])
@@ -62,8 +173,11 @@ def committed_reply(team, start, events):
                 or not start.seq < tool.seq < receipt.seq or tool.payload.get("name") != TOOL
                 or any(r.get(key) != p.get(key) or tool.payload.get(key) != p.get(key)
                        for key in ("run_id", "role"))
-                or type(tool.payload.get("message_seq")) is not int or tool.payload["message_seq"] != source.seq
+                or type(tool.payload.get("message_seq")) is not int or tool.payload["message_seq"] != incoming.seq
                 or not isinstance(result, dict) or result.get("status") != "ok"):
+            continue
+        source = customer_source(team, start.task_id, incoming, role, events=events, before_seq=tool.seq)
+        if source is None:
             continue
         contract = tool.payload.get("execution_contract")
         args = _recorded_arguments(tool.payload.get("arguments"))
@@ -103,7 +217,7 @@ def committed_reply(team, start, events):
 def schema():
     return {"name": TOOL, "description": (
         "核对后直接回答本轮顾客问题，发送给顾客并结束本轮。text只讲本次所需的结论、关键原因和必要操作；要求简短时不重述全流程，要求细节时完整回答。区分实际观察、源码推导和未验证建议，保留执行者与环境范围；失败实验未取得的输出不能写成实测，不混入之前的过程前言。"
-        "只发消息，不代表整个任务完成或复核通过；正式交付仍用finish_work，伙伴交还委托仍用send_message。"
+        "伙伴咨询交回后，可由原顾客接收者答复原问题。只发消息，不代表整个任务完成或复核通过；正式交付仍用finish_work，伙伴交还委托仍用send_message。"
         "若只是解释或核验旧交付，无需重设目标或发布新报告；需要可查原文时可选填evidence，顾客默认折叠查看。"),
         "input_schema": {"type": "object", "additionalProperties": False,
             "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 32000},
@@ -118,21 +232,21 @@ def reply(team, task_id, role, arguments, tool_start, assignment):
     events = team.rt.log.read(task_id=task_id)
     by_seq = {event.seq: event for event in events}
     stored = by_seq.get(tool_start.seq)
-    source = by_seq.get(tool_start.payload.get("message_seq"))
+    incoming = by_seq.get(tool_start.payload.get("message_seq"))
+    source = customer_source(team, task_id, incoming, role, events=events)
     run = next((e for e in events if e.type == "team.run_started" and e.actor == HOST
                 and e.payload.get("run_id") == tool_start.payload.get("run_id")), None)
     if (stored != tool_start or tool_start.actor != HOST or tool_start.type != "team.tool_started"
             or tool_start.payload.get("name") != TOOL or tool_start.payload.get("role") != role.id
-            or source is None or source.type != "team.message_received" or source.actor != Actor.human()
-            or source.payload.get("recipient") != role.id or source.payload.get("kind") != "message"
-            or run is None or not source.seq < run.seq < tool_start.seq
+            or source is None or incoming is None
+            or run is None or not incoming.seq < run.seq < tool_start.seq
             or any(run.payload.get(key) != tool_start.payload.get(key)
                    for key in ("run_id", "role", "message_seq"))
             or team.view(task_id)["revision"] != tool_start.payload.get("revision")
             or any(e.type == "team.run_finished" and e.actor == HOST
                    and e.payload.get("run_id") == run.payload["run_id"] for e in events)
-            or assignment is not None or team._waiting_assignment(task_id, source, role) is not None):
-        raise WorkConflict("此入口只回答本轮直接顾客输入；已有委托仍向原委托人交还，未代替任何人宣布完成。")
+            or assignment is not None or team._waiting_assignment(task_id, incoming, role) is not None):
+        raise WorkConflict("此入口只回答本轮顾客输入或其已核对来源的咨询回报；已有委托仍向原委托人交还，未代替任何人宣布完成。")
     team._current(task_id, run, role, tool_start.payload["revision"])
     refs = arguments.get("evidence", [])
     previous = next((e for e in events if e.type == "msg.said"

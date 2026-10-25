@@ -141,16 +141,8 @@ class TeamExternal:
             fingerprint = driver_fingerprint(driver)
             rules = basis["rule_fingerprint"]
 
-            def check(force=False):
-                nonlocal last_check, admission_blocked
-                if stop_kind is not None:
-                    raise ExternalYield(stop_kind)
-                now = time.monotonic()
-                # Before prompt transmission every check must observe changes
-                # made during the handshake, even inside the idle polling window.
-                if (not force and run is not None and run.state.prompt_attempted
-                        and now - last_check < 0.2):
-                    return
+            def verify_scope():
+                nonlocal admission_blocked
                 self.team._current(task_id, started, role, revision)
                 if budget_supervision and any(row.get("started_seq") != (attempt.seq if attempt is not None else None)
                                              for row in self.team._pending_operations(task_id)):
@@ -168,6 +160,18 @@ class TeamExternal:
                     raise WorkConflict("适用店规已更新，先理解新要求再继续。")
                 if driver_fingerprint(driver) != fingerprint:
                     raise WorkConflict("外部模型接入配置已变化，未继续旧会话。")
+
+            def check(force=False):
+                nonlocal last_check
+                if stop_kind is not None:
+                    raise ExternalYield(stop_kind)
+                now = time.monotonic()
+                # Before prompt transmission every check must observe changes
+                # made during the handshake, even inside the idle polling window.
+                if (not force and run is not None and run.state.prompt_attempted
+                        and now - last_check < 0.2):
+                    return
+                verify_scope()
                 last_check = now
 
             def execute(call):
@@ -378,19 +382,29 @@ class TeamExternal:
                 final += "\n\n已发布成果可下载；外部客户端清理尚未确认，需核对进程，不能将本次交付理解为所有执行均已停止。"
             elif stop_kind == "delivery_unchanged" and run is not None and not run.state.cleanup_complete:
                 final += "\n\n外部客户端清理尚未确认，需核对进程；本次没有新增交付，不表示所有执行均已停止。"
-            current = self.team.view(task_id)
-            completed = next((event for event in reversed(self.rt.log.read(task_id=task_id))
-                              if event.type == "team.objective_completed" and event.actor == HOST
-                              and event.seq == current["revision"] and event.seq > started.seq
-                              and event.payload.get("run_id") == started.payload["run_id"]), None)
-            delivery = (completed.seq if stop_kind == "delivered" and current["status"] == "done"
-                        and role.id == self.rt.organization.leader.id and completed is not None else None)
-            customer = message.actor.kind == "human" or delivery is not None
-            self.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
-                payload={"text": final, "claim": final[:180], "phase": "team", "run_id": started.payload["run_id"],
-                         "reply_to": message.seq, "response_kind": "reply",
-                         "audience": "customer" if customer else "team",
-                         "recipient": "human" if customer else message.actor.id,
-                         **({"delivery_seq": delivery} if delivery is not None else {})})
+            try:
+                with self.rt.log.atomic():
+                    # Settlement may outlast a pause or a scope change. Check and
+                    # publish together; an earlier committed reply stays intact.
+                    verify_scope()
+                    current = self.team.view(task_id)
+                    completed = next((event for event in reversed(self.rt.log.read(task_id=task_id))
+                                      if event.type == "team.objective_completed" and event.actor == HOST
+                                      and event.seq == current["revision"] and event.seq > started.seq
+                                      and event.payload.get("run_id") == started.payload["run_id"]), None)
+                    delivery = (completed.seq if stop_kind == "delivered" and current["status"] == "done"
+                                and role.id == self.rt.organization.leader.id and completed is not None else None)
+                    from .team_reply import customer_source
+
+                    reply_source = customer_source(self.team, task_id, message, role) if assignment is None else None
+                    customer = message.actor.kind == "human" or delivery is not None or reply_source is not None
+                    self.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
+                        payload={"text": final, "claim": final[:180], "phase": "team", "run_id": started.payload["run_id"],
+                                 "reply_to": reply_source.seq if reply_source else message.seq, "response_kind": "reply",
+                                 "audience": "customer" if customer else "team",
+                                 "recipient": "human" if customer else message.actor.id,
+                                 **({"delivery_seq": delivery} if delivery is not None else {})})
+            except WorkConflict as exc:
+                status, reason, final = "interrupted", str(exc), ""
         return {"revision": revision, "status": status, "reason": reason, "final": final,
                 "failure": failure, "awaiting_customer": awaiting_customer, "last_scope": last_scope}

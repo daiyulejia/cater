@@ -6,6 +6,7 @@ import { commonResponseDiagnostics, requestFailureFields, responseDiagnosticFiel
 import { publicReports } from './publicProgress'
 import type { PublicProgressSnapshot } from './publicProgress'
 import { hasReceiptReadMetadata, receiptReadProvenance } from './receiptReadStatus'
+import { consultationSources } from './consultationSource'
 
 type TimedEvent = TeamEvent & { ts?: string }
 export type ConversationActivityInput = {
@@ -687,11 +688,17 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   const deliveredAt = done ? completed ? completion.seq : team.revision : undefined
   const recipient = currentHuman ? string(currentHuman.payload.recipient) ?? leaderId : undefined
   const customerRun = currentHuman ? runs.get(key(currentHuman.seq, recipient)) : undefined
+  const consultation = consultationSources(events)
   const answer = currentHuman && events.findLast((event) => {
     if (event.seq <= currentHuman.seq || event.type !== 'msg.said' || progress.has(event.seq) || event.payload.reply_to !== currentHuman.seq
       || teamSpeaker(event) !== recipient || typeof event.payload.text !== 'string' || !event.payload.text.trim()
       || !((event.actor.kind === 'agent' && event.actor.id === recipient) || isTeamHost(event))) return false
     const audience = teamMessageAudience(event, bySeq)
+    // Report-triggered runs need their own authenticated source, not the original Human run id.
+    if (hosts.some(start => start.type === 'team.run_started'
+      && (start.payload.run_id === event.payload.run_id || event.payload.run_id === undefined && start.payload.role === recipient && start.seq < event.seq)
+      && start.payload.message_seq !== currentHuman.seq
+      && bySeq.get(Number(start.payload.message_seq))?.actor.kind !== 'human')) return consultation.answerSource(event) === currentHuman
     return audience.audience === 'customer' && (audience.recipient === undefined || audience.recipient === currentHuman.actor.id)
       && (event.payload.run_id === undefined || customerRun?.start?.payload.run_id === undefined
         || event.payload.run_id === customerRun.start.payload.run_id)

@@ -65,7 +65,7 @@ def context_instructions(context):
     if context.get("tool_catalog"):
         notes.append("tool_catalog列出当前可按需载入的工具名称；未声明参数的工具先用load_tools按确切名称选择，可一次载入多项，下一次请求提供完整定义。载入不执行动作、不授予权限；无需为等待或普通聊天全部载入。")
     if (context.get("current_work") or {}).get("status") == "done" and message.get("sender_kind") == "human":
-        notes.append("当前目标已交付。普通追问先用已有成果和回执解释，不为讲解另写工程探针或重新分工；顾客确需修改时再采用新工作目标。"
+        notes.append("当前目标已交付。普通追问先用已有成果和回执解释；必要时可用普通委托或消息请伙伴核对并交回，不必重设目标或再次交付。不要为讲解另写工程；顾客确需修改时再采用新工作目标。"
                      "区分实际argv执行、等价输入验证和建议但未实测的终端命令；受限环境中的查找未命中不证明整机未安装。"
                      "讲解改动须明确比较的旧、新版本；未发布新版不证明未改磁盘文件，不把原交付自述当作独立证明。")
     if context.get("background"):

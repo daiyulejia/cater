@@ -80,20 +80,19 @@ class TeamWorkControl:
         events = sorted((e for e in events if e.task_id == task_id), key=lambda e: e.seq)
         messages = {e.seq: e for e in events if e.type == "team.message_received"}
         rows, seen = [], set()
-        revision, done = 0, False
+        revision = 0
         for event in events:
             if event.actor != HOST:
                 continue
             if event.type in {"team.objective_updated", "team.objective_completed"}:
                 revision = event.seq
-                done = event.type == "team.objective_completed"
             if event.type != "team.assignment_withdrawn":
                 continue
             p = event.payload
             if type(p.get("message_seq")) is not int:
                 continue
             source = messages.get(p["message_seq"])
-            if (source is None or not self._ordinary(source, task_id, historical=True) or done
+            if (source is None or not self._ordinary(source, task_id, historical=True)
                     or not revision <= source.seq < event.seq
                     or type(p.get("revision")) is not int
                     or p["revision"] != revision or p["revision"] != source.payload["revision"]
@@ -153,9 +152,9 @@ class TeamWorkControl:
                 or type(tool_start.payload.get("revision")) is not int
                 or tool_start.payload["revision"] != view["revision"]
                 or source.payload["revision"] != view["revision"]
-                or view["status"] != "running"
+                or view["status"] not in {"running", "done"}
                 or self.rt.execution_control.view(task_id)["state"] != "running"):
-            return _error("work_not_current", "工作已暂停、交付或目标已变化，不能用旧的工具请求撤回工作；请先核对当前目标和执行状态。")
+            return _error("work_not_current", "工作已暂停或目标版本已变化，不能用旧的工具请求撤回工作；请先核对当前目标和执行状态。")
         previous = next((row for row in self.view(task_id, events=events) if row["message_seq"] == seq), None)
         if previous:
             return {"status": "ok", "message_seq": seq, "withdrawn": True,

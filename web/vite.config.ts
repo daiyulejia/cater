@@ -38,7 +38,7 @@ export default defineConfig({
             },
             {
               name: 'team-state',
-              test: /[\\/]src[\\/]team\.ts$/,
+              test: /[\\/]src[\\/](?:team|consultationSource|auditArguments|replyEvidence|nativeHandoff)\.ts$/,
               priority: 20,
             },
             {

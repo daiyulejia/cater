@@ -519,20 +519,23 @@ class TeamService:
             ]
         return tools
 
-    def _waiting_assignment(self, task_id, message, role):
-        inactive = self._inactive_messages(task_id)
+    def _waiting_assignment(self, task_id, message, role, *, events=None):
+        events = self.rt.log.read(task_id=task_id) if events is None else events
+        messages = self._messages(task_id, events=events)
+        inactive = self._inactive_messages(task_id, events=events)
+        revision = max((e.seq for e in events if e.actor == HOST
+                        and e.type in {"team.objective_updated", "team.objective_completed"}), default=0)
         if message.seq in inactive:
             return None
         if message.payload.get("kind") == "continuation":
-            return next((e for e in self._messages(task_id) if e.seq == message.payload.get("continue_assignment_seq")
+            return next((e for e in messages if e.seq == message.payload.get("continue_assignment_seq")
                          and e.actor == message.actor and e.payload.get("recipient") == role.id
                          and e.payload.get("kind") in {"assignment", "message"}
-                         and e.payload.get("revision") == self.view(task_id)["revision"]
+                         and e.payload.get("revision") == revision
                          and e.seq not in inactive
-                         and e.seq not in _reported_messages(self._messages(task_id))), None)
+                         and e.seq not in _reported_messages(messages)), None)
         response = message.payload.get("questionnaire") if message.actor == Actor.human() else None
         if message.actor == Actor.human():
-            events = self.rt.log.read(task_id=task_id)
             question = next((e for e in reversed(events)
                              if e.type == "team.questions_requested" and e.actor == HOST and e.seq < message.seq
                              and e.payload.get("role_id") == role.id
@@ -553,17 +556,17 @@ class TeamService:
                            for key in ("message_seq", "role")) for e in events):
                     question = None
             if question is not None:
-                source = next((e for e in self._messages(task_id) if e.seq == question.payload.get("assignment_seq")
+                source = next((e for e in messages if e.seq == question.payload.get("assignment_seq")
                                and e.payload.get("recipient") == role.id), None)
-                if (source is not None and source.payload.get("revision") == self.view(task_id)["revision"]
+                if (source is not None and source.payload.get("revision") == revision
                         and source.seq not in inactive
-                        and source.seq not in _reported_messages(self._messages(task_id))):
+                        and source.seq not in _reported_messages(messages)):
                     return source
         if message.payload["kind"] == "assignment":
             return message
         if message.payload["kind"] not in {"report", "progress", "message"}:
             return None
-        messages = {e.seq: e for e in self._messages(task_id)}
+        messages = {e.seq: e for e in messages}
         child = messages.get(message.payload.get("reply_to"))
         parent = messages.get(child.payload.get("parent_assignment_seq")) if child else None
         if (child and parent and child.actor.id == role.id
@@ -571,7 +574,7 @@ class TeamService:
                 and message.payload.get("recipient") == role.id
                 and parent.payload.get("kind") in {"assignment", "message"}
                 and parent.payload.get("recipient") == role.id
-                and parent.payload.get("revision") == self.view(task_id)["revision"]
+                and parent.payload.get("revision") == revision
                 and parent.seq not in inactive
                 and parent.seq not in _reported_messages(messages.values())):
             return parent
@@ -759,7 +762,9 @@ class TeamService:
             tools = self._schemas(role, workspace, has_background=self.rt.conversation_background(task_id) is not None,
                                   workspace_id=binding.get("workspace_id") if binding["available"] else None,
                                   has_project_history=self.project_history.available(task_id))
-            if message.actor != Actor.human() or self._waiting_assignment(task_id, message, role) is not None:
+            from .team_reply import customer_source
+
+            if customer_source(self, task_id, message, role) is None or self._waiting_assignment(task_id, message, role) is not None:
                 tools = [tool for tool in tools if tool["name"] != "reply_to_customer"]
             if self.rt.execution_control.view(task_id)["state"] != "running":
                 tools = [tool for tool in tools if tool["name"] in PAUSED_TOOLS]
@@ -951,7 +956,7 @@ class TeamService:
         if post_delivery and not self._post_delivery_command(task_id, role, tool_start):
             raise WorkConflict("交付后命令仅响应当前有效的顾客新输入；已有交付保留，未继续旧操作。")
         if self.view(task_id)["status"] == "done" and name in {
-                "delegate", "continue_work", "withdraw_work", "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "workspace_write", "workspace_run", PROJECT_RESTORE, MCP_CALL, "request_review", "record_review"} and not post_delivery:
+                "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "workspace_write", "workspace_run", PROJECT_RESTORE, MCP_CALL, "request_review", "record_review"} and not post_delivery:
             raise WorkConflict("当前工作已交付；如需继续修改，请先由店长采用新的工作目标。")
         if name == "wait_for_reply":
             return {"status": "ok", "waiting": True}
@@ -1575,9 +1580,7 @@ class TeamService:
                 if budget_supervision and self._pending_operations(task_id):
                     failure["admission_not_started"] = True
                 raise WorkConflict("恢复通知对应的目标、控制或工作目录已变化，不再启动旧工作。")
-            if message.actor.kind == "agent" and (
-                    message.payload.get("revision") != revision
-                    or self.view(task_id)["status"] == "done"):
+            if message.actor.kind == "agent" and message.payload.get("revision") != revision:
                 raise WorkConflict("这份委托已被新的目标替代，不再执行旧方案。")
             if message.payload.get("kind") == "report" and "review_seq" in message.payload and not any(
                     r["request_seq"] == message.payload["review_seq"] and r["status"] not in {"stale", "outdated"}
@@ -1766,24 +1769,29 @@ class TeamService:
                     raise ValueError("模型请求了本轮尚未声明的工具，整批未执行；应先载入并在下一次请求使用。")
                 check_request()
                 if turn.text.strip():
-                    final = turn.text
-                    completed = next((e for e in reversed(self.rt.log.read(task_id=task_id))
-                        if e.seq > started.seq and e.type == "team.objective_completed" and e.actor == HOST), None)
-                    current_work = self.view(task_id)
-                    delivery = (completed.seq if completed and role.id == self.rt.organization.leader.id
-                                and current_work["status"] == "done" and current_work["revision"] == completed.seq else None)
-                    if delivery is not None:
-                        # Keep the customer reply consistent with the frozen delivery.
-                        final = completed.payload["summary"]
-                    customer_facing = ((message.actor.kind == "human" or delivery is not None)
-                                       and not any(call.name == "reply_to_customer" for call in turn.calls))
-                    self.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
-                        payload={"text": final, "claim": final[:180], "phase": "team",
-                                 "run_id": started.payload["run_id"], "reply_to": message.seq,
-                                 "response_kind": "progress" if any(call.name != "wait_for_reply" for call in turn.calls) else "reply",
-                                 "audience": "customer" if customer_facing else "team",
-                                 "recipient": "human" if customer_facing else message.actor.id,
-                                 **({"delivery_seq": delivery} if delivery is not None else {})})
+                    with self.rt.log.atomic():
+                        check_request()
+                        final = turn.text
+                        completed = next((e for e in reversed(self.rt.log.read(task_id=task_id))
+                            if e.seq > started.seq and e.type == "team.objective_completed" and e.actor == HOST), None)
+                        current_work = self.view(task_id)
+                        delivery = (completed.seq if completed and role.id == self.rt.organization.leader.id
+                                    and current_work["status"] == "done" and current_work["revision"] == completed.seq else None)
+                        if delivery is not None:
+                            # Keep the customer reply consistent with the frozen delivery.
+                            final = completed.payload["summary"]
+                        from .team_reply import customer_source
+
+                        reply_source = customer_source(self, task_id, message, role) if assignment is None else None
+                        customer_facing = ((message.actor.kind == "human" or delivery is not None or reply_source is not None)
+                                           and not any(call.name == "reply_to_customer" for call in turn.calls))
+                        self.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
+                            payload={"text": final, "claim": final[:180], "phase": "team",
+                                     "run_id": started.payload["run_id"], "reply_to": reply_source.seq if reply_source else message.seq,
+                                     "response_kind": "progress" if any(call.name != "wait_for_reply" for call in turn.calls) else "reply",
+                                     "audience": "customer" if customer_facing else "team",
+                                     "recipient": "human" if customer_facing else message.actor.id,
+                                     **({"delivery_seq": delivery} if delivery is not None else {})})
                 if not turn.calls:
                     pending_review = self.rt.team_reviews.pending_for(task_id, role, assignment)
                     if pending_review is not None:

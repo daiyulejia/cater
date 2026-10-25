@@ -125,7 +125,7 @@ class PostDeliveryVerificationTests(unittest.TestCase):
 
     def test_other_mutations_still_blocked_after_delivery(self):
         f, message, role, started, tool = self.claimed()
-        for name in ('workspace_write', 'delegate', 'publish_artifact', 'request_review', 'record_review'):
+        for name in ('workspace_write', 'publish_artifact', 'request_review', 'record_review'):
             with self.subTest(name=name), self.assertRaises(WorkConflict):
                 f.rt.team._execute(f.task, role, name, {}, None, {}, tool, None)
 
