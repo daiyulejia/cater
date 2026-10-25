@@ -124,6 +124,8 @@ Windows 精简环境还提供固定 `PATHEXT=.COM;.EXE;.BAT;.CMD`，使 PowerShe
 
 这个显式模式允许本群同名历史版本，不放松原 `artifact_seqs` 或浏览器检查的最新版本要求。每个序号只选一次；目录必须是独立的单层便携名称，拒绝受保护名称、路径越界及大小写或 Unicode 等价冲突。所有版本合计仍限 128 文件、单文件 16 MiB、总 32 MiB，先核对总预算、清单和路径再读取 ZIP 字节。无效选择会在启动前拒绝，不回退实际工程目录；不会继承旧版本的批准或执行权限。
 
+可确定的版本参数错误保留 `invalid_artifact_check`、`complete=true` 和 `outcome=not_started`，另给固定 `reason`、`fields` 与修正说明，例如两个版本共用或等价的目录返回 `version_directories_conflict`。检查当前多个已发布文件时，可用 `artifact_seqs` 放入同一副本；比较不同版本时，`artifact_versions` 的每项需要独立目录。宿主不自动改参或合并目录，未知异常仍使用脱敏提示；拒绝信息不证明其他输入都正确，也不清除既有待核对操作。
+
 回执中 `artifact_selection=version_directories`，`checked_artifacts` 记录所选序号、摘要、目录和检查末观察到的最新发布序号；`checked_files.source_path` 是原路径，`path` 是实际挂载路径。`scope_current` 在此模式表示目标、控制、目录授权及所选确切源字节仍有效，**不表示最新版**。`selected_versions_current` 单独表示所有所选版本是否都是最新发布；`null` 表示无法确定，不能按“是”处理。明确选择的旧版可以留下有效的历史运行证据，即使检查时又有同名新发布，也不会因此变成新版验收。`artifact_check_valid` 仍仅表示范围有效且原输入副本未改，不证明兼容、覆盖充分或独立复核通过；退出结果、检查内容和最终批准版本要分别核对。
 
 网页沿用已有“工具过程”入口，在对应命令下展开“版本副本检查详情”，可分别查看执行结果、版本新旧及原路径到挂载路径的映射。详情默认折叠，不在主聊天重复铺开文件清单或输出日志。

@@ -54,8 +54,10 @@ def execute(team, task_id, role, arguments, workspace, binding, tool_start):
     current()
     try:
         if versioned and 'artifact_seqs' in arguments:
-            raise ValueError('artifact_versions与artifact_seqs不能同时提供。')
+            raise artifact_versions.VersionInputError("artifact_selectors_conflict")
         sources, files = selected_inputs()
+    except artifact_versions.VersionInputError as error:
+        return error.result()
     except (ValueError, KeyError, TypeError):
         return {"status": "error", "code": "invalid_artifact_check", "complete": True,
                 "outcome": "not_started", "message": ("确切版本或挂载目录无效，未执行命令；artifact_versions与artifact_seqs互斥，目录须独立，不能有大小写、Unicode或路径冲突，并遵守文件预算。"
