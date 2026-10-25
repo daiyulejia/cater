@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from 'react'
 import { Download, Files, LoaderCircle } from 'lucide-react'
 import { request, RequestTimeoutError } from './request'
 import { archiveEntries as entriesOf, portableArchivePart as portablePart } from './archiveManifest'
+import { ArchiveMemberPreview } from './ArchiveMemberPreview'
 
 type ArchiveItem = {
   seq: number; filename?: string; format?: string; content_sha256?: string
@@ -22,7 +23,7 @@ class DownloadError extends Error {}
 
 export function ArchivePreview({ item, taskId, accessToken = '' }: Props) {
   // Replacing the scope also resets the fold, busy state and errors before paint.
-  const scope = JSON.stringify([taskId, item.seq, accessToken, item.filename, item.content_bytes, item.content_sha256])
+  const scope = JSON.stringify([taskId, item.seq, accessToken, item.filename, item.content_bytes, item.content_sha256, item.archive])
   return <ScopedArchivePreview key={scope} item={item} taskId={taskId} accessToken={accessToken} />
 }
 
@@ -87,7 +88,10 @@ function ScopedArchivePreview({ item, taskId, accessToken }: Props) {
         <summary className="cursor-pointer"><Files size={13} className="mr-1 inline" aria-hidden="true" />{entries ? `工程文件 · ${entries.length} 份` : '工程文件 · 清单不可用'}</summary>
         {entries ? <ul aria-label="工程文件清单" className="mt-1 max-h-48 overflow-y-auto">
           {entries.map(entry => <li key={entry.path} className="min-w-0 py-1">
-            <code className="block min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{entry.path}</code>
+            <div className="flex min-w-0 items-start gap-2">
+              <code className="block min-w-0 flex-1 whitespace-pre-wrap [overflow-wrap:anywhere]">{entry.path}</code>
+              <ArchiveMemberPreview taskId={taskId ?? ''} accessToken={accessToken ?? ''} seq={item.seq} archiveSha256={item.content_sha256 ?? ''} filename={filename} entry={entry} available={available} />
+            </div>
             <span>{entry.bytes} 字节 · {entry.executable ? '可执行文件' : '普通文件'}</span>
             <code className="block min-w-0 [overflow-wrap:anywhere]">SHA-256：{entry.sha256}</code>
           </li>)}

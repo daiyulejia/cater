@@ -1538,24 +1538,53 @@ def make_handler(
             if path.startswith("/api/tasks/"):
                 task_id = path.split("/", 3)[3]
                 if "/artifacts/" in task_id:
-                    from .team_archive import artifact_bytes
+                    from .team_archive import MemberPreviewError, artifact_bytes, preview_member
 
                     task_id, seq_text = task_id.split("/artifacts/", 1)
+                    member_preview = seq_text.endswith("/file")
+                    member_path = None
+                    if member_preview:
+                        from .workspace_archive import portable_path
+
+                        seq_text = seq_text.removesuffix("/file")
+                        try:
+                            query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True,
+                                             errors="strict", max_num_fields=2)
+                            if set(query) != {"path"} or len(query["path"]) != 1 or parsed.fragment:
+                                raise ValueError()
+                            member_path = portable_path(query["path"][0])
+                        except (ValueError, UnicodeError):
+                            return self._bad_request("预览需要清单中的单个相对文件路径。")
                     if not seq_text.isascii() or not seq_text.isdecimal() or len(seq_text) > 18 or int(seq_text) < 1:
                         return self._bad_request("成果序号需要单个正整数。")
                     with self._runtime() as rt:
+                        failure = None
                         with _read_snapshot(rt):
                             task = rt.task(task_id)
-                            if task is None:
-                                return self._not_found()
                             artifact = next((a for a in task.deliverables if a["seq"] == int(seq_text)
-                                             and a.get("format") == "archive"), None)
+                                             and a.get("format") == "archive"), None) if task else None
                             if artifact is None:
-                                return self._not_found()
-                            try:
-                                raw = artifact_bytes(rt.log, artifact)
-                            except ValueError:
-                                return self._conflict("工程归档缺失或与已发布版本不一致，未用其他文件替代。")
+                                failure = HTTPStatus.NOT_FOUND
+                            else:
+                                try:
+                                    raw = (preview_member(rt.log, artifact, member_path) if member_preview
+                                           else artifact_bytes(rt.log, artifact))
+                                except MemberPreviewError as exc:
+                                    failure = {"not_found": HTTPStatus.NOT_FOUND,
+                                               "too_large": HTTPStatus.REQUEST_ENTITY_TOO_LARGE}.get(
+                                                   exc.code, HTTPStatus.CONFLICT)
+                                except ValueError:
+                                    failure = HTTPStatus.CONFLICT
+                        if failure == HTTPStatus.NOT_FOUND:
+                            return self._not_found()
+                        if failure == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
+                            return self._send_json({"status": "error", "code": "preview_too_large",
+                                "message": "文件超过 64 KiB 预览上限，可下载完整工程查看。"}, status=failure)
+                        if failure == HTTPStatus.CONFLICT:
+                            return self._conflict("工程文件缺失或与已发布快照不一致，未用其他文件替代。" if member_preview
+                                else "工程归档缺失或与已发布版本不一致，未用其他文件替代。")
+                        if member_preview:
+                            return self._send_json(raw)
                         self.send_response(HTTPStatus.OK)
                         self.send_header("Content-Type", "application/zip")
                         self.send_header("Content-Disposition", 'attachment; filename="cater-project.zip"')

@@ -12,6 +12,44 @@ from .work import WorkConflict
 
 
 TOOL = "publish_workspace_archive"
+MEMBER_PREVIEW_BYTES = 65536
+
+
+class MemberPreviewError(ValueError):
+    """A listed file cannot be opened by the bounded, read-only web preview."""
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def _member_text(body):
+    try:
+        content = body.decode("utf-8")
+    except UnicodeError:
+        return None
+    return None if any(ord(char) < 32 and char not in "\t\r\n\f" for char in content) else content
+
+
+def preview_member(log, artifact, path):
+    """Read one complete small member from the published DB snapshot, not disk."""
+    from .archive_members import read_members
+    from .workspace_archive import portable_path
+
+    path = portable_path(path)
+    manifest = artifact.get("archive")
+    validate_manifest(manifest)
+    entry = next((entry for entry in manifest["files"] if entry["path"] == path), None)
+    if entry is None:
+        raise MemberPreviewError("not_found")
+    if entry["bytes"] > MEMBER_PREVIEW_BYTES:
+        raise MemberPreviewError("too_large")
+    member, = read_members(log, artifact, [path], max_files=1,
+        max_member_bytes=MEMBER_PREVIEW_BYTES, max_total_bytes=MEMBER_PREVIEW_BYTES)
+    content = _member_text(member.pop("body"))
+    return {"status": "ok", "artifact_seq": artifact["seq"],
+            "archive_sha256": artifact["content_sha256"], **member,
+            "content_kind": "binary" if content is None else "utf8", "content": content}
 
 
 def schema():
@@ -115,11 +153,8 @@ def read_member(log, artifact, arguments, *, guide_missing=False):
         max_member_bytes=32 * 1024 * 1024, max_total_bytes=32 * 1024 * 1024)
     body = member.pop("body")
     result = {"status": "ok", "artifact_seq": artifact["seq"], "archive_sha256": artifact["content_sha256"], **member}
-    try:
-        content = body.decode("utf-8")
-        if any(ord(char) < 32 and char not in "\t\r\n\f" for char in content):
-            raise UnicodeError()
-    except UnicodeError:
+    content = _member_text(body)
+    if content is None:
         return {**result, "content": None, "content_kind": "binary",
                 "note": "仅核对保存的二进制字节与摘要，未解释或执行文件内容。"}
     if offset > len(content):

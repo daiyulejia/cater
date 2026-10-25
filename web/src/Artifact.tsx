@@ -1,9 +1,8 @@
 import { useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
-import Markdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
 import { Check, Copy, Download, ExternalLink, FileText, HardDrive, X } from 'lucide-react'
 import { ArchivePreview } from './ArchivePreview'
+import { ArtifactContent, externalUrl } from './ArtifactContent'
 
 export type Artifact = {
   seq: number; title: string; summary: string; kind?: string; uri?: string; message_seq?: number
@@ -11,14 +10,6 @@ export type Artifact = {
   content_sha256?: string
   content_bytes?: number; archive?: unknown
   local_path?: string; local_save_error?: string
-}
-
-function externalUrl(value?: string): string | undefined {
-  if (!value) return undefined
-  try {
-    const url = new URL(value)
-    return ['https:', 'http:'].includes(url.protocol) && !url.username && !url.password ? url.href : undefined
-  } catch { return undefined }
 }
 
 function downloadName(item: Artifact): string {
@@ -108,11 +99,7 @@ export function ArtifactPreview({ item, publisher, showSummary = true, taskId, a
               <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[#9a8778]"><span className="break-all">{filename}</span><span>事件 #{item.seq}</span>{copyState !== 'idle' && <span role="status" className="text-[#377968]">{copyState === 'copied' ? '已复制' : '复制未完成'}</span>}{downloadError && <span role="alert" className="text-rose-700">下载未完成</span>}</div>
             </header>
             <article className="artifact-document min-h-0 flex-1 overflow-y-auto px-5 py-6 sm:px-8 sm:py-8">
-              {item.format === 'markdown' ? <Markdown remarkPlugins={[remarkGfm]} skipHtml urlTransform={(url) => externalUrl(url) ?? ''} components={{
-                a: ({ href, children }) => externalUrl(href) ? <a href={externalUrl(href)} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>,
-                img: ({ alt }) => <span className="artifact-image-label">图片：{alt || '未命名图片'}</span>,
-                table: ({ children }) => <div className="artifact-table-scroll"><table>{children}</table></div>,
-              }}>{item.content}</Markdown> : item.format === 'code' ? <pre className="artifact-code"><code>{item.content}</code></pre> : <div className="whitespace-pre-wrap break-words text-sm leading-7">{item.content}</div>}
+              <ArtifactContent content={item.content!} format={item.format} />
             </article>
           </Dialog.Content>
         </Dialog.Portal>
