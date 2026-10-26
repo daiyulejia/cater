@@ -1651,7 +1651,8 @@ class RuntimeTests(unittest.TestCase):
 
         ui_lens = next(item for item in review["lenses"] if item["id"] == "ui")
         self.assertEqual(ui_lens["status"], "ok")
-        self.assertIn("autonomous path remained uninterrupted", ui_lens["finding"])
+        self.assertIn("No human command events are recorded", ui_lens["finding"])
+        self.assertIn("does not establish uninterrupted execution", ui_lens["finding"])
 
     def test_review_flags_high_token_cost(self):
         driver = StaticResponseDriver(

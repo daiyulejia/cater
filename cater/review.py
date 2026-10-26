@@ -38,7 +38,7 @@ def build_review(
         _product_lens(tasks),
         _design_lens(tasks, events, member_ids),
         _distribution_lens(tasks, native_tasks),
-        _collaboration_lens(tasks),
+        _collaboration_lens(tasks, _native_chat_tasks(events, member_ids, agent_exchange=True)),
         _cost_lens(tasks),
         _testing_lens(tasks, chain),
         _ui_lens(tasks),
@@ -190,7 +190,9 @@ def _design_lens(
     return _lens("design", "ok", "The process has timeline and brief data.", "Keep replay views compact and scannable.")
 
 
-def _native_chat_tasks(events: list[Event], member_ids: frozenset[str]) -> frozenset[str]:
+def _native_chat_tasks(
+    events: list[Event], member_ids: frozenset[str], *, agent_exchange: bool = False,
+) -> frozenset[str]:
     started, routed = set(), set()
     for event in events:
         if not event.task_id:
@@ -200,6 +202,11 @@ def _native_chat_tasks(events: list[Event], member_ids: frozenset[str]) -> froze
         elif (event.task_id in started and event.type == "team.message_received"
               and (event.actor == Actor.human() or event.actor.kind == "agent" and event.actor.id in member_ids)
               and isinstance(event.payload.get("recipient"), str) and event.payload["recipient"] in member_ids):
+            if agent_exchange and (
+                event.actor.kind != "agent" or event.actor.id == event.payload["recipient"]
+                or not isinstance(event.payload.get("text"), str) or not event.payload["text"].strip()
+            ):
+                continue
             routed.add(event.task_id)
     return frozenset(routed)
 
@@ -259,7 +266,9 @@ def _distribution_lens(tasks: list[TaskSnapshot], native_tasks: frozenset[str] =
     return _lens("distribution", "watch", "Tasks exist but no distribution path is visible.", "Choose direct assignment for simple work or dispatch for complex work.")
 
 
-def _collaboration_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
+def _collaboration_lens(
+    tasks: list[TaskSnapshot], native_exchanges: frozenset[str] = frozenset(),
+) -> dict[str, str]:
     multi_agent = [
         task for task in tasks
         if not (task.work and task.work.get("items"))
@@ -269,6 +278,9 @@ def _collaboration_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
         if any(task.work and task.work.get("items") for task in tasks):
             return _lens("collaboration", "ok", "Work-item handoffs are bound to accepted input versions; waiting dependencies do not need chat replies.",
                          "Inspect the linked artifacts and acceptance records, not the number of messages.")
+        if any(task.id in native_exchanges for task in tasks):
+            return _lens("collaboration", "ok", "Native chat records messages between distinct team members; routing alone does not prove execution, review or delivery.",
+                         "Inspect the recipient's actual work and return receipts; public narration is not required for a handoff.")
         return _lens("collaboration", "ok", "No multi-agent exchange is visible; that alone is not a collaboration defect.", "Use additional roles only when the task needs collaboration or independent checking.")
     linked = [
         task for task in multi_agent
@@ -297,25 +309,24 @@ def _collaboration_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
 
 
 def _cost_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
-    messages = sum(len(task.messages) for task in tasks)
     tokens = sum(task.tokens for task in tasks)
-    if not messages:
-        return _lens("cost", "ok", "No token-bearing agent output is recorded yet.", "Measure token cost once real driver output exists.")
+    # Native tool turns and legacy outputs share usage records, not chat-message counts.
     sources = {source: sum(task.token_usage.get(source, 0) for task in tasks) for source in ("reported", "estimated", "unavailable")}
+    records = sum(sources.values())
     unavailable = sources["unavailable"]
     estimated = sources["estimated"]
     if unavailable:
         return _lens(
             "cost",
             "watch",
-            f"Token usage is unavailable for {unavailable} of {messages} message(s); the recorded {tokens} token(s) is incomplete.",
+            f"Token usage is unavailable for {unavailable} of {records} usage record(s); the recorded {tokens} token(s) is incomplete.",
             "Treat cost as unknown until the connected driver reports verified usage telemetry.",
         )
     if estimated:
         return _lens(
             "cost",
             "watch",
-            f"Token usage is estimated for {estimated} of {messages} message(s); {tokens} token(s) is not a billing total.",
+            f"Token usage is estimated for {estimated} of {records} usage record(s); {tokens} token(s) is not a billing total.",
             "Use provider-reported usage before making cost decisions from this workspace.",
         )
     failed_attempts = sum(
@@ -328,10 +339,13 @@ def _cost_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
             f"Recorded outputs report {tokens} token(s), but usage for {failed_attempts} failed driver attempt(s) is unknown.",
             "Reconcile provider usage for failed attempts before treating recorded output tokens as a complete cost total.",
         )
-    average = tokens / messages
+    if not records:
+        return _lens("cost", "ok", "No model usage records are available yet; absence of telemetry does not establish zero cost.",
+                     "Measure provider usage independently of visible chat messages.")
+    average = tokens / records
     if tokens >= 4000 or average >= 1500:
-        return _lens("cost", "watch", f"Agent output used {tokens} token(s) across {messages} message(s).", "Review whether fewer roles, direct assignment, or a smaller prompt would preserve quality with less cost.")
-    return _lens("cost", "ok", f"Agent output cost is currently {tokens} token(s) across {messages} message(s).", "Keep monitoring token cost as driver prompts and memory grow.")
+        return _lens("cost", "watch", f"Recorded model usage totals {tokens} token(s) across {records} usage record(s).", "Review whether fewer roles, direct assignment, or a smaller prompt would preserve quality with less cost.")
+    return _lens("cost", "ok", f"Recorded model usage totals {tokens} token(s) across {records} usage record(s).", "Keep monitoring token cost as driver prompts and memory grow.")
 
 
 def _testing_lens(tasks: list[TaskSnapshot], chain: ChainReport) -> dict[str, str]:
@@ -355,7 +369,7 @@ def _ui_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
     return _lens(
         "ui",
         "ok",
-        "No human redirection was needed; the autonomous path remained uninterrupted.",
+        "No human command events are recorded; this does not establish uninterrupted execution.",
         "Keep command entry discoverable without making it the default workflow.",
     )
 
