@@ -39,7 +39,7 @@ def build_review(
         _design_lens(tasks, events, member_ids),
         _distribution_lens(tasks, native_tasks),
         _collaboration_lens(tasks, _native_chat_tasks(events, member_ids, agent_exchange=True)),
-        _cost_lens(tasks),
+        _cost_lens(tasks, events),
         _testing_lens(tasks, chain),
         _ui_lens(tasks),
         _logic_lens(tasks, native_tasks),
@@ -308,13 +308,64 @@ def _collaboration_lens(
     )
 
 
-def _cost_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
+def _native_unaccounted_failures(tasks: list[TaskSnapshot], events: list[Event]) -> int:
+    task_ids = {task.id for task in tasks}
+    started, failed, usage = {}, set(), {}
+    for event in events:
+        if event.actor != Actor.system("team") or event.task_id not in task_ids:
+            continue
+        payload = event.payload
+        run_id, role = payload.get("run_id"), payload.get("role")
+        if not isinstance(run_id, str) or not run_id or not isinstance(role, str) or not role:
+            continue
+        run = (event.task_id, run_id, role)
+        if event.type == "team.model_called":
+            usage.setdefault(run, []).append(event)
+            continue
+        message = payload.get("message_seq")
+        if type(message) is not int or message <= 0:
+            continue
+        key = (event.task_id, run_id, role, message)
+        if event.type == "team.run_started":
+            started[key] = event.seq
+        elif (event.type == "team.run_finished" and key in started and started[key] < event.seq
+                and payload.get("status") in ("failed", "interrupted")
+                and payload.get("failure_kind") not in ("missing_credentials", "invalid_request")
+                and payload.get("admission_not_started") is not True):
+            transport = (payload.get("failure_stage") == "model_request"
+                         and (payload.get("failure_kind") in ("network_error", "timeout", "http_error")
+                              or payload.get("error_type") == "DriverUnavailable"))
+            basis = payload.get("context_basis")
+            accounted = isinstance(basis, dict) and bool(basis) and any(
+                started[key] < call.seq < event.seq and call.payload.get("context_basis") == basis
+                for call in usage.get(run, []))
+            unreported_response = (payload.get("failure_stage") == "response_handling"
+                                   and payload.get("error_type") == "DriverProtocolError" and not accounted)
+            # A transport timeout need not prove dispatch. Report uncertainty, not a billable call.
+            if transport or unreported_response:
+                failed.add(key)
+    return len(failed)
+
+
+def _cost_lens(tasks: list[TaskSnapshot], events: list[Event]) -> dict[str, str]:
     tokens = sum(task.tokens for task in tasks)
     # Native tool turns and legacy outputs share usage records, not chat-message counts.
     sources = {source: sum(task.token_usage.get(source, 0) for task in tasks) for source in ("reported", "estimated", "unavailable")}
     records = sum(sources.values())
     unavailable = sources["unavailable"]
     estimated = sources["estimated"]
+    failed_attempts = sum(
+        1 for task in tasks for failure in task.driver_failures
+        if type(failure.get("attempt")) is int and failure["attempt"] > 0
+    )
+    native_failures = _native_unaccounted_failures(tasks, events)
+    if native_failures:
+        return _lens(
+            "cost", "watch",
+            f"Recorded usage contains {tokens} token(s), but {native_failures} native model failure receipt(s) have unverified usage. "
+            f"There are also {failed_attempts} failed legacy driver attempt(s), {unavailable} unavailable and {estimated} estimated usage record(s); this is not a complete billing total.",
+            "Reconcile provider usage; a failure does not prove a request reached the provider or was billed. Do not assume zero cost or automatically replay it.",
+        )
     if unavailable:
         return _lens(
             "cost",
@@ -329,10 +380,6 @@ def _cost_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
             f"Token usage is estimated for {estimated} of {records} usage record(s); {tokens} token(s) is not a billing total.",
             "Use provider-reported usage before making cost decisions from this workspace.",
         )
-    failed_attempts = sum(
-        1 for task in tasks for failure in task.driver_failures
-        if type(failure.get("attempt")) is int and failure["attempt"] > 0
-    )
     if failed_attempts:
         return _lens(
             "cost", "watch",
