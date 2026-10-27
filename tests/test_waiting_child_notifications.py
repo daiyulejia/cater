@@ -338,7 +338,8 @@ class WaitingChildProjectionTests(unittest.TestCase):
     def test_returned_child_and_late_continuation_cannot_silence_parent(self):
         parent = self.parent()
         child = self.child(parent)
-        self.send(self.helper, self.worker, "Formally returned", "report", reply_to=child.seq)
+        report = self.send(self.helper, self.worker, "Formally returned", "report", reply_to=child.seq)
+        self.run_fact(report, "completed")
         # A durable late continuation cannot reopen a formally returned root.
         self.send(self.worker, self.helper, kind="continuation", continue_assignment_seq=child.seq,
                   parent_assignment_seq=parent.seq)

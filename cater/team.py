@@ -2007,11 +2007,28 @@ class TeamService:
                 and (row["status"] in {"queued", "running"}
                      or row["status"] == "waiting" and row["latest_message_seq"] > started.seq)
                 for row in self.recovery.assignments(task_id))
+            # A returned child is no longer open work, but its queued reply will
+            # resume this owner. Do not wake the upstream owner just to wait too.
+            events = self.rt.log.read(task_id=task_id)
+            claimed = {e.payload.get("message_seq") for e in events
+                       if e.actor == HOST and e.type == "team.run_started"}
+            inactive = self._inactive_messages(task_id, events=events)
+            child_sources = {e.seq: e for e in messages if e.seq in children
+                             and e.payload.get("kind") in {"assignment", "message"}
+                             and e.payload.get("revision") == revision and e.seq not in inactive}
+            active_reviews = [row["request_seq"] for row in current_work["reviews"]
+                              if row["status"] not in {"stale", "outdated"}]
+            queued_child_report = any(
+                e.seq not in claimed and e.seq not in inactive and e.payload.get("revision") == revision
+                and (child := child_sources.get(e.payload.get("reply_to"))) is not None
+                and child.seq < e.seq and _assignment_report(child, e)
+                and ("review_seq" not in e.payload or e.payload["review_seq"] in active_reviews)
+                for e in messages)
             published = "；".join(f"{a.get('filename', a.get('title', '成果'))}（成果 #{a['seq']}）" for a in artifacts)
             text = ("本轮已保存：" + published + "。" if published else "")
             text += (final or "我已处理这轮消息，现在等待后续信息或安排。")
             if not notified_parent and (assignment.payload["kind"] == "assignment" or published):
-                if waiting_on_child:
+                if waiting_on_child or queued_child_report:
                     if final.strip() or artifacts:
                         self._send(task_id, role, assignment.actor.id, text, "notification",
                                    parent_assignment_seq=assignment.seq)

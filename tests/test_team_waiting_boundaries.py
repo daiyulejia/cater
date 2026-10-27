@@ -300,7 +300,7 @@ class WaitingBoundaryTests(unittest.TestCase):
         self.assertEqual(context["active_assignment"]["seq"], claimed[0].seq)
         self.assertIn(child.seq, [row["seq"] for row in context["outgoing_work"]])
 
-    def test_native_child_reported_before_parent_wait_is_not_still_a_dependency(self):
+    def test_native_queued_child_report_resumes_owner_without_empty_upstream_wakeup(self):
         claimed = self.start()
         self.f.driver.steps[self.worker] = [self.f.native_turn("", self.delegate()), self.wait()]
         parent_run = self.rt.team._run_message(self.task, *claimed)
@@ -320,12 +320,25 @@ class WaitingBoundaryTests(unittest.TestCase):
         list(parent_run)
         self.assertEqual(self.f.protocol_errors, [])
         self.assertEqual(self.f.driver.steps[self.worker], [])
-        progress = self.upstream(claimed[0])
-        self.assertGreater(progress.seq, report.seq)
-        self.assert_pending(report, progress)
+        self.assertFalse([e for e in self.messages() if e.actor.id == self.worker
+                          and e.payload["recipient"] == self.manager])
+        self.assert_pending(report)
         parent_finished, = [e for e in self.f.events("team.run_finished")
                             if e.payload["message_seq"] == claimed[0].seq]
         self.assertEqual(parent_finished.payload["status"], "waiting")
+        self.assert_open(claimed[0])
+        resumed = self.rt.team._claim(self.task)
+        self.assertEqual((resumed[0].seq, resumed[1].id), (report.seq, self.worker))
+        self.execute(resumed, self.f.native_turn("", ("return_work", {
+            "text": "Checked evidence accepted and returned."})), status="completed")
+        result, = [e for e in self.messages() if e.actor.id == self.worker
+                   and e.payload["recipient"] == self.manager]
+        self.assertEqual((result.payload["kind"], result.payload["reply_to"]), ("report", claimed[0].seq))
+        self.assert_pending(result)
+        parent = self.rt.team._claim(self.task)
+        self.assertEqual((parent[0].seq, parent[1].id), (result.seq, self.manager))
+        self.execute(parent, self.wait())
+        self.assert_pending()
 
 
 if __name__ == "__main__":
