@@ -126,6 +126,7 @@ def model_context(context):
         "conversation_excerpt": True,
         "conversation_reader": {"name": "read_messages", "scope": "conversation"},
         "work_reader": "read_checkpoint", "receipt_reader": "read_receipts",
+        "receipt_index_reader": {"name": "read_receipts", "section": "index"},
         "review_reader": {"name": "read_checkpoint", "argument": "review_seq", "source": "reviews[].request_seq"},
         "artifact_versions_total": len(context["artifacts"]),
         **({"artifact_versions_reader": {"name": "read_artifact", "section": "versions", "argument": "artifact_seq"}}

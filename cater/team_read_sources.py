@@ -15,6 +15,9 @@ from .workspace_tools import _parts, DEFAULT_READ_BYTES, MAX_FILE_BYTES, MAX_REA
 
 HOST = Actor.system("team")
 MAX_INDEX_BYTES = 8000
+RECEIPT_INDEX_NOTE = ("完成回执索引，不含脚本或输出正文。result_summary保留原操作状态，查询ok不代表操作成功。"
+                      "按read_args读取原回执；历史读取不重执行、不证明当前文件或验收通过。"
+                      "空列表不证明没有历史或未结算操作，pending仍需单独查询。")
 NOTE = ("这里只列当前工作目录绑定期间已记录的成功读取，不是磁盘扫描。"
         "first_observed不等于原始基线，last_observed不等于当前文件；目标变化后仍可能是历史。"
         "读取可能为节选，按read_args读回确切回执再比较；历史不授权写入，也不证明解释正确。")
@@ -42,6 +45,13 @@ _READ_FIELDS = tuple((f"$.{key}", maximum) for key, maximum in {
 }.items())
 _BINDING_FIELDS = tuple((f"$.{key}", maximum) for key, maximum in {
     "workspace_id": 128, "root": 8192, "fingerprint": 256,
+}.items())
+_RECEIPT_INDEX_FIELDS = tuple((f"$.{key}", maximum) for key, maximum in {
+    "started_seq": 0, "run_id": 128, "role": 128, "name": 128, "call_id": 256,
+    "result.status": 128, "result.outcome": 128, "result.code": 128,
+    "result.exit_code": 0, "result.complete": 0, "result.truncated": 0,
+    "result.timed_out": 0, "result.command": 128, "result.duration_ms": 0,
+    "result.bytes": 0,
 }.items())
 
 
@@ -146,6 +156,69 @@ class TeamReadSources:
                                           for value in observations]
         return [result]
 
+    def receipts_index(self, task_id, arguments, record_read):
+        """Discover bounded metadata; fetch a chosen body only through exact()."""
+        conditions, parameters = ["json_extract(payload_json, '$.name') != 'read_receipts'",
+            # exact() rejects ambiguous keys at every depth. Keep discovery
+            # consistent without decoding scripts or outputs into Python.
+            "NOT EXISTS (SELECT 1 FROM json_tree(payload_json) WHERE typeof(key) = 'text' "
+            "GROUP BY parent, CAST(key AS BLOB) HAVING count(*) > 1 "
+            "OR instr(CAST(key AS BLOB), x'00') > 0)"], []
+        for key in ("run_id", "role", "name"):
+            if key in arguments:
+                conditions.append(f"json_extract(payload_json, '$.{key}') = ?")
+                parameters.append(arguments[key])
+        if "before_seq" in arguments:
+            conditions.append("seq < ?")
+            parameters.append(min(arguments["before_seq"], 2 ** 63 - 1))
+        response = {"status": "ok", "section": "index", "receipts": [], "has_more": False,
+                    "next_before_seq": None, "record_read": record_read, "note": RECEIPT_INDEX_NOTE}
+        limit = arguments.get("limit", 20)
+        try:
+            with self.team._context_read():
+                if "run_id" in arguments and not any(event.actor == HOST for event in self._metadata(
+                        task_id, kind="team.run_started", where="json_extract(payload_json, '$.run_id') = ?",
+                        parameters=(arguments["run_id"],))):
+                    return {"status": "error", "message": "找不到本群的这个运行ID；角色名请用role筛选，委托序号请用message_seq，真实运行ID见receipt_index。"}
+                for event in self._metadata(task_id, kind="team.tool_finished",
+                        where=" AND ".join(conditions), parameters=parameters, fields=_RECEIPT_INDEX_FIELDS,
+                        optional_fields={path for path, _ in _RECEIPT_INDEX_FIELDS
+                                         if path.startswith("$.result.") and path != "$.result.status"}):
+                    result = event.payload.get("result", {})
+                    if type(result.get("status")) is not str:
+                        continue
+                    start = self._chain(task_id, event)
+                    if start is None or ("message_seq" in arguments
+                            and start.payload["message_seq"] != arguments["message_seq"]):
+                        continue
+                    summary = {}
+                    for key, value in result.items():
+                        expected = (bool if key in {"complete", "truncated", "timed_out"} else
+                                    int if key in {"exit_code", "duration_ms", "bytes"} else str)
+                        if type(value) is expected or key == "exit_code" and value is None:
+                            summary[key] = value
+                    row = {"seq": event.seq, "source_hash": event.hash,
+                           **{key: start.payload[key] for key in ("run_id", "message_seq", "role", "name")},
+                           "started_seq": start.seq, "result_summary": summary,
+                           "read_args": {"receipt_seq": event.seq}}
+                    # Candidates arrive newest first; only advance past returned records.
+                    candidate = {**response, "receipts": [row, *response["receipts"]],
+                                 "has_more": True, "next_before_seq": event.seq}
+                    terminal = {**candidate, "has_more": False, "next_before_seq": None}
+                    if (len(response["receipts"]) >= limit
+                            or max(len(json_utf8(candidate)), len(json_utf8(terminal))) > MAX_INDEX_BYTES):
+                        if not response["receipts"]:
+                            return {"status": "error", "code": "receipt_index_record_too_large",
+                                    "message": "这份回执元数据无法放入索引页，请按receipt_seq读取。",
+                                    "read_args": {"receipt_seq": event.seq}, "record_read": record_read}
+                        response.update(has_more=True, next_before_seq=response["receipts"][0]["seq"])
+                        break
+                    response["receipts"].insert(0, row)
+            return response
+        except (sqlite3.Error, ValueError, TypeError, UnicodeError):
+            return {"status": "error", "code": "receipt_index_unavailable", "record_read": record_read,
+                    "message": "回执索引暂不可用，未回退加载全部正文；可按已知receipt_seq精读。"}
+
     @staticmethod
     def _guard(path=None):
         if path is None:
@@ -166,14 +239,22 @@ class TeamReadSources:
         return ", ".join(columns)
 
     @staticmethod
-    def _values(row, fields):
+    def _values(row, fields, *, optional_fields=()):
         payload = {}
         for index, (path, _) in enumerate(fields):
             value, kind = row[f"v{index}"], row[f"k{index}"]
+            if path in optional_fields and value is None and kind != "null":
+                # SQL NULL for an oversized/unsupported value is not JSON null.
+                continue
             if kind in {"true", "false"}:
                 value = kind == "true"
             elif isinstance(value, bytes):
-                value = value.decode("utf-8")
+                try:
+                    value = value.decode("utf-8")
+                except UnicodeError:
+                    if path in optional_fields:
+                        continue
+                    raise
                 if kind in {"object", "array"}:
                     value = json.loads(value)
             target = payload
@@ -184,7 +265,8 @@ class TeamReadSources:
                 target[parts[-1]] = value
         return payload
 
-    def _metadata(self, task_id, *, seq=None, kind=None, where="", parameters=(), limit=None, fields=None):
+    def _metadata(self, task_id, *, seq=None, kind=None, where="", parameters=(), limit=None, fields=None,
+                  optional_fields=()):
         fields = fields or _SOURCE_FIELDS
         conditions, args = ["task_id = ?", f"({self._guard()})"], [task_id]
         if seq is not None:
@@ -209,7 +291,7 @@ class TeamReadSources:
                 try:
                     actor = Actor(**json.loads(row["actor_json"], object_pairs_hook=_unambiguous))
                     yield SimpleNamespace(seq=row["seq"], task_id=row["task_id"], type=row["type"],
-                        actor=actor, hash=row["hash"], payload=self._values(row, fields))
+                        actor=actor, hash=row["hash"], payload=self._values(row, fields, optional_fields=optional_fields))
                 except (ValueError, TypeError, UnicodeError):
                     continue
         finally:
