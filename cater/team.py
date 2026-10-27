@@ -911,7 +911,9 @@ class TeamService:
             if self.recovery.run_scope(task_id, started) is None:
                 raise WorkConflict("监督执行的目标、控制、规则或工程范围已变化，未继续旧请求或执行旧响应。")
         if source is not None and source.payload.get("kind") == "continuation" and self._waiting_assignment(task_id, source, role) is None:
-            own_return = any(r.get("run_id") == started.payload["run_id"] and r.get("name") in {"send_message", "return_work"}
+            # A formal review also returns the original assignment. Its own
+            # committed report must remain valid while this run settles.
+            own_return = any(r.get("run_id") == started.payload["run_id"] and r.get("name") in {"send_message", "return_work", "record_review"}
                 and r.get("result", {}).get("status") == "ok" and any(
                     e.seq == r["result"].get("message_seq") and e.payload.get("kind") == "report"
                     and e.payload.get("reply_to") == source.payload.get("continue_assignment_seq")
