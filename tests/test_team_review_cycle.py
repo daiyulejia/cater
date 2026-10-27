@@ -406,7 +406,17 @@ class TeamReviewCycleTests(TeamSupervisionTests):
         self.assertIn("artifact_seqs", request["properties"])
         self.assertIn("workspace_file", request["properties"])
         self.assertEqual(set(request["properties"]["workspace_file"]["required"]), {"path", "format"})
-        self.assertEqual(set(request["properties"]), {"reviewer", "artifact_seqs", "workspace_file", "instruction", "review_seq"})
+        self.assertEqual(set(request["properties"]), {"reviewer", "artifact_seqs", "workspace_file", "workspace_archive", "instruction", "review_seq"})
+        archive = request["properties"]["workspace_archive"]
+        self.assertEqual(archive["type"], "object")
+        self.assertFalse(archive["additionalProperties"])
+        self.assertEqual(set(archive["required"]), {"filename", "paths"})
+        self.assertEqual(set(archive["properties"]), {"filename", "paths"})
+        self.assertEqual(archive["properties"]["filename"]["type"], "string")
+        paths = archive["properties"]["paths"]
+        self.assertEqual((paths["type"], paths["minItems"], paths["maxItems"]), ("array", 1, 256))
+        self.assertEqual(paths["items"]["type"], "string")
+        self.assertEqual(tools["delegate"]["properties"]["review"]["properties"]["workspace_archive"], archive)
         self.assertFalse(request["additionalProperties"])
         props = request["properties"]
         self.assertEqual(props["reviewer"]["type"], "string")

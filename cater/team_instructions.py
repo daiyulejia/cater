@@ -17,7 +17,7 @@ COMMON = (
     "核验实际版本，不重写替代实现来证明正确；按顾客需求审测试断言，退出码0或测试数量不证明覆盖与正确性。"
     "核验中途失败时说明哪些已观察、哪些未到达，不补称成功；未改动或未改弱须比确切前后版，不只比当前副本。"
     "【版本与闭环】需复核时用request_review提交确切伙伴版本，不必再叫发布者送审；负责人及发布者不自审，由伙伴用record_review登记。"
-    "检查本次交付文件可用delegate的review.workspace_file，相对path/format，一次保存候选并派发正式复核；已有成果用review.artifact_seqs。伙伴读取该版后record_review，有反馈沿原链修订。讨论方法仍用不带review的delegate，不为无需复核的工作增设检查。"
+    "检查本次交付文件可用delegate的review.workspace_file，工程用review.workspace_archive，一次保存候选并派发复核；已有成果用review.artifact_seqs。伙伴读取该版后record_review，有反馈沿原链修订。讨论方法仍用不带review的delegate，不为无需复核的工作增设检查。"
     "已证实违例须修复，清单不缩小明文要求。不把偏好或假设变成新验收条件。"
     "changes_requested后实际修正并发布新版，由原送审负责人以原review_seq交回原复核者；可直接选伙伴已发布的版本，不重复发布或改写发布者。有问题继续返修，直到approved。即使已批准又改动，也须复核新版，旧结论不覆盖新版。"
     "未收回工作、未知操作或复核未闭环时不能宣称交付，不用重设目标绕过；承诺修复不等于修复完成。"
@@ -48,7 +48,7 @@ EXTERNAL = (
 
 OBJECTIVE_CHANGED = (
     "已采用本次目标；本回执的goal、revision、work_status更新本轮初始工作状态，旧的done状态或旧批准不自动代表本次目标已完成或获批。"
-    "历史对话仍可作资料，不作为当前操作范例。需要伙伴检查交付文件时，可用delegate.review.workspace_file保存候选并派发，或request_review提交已有版本；"
+    "历史对话仍可作资料，不作为当前操作范例。需要伙伴复核时，可用delegate.review保存文件或工程候选并派发，已有版本用request_review；"
     "复核者读取并record_review；讨论方法仍可delegate，无需复核时不增设流程。"
 )
 
@@ -88,8 +88,13 @@ def context_instructions(context):
         notes.append("continuation只是原委托的补充，仍向原委托人回报，不另开一份工作。")
     if message.get("questionnaire"):
         notes.append("这是整组问题的回答，结合目标、前文与原委托继续；自填或跳过不是新目标，也不补造信息或授权。")
-    if context.get("pending_operations"):
-        notes.append("pending_operations尚无可信结算，按read_receipts核对；not_committed仅指相应本地事件未提交，不证明外部执行或计费未发生。")
+    pending = context.get("pending_operations") or []
+    if any(row.get("scheduler_owned_live") is True for row in pending):
+        notes.append("pending_operations中scheduler_owned_live=true是宿主确认仍在执行的会话，不因尚未结束就排障或重启；存活不代表工作已完成。")
+    if any(row.get("scheduler_owned_live") is not True for row in pending):
+        notes.append("其余pending_operations尚无可信结算，按read_receipts核对，未确认存活不等于已停止；not_committed仅指相应本地事件未提交，不证明外部执行或计费未发生。")
+    if context.get("pending_operations_truncated"):
+        notes.append("pending_operations为节选，不据已显示的存活项推断其余操作；需要完整状态用read_checkpoint或read_receipts核对。")
     if context.get("delivery_index"):
         notes.append("delivery_index保留过去交付。先判断本次是旧成果追问还是新工作；追问可用read_delivery、原成果与回执解释或纠错，不重复交付。必要核验须在实际权限内，不为解释擅改工程。")
     if context.get("file_read_sources"):

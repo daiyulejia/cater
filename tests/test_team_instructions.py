@@ -195,6 +195,36 @@ class TeamInstructionSelectionTests(unittest.TestCase):
                         OLD_EXTERNAL_BYTES * 0.65)
 
 
+class PendingInstructionSelectionTests(unittest.TestCase):
+    def test_only_authenticated_live_state_avoids_unknown_operation_guidance(self):
+        for value in (True, False, None, 1, 'true', 'missing'):
+            pending = {'name': 'external_agent', 'started_seq': 6}
+            if value != 'missing':
+                pending['scheduler_owned_live'] = value
+            context = {'pending_operations': [pending]}
+            original = deepcopy(context)
+            with self.subTest(value=value):
+                text = context_instructions(context)
+                self.assertEqual('宿主确认仍在执行' in text, value is True)
+                self.assertEqual('按read_receipts核对' in text, value is not True)
+                self.assertEqual('not_committed仅指' in text, value is not True)
+                self.assertEqual(context, original)
+
+    def test_mixed_live_and_unknown_keeps_both_meanings(self):
+        text = context_instructions({'pending_operations': [
+            {'name': 'external_agent', 'scheduler_owned_live': True},
+            {'name': 'workspace_run', 'scheduler_owned_live': False}]})
+        self.assertIn('宿主确认仍在执行', text)
+        self.assertIn('其余pending_operations尚无可信结算', text)
+        self.assertIn('未确认存活不等于已停止', text)
+
+    def test_truncated_live_page_does_not_claim_every_operation_is_live(self):
+        text = context_instructions({'pending_operations': [
+            {'scheduler_owned_live': True}], 'pending_operations_truncated': True})
+        self.assertIn('为节选', text)
+        self.assertIn('需要完整状态用read_checkpoint或read_receipts核对', text)
+
+
 class TeamInstructionWireTests(unittest.TestCase):
     def fixture(self, cls):
         fixture = cls()

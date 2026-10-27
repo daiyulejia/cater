@@ -24,7 +24,9 @@
 
 原生工具中，提交者可用request_review直接组织已发布成果的复核，包括多位伙伴的完整版本集合，不必重新发布或再唤醒发布者送审。首次提交者是该链送审负责人owner，author是其历史字段别名，publishers保存本版真实发布者。指定伙伴用record_review记录changes_requested或approved及依据，并交回负责人。发现需修改的问题，由负责人协调实际修正、取得新版，再用原review_seq交回同一复核者；不复制发布，不改变原始来源。负责人及本版任何发布者都不能自行复核。承诺会改、已收到反馈或普通聊天都不是完成证据；通过后仍须收齐实际工作回报再交付。
 
-检查工作目录中的单份UTF-8文件，也可一次交接：delegate带review.workspace_file（相对path和format），或request_review带workspace_file，宿主保存完整候选后派发同一复核流程，不修改源文件。已有版本则用artifact_seqs；两种来源只能选一种。返修保留原review_seq，选择本次完整成果集合；源文件过大或工程包含多文件时先发布工程ZIP，不用节选代替完整版本。普通讨论用不带review的委托，不需要复核时不增设流程。
+检查工作目录中的单份UTF-8文件，可用delegate的review.workspace_file（相对path和format），或request_review的workspace_file一次保存候选并派发复核。工程包含多份文件、二进制文件或较大源码时，可改用workspace_archive，例如{"filename":"project.zip","paths":["main.py","tests/test_main.py","README.md"]}；指定完整交付所需的相对文件路径，宿主冻结为ZIP候选。已有发布版本则用artifact_seqs；三种来源只选一种，不为送审重复发布。快照、复核请求及成功回执一起提交，不修改源文件，也不代表已验收或最终交付。
+
+返修保留原review_seq，提交本次完整成果集合。复核者用read_artifact的path读取ZIP成员，或用workspace_run的artifact_seqs执行该版本副本；后续工作目录改动不改变已送审内容。普通讨论仍用不带review的委托，不需要复核时不增设流程。
 
 ## 结束这一份责任
 
