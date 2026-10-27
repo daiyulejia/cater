@@ -42,7 +42,9 @@ class ReceiptIndexBoundaryTests(unittest.TestCase):
         run, _ = self.f.source_run(run_id="boundary-run")
         result = {"status": "ok", "outcome": "passed", "exit_code": 0,
                   "code": "", "command": ""}
-        expected = [self.f.finish(self.f.start(run), dict(result)) for _ in range(15)]
+        # A non-command isolates terminal-envelope accounting from the optional
+        # command identity projection; all original byte/cursor assertions stay.
+        expected = [self.f.finish(self.f.start(run, name="workspace_read"), dict(result)) for _ in range(15)]
         reader = self.f.reader()
         baseline = self.f.index(limit=50, reader=reader)
         self.f.assert_page(baseline, expected, reader=reader)

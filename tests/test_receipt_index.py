@@ -219,11 +219,13 @@ class ReceiptIndexTests(unittest.TestCase):
         page = self.index()
         self.assert_page(page, [finish])
         serialized = json.dumps(page, ensure_ascii=False)
-        for marker in ("ARGV_ONLY", "SCRIPT_ONLY", "CONTENT_ONLY", "ERROR_ONLY", "BODY_ONLY", "FORGED_HASH",
+        for marker in ("SCRIPT_ONLY", "CONTENT_ONLY", "ERROR_ONLY", "BODY_ONLY", "FORGED_HASH",
                        "Ran 2 tests"):
             self.assertNotIn(marker, serialized)
         row = page["receipts"][0]
         self.assertNotIn("argv", row["result_summary"])
+        self.assertEqual(row["command_identity"]["argv"], original["argv"])
+        self.assertTrue(row["command_identity"]["argv_available"])
         self.assertEqual(row["message_seq"], message.seq)
         exact = self.query(row["read_args"])
         saved = exact["receipts"][0]

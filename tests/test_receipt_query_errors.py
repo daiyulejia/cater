@@ -148,7 +148,8 @@ class ReceiptQueryErrorTests(unittest.TestCase):
         schema = tool["input_schema"]
         self.assertEqual(schema["required"], [])
         self.assertEqual(set(schema["properties"]), {"run_id", "role", "section", "receipt_seq",
-            "file_path", "message_seq", "name", "before_seq", "include_pending", "limit"})
+            "file_path", "message_seq", "name", "before_seq", "include_pending", "limit",
+            "request_part", "offset", "length"})
         exact = schema["properties"]["receipt_seq"]["description"]
         pending = schema["properties"]["include_pending"]["description"]
         self.assertIn("include_pending", exact)

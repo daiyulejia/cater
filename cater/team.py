@@ -430,10 +430,13 @@ class TeamService:
                        "description": "request_review或带review的delegate返回的review_seq，也可取reviews[].request_seq；不是委托message_seq、成果seq或回执seq。没有正式请求时先反馈作者，用delegate.review或request_review提交确切版本，不猜消息号。"},
                    "verdict": {"type": "string", "enum": ["changes_requested", "approved"]},
                    "feedback": string}, ["review_seq", "verdict", "feedback"]),
-            _tool("read_receipts", "查找回执可先用section=index：只读有界身份和原状态，再按返回的receipt_seq精读正文。默认receipts仍读完整回执。record_read标记本次查询，原观察轮次看记录run_id；读历史不重新执行、不证明验收通过。role、message_seq、name、run_id和before_seq可筛选分页，run_id不是角色名。section=file_reads只列当前目录绑定期间已观察的文件读取元数据，可用file_path精确筛选，再用receipt_seq读原文。first/last_observed不是基线/当前磁盘；节选不补全文。",
+            _tool("read_receipts", "按问题所需字段读取。section=index查有界身份、命令信息和原状态；已含所需字段即可据实回答，缺失字段、冲突或正文引文再按receipt_seq精读，不必逐条展开。默认receipts读完整结果；核对原检查脚本用section=request。record_read标记本次查询，原观察轮次看run_id；读历史不重新执行、不证明验收通过。role、message_seq、name、run_id和before_seq可筛选分页，run_id不是角色名。section=file_reads只列当前目录绑定期间已观察的文件读取元数据，可用file_path精确筛选。first/last_observed不是基线/当前磁盘；节选不补全文。",
                   {"run_id": string, "role": {"type": "string", "enum": [r.id for r in members]},
-                   "section": {"type": "string", "enum": ["receipts", "index", "file_reads"],
-                               "description": "index用于发现，按条数和8000 UTF-8字节分页；不与receipt_seq或include_pending合用。receipts读取完整原结果，file_reads查询文件来源。"},
+                   "section": {"type": "string", "enum": ["receipts", "index", "file_reads", "request"],
+                               "description": "index用于发现，按条数和8000 UTF-8字节分页；不与receipt_seq或include_pending合用。receipts读取完整原结果，file_reads查询文件来源。request按receipt_seq读取已完成workspace_run的原请求，可核对检查脚本。"},
+                   "request_part": {"type": "string", "enum": ["arguments", "stdin"], "description": "仅request：默认arguments是已保存请求的JSON表示；stdin单独读原脚本正文。"},
+                   "offset": {"type": "integer", "minimum": 0, "description": "仅request：Unicode码点偏移，默认0。续页用read_range.next_offset。"},
+                   "length": {"type": "integer", "minimum": 1, "maximum": 4000, "description": "仅request：至多读取的码点数，默认4000；响应还受8000 UTF-8字节限制。"},
                    "receipt_seq": {"type": "integer", "minimum": 1, "description": "工具完成回执seq，不是started_seq、消息号或运行ID；不与include_pending=true或section=file_reads合用。"},
                    "file_path": {"type": "string", "description": "仅section=file_reads，当前绑定内已记录读取的相对路径，不扫描磁盘。"},
                    "message_seq": {"type": "integer", "minimum": 1}, "name": string,
@@ -883,7 +886,7 @@ class TeamService:
                 "sender_name": name(message.actor.id), "sender_kind": message.actor.kind, **message.payload},
             "latest_customer_message": next((row for row in reversed(history) if row.get("sender_kind") == "human"), None),
             "receipt_index": receipt_index, "receipts_truncated": len(receipts) > 20,
-            **({"command_record_note": "command_record是配对原回执的历史请求、原环境argv与目录，不是当前文件验收、覆盖证明或顾客终端的复现命令；状态仍看原回执，stdin仅保留指纹。省略项按自身seq作为receipt_seq用read_receipts读原完成结果，该回读不含原工具请求；不能从argv倒推请求。"}
+            **({"command_record_note": "command_record是配对原回执的历史请求、原环境argv与目录，不是当前文件验收、覆盖证明或顾客终端的复现命令；状态仍看原回执，stdin仅保留指纹。按自身seq作为receipt_seq用read_receipts读原完成结果；要核对原检查脚本，用section=request及request_part=stdin按需分页读取，不能从argv或输出倒推原请求。"}
                if any("command_record" in row for row in receipt_index) else {}),
             **({"file_read_sources": file_sources} if file_sources is not None else {}),
             "pending_operations": [{k: row[k] for k in row if k != "arguments"} for row in pending[-20:]],
@@ -961,8 +964,8 @@ class TeamService:
             for e in self.rt.log.iter_events(task_id=task_id, event_types=("team.objective_completed",)))
         if post_delivery and not self._post_delivery_command(task_id, role, tool_start):
             raise WorkConflict("交付后命令仅响应当前有效的顾客新输入；已有交付保留，未继续旧操作。")
-        if self.view(task_id)["status"] == "done" and name in {
-                "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "workspace_write", "workspace_run", PROJECT_RESTORE, MCP_CALL, "request_review", "record_review"} and not post_delivery:
+        if name in {
+                "publish_artifact", "publish_workspace_file", "publish_workspace_archive", "workspace_write", "workspace_run", PROJECT_RESTORE, MCP_CALL, "request_review", "record_review"} and self.view(task_id)["status"] == "done" and not post_delivery:
             raise WorkConflict("当前工作已交付；如需继续修改，请先由店长采用新的工作目标。")
         if name == "wait_for_reply":
             return {"status": "ok", "waiting": True}
@@ -1223,8 +1226,25 @@ class TeamService:
                 if key in arguments and (type(arguments[key]) is not int or arguments[key] < 1):
                     return invalid_query("回执筛选序号需要正整数；receipt_seq是完成回执号，message_seq是输入消息号。", key)
             section = arguments.get("section", "receipts")
-            if not isinstance(section, str) or section not in {"receipts", "index", "file_reads"}:
-                return invalid_query("section只接受receipts、index或file_reads。", "section")
+            if not isinstance(section, str) or section not in {"receipts", "index", "file_reads", "request"}:
+                return invalid_query("section只接受receipts、index、file_reads或request。", "section")
+            if section == "request":
+                from .team_receipt_requests import read
+
+                if "receipt_seq" not in arguments or any(key in arguments for key in ("include_pending", "file_path", "limit")):
+                    return invalid_query("section=request需要完成receipt_seq，请省略include_pending、file_path和limit；正文分页用offset/length。", "section", "receipt_seq")
+                part = arguments.get("request_part", "arguments")
+                if not isinstance(part, str) or part not in {"arguments", "stdin"}:
+                    return invalid_query("request_part只接受arguments或stdin。", "request_part")
+                offset, length = arguments.get("offset", 0), arguments.get("length", 4000)
+                if type(offset) is not int or offset < 0:
+                    return invalid_query("offset需要非负整数码点偏移。", "offset")
+                if type(length) is not int or not 1 <= length <= 4000:
+                    return invalid_query("length需要1到4000的整数。", "length")
+                with self._context_read():
+                    return read(self.read_sources, task_id, arguments, record_read)
+            if any(key in arguments for key in ("request_part", "offset", "length")):
+                return invalid_query("request_part、offset和length仅用于section=request。", "section")
             if section == "file_reads":
                 if "receipt_seq" in arguments or "include_pending" in arguments:
                     return invalid_query("section=file_reads只读元数据，请省略receipt_seq和include_pending；精确原文另用receipt_seq读取。",

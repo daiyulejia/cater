@@ -15,8 +15,9 @@ from .workspace_tools import _parts, DEFAULT_READ_BYTES, MAX_FILE_BYTES, MAX_REA
 
 HOST = Actor.system("team")
 MAX_INDEX_BYTES = 8000
-RECEIPT_INDEX_NOTE = ("完成回执索引，不含脚本或输出正文。result_summary保留原操作状态，查询ok不代表操作成功。"
-                      "按read_args读取原回执；历史读取不重执行、不证明当前文件或验收通过。"
+RECEIPT_INDEX_NOTE = ("完成回执索引，不含stdin或输出正文，超长参数省略。result_summary保留原操作状态，查询ok不代表操作成功。"
+                      "command_identity区分请求与实际argv；缺失字段不代表默认值。已含所需字段可据实回答，详情按需读取，不必逐条展开。"
+                      "历史读取不重执行、不证明当前文件或验收通过。"
                       "空列表不证明没有历史或未结算操作，pending仍需单独查询。")
 NOTE = ("这里只列当前工作目录绑定期间已记录的成功读取，不是磁盘扫描。"
         "first_observed不等于原始基线，last_observed不等于当前文件；目标变化后仍可能是历史。"
@@ -201,6 +202,11 @@ class TeamReadSources:
                            **{key: start.payload[key] for key in ("run_id", "message_seq", "role", "name")},
                            "started_seq": start.seq, "result_summary": summary,
                            "read_args": {"receipt_seq": event.seq}}
+                    if start.payload["name"] == "workspace_run":
+                        from .team_command_index import command_identity
+
+                        if command := command_identity(self, task_id, event, start):
+                            row["command_identity"] = command
                     # Candidates arrive newest first; only advance past returned records.
                     candidate = {**response, "receipts": [row, *response["receipts"]],
                                  "has_more": True, "next_before_seq": event.seq}
@@ -309,13 +315,14 @@ class TeamReadSources:
             return None
         s = start.payload
         members = {r.id for r in [self.rt.organization.leader, *self.rt.roles]}
-        if (s.get("role") not in members or type(s.get("message_seq")) is not int
+        if (not isinstance(s.get("role"), str) or s["role"] not in members or type(s.get("message_seq")) is not int
                 or not isinstance(s.get("run_id"), str) or not s["run_id"].strip()
                 or not isinstance(s.get("call_id"), str) or not s["call_id"].strip()
                 or not isinstance(s.get("name"), str) or not s["name"]
                 or any(p.get(k) != s.get(k) for k in ("name", "run_id", "role"))
                 or "call_id" in p and p["call_id"] != s["call_id"]
-                or not isinstance(p.get("result"), dict) or p["result"].get("status") not in {"ok", "error"}):
+                or not isinstance(p.get("result"), dict) or not isinstance(p["result"].get("status"), str)
+                or p["result"]["status"] not in {"ok", "error"}):
             return None
         match = ("json_type(payload_json, '$.message_seq') = 'integer' "
                  "AND json_extract(payload_json, '$.message_seq') = ? "

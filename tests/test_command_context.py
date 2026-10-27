@@ -550,7 +550,8 @@ class CommandContextTests(unittest.TestCase):
         self.assertNotIn("command_record", row)
         self.assertNotIn("read_args", row)
         note = context["command_record_note"]
-        for meaning in ("seq", "receipt_seq", "read_receipts", "\u5b8c\u6210", "\u4e0d\u542b", "\u8bf7\u6c42"):
+        for meaning in ("seq", "receipt_seq", "read_receipts", "完成", "原请求",
+                        "section=request", "request_part=stdin", "不能从argv或输出倒推"):
             self.assertIn(meaning, note)
         self.assertNotIn("read_args", note)
         self.assertNotIn(marker, json.dumps(context))
