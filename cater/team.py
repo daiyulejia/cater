@@ -251,9 +251,12 @@ class TeamService:
                     event_types=("team.objective_updated", "team.objective_completed")) if e.actor == HOST), default=0)
 
     def _inactive_messages(self, task_id, *, events=None, started=None):
+        from .team_feedback import consumed_feedback
+
         events = events if events is not None else self.rt.log.read(task_id=task_id)
         return (self.rt.team_reviews.superseded_assignments(task_id, events=events)
-                | self.work_control.inactive(task_id, events=events, started=started))
+                | self.work_control.inactive(task_id, events=events, started=started)
+                | consumed_feedback(events))
 
     def view(self, task_id):
         events = self.rt.log.read(task_id=task_id)
@@ -1325,11 +1328,15 @@ class TeamService:
             if target is None or target.casefold() == filename.casefold():
                 raise WorkConflict("同名成果有发布影响待核对，不能重复发布或落盘；先核对原操作与实际文件。")
 
-    def _invoke_tool(self, task_id, role, started, revision, call, schema, workspace, binding, tool_start, assignment):
+    def _invoke_tool(self, task_id, role, started, revision, call, schema, workspace, binding, tool_start, assignment, *, context=None):
         def settle(result):
+            from .team_feedback import presented_feedback
+
+            consumed = presented_feedback(self, task_id, tool_start, result, context)
             event = self.rt.log.emit(type="team.tool_finished", task_id=task_id, actor=HOST,
                 payload={"started_seq": tool_start.seq, "run_id": started.payload["run_id"],
-                         "role": role.id, "name": call.name, "result": result})
+                         "role": role.id, "name": call.name, "result": result,
+                         **({"consumed_input_seqs": consumed} if consumed else {})})
             from .reply_evidence import SUPPORTED
             from .tool_protocol import RecordedToolResult
 
@@ -1403,7 +1410,7 @@ class TeamService:
         if on_started is not None:
             on_started()
         result = self._invoke_tool(task_id, role, started, revision, call, schema,
-                                   workspace, binding, tool_start, assignment)
+                                   workspace, binding, tool_start, assignment, context=context)
         return tool_start, result
 
     def _finish_work(self, task_id, role, arguments, tool_start):
@@ -1439,8 +1446,10 @@ class TeamService:
                 return {"status": "error", "code": "review_pending", "reviews": reviews,
                         "message": "修复与复核尚未闭环，未结束工作。请让作者修正并发布新版，交回原复核者；通过后再交付。"}
             superseded = self._inactive_messages(task_id)
-            messages = [e for e in self._messages(task_id) if e.seq not in superseded]
+            messages = self._messages(task_id)
+            # An acknowledged input still proves that its child work returned.
             reported = _reported_messages(messages)
+            messages = [e for e in messages if e.seq not in superseded]
             published = self.rt.task(task_id).deliverables
             authors = {a.get("actor") for a in published}
             publication_sources = {a["seq"]: a for a in published}

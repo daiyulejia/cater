@@ -218,13 +218,13 @@ with Runtime(sys.argv[1], roles_path=sys.argv[2], drivers={"team_test": driver})
         invoke = self.rt.team._invoke_tool
         changed = []
 
-        def pause_then_invoke(*args):
+        def pause_then_invoke(*args, **kwargs):
             if not changed:
                 changed.append(True)
                 with Runtime(self.rt.log.path, roles_path=self.roles, drivers={"team_test": self.driver},
                              close_drivers_on_close=False) as other:
                     other.execution_control.change(task, "pause", request_id="pause-before-tool-lock")
-            return invoke(*args)
+            return invoke(*args, **kwargs)
 
         with patch.object(self.rt.team, "_invoke_tool", side_effect=pause_then_invoke):
             list(self.rt.team._run_message(task, message, self.rt.organization.leader, run))

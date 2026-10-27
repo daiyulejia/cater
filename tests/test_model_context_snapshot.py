@@ -191,8 +191,8 @@ class ModelContextSnapshotTests(unittest.TestCase):
         _, initial = self.bind_roots()
         (self.root / 'first' / 'input.txt').write_text('旧目录正文', encoding='utf-8')
         invoke = self.rt.team._invoke_tool
-        def switch(task_id, role, started, revision, call, *rest):
-            result = invoke(task_id, role, started, revision, call, *rest)
+        def switch(task_id, role, started, revision, call, *rest, **kwargs):
+            result = invoke(task_id, role, started, revision, call, *rest, **kwargs)
             if call.name == 'workspace_read' and result['status'] == 'ok':
                 self.rt.workspaces.bind(self.task, 'root-1', expected_revision=initial['revision'])
             return result
@@ -210,8 +210,8 @@ class ModelContextSnapshotTests(unittest.TestCase):
     def test_project_tool_set_change_does_not_corrupt_native_history(self):
         project = self.rt.rulebook.create_project('新增项目范围')['id']
         invoke = self.rt.team._invoke_tool
-        def switch(task_id, role, started, revision, call, *rest):
-            result = invoke(task_id, role, started, revision, call, *rest)
+        def switch(task_id, role, started, revision, call, *rest, **kwargs):
+            result = invoke(task_id, role, started, revision, call, *rest, **kwargs)
             if call.name == 'read_messages' and result['status'] == 'ok':
                 self.rt.rulebook.bind_project(self.task, project)
             return result
