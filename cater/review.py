@@ -34,8 +34,9 @@ def build_review(
     member_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     native_tasks = _native_chat_tasks(events, member_ids)
+    native_activity = _native_model_tasks(events) & {task.id for task in tasks}
     lenses = [
-        _product_lens(tasks),
+        _product_lens(tasks, native_activity),
         _design_lens(tasks, events, member_ids),
         _distribution_lens(tasks, native_tasks),
         _collaboration_lens(tasks, _native_chat_tasks(events, member_ids, agent_exchange=True)),
@@ -45,7 +46,7 @@ def build_review(
         _logic_lens(tasks, native_tasks),
         _discipline_lens(tasks),
         _reliability_lens(tasks, events),
-        _adoption_lens(tasks, profiles),
+        _adoption_lens(tasks, profiles, native_activity),
     ]
     next_steps = _next_steps(tasks, lenses)
     next_actions = [step["action"] for step in next_steps]
@@ -115,16 +116,27 @@ def _lens(lens_id: str, status: str, finding: str, action: str) -> dict[str, str
     return {"id": lens_id, "label": label, "status": status, "finding": finding, "action": action}
 
 
-def _product_lens(tasks: list[TaskSnapshot]) -> dict[str, str]:
+def _product_lens(tasks: list[TaskSnapshot], native_activity: frozenset[str] = frozenset()) -> dict[str, str]:
     if not tasks:
         return _lens("product", "needs_attention", "No user-visible task exists.", "Create a small task with acceptance criteria.")
     stale = [task for task in tasks if task.status in {"pending", "running"} and not task.messages]
     if stale:
-        return _lens("product", "needs_attention", "Some tasks have not received agent work.", "Run a collaboration round for the pending task.")
+        attempted = [task.id for task in stale if task.id in native_activity]
+        unobserved = [task.id for task in stale if task.id not in native_activity]
+        findings = []
+        if attempted:
+            findings.append(f"{len(attempted)} active task(s) without public messages have recorded native model activity: {', '.join(attempted)}. "
+                            "These are historical receipts, not current execution or delivery.")
+        if unobserved:
+            findings.append(f"{len(unobserved)} active task(s) have neither public messages nor linked native model receipts: {', '.join(unobserved)}; "
+                            "absence is not proof that no work occurred.")
+        return _lens("product", "needs_attention" if unobserved else "watch", " ".join(findings),
+                     "Inspect each task's current objective, model/tool receipts and pending operations before deciding the next step. "
+                     "Do not automatically replay work or require public chatter to prove activity.")
     rework = [task for task in tasks if task.status == "rework"]
     if rework:
         return _lens("product", "watch", "A task is in rework after autonomous governance.", "Send a command or run another collaboration round.")
-    return _lens("product", "ok", "Tasks have visible agent progress.", "Keep the next user action obvious.")
+    return _lens("product", "ok", "No active task is missing public agent messages.", "Keep the next user action obvious.")
 
 
 def _design_lens(
@@ -188,6 +200,27 @@ def _design_lens(
     if findings:
         return _lens("design", "watch" if missing_brief or native_issues else "ok", " ".join(findings), " ".join(actions))
     return _lens("design", "ok", "The process has timeline and brief data.", "Keep replay views compact and scannable.")
+
+
+def _native_model_tasks(events: list[Event]) -> frozenset[str]:
+    """Recognize historical model receipts, never execution or current-goal success."""
+    starts, activity = {}, set()
+    for event in events:
+        if not event.task_id or event.actor != Actor.system("team"):
+            continue
+        payload = event.payload
+        run, role = payload.get("run_id"), payload.get("role")
+        if not isinstance(run, str) or not run.strip() or not isinstance(role, str) or not role.strip():
+            continue
+        key = (event.task_id, run, role)
+        if event.type == "team.run_started":
+            message = payload.get("message_seq")
+            if type(message) is int and message > 0:
+                starts[key] = event.seq
+        elif (event.type == "team.model_called" and key in starts and starts[key] < event.seq
+              and isinstance(payload.get("driver"), str) and payload["driver"].strip()):
+            activity.add(event.task_id)
+    return frozenset(activity)
 
 
 def _native_chat_tasks(
@@ -509,11 +542,21 @@ def _reliability_lens(tasks: list[TaskSnapshot], events: list[Event]) -> dict[st
     return _lens("reliability", "ok", "No driver failures are recorded.", "Keep containment events visible in replay.")
 
 
-def _adoption_lens(tasks: list[TaskSnapshot], profiles: dict[str, dict[str, Any]]) -> dict[str, str]:
+def _adoption_lens(
+    tasks: list[TaskSnapshot], profiles: dict[str, dict[str, Any]], native_activity: frozenset[str] = frozenset(),
+) -> dict[str, str]:
     if not profiles:
+        if native_activity:
+            return _lens("adoption", "watch",
+                         f"No message/failure-derived agent profiles are projected, but native model activity is recorded in {len(native_activity)} task(s). "
+                         "Profile absence does not mean the model was unused or establish delivery quality.",
+                         "Assess onboarding from actual task receipts and usable results; do not require extra agents, public messages or demo runs to populate profiles.")
+        if tasks:
+            return _lens("adoption", "needs_attention", "No message/failure-derived agent profiles are projected.",
+                         "Inspect existing task receipts and profile coverage before starting more work; an empty profile projection does not establish an unused model.")
         return _lens("adoption", "needs_attention", "No agent profiles exist yet.", "Run the demo or first collaboration round before presenting the project.")
     if len(profiles) < 2:
-        return _lens("adoption", "ok", "One active agent profile is visible.", "Choose team size for the actual work, not to manufacture multi-agent coverage.")
+        return _lens("adoption", "ok", "One agent profile is visible in workspace history.", "Choose team size for the actual work, not to manufacture multi-agent coverage.")
     if not tasks:
         return _lens("adoption", "needs_attention", "Profiles exist without task context.", "Export a replay bundle for contributors.")
-    return _lens("adoption", "ok", "Multiple agent profiles are visible.", "Keep README examples runnable with zero services.")
+    return _lens("adoption", "ok", "Multiple agent profiles are visible in workspace history.", "Keep README examples runnable with zero services.")
