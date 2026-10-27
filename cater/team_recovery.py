@@ -7,6 +7,7 @@ import json
 from .activity_owner import activity_owner
 from .events import Actor
 from .execution_control import paused_predecessor
+from .team_pending_display import display_pending, pending_counts
 from .work import WorkConflict
 
 
@@ -457,7 +458,7 @@ class TeamRecovery:
     def checkpoint(self, task_id):
         return self._capture(task_id)[0]
 
-    def _capture(self, task_id):
+    def _capture(self, task_id, *, tool_start=None, role_id=None, pending_view=None):
         # Keep all database projections in one short read snapshot, including
         # shared rules/workspaces, without taking over a caller's transaction.
         db = self.rt.log.db
@@ -472,6 +473,8 @@ class TeamRecovery:
             withdrawals = self.team.work_control.view(task_id, events=events)
             objectives = [e for e in events if e.actor == HOST and e.type == "team.objective_updated"]
             objective = objectives[-1].payload["goal"] if objectives else self.rt.task(task_id).goal
+            pending = (display_pending(self.team, task_id, tool_start=tool_start, role_id=role_id)
+                       if pending_view is None else pending_view)
             checkpoint = {"as_of_seq": events[-1].seq if events else 0,
                 "as_of_hash": events[-1].hash if events else None,
                 "scope": self.scope(task_id, events=events), "objective": objective,
@@ -479,14 +482,14 @@ class TeamRecovery:
                 "open_work_count": len(assignments), "open_work_truncated": len(assignments) > 20,
                 "withdrawals": [_preview(row, "reason", 512) for row in withdrawals[-5:]],
                 "withdrawals_truncated": len(withdrawals) > 5,
-                "pending_operation_count": len(self.team._pending_operations(task_id)),
+                **pending_counts(pending),
                 "note": "从持久事件重建的当前事实，不是恢复旧模型历史、重放操作或宣告验收的授权。"}
             return checkpoint, assignments
         finally:
             if owned:
                 db.rollback()
 
-    def read(self, task_id, arguments):
+    def read(self, task_id, arguments, *, tool_start=None, role_id=None):
         if "review_seq" in arguments:
             seq = arguments["review_seq"]
             if set(arguments) != {"review_seq"} or type(seq) is not int or seq < 1:
@@ -502,7 +505,7 @@ class TeamRecovery:
         after, limit = arguments.get("after_seq", 0), arguments.get("limit", 20)
         if type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 50:
             raise ValueError("检查点读取需要非负序号和1至50条分页大小。")
-        checkpoint, assignments = self._capture(task_id)
+        checkpoint, assignments = self._capture(task_id, tool_start=tool_start, role_id=role_id)
         rows = [r for r in assignments if r["seq"] > after]
         page = rows[:limit]
         return {"status": "ok", "checkpoint": checkpoint, "assignments": page,

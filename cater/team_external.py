@@ -65,7 +65,7 @@ class TeamExternal:
                     errors.append(exc)
         return errors
 
-    def owns(self, task_id, row):
+    def owns(self, task_id, row, *, observe_only=False):
         """Recognize a live handle, never a reconstructed permission or replay grant."""
         if not self.scheduling(task_id):
             return False
@@ -81,7 +81,10 @@ class TeamExternal:
         if stored != attempt or run.state.phase not in {'opening', 'prompting'}:
             return False
         try:
-            check(force=True)
+            if observe_only:
+                check(force=True, observe_only=True)
+            else:
+                check(force=True)
         except Exception:
             return False
         return True
@@ -133,20 +136,18 @@ class TeamExternal:
                 raise WorkConflict("当前通道已达到顾客配置的用量上限，未继续调用。")
             raw, workspace, binding, tools, basis = self.team._model_input(
                 task_id, message, role, run_id=started.payload["run_id"])
-            for pending in raw.get('pending_operations', []):
-                if self.owns(task_id, pending):
-                    pending['scheduler_owned_live'] = True
             last_scope = dict(raw["work_checkpoint"]["scope"])
             context = model_context(raw)
             fingerprint = driver_fingerprint(driver)
             rules = basis["rule_fingerprint"]
 
-            def verify_scope():
+            def verify_scope(*, observe_only=False):
                 nonlocal admission_blocked
                 self.team._current(task_id, started, role, revision)
                 if budget_supervision and any(row.get("started_seq") != (attempt.seq if attempt is not None else None)
                                              for row in self.team._pending_operations(task_id)):
-                    admission_blocked = attempt is None
+                    if not observe_only:
+                        admission_blocked = attempt is None
                     raise WorkConflict("监督接续前出现了未核对操作，先核对实际影响，不启动或继续旧范围工作。")
                 if getattr(driver, "closed", False):
                     raise WorkConflict("外部通道正在关闭，本轮停止接收新操作。")
@@ -161,10 +162,15 @@ class TeamExternal:
                 if driver_fingerprint(driver) != fingerprint:
                     raise WorkConflict("外部模型接入配置已变化，未继续旧会话。")
 
-            def check(force=False):
+            def check(force=False, *, observe_only=False):
                 nonlocal last_check
                 if stop_kind is not None:
                     raise ExternalYield(stop_kind)
+                if observe_only:
+                    # A display can run in an older read snapshot. Check fully,
+                    # but never let it postpone a subsequent live scope check.
+                    verify_scope(observe_only=True)
+                    return
                 now = time.monotonic()
                 # Before prompt transmission every check must observe changes
                 # made during the handshake, even inside the idle polling window.

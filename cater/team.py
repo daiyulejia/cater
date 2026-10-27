@@ -24,6 +24,7 @@ from .team_recovery import RECOVERY_CONTRACT, TeamRecovery, _same_scope
 from .team_delivery import HandoffError, REFERENCES_OMITTED_WARNING, TeamDelivery, handoff_schema, omission_reason
 from .team_browser import BROWSER_CONTRACT, TeamBrowser, browser_schema
 from .team_context import history_window, json_bytes, model_context, model_json
+from .team_pending_display import display_pending, pending_counts
 from .delivery_followup_sources import delivery_followup_sources
 from .tool_protocol import contained_response_diagnostics, safe_tool_usage
 from .usage import valid_token_count
@@ -800,7 +801,8 @@ class TeamService:
         reported = _reported_messages(messages)
         current_work = self.view(task_id)
         superseded = self._inactive_messages(task_id, events=events)
-        checkpoint, work_states = self.recovery._capture(task_id)
+        pending = display_pending(self, task_id)
+        checkpoint, work_states = self.recovery._capture(task_id, pending_view=pending)
         outgoing_states = {row["seq"]: row for row in work_states}
         background = self.rt.conversation_background(task_id)
         revision = current_work["revision"]
@@ -851,7 +853,6 @@ class TeamService:
                 entry["observations"] = metadata
                 observation_bytes += size
                 observed += 1
-        pending = self._pending_operations(task_id)
         workspace_state = self.rt.workspaces.view(task_id)
         file_sources = self.read_sources.index(task_id, workspace=workspace_state, events=events)
         project_history = self.project_history.index(task_id)
@@ -996,7 +997,7 @@ class TeamService:
             except ValueError as exc:
                 return {"status": "error", "message": str(exc)}
         if name == "read_checkpoint":
-            return self.recovery.read(task_id, arguments)
+            return self.recovery.read(task_id, arguments, tool_start=tool_start, role_id=role.id)
         if name == "read_delivery":
             return self.delivery.read(task_id, arguments)
         if name == "read_handoff_sources":
@@ -1265,23 +1266,25 @@ class TeamService:
                         "record_read": record_read}
             if section == "index":
                 return self.read_sources.receipts_index(task_id, arguments, record_read)
-            if "run_id" in arguments and not any(e.actor == HOST and e.payload.get("run_id") == arguments["run_id"]
-                    for e in self.rt.log.iter_events(task_id=task_id, event_types=("team.run_started",))):
-                return {"status": "error", "message": "找不到本群的这个运行ID；角色名请用role筛选，委托序号请用message_seq，真实运行ID见receipt_index。"}
-            receipts = [row for row in self._receipts(task_id)
-                if all(key not in arguments or row.get(key) == arguments[key] for key in ("run_id", "role", "message_seq", "name"))
-                and ("before_seq" not in arguments or row["seq"] < arguments["before_seq"])]
-            page = receipts[-limit:]
-            response = {"status": "ok", "receipts": page, "has_more": len(receipts) > limit,
-                        "next_before_seq": page[0]["seq"] if len(receipts) > limit else None,
-                        "record_read": record_read}
-            if arguments.get("include_pending"):
-                pending = [row for row in self._pending_operations(task_id)
+            with self._context_read():
+                if "run_id" in arguments and not any(e.actor == HOST and e.payload.get("run_id") == arguments["run_id"]
+                        for e in self.rt.log.iter_events(task_id=task_id, event_types=("team.run_started",))):
+                    return {"status": "error", "message": "找不到本群的这个运行ID；角色名请用role筛选，委托序号请用message_seq，真实运行ID见receipt_index。"}
+                receipts = [row for row in self._receipts(task_id)
                     if all(key not in arguments or row.get(key) == arguments[key] for key in ("run_id", "role", "message_seq", "name"))
                     and ("before_seq" not in arguments or row["seq"] < arguments["before_seq"])]
-                response.update(pending_operations=pending[-limit:], pending_has_more=len(pending) > limit,
-                    pending_next_before_seq=pending[-limit]["seq"] if len(pending) > limit else None)
-            return response
+                page = receipts[-limit:]
+                response = {"status": "ok", "receipts": page, "has_more": len(receipts) > limit,
+                            "next_before_seq": page[0]["seq"] if len(receipts) > limit else None,
+                            "record_read": record_read}
+                if arguments.get("include_pending"):
+                    pending = [row for row in display_pending(self, task_id)
+                        if all(key not in arguments or row.get(key) == arguments[key] for key in ("run_id", "role", "message_seq", "name"))
+                        and ("before_seq" not in arguments or row["seq"] < arguments["before_seq"])]
+                    response.update(pending_operations=pending[-limit:], pending_has_more=len(pending) > limit,
+                        pending_next_before_seq=pending[-limit]["seq"] if len(pending) > limit else None,
+                        **pending_counts(pending))
+                return response
         if name == "publish_workspace_archive":
             from .team_archive import publish
 
