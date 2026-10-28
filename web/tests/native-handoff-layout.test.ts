@@ -18,9 +18,11 @@ test.skipIf(process.env.CATER_WEB_BROWSER_TESTS !== '1').each([false, true])('�
     saved.evidence[0].filename = `${'long-file-name-'.repeat(30)}.html`
     saved.evidence[0].quote = `<script>${'unbroken-quote'.repeat(50)}</script>\n  精确摘录。  `
     saved.limits = ['手机端离线场景尚未验证。', `  https://example.invalid/${'unbroken-limit'.repeat(70)}\n<script>仅为原文</script>  `]
+    // The host strips list items and bounds them before saving a reference-omitted handoff.
+    if (omitted) saved.limits[1] = `https://example.invalid/${'unbroken-limit'.repeat(55)}\n<script>仅为原文</script>`
     const tasks = [detail([completion(10, undefined), completion(20, saved)])]
     delete tasks[0].events[0].payload.handoff
-    const warning = '交付讲解已保留；引用核对失败，未保存为验证证据。'
+    const warning = '讲解已保留，引用核对失败未保存，不视为验证证据。'
     if (omitted) Object.assign(tasks[0].events[1].payload,
       { handoff_status: 'references_omitted_invalid', handoff_warning: warning })
     const errors: string[] = []

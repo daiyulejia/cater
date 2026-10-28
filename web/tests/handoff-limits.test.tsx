@@ -67,10 +67,22 @@ test.each([
 test('仅引用省略时按既有校验保留边界，不恢复未验证引用', () => {
   const evidence = completion(10, saved())
   evidence.payload.handoff_status = 'references_omitted_invalid'
+  evidence.payload.handoff_warning = '讲解已保留，引用核对失败未保存，不视为验证证据。'
   const { container } = render(<MessageDetails item={itemFor(evidence)} />)
   fireEvent.click(screen.getByText(label))
   expect(within(limitsFold()).getAllByRole('listitem').map(node => node.textContent)).toEqual(limits)
   expect(container.querySelector('blockquote')).toBeNull()
+})
+
+test.each([undefined, '未经核对的警告'])('引用省略缺失或伪造警告时不展示边界，旧的无状态记录仍可查看：%s', warning => {
+  const evidence = completion(10, saved())
+  evidence.payload.handoff_status = 'references_omitted_invalid'
+  if (warning !== undefined) evidence.payload.handoff_warning = warning
+  const { rerender } = render(<MessageDetails item={itemFor(evidence)} />)
+  expect(screen.queryByText(label)).toBeNull()
+  rerender(<MessageDetails item={itemFor(completion(10, saved()))} />)
+  fireEvent.click(screen.getByText(label))
+  expect(within(limitsFold()).getAllByRole('listitem').map(node => node.textContent)).toEqual(limits)
 })
 
 test('切换消息更新计数并重置开合，切为无效或普通消息后移除边界', () => {

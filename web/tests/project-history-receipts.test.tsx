@@ -5,7 +5,7 @@ import type { TaskDetail } from '../src/App'
 import { EventDetails } from '../src/EventDetails'
 import { NativeProjectHistoryReceipt } from '../src/NativeProjectHistoryReceipt'
 import { TeamToolProgress } from '../src/TeamProgressPanel'
-import { conversationActivity } from '../src/conversationActivityState'
+import { conversationActivity, nativeProjectHistoryReceiptStatus } from '../src/conversationActivityState'
 import type { TeamEvent, TeamState } from '../src/team'
 
 const host = { id: 'team', kind: 'system', role: 'team' }
@@ -106,6 +106,118 @@ test('完整delivery JSON使用中文字段投影，交接与完整文件引用�
     expect(view.container.textContent).toContain(hostile)
     expect(view.container.textContent).not.toContain('PRIVATE_JSON')
     expect(view.container.querySelector('a, script, img, button')).toBeNull()
+  }
+})
+
+test('历史部分交付说明保留不完整警告且不展示未校验引用', () => {
+  const original = delivery()
+  const partial = { ...original.handoff, evidence: [] }
+  const value = body('delivery', JSON.stringify(delivery({ handoff: undefined,
+    handoff_status: 'omitted_invalid', handoff_warning: '仅保存部分内容；其他内容和引用未保存，请结合记录核对。', handoff_partial: partial })))
+  for (const view of surfaces(value, start('delivery'))) {
+    expect(view.container.textContent).toContain('当时交付说明：仅保存部分内容；其他内容和引用未保存，请结合记录核对。')
+    expect(view.container.textContent).toContain(partial.why)
+    expect(view.container.querySelector('blockquote')).toBeNull()
+  }
+  const invalid = body('delivery', JSON.stringify(delivery({ handoff: undefined,
+    handoff_status: 'omitted_invalid', handoff_warning: '仅保存部分内容；其他内容和引用未保存，请结合记录核对。',
+    handoff_partial: { ...partial, evidence: original.handoff.evidence } })))
+  for (const view of surfaces(invalid, start('delivery'))) {
+    expect(view.container.textContent).not.toContain(partial.why)
+    expect(view.container.querySelector('blockquote')).toBeNull()
+  }
+})
+
+test('历史省略警告独立于正文保留，矛盾载荷的引文不会被展示', () => {
+  const warning = '讲解已保留，引用核对失败未保存，不视为验证证据。'
+  const value = body('delivery', JSON.stringify(delivery({ handoff_status: 'references_omitted_invalid', handoff_warning: warning })))
+  for (const view of surfaces(value, start('delivery'))) {
+    expect(view.container.textContent).toContain(`当时交付说明：${warning}`)
+    expect(view.container.querySelector('blockquote')).toBeNull()
+  }
+  const omitted = body('delivery', JSON.stringify(delivery({ handoff: undefined,
+    handoff_status: 'omitted_invalid', handoff_warning: '可选交付说明未通过校验，未保存；主要交付结论与成果已保留。' })))
+  for (const view of surfaces(omitted, start('delivery'))) {
+    expect(view.container.textContent).toContain('当时交付说明：可选交付说明未通过校验')
+    expect(within(view.container).queryByText('当时交接说明')).toBeNull()
+  }
+})
+
+test('历史分页保留说明警告，未来快照回执不被信任', () => {
+  const content = '私密片段'
+  const warning = '仅保存部分内容；其他内容和引用未保存，请结合记录核对。'
+  const paged = body('delivery', content, { total_chars: 20, next_offset: 4, has_more: true,
+    handoff_status: 'omitted_invalid', handoff_warning: warning })
+  for (const view of surfaces(paged, start('delivery'))) {
+    expect(view.container.textContent).toContain(`当时交付说明：${warning}`)
+    expect(view.container.textContent).toContain('正文未显示，请结合完整记录核对')
+    expect(view.container.textContent).not.toContain(content)
+  }
+  for (const view of surfaces({ ...paged, handoff_warning: '伪造分页警告' }, start('delivery'))) {
+    expect(view.container.textContent).not.toContain('伪造分页警告')
+  }
+  const forged = finish({ ...paged, as_of_seq: 111 }, start('delivery'))
+  expect(nativeProjectHistoryReceiptStatus(forged)).toBe('历史回执待核对')
+  expect(nativeProjectHistoryReceiptStatus({ ...finish(paged, start('delivery')), seq: 0 })).toBe('历史回执待核对')
+})
+
+test('带状态的历史分页隐藏矛盾引文，旧无状态记录和历史文件仍可读取', () => {
+  const content = 'UNVERIFIED_QUOTE🐾'
+  const warning = '讲解已保留，引用核对失败未保存，不视为验证证据。'
+  const size = Array.from(content).length
+  for (const extra of [
+    { offset: 0, total_chars: size + 1, next_offset: size, has_more: true },
+    { offset: 4, total_chars: size + 4, next_offset: null, has_more: false },
+  ]) {
+    for (const state of [{ handoff_status: 'references_omitted_invalid', handoff_warning: warning },
+      { handoff_status: 'unknown', handoff_warning: 'PRIVATE_WARNING' }]) {
+      const value = body('delivery', content, { ...extra, ...state })
+      for (const view of surfaces(value, start('delivery'))) {
+        expect(view.container.textContent).not.toContain(content)
+        expect(view.container.textContent).not.toContain('PRIVATE_WARNING')
+        expect(view.container.textContent).toContain('正文未显示，请结合完整记录核对')
+      }
+    }
+    const legacy = body('delivery', content, extra)
+    for (const view of surfaces(legacy, start('delivery'))) expect(view.container.textContent).toContain(content)
+    const artifact = body('artifact', content, { ...extra, handoff_status: 'unknown' })
+    for (const view of surfaces(artifact, start('artifact'))) expect(view.container.textContent).toContain(content)
+  }
+})
+
+test('完整历史正文与页级省略状态矛盾时不展示引文', () => {
+  const warning = '讲解已保留，引用核对失败未保存，不视为验证证据。'
+  const value = body('delivery', JSON.stringify(delivery()), { handoff_status: 'references_omitted_invalid', handoff_warning: warning })
+  for (const view of surfaces(value, start('delivery'))) {
+    expect(view.container.textContent).toContain('历史交付说明状态不一致，请核对原记录。')
+    expect(view.container.textContent).toContain(`当时交付说明：${warning}`)
+    expect(view.container.querySelector('blockquote')).toBeNull()
+  }
+  for (const content of ['{"broken":"UNVERIFIED_QUOTE', JSON.stringify({ handoff: { evidence: [{ quote: 'UNVERIFIED_QUOTE' }] } })]) {
+    const malformed = body('delivery', content, { handoff_status: 'references_omitted_invalid', handoff_warning: warning })
+    for (const view of surfaces(malformed, start('delivery'))) {
+      expect(view.container.textContent).toContain('历史交付说明状态不一致，请核对原记录。')
+      expect(view.container.textContent).toContain(`当时交付说明：${warning}`)
+      expect(view.container.textContent).not.toContain('UNVERIFIED_QUOTE')
+    }
+  }
+})
+
+test('历史正文截断不会拆开 Unicode 字符', () => {
+  const reason = 'a'.repeat(1999) + '🐾' + '余下内容'
+  const value = body('delivery', JSON.stringify(delivery({ handoff: { ...delivery().handoff, why: reason } })))
+  for (const view of surfaces(value, start('delivery'))) {
+    expect(view.container.textContent).toContain('🐾\n（显示已截断）')
+    expect(view.container.textContent).not.toContain('\ud83d\n')
+  }
+})
+
+test('历史目录提示可用的部分说明，但不从非布尔标记推断', () => {
+  for (const view of surfaces(index({ entries: [entry({ has_handoff_partial: true })], total: 1, has_more: false, next_before_seq: null }))) {
+    expect(view.container.textContent).toContain('当时交付说明仅部分保存。')
+  }
+  for (const view of surfaces(index({ entries: [entry({ has_handoff_partial: 'true' })], total: 1, has_more: false, next_before_seq: null }))) {
+    expect(view.container.textContent).not.toContain('当时交付说明仅部分保存。')
   }
 })
 

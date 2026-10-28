@@ -12,6 +12,9 @@ from .review_contract import browser_observations
 
 HOST = Actor.system("team")
 REFERENCES_OMITTED_WARNING = "讲解已保留，引用核对失败未保存，不视为验证证据。"
+HANDOFF_OMITTED_WARNING = "可选交付说明未通过校验，未保存；主要交付结论与成果已保留。"
+PARTIAL_HANDOFF_WARNING = "仅保存部分内容；其他内容和引用未保存，请结合记录核对。"
+HANDOFF_PROSE_FIELDS = frozenset({"why", "changed", "impact", "alternatives", "reproduce", "limits"})
 
 
 def omission_reason(value):
@@ -56,6 +59,32 @@ def _completion_request(arguments):
         return None
 
 
+def _recorded_finish_arguments(event):
+    """Decode host-recorded arguments only for a successfully receipted finish."""
+    if (event is None or event.actor != HOST or event.type != "team.tool_started"
+            or event.payload.get("name") != "finish_work"):
+        return None
+    value = event.payload.get("arguments")
+    if not (isinstance(value, dict) and set(value) == {"encoding", "json"}
+            and value.get("encoding") == "escaped_json" and isinstance(value.get("json"), str)):
+        return value
+    from .tool_protocol import strict_json
+    from .workspaces import WorkspaceService
+
+    try:
+        decoded = strict_json(value["json"])
+        # The host wraps only when the original public arguments cannot be encoded.
+        # Exact regeneration rejects normal input, duplicate keys and altered wrappers.
+        if (not isinstance(decoded, dict)
+                or set(decoded) - {"summary", "verification", "artifact_seqs", "handoff", "omitted_approved_artifacts_reason"}
+                or _completion_request(decoded) is None
+                or WorkspaceService._public_arguments("finish_work", decoded) != value):
+            return None
+        return decoded
+    except (ValueError, TypeError, RecursionError, OverflowError):
+        return None
+
+
 class HandoffError(ValueError):
     """Controlled public diagnostics; never echo arbitrary source payloads."""
 
@@ -68,7 +97,22 @@ class HandoffError(ValueError):
 def _text(value, limit):
     if not isinstance(value, str) or not value.strip() or len(value) > limit:
         raise HandoffError("交付说明需要非空、有界的文字。")
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        raise HandoffError("交付说明需要有效的 UTF-8 文字。") from None
     return value.strip()
+
+
+def _why(value):
+    if isinstance(value, list):
+        if not 1 <= len(value) <= 12:
+            raise HandoffError("交付原因需要一至十二段文字。")
+        # Validate each paragraph, but preserve its interior and paragraph spacing.
+        for paragraph in value:
+            _text(paragraph, 4000)
+        value = "\n\n".join(value)
+    return _text(value, 4000)
 
 
 def _strings(value, *, count=12):
@@ -77,13 +121,86 @@ def _strings(value, *, count=12):
     return [_text(item, 1000) for item in value]
 
 
+def _saved_prose(value):
+    if (not isinstance(value, dict) or set(value) != HANDOFF_PROSE_FIELDS | {"version", "evidence"}
+            or type(value.get("version")) is not int or value["version"] != 1
+            or value.get("evidence") != []):
+        return None
+    try:
+        if _text(value["why"], 4000) != value["why"]:
+            return None
+        for field in ("changed", "impact", "alternatives", "reproduce", "limits"):
+            if _strings(value[field]) != value[field]:
+                return None
+        if len(json.dumps(value, ensure_ascii=False).encode("utf-8")) > 24000:
+            return None
+    except (HandoffError, UnicodeError, TypeError, ValueError):
+        return None
+    return value
+
+
+def saved_partial_handoff(payload):
+    """Select only the host's strictly shaped, citation-free saved partial prose."""
+    if (not isinstance(payload, dict) or payload.get("handoff_status") != "omitted_invalid"
+            or payload.get("handoff_warning") != PARTIAL_HANDOFF_WARNING):
+        return None
+    return _saved_prose(payload.get("handoff_partial"))
+
+
+def saved_reference_omitted_handoff(payload):
+    """Project bounded prose only; an omitted-reference status never exposes references."""
+    if (not isinstance(payload, dict) or payload.get("handoff_status") != "references_omitted_invalid"
+            or payload.get("handoff_warning") != REFERENCES_OMITTED_WARNING
+            or "handoff_partial" in payload or not isinstance(payload.get("handoff"), dict)):
+        return None
+    original = payload["handoff"]
+    prose = {key: original[key] for key in
+             ("version", "why", "changed", "impact", "alternatives", "reproduce", "limits") if key in original}
+    prose["evidence"] = []
+    return _saved_prose(prose)
+
+
+def saved_handoff_warning(payload):
+    """Project only known host statuses, warnings and corresponding saved shapes."""
+    if not isinstance(payload, dict):
+        return None
+    status, warning = payload.get("handoff_status"), payload.get("handoff_warning")
+    if status == "omitted_invalid":
+        valid = ("handoff" not in payload and
+                 (warning == HANDOFF_OMITTED_WARNING and "handoff_partial" not in payload
+                  or warning == PARTIAL_HANDOFF_WARNING and saved_partial_handoff(payload) is not None))
+    elif status == "references_omitted_invalid":
+        valid = saved_reference_omitted_handoff(payload) is not None
+    else:
+        valid = False
+    return {"handoff_status": status, "handoff_warning": warning} if valid else None
+
+
+def saved_handoff_projection(payload):
+    """Project saved notes consistently without promoting contradictory fields."""
+    if not isinstance(payload, dict):
+        return {}
+    if not any(key in payload for key in ("handoff_status", "handoff_warning", "handoff_partial")):
+        return {"handoff": payload["handoff"]} if payload.get("handoff") is not None else {}
+    warning = saved_handoff_warning(payload)
+    if warning is None:
+        return {}
+    if warning["handoff_status"] == "references_omitted_invalid":
+        return {"handoff": saved_reference_omitted_handoff(payload), **warning}
+    partial = saved_partial_handoff(payload)
+    return {**({"handoff_partial": partial} if partial is not None else {}), **warning}
+
+
 def handoff_schema():
     from .delivery_commands import schema as command_schema
 
     strings = {"type": "array", "maxItems": 12, "items": {"type": "string", "maxLength": 1000}}
     return {"type": "object", "additionalProperties": False, "required": ["why", "reproduce", "limits"],
         "description": "可选的对客原因、长细节与证据，折叠保存；关键结论留主摘要，不是私有思维。完整说明（含宿主补充引用信息）不超过24KB UTF-8。需要引用时可先用read_handoff_sources选evidence_id，由宿主保存实际片段；也可逐字填写source_seq和quote。片段不认证观点或覆盖率。",
-        "properties": {"why": {"type": "string", "maxLength": 4000},
+        "properties": {"why": {"maxLength": 4000, "oneOf": [{"type": "string", "maxLength": 4000},
+            {"type": "array", "minItems": 1, "maxItems": 12,
+             "items": {"type": "string", "minLength": 1, "maxLength": 4000}}],
+            "description": "原因可为文字或按顺序排列的非空段落；段落以空行连接，合计不超过4000字符。"},
             **{key: strings for key in ("changed", "impact", "alternatives", "reproduce", "limits")},
             "reproduce": {**strings, "description": "成员建议的使用和复查步骤：给出适用目录、完整命令及环境，区分已运行与建议，不凭说明声称执行。Cater工具JSON字段不是终端参数，客户端临时目录不是工程；实际命令可选用command_receipts引用宿主记录，不必重新编写。"},
             "command_receipts": command_schema(),
@@ -154,7 +271,7 @@ class TeamDelivery:
             and e.payload.get("run_id") == completed.payload["run_id"] and e.payload.get("name") == "finish_work"
             and isinstance(e.payload.get("result"), dict) and e.payload["result"].get("status") == "ok" for e in events)
         requested = _completion_request(arguments)
-        if receipted and requested is not None and requested == _completion_request(original.payload.get("arguments")):
+        if receipted and requested is not None and requested == _completion_request(_recorded_finish_arguments(original)):
             return {"status": "ok", "delivery_seq": delivery_seq, "already_completed": True,
                 "note": f"这份相同请求已有交付记录 #{delivery_seq}；本次没有新增交付，也没有改写文件或保存新的说明。"}
         return {"status": "error", "code": "delivery_already_completed", "delivery_seq": delivery_seq,
@@ -319,11 +436,11 @@ class TeamDelivery:
                         "来源状态不认证观点、测试覆盖或当前文件正确性。读取不执行原操作，也不登记批准或交付。"}
 
     def normalize(self, task_id, value, *, artifacts, revision):
-        allowed = {"why", "changed", "impact", "alternatives", "reproduce", "limits", "evidence", "command_receipts"}
+        allowed = HANDOFF_PROSE_FIELDS | {"evidence", "command_receipts"}
         if (not isinstance(value, dict) or set(value) - allowed
                 or not {"why", "reproduce", "limits"} <= set(value)):
             raise HandoffError("交付说明需要原因、复查步骤与未覆盖范围，不能包含私有思考或其他未定义字段。")
-        result = {"version": 1, "why": _text(value["why"], 4000),
+        result = {"version": 1, "why": _why(value["why"]),
                   **{key: _strings(value.get(key, [])) for key in ("changed", "impact", "alternatives", "reproduce", "limits")}}
         evidence = value.get("evidence", [])
         if not isinstance(evidence, list) or len(evidence) > 16:
@@ -386,19 +503,34 @@ class TeamDelivery:
             value = {key: item for key, item in value.items() if key not in {"evidence", "command_receipts"}}
         return self.normalize(task_id, value, artifacts=artifacts, revision=revision)
 
+    def normalize_partial(self, task_id, value, *, artifacts, revision):
+        """Salvage only known prose when an unknown handoff field was supplied."""
+        if not isinstance(value, dict) or not (set(value) - HANDOFF_PROSE_FIELDS - {"evidence", "command_receipts"}):
+            raise HandoffError("没有可部分保存的交付说明。")
+        prose = {key: value[key] for key in HANDOFF_PROSE_FIELDS if key in value}
+        return self.normalize(task_id, prose, artifacts=artifacts, revision=revision)
+
     def index(self, task_id):
         event = next((e for e in reversed(self.rt.log.read(task_id=task_id))
                       if e.type == "team.objective_completed" and e.actor == HOST), None)
         if event is None:
             return None
         summary = event.payload.get("summary")
+        projection = saved_handoff_projection(event.payload)
         return {"seq": event.seq, "summary": summary[:1000] if isinstance(summary, str) else "",
-                "has_handoff": isinstance(event.payload.get("handoff"), dict),
+                "has_handoff": isinstance(projection.get("handoff"), dict),
+                **({"has_handoff_partial": True} if "handoff_partial" in projection else {}),
                 "historical": self.team.view(task_id)["revision"] != event.seq}
 
     @staticmethod
     def markdown(event):
-        note = event.payload.get("handoff")
+        projection = (saved_handoff_projection(event.payload)
+                      if event.actor == HOST and event.type == "team.objective_completed" else {})
+        note = projection.get("handoff")
+        partial = projection.get("handoff_partial")
+        is_partial = partial is not None
+        if is_partial:
+            note = partial
         reason = (omission_reason(event.payload.get("omitted_approved_artifacts_reason"))
                   if event.actor == HOST and event.type == "team.objective_completed" else None)
         omission = (["## 未附已复核成果的原因", "", *["    " + line for line in reason.splitlines()], "",
@@ -407,14 +539,18 @@ class TeamDelivery:
                 or not isinstance(note.get("why"), str) or not note["why"].strip()
                 or any(not isinstance(note.get(k), list) or not all(isinstance(v, str) for v in note[k])
                        for k in ("changed", "impact", "alternatives", "reproduce", "limits"))):
+            warning = projection.get("handoff_warning")
             return ("\n".join(["# 交付说明", "", f"对应交付事件 #{event.seq}", "",
                 str(event.payload.get("summary", "")), "", "## 当时记录的验证范围", "",
-                str(event.payload.get("verification", "")), "", *omission]) if omission else None)
+                str(event.payload.get("verification", "")), "", *omission,
+                *(["## 说明不完整", "", warning, ""] if warning else [])]) if omission or warning else None)
         lines = ["# 交付说明", "", f"对应交付事件 #{event.seq}", "", str(event.payload.get("summary", "")), "",
                  "## 当时记录的验证范围", "", str(event.payload.get("verification", "")), "",
                  "## 为什么这样做", "", note["why"], ""]
         lines += omission
-        if event.payload.get("handoff_status") == "references_omitted_invalid":
+        if is_partial:
+            lines += ["## 说明不完整", "", PARTIAL_HANDOFF_WARNING, ""]
+        if projection.get("handoff_status") == "references_omitted_invalid":
             lines += ["## 引用说明", "", REFERENCES_OMITTED_WARNING, ""]
         for key, title in (("changed", "改动"), ("impact", "影响"), ("alternatives", "取舍与其他考虑"),
                            ("reproduce", "成员建议的运行与复查"), ("limits", "未验证范围")):
@@ -467,8 +603,9 @@ class TeamDelivery:
                       if e.type == "team.objective_completed" and e.actor == HOST and (seq is None or e.seq == seq)), None)
         if event is None:
             raise ValueError("找不到本群这次交付记录。")
+        projection = saved_handoff_projection(event.payload)
         return {"status": "ok", "delivery": {"seq": event.seq,
-                **{k: event.payload[k] for k in ("summary", "verification", "artifacts", "handoff",
-                    "handoff_status", "handoff_warning", "omitted_approved_artifacts_reason") if k in event.payload}},
+                **{k: event.payload[k] for k in ("summary", "verification", "artifacts",
+                    "omitted_approved_artifacts_reason") if k in event.payload}, **projection},
                 "historical": self.team.view(task_id)["revision"] != event.seq,
                 "note": "保存的版本说明；步骤未因此执行，引用摘录匹配不证明判断正确或当前文件未变化。"}

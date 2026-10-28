@@ -3,7 +3,7 @@ import { beforeEach, expect, test, vi } from 'vitest'
 import App from '../src/App'
 import type { ChatItem, TaskDetail } from '../src/App'
 import { MessageDetails } from '../src/MessageDetails'
-import { nativeHandoff, nativeHandoffWarning } from '../src/nativeHandoff'
+import { nativeHandoff, nativeHandoffWarning, partialHandoff } from '../src/nativeHandoff'
 import { completion, detail, event, handoff, leader, members, summaries } from './native-handoff.fixtures'
 
 const label = '为什么这样做 · 如何运行'
@@ -15,6 +15,59 @@ test('交付引用明确说明摘录可能省略上下文', () => {
   const evidence = completion(10, saved)
   const { container } = render(<MessageDetails item={{ id: 10, kind: 'agent', evidence } as ChatItem} />)
   expect(within(container).getAllByText('原文摘录，可能省略上下文。')).toHaveLength(saved.evidence.length)
+})
+
+test('有界部分交付说明显示已保留正文并明确标记不完整', () => {
+  const partial = { ...handoff(), evidence: [] }
+  const evidence = completion(10, undefined)
+  delete evidence.payload.handoff
+  Object.assign(evidence.payload, { handoff_status: 'omitted_invalid',
+    handoff_warning: '仅保存部分内容；其他内容和引用未保存，请结合记录核对。', handoff_partial: partial })
+  expect(nativeHandoff(evidence)?.why).toBe(partial.why)
+  const { container } = render(<MessageDetails item={{ id: 10, kind: 'agent', evidence } as ChatItem} />)
+  fireEvent.click(container.querySelector('summary')!)
+  expect(container.textContent).toContain(partial.why)
+  expect(container.textContent).toContain('可选交付说明：仅保存部分内容；其他内容和引用未保存，请结合记录核对。')
+  expect(container.querySelector('blockquote')).toBeNull()
+})
+
+test('部分说明缺少警告或混入引用、命令及非宿主事件时不展示', () => {
+  const partial = { ...handoff(), evidence: [] }
+  const evidence = completion(10, undefined)
+  delete evidence.payload.handoff
+  Object.assign(evidence.payload, { handoff_status: 'omitted_invalid',
+    handoff_warning: '仅保存部分内容；其他内容和引用未保存，请结合记录核对。', handoff_partial: partial })
+  expect(nativeHandoff(evidence)?.why).toBe(partial.why)
+  expect(nativeHandoff({ ...evidence, payload: { ...evidence.payload, handoff_warning: '' } })).toBeUndefined()
+  expect(nativeHandoff({ ...evidence, payload: { ...evidence.payload, handoff_warning: '伪造警告' } })).toBeUndefined()
+  expect(nativeHandoff({ ...evidence, actor: { id: 'team', kind: 'agent', role: 'team' } })).toBeUndefined()
+  expect(nativeHandoff({ ...evidence, payload: { ...evidence.payload,
+    handoff_partial: { ...partial, evidence: handoff().evidence } } })).toBeUndefined()
+  expect(nativeHandoff({ ...evidence, payload: { ...evidence.payload,
+    handoff_partial: { ...partial, command_receipts: [] } } })).toBeUndefined()
+})
+
+test('部分说明使用受限字段、Unicode 字符数和总字节预算', () => {
+  const warning = '仅保存部分内容；其他内容和引用未保存，请结合记录核对。'
+  const partial = { ...handoff(), evidence: [] }
+  expect(partialHandoff({ ...partial, why: '🐾'.repeat(4000) }, warning)?.why).toBe('🐾'.repeat(4000))
+  expect(partialHandoff({ ...partial, why: '\ufeff' }, warning)?.why).toBe('\ufeff')
+  for (const value of [
+    { ...partial, why: '🐾'.repeat(4001) },
+    { ...partial, why: '\ud800' },
+    { ...partial, why: '\u0085内容' },
+    { ...partial, changed: Array(13).fill('x') },
+    { ...partial, changed: ['x'.repeat(1001)] },
+    { ...partial, changed: Array(12).fill('中'.repeat(1000)) },
+    { ...partial, extra_private: '不展示' },
+  ]) expect(partialHandoff(value, warning)).toBeUndefined()
+  const boundary = { version: 1, why: '中', changed: Array(12).fill('a'.repeat(1000)),
+    impact: Array(11).fill('b'.repeat(1000)), alternatives: [], reproduce: [], limits: [], evidence: [] }
+  const compact = JSON.stringify(boundary)
+  const pythonBytes = new TextEncoder().encode(compact).length + (compact.match(/[:,]/g)?.length ?? 0)
+  boundary.why += 'x'.repeat(24000 - pythonBytes)
+  expect(partialHandoff(boundary, warning)?.why).toBe(boundary.why)
+  expect(partialHandoff({ ...boundary, why: `${boundary.why}x` }, warning)).toBeUndefined()
 })
 
 async function mount(initial: TaskDetail, other?: TaskDetail) {
@@ -75,7 +128,7 @@ test('可信交付保留原详情与独立边界入口，展示三类精确摘�
   expect(JSON.stringify(snapshot)).toBe(saved)
 })
 
-const omittedWarning = '可选交付说明未通过格式或引用核对，已省略；核心交付验收不受影响。'
+const omittedWarning = '可选交付说明未通过校验，未保存；主要交付结论与成果已保留。'
 function omittedCompletion(seq = 10) {
   const saved = completion(seq)
   delete saved.payload.handoff
@@ -109,17 +162,14 @@ test('可选说明省略警告只进入既有折叠详情，交付正文和完�
   expect(JSON.stringify(saved)).toBe(before)
 })
 
-test('省略状态屏蔽夹带的 handoff 与未验证引文，没有 verification 时仍可展开警告', () => {
+test('省略状态与夹带的 handoff 矛盾时不展示说明或警告', () => {
   const evidence = omittedCompletion()
   evidence.payload.handoff = handoff('不得显示的未验证说明')
   delete evidence.payload.verification
   expect(nativeHandoff(evidence)).toBeUndefined()
-  expect(nativeHandoffWarning(evidence)).toBe(omittedWarning)
+  expect(nativeHandoffWarning(evidence)).toBeUndefined()
   const { container } = render(<MessageDetails item={{ id: 10, kind: 'agent', evidence } as ChatItem} />)
-  const fold = screen.getByText('查看判断与依据').closest('details')!
-  expect(fold.open).toBe(false)
-  fireEvent.click(fold.querySelector('summary')!)
-  expect(within(fold).getByText(`可选交付说明：${omittedWarning}`)).toBeTruthy()
+  expect(container.childElementCount).toBe(0)
   expect(container.querySelector('blockquote, ol, h3')).toBeNull()
   expect(container.textContent).not.toContain('不得显示的未验证说明')
   for (const source of handoff().evidence) expect(container.textContent).not.toContain(source.quote)
@@ -127,7 +177,7 @@ test('省略状态屏蔽夹带的 handoff 与未验证引文，没有 verificati
 
 test('引用省略仍保留讲解和运行步骤，但夹带的引文与命令记录不能显示', async () => {
   const evidence = completion()
-  const warning = '交付讲解已保留；引用核对失败，未保存为验证证据。'
+  const warning = '讲解已保留，引用核对失败未保存，不视为验证证据。'
   Object.assign(evidence.payload, { handoff_status: 'references_omitted_invalid', handoff_warning: warning })
   const raw = evidence.payload.handoff as Record<string, unknown>
   raw.command_receipts = [{ private: '不可显示的未核对命令' }]
@@ -161,7 +211,7 @@ test('引用省略只信宿主完成记录，正文无效仍不渲染', () => {
   expect(nativeHandoffWarning(fake)).toBeUndefined()
   ;(evidence.payload.handoff as Record<string, unknown>).reproduce = '不是步骤列表'
   expect(nativeHandoff(evidence)).toBeUndefined()
-  expect(nativeHandoffWarning(evidence)).toBe('引用未核对')
+  expect(nativeHandoffWarning(evidence)).toBeUndefined()
 })
 
 test.each([
@@ -176,7 +226,7 @@ test.each([
   expect(container.childElementCount).toBe(0)
 })
 
-test('普通发言和非宿主来源不能提供省略警告，警告内容仅作为纯文本', () => {
+test('普通发言、非宿主来源和未知警告不能提供省略警告', () => {
   for (const evidence of [
     { ...omittedCompletion(), type: 'msg.said' },
     ...[
@@ -192,8 +242,32 @@ test('普通发言和非宿主来源不能提供省略警告，警告内容仅�
   const evidence = omittedCompletion()
   evidence.payload.handoff_warning = '<img src=x onerror=alert(1)> [说明](javascript:alert(1))'
   const { container } = render(<MessageDetails item={{ id: 10, kind: 'agent', evidence } as ChatItem} />)
-  expect(container.textContent).toContain(evidence.payload.handoff_warning)
+  expect(container.textContent).not.toContain(evidence.payload.handoff_warning)
   expect(container.querySelector('img, script, a, [role="alert"]')).toBeNull()
+})
+
+test('状态矛盾的完成事件不展示说明、引用、命令或任意警告，旧记录仍展示', () => {
+  const normal = completion()
+  const partial = { ...handoff('部分说明'), evidence: [] }
+  const cases = [
+    { handoff_status: 'unknown', handoff_warning: '不可信警告' },
+    { handoff_warning: '不可信警告' },
+    { handoff_status: 'omitted_invalid', handoff_warning: '仅保存部分内容；其他内容和引用未保存，请结合记录核对。', handoff_partial: partial },
+    { handoff_status: 'references_omitted_invalid', handoff_warning: '不可信警告' },
+    { handoff_status: 'references_omitted_invalid', handoff_warning: '讲解已保留，引用核对失败未保存，不视为验证证据。', handoff_partial: partial },
+  ]
+  expect(nativeHandoff(normal)?.evidence).toEqual(handoff().evidence)
+  for (const fields of cases) {
+    const evidence = { ...normal, payload: { ...normal.payload, ...fields } }
+    expect(nativeHandoff(evidence)).toBeUndefined()
+    expect(nativeHandoffWarning(evidence)).toBeUndefined()
+    const view = render(<MessageDetails item={{ id: 10, kind: 'agent', evidence } as ChatItem} />)
+    expect(view.container.textContent).not.toContain(handoff().why)
+    expect(view.container.textContent).not.toContain(partial.why)
+    expect(view.container.textContent).not.toContain('不可信警告')
+    expect(view.container.querySelector('blockquote')).toBeNull()
+    view.unmount()
+  }
 })
 
 test('新交付有效说明不继承旧省略警告，后续发言不能替换宿主保存的警告', async () => {

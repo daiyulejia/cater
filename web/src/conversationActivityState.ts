@@ -329,7 +329,7 @@ export function nativeProjectHistoryReceiptStatus(event: TeamEvent): string {
   if (Object.hasOwn(args, 'path')) return uncertain
   if (result.status !== 'ok' || result.complete !== true || result.historical_only !== true || result.truncated === true || result.outcome !== undefined
     || ![undefined, 'ok', 'completed', 'succeeded'].includes(event.payload.status as string | undefined)
-    || !skillCount(result.as_of_seq) || !skillHash(result.as_of_hash)
+    || !historyPositive(event.seq) || !skillCount(result.as_of_seq) || result.as_of_seq >= event.seq || !skillHash(result.as_of_hash)
     || args.section !== undefined && args.section !== result.section
     || args.as_of_seq !== undefined && args.as_of_seq !== result.as_of_seq) return uncertain
   if (event.payload.project_scope !== undefined && (!historyId(event.payload.project_scope)

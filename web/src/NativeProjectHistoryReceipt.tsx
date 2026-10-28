@@ -1,11 +1,15 @@
 import { nativeProjectHistoryReceiptStatus, projectHistoryArchiveReadEvent } from './conversationActivityState'
 import { NativeArtifactReceipt } from './NativeArtifactReceipt'
 import type { TeamEvent } from './team'
-import { isOutputUtf8Validity } from './nativeHandoff'
+import { isOutputUtf8Validity, knownHistoryHandoffWarning, partialHandoff } from './nativeHandoff'
 import { outputEncodingHint } from './outputPreview'
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
-const text = (value: unknown, limit = 1200): string => typeof value === 'string' ? value.slice(0, limit) + (value.length > limit ? '\n（显示已截断）' : '') : ''
+const text = (value: unknown, limit = 1200): string => {
+  if (typeof value !== 'string') return ''
+  const points = Array.from(value)
+  return points.slice(0, limit).join('') + (points.length > limit ? '\n（显示已截断）' : '')
+}
 const bodyClass = 'max-h-64 min-w-0 overflow-auto whitespace-pre-wrap font-mono text-[11px] [overflow-wrap:anywhere]'
 
 function HistoryReferences({ value }: { value: unknown }) {
@@ -19,12 +23,26 @@ function HistoryReferences({ value }: { value: unknown }) {
   })}{value.length > 128 && <li>文件引用显示已截断。</li>}</ul>
 }
 
-function DeliveryContent({ content }: { content: string }) {
+function DeliveryContent({ content, pageState }: { content: string; pageState?: { status: unknown; warning: unknown } }) {
+  const pageWarning = pageState && knownHistoryHandoffWarning(pageState.status, pageState.warning)
+  const incomplete = pageState && <>
+    <p>历史交付说明状态不一致，请核对原记录。</p>
+    {pageWarning && <p className="whitespace-pre-wrap">当时交付说明：{text(pageState.warning, 1000)}</p>}
+  </>
   let parsed: unknown
-  try { parsed = JSON.parse(content) } catch { return <pre className={bodyClass}>{text(content, 8000) || '（空正文）'}</pre> }
-  const data = record(parsed), handoff = record(data.handoff)
+  try { parsed = JSON.parse(content) } catch {
+    return pageState ? incomplete : <pre className={bodyClass}>{text(content, 8000) || '（空正文）'}</pre>
+  }
+  const data = record(parsed)
+  const mismatch = pageState !== undefined && (!pageWarning || data.handoff_status !== pageState.status || data.handoff_warning !== pageState.warning)
+  const hasWarning = knownHistoryHandoffWarning(data.handoff_status, data.handoff_warning)
+  const partial = !mismatch && data.handoff_status === 'omitted_invalid' ? partialHandoff(data.handoff_partial, data.handoff_warning) : undefined
+  const originalHandoff = record(data.handoff)
+  const handoff = record(mismatch ? undefined : partial ?? (data.handoff_status === 'omitted_invalid' ? undefined
+    : data.handoff_status === 'references_omitted_invalid' ? { ...originalHandoff, evidence: [] } : originalHandoff))
   const fields = [['历史摘要', data.summary], ['当时目标', data.objective], ['店长当时验证说明', data.verification]]
   const recognized = fields.some(([, value]) => typeof value === 'string')
+  if (!recognized && pageState) return incomplete
   if (!recognized) return <details>
     <summary className="cursor-pointer">其他历史数据 · 纯文本</summary>
     <pre className={`mt-1 ${bodyClass}`}>{text(content, 8000)}</pre>
@@ -33,6 +51,8 @@ function DeliveryContent({ content }: { content: string }) {
     <dl className="space-y-2">{fields.filter(([, value]) => typeof value === 'string').map(([label, value]) => <div key={label as string}>
       <dt className="font-semibold">{label as string}</dt><dd className="max-h-48 overflow-auto whitespace-pre-wrap">{text(value, 2000)}</dd>
     </div>)}</dl>
+    {mismatch && <p>历史交付说明状态不一致，请核对原记录。</p>}
+    {(mismatch ? pageWarning : hasWarning) && <p className="whitespace-pre-wrap">当时交付说明：{text(mismatch ? pageState?.warning : data.handoff_warning, 1000)}</p>}
     {Object.keys(handoff).length > 0 && <details>
       <summary className="cursor-pointer">当时交接说明</summary>
       {text(handoff.why, 2000) && <p className="mt-1 whitespace-pre-wrap">原因：{text(handoff.why, 2000)}</p>}
@@ -77,6 +97,10 @@ export function NativeProjectHistoryReceipt({ event }: { event: TeamEvent }) {
   const rows = index ? result.entries as Record<string, unknown>[] : []
   const content = typeof result.content === 'string' ? result.content : ''
   const fullDelivery = result.section === 'delivery' && result.offset === 0 && result.has_more === false
+  const hasPageState = Object.hasOwn(result, 'handoff_status') || Object.hasOwn(result, 'handoff_warning')
+  const pageState = hasPageState ? { status: result.handoff_status, warning: result.handoff_warning } : undefined
+  const pageWarning = result.section === 'delivery' && !fullDelivery
+    && knownHistoryHandoffWarning(result.handoff_status, result.handoff_warning)
   const end = (result.offset as number) + Array.from(content).length
   return <div className="mt-1 min-w-0 space-y-2 [overflow-wrap:anywhere]">
     {archiveEvent ? <>
@@ -88,6 +112,7 @@ export function NativeProjectHistoryReceipt({ event }: { event: TeamEvent }) {
         <p className="whitespace-pre-wrap"><strong>历史摘要：</strong>{text(row.summary_excerpt, 640)}{row.summary_truncated === true && '（摘要节选）'}</p>
         <p className="whitespace-pre-wrap">当时目标：{text(row.objective_excerpt, 640)}{row.objective_truncated === true && '（目标节选）'}</p>
         <p>历史交付 #{row.delivery_seq as number} · 文件 {row.artifact_count as number} 份</p>
+        {row.has_handoff_partial === true && <p>当时交付说明仅部分保存。</p>}
         {(row.artifacts as Record<string, unknown>[]).map(ref => <p key={ref.seq as number}>{text(ref.filename, 128)}</p>)}
         {row.artifacts_truncated === true && <p>仅列部分文件引用；完整引用见历史交付说明。</p>}
       </li>)}</ul>
@@ -95,7 +120,12 @@ export function NativeProjectHistoryReceipt({ event }: { event: TeamEvent }) {
       {result.has_more === true && <p>还有历史目录 · 下一页上界 #{result.next_before_seq as number}（不含），本页不是全部。</p>}
     </> : <>
       {result.section === 'artifact' && text(source.filename, 180) && <p className="font-semibold">历史文件：{text(source.filename, 180)}</p>}
-      {fullDelivery ? <DeliveryContent key={event.seq} content={content} /> : <pre className={bodyClass}>{text(content, 8000) || '（空正文）'}</pre>}
+      {pageWarning && <p className="whitespace-pre-wrap">当时交付说明：{text(result.handoff_warning, 1000)}</p>}
+      {result.section === 'delivery' && !fullDelivery && hasPageState && !pageWarning && <p>历史交付说明状态待核对。</p>}
+      {fullDelivery ? <DeliveryContent key={event.seq} content={content} pageState={pageState} />
+        : result.section === 'delivery' && hasPageState
+          ? <p>此页仅为历史正文片段，无法单独核对交付说明；正文未显示，请结合完整记录核对。</p>
+          : <pre className={bodyClass}>{text(content, 8000) || '（空正文）'}</pre>}
       <p>本页字符：{result.offset as number} 至 {end} · 历史正文共 {result.total_chars as number} 字符</p>
       {result.has_more === true ? <p>历史节选，非全文 · 下一页起点 {result.next_offset as number}。</p>
         : <p>{result.offset === 0 ? '已到历史正文末页。' : '末页节选，非全文。'}</p>}

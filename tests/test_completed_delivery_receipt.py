@@ -4,11 +4,14 @@ import copy
 import hashlib
 import io
 import json
+from types import SimpleNamespace
 import unittest
 import zipfile
 
 from cater.events import Actor
 from cater.team import HOST
+from cater.team_delivery import _recorded_finish_arguments
+from cater.workspaces import WorkspaceService
 import test_team_external as external
 import test_team_review_cycle as reviews
 
@@ -415,6 +418,53 @@ class CompletedDeliveryReceiptTests(unittest.TestCase):
         clean = {**original, "handoff": {key: value for key, value in original["handoff"].items() if key != "evidence"}}
         self.assert_rejected(self.finish(clean), before[-1][0])
         self.assert_unchanged(before)
+
+    def test_wrapped_surrogate_request_repeats_only_when_original_arguments_match(self):
+        original = self.arguments(artifact_seqs=[], handoff={"why": ["first", "second"],
+            "reproduce": [], "limits": [], "unknown": "private\ud800"})
+        result = self.finish(original)
+        self.assertEqual((result["status"], result["handoff_status"]), ("ok", "omitted_invalid"))
+        before = self.frozen()
+        started, = [e for e in self.f.events("team.tool_started") if e.payload.get("name") == "finish_work"]
+        self.assertEqual(started.payload["arguments"]["encoding"], "escaped_json")
+        self.assertEqual(_recorded_finish_arguments(started), original)
+        self.assertIs(self.finish(original).get("already_completed"), True)
+        for changed in ({**original, "handoff": {**original["handoff"], "unknown": "private\udfff"}},
+                        {**original, "handoff": {k: v for k, v in original["handoff"].items() if k != "unknown"}},
+                        {**original, "handoff": {**original["handoff"], "why": "first\n\nsecond"}}):
+            with self.subTest(changed=repr(changed)):
+                self.assert_rejected(self.finish(changed), before[-1][0])
+        self.assert_unchanged(before)
+
+    def test_wrapper_decoder_requires_trusted_host_and_exact_host_representation(self):
+        original = self.arguments(artifact_seqs=[], handoff={"why": "ok", "reproduce": [],
+            "limits": [], "unknown": "\ud800"})
+        wrapped = WorkspaceService._public_arguments("finish_work", original)
+        def event(value, *, actor=HOST, kind="team.tool_started", name="finish_work"):
+            return SimpleNamespace(actor=actor, type=kind, payload={"name": name, "arguments": value})
+        self.assertEqual(_recorded_finish_arguments(event(wrapped)), original)
+        self.assertIsNone(_recorded_finish_arguments(event(wrapped, actor=Actor.human())))
+        self.assertIsNone(_recorded_finish_arguments(event(wrapped, kind="team.tool_finished")))
+        self.assertIsNone(_recorded_finish_arguments(event(wrapped, name="other")))
+        plain = self.arguments(handoff={"why": "ok", "reproduce": [], "limits": [],
+            "encoding": "escaped_json", "json": wrapped["json"]})
+        self.assertEqual(_recorded_finish_arguments(event(plain)), plain)
+        for fake in ({"encoding": "escaped_json", "json": "{"},
+                     {"encoding": "escaped_json", "json": "[]"},
+                     {"encoding": "escaped_json", "json": json.dumps(self.arguments())},
+                     {"encoding": "escaped_json", "json": '{"summary":"a","summary":"b"}'},
+                     {"encoding": "escaped_json", "json": wrapped["json"] + " "},
+                     WorkspaceService._public_arguments("finish_work", {**original, "unexpected": "x"})):
+            with self.subTest(value=repr(fake)[:80]):
+                self.assertIsNone(_recorded_finish_arguments(event(fake)))
+        # A user-controlled wrapper-shaped object with extra keys stays an ordinary request.
+        lookalike = {**wrapped, "summary": "ordinary", "verification": "ordinary"}
+        self.assertEqual(_recorded_finish_arguments(event(lookalike)), lookalike)
+        # A user-supplied top-level wrapper cannot start a successful finish chain.
+        rejected = self.finish(wrapped)
+        self.assertEqual(rejected["status"], "error")
+        self.assertEqual(rejected["code"], "invalid_arguments")
+        self.assertEqual(self.f.events("team.objective_completed"), [])
 
     def test_accepted_native_delivery_keeps_receipt_after_a_correctable_read_error(self):
         f = self.f

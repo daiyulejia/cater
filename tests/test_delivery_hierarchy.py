@@ -193,9 +193,25 @@ class DeliveryHierarchyTests(unittest.TestCase):
         self.assertEqual(note["properties"]["command_receipts"]["maxItems"], 4)
         self.assertEqual(note["properties"]["command_receipts"]["items"], {"type": "integer", "minimum": 1})
         self.assertEqual(note["properties"]["why"]["maxLength"], 4000)
+        string, paragraphs = note["properties"]["why"]["oneOf"]
+        self.assertEqual(string, {"type": "string", "maxLength": 4000})
+        self.assertEqual(paragraphs, {"type": "array", "minItems": 1, "maxItems": 12,
+                                      "items": {"type": "string", "minLength": 1, "maxLength": 4000}})
+        self.assertNotIn("type", note["properties"]["why"])
         self.assertEqual(note["properties"]["reproduce"]["maxItems"], 12)
         self.assertEqual(note["properties"]["reproduce"]["items"]["maxLength"], 1000)
         self.assertEqual(note["properties"]["evidence"]["maxItems"], 16)
+
+    def test_why_string_and_paragraphs_both_deliver_on_native_and_external_paths(self):
+        for mode in ("native", "external"):
+            for why, expected in (("原来的说明", "原来的说明"),
+                                  (["第一段 🐾", "第二段"], "第一段 🐾\n\n第二段")):
+                with self.subTest(mode=mode, why=why):
+                    fixture, completion = self.complete(mode, {"summary": "结果", "verification": "未运行",
+                        "handoff": {**self.handoff(), "why": why}})
+                    self.assertNotIn("handoff_status", completion.payload)
+                    self.assertEqual(completion.payload["handoff"]["why"], expected)
+                    self.assertEqual(fixture.rt.team.delivery.read(fixture.task, {})["delivery"]["handoff"]["why"], expected)
 
     def test_updated_skill_is_read_in_full_without_engineering_tools(self):
         fixture = self.fixture("native")

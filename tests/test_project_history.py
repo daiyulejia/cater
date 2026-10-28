@@ -4,16 +4,19 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 from cater.conversations import read_background
 from cater.events import Actor
 from cater.project_history import ProjectHistory, TOOL
+from cater.team_delivery import HANDOFF_OMITTED_WARNING, PARTIAL_HANDOFF_WARNING, REFERENCES_OMITTED_WARNING
 from cater.runtime import Runtime
 from cater.team import HOST
 from test_simple_team import TeamDriver, turn
@@ -486,6 +489,264 @@ class ProjectHistoryTests(unittest.TestCase):
         self.assertEqual(len(self.read_artifact(delivery, artifact)["content"]), 8000)
         self.assertEqual(self.read_artifact(delivery, artifact, offset=len(content))["content"], "")
         self.assert_error(self.read_artifact(delivery, artifact, offset=len(content) + 1))
+
+    def test_partial_handoff_is_discoverable_and_history_reads_only_saved_prose(self):
+        source = self.task(self.project)
+        self.publish(source)
+        value = {"why": ["第一段", "第二段 🐾"], "reproduce": ["Review result"], "limits": ["Not tested"],
+                 "evidence_note": "UNKNOWN_PRIVATE_SECRET", "thinking": {"body": "PRIVATE_BODY"},
+                 "evidence": [{"source_seq": 999999, "quote": "FOREIGN_QUOTE_SECRET"}],
+                 "command_receipts": [999999]}
+        result, = self.exchange(source, ("finish_work", {"summary": "Source delivered", "verification": "Limited",
+                                                        "handoff": value}))
+        self.assertEqual((result["status"], result["handoff_status"]), ("ok", "omitted_invalid"))
+        delivery = self.events(source, "team.objective_completed")[-1]
+        local = self.rt.team.delivery.index(source)
+        self.assertTrue(local["has_handoff_partial"])
+        self.assertFalse(local["has_handoff"])
+        index = self.history.index(self.target)
+        row, = index["entries"]
+        self.assertEqual(row["delivery_seq"], delivery.seq)
+        self.assertTrue(row["has_handoff_partial"])
+        result = self.read(delivery, as_of_seq=index["as_of_seq"], length=16000)
+        body = json.loads(result["content"])
+        self.assertEqual(body["handoff_partial"], delivery.payload["handoff_partial"])
+        self.assertEqual(body["handoff_partial"]["why"], "第一段\n\n第二段 🐾")
+        self.assertEqual(body["handoff_partial"]["evidence"], [])
+        self.assertNotIn("command_receipts", body["handoff_partial"])
+        self.assertEqual(body["handoff_status"], "omitted_invalid")
+        self.assertEqual(body["handoff_warning"], PARTIAL_HANDOFF_WARNING)
+        self.assertTrue(result["historical_only"])
+        pages, offset = [], 0
+        while True:
+            page = self.read(delivery, as_of_seq=index["as_of_seq"], offset=offset, length=53)
+            self.assertEqual((page["handoff_status"], page["handoff_warning"]),
+                             ("omitted_invalid", PARTIAL_HANDOFF_WARNING))
+            self.assertEqual((page["source"]["delivery_seq"], page["source"]["delivery_hash"]),
+                             (delivery.seq, delivery.hash))
+            self.assertEqual((page["as_of_seq"], page["as_of_hash"]),
+                             (index["as_of_seq"], index["as_of_hash"]))
+            pages.append(page["content"])
+            if not page["has_more"]:
+                break
+            offset = page["next_offset"]
+        self.assertEqual("".join(pages), result["content"])
+        public = json.dumps({"index": index, "result": result}, ensure_ascii=False)
+        for secret in ("evidence_note", "UNKNOWN_PRIVATE_SECRET", "PRIVATE_BODY", "FOREIGN_QUOTE_SECRET"):
+            self.assertNotIn(secret, public)
+        outside = self.task(self.rt.rulebook.create_project("Different project")["id"])
+        self.assert_error(self.read(delivery, task=outside))
+        self.update(source, "A newer goal")
+        self.assertEqual(self.read(delivery, as_of_seq=index["as_of_seq"], length=16000)["content"], result["content"])
+
+    def test_legacy_omission_warnings_survive_every_delivery_page(self):
+        cases = [
+            ("omitted_invalid", HANDOFF_OMITTED_WARNING,
+             {"why": [], "reproduce": [], "limits": []}),
+            ("references_omitted_invalid", REFERENCES_OMITTED_WARNING,
+             {"why": "Valid explanation", "reproduce": [], "limits": [],
+              "evidence": [{"source_seq": 999999, "quote": "PRIVATE_BAD_QUOTE"}]}),
+        ]
+        outside = self.task(self.rt.rulebook.create_project("Other project")["id"])
+        for status, warning, handoff in cases:
+            with self.subTest(status=status):
+                source = self.task(self.project)
+                artifact = self.publish(source)
+                result, = self.exchange(source, ("finish_work", {"summary": "Long " + "中🐾" * 700,
+                    "verification": "Limited", "handoff": handoff}))
+                self.assertEqual((result["handoff_status"], result["handoff_warning"]), (status, warning))
+                delivery = self.events(source, "team.objective_completed")[-1]
+                read = self.rt.team.delivery.read(source, {"delivery_seq": delivery.seq})["delivery"]
+                self.assertEqual((read["handoff_status"], read["handoff_warning"]), (status, warning))
+                self.assertIn(warning, self.rt.team.delivery.markdown(delivery))
+                index = self.history.index(self.target)
+                as_of = index["as_of_seq"]
+                pieces, offset = [], 0
+                while True:
+                    page = self.read(delivery, as_of_seq=as_of, offset=offset, length=73)
+                    self.assertEqual((page["handoff_status"], page["handoff_warning"]), (status, warning))
+                    self.assertEqual((page["source"]["delivery_seq"], page["source"]["delivery_hash"]),
+                                     (delivery.seq, delivery.hash))
+                    self.assertEqual((page["as_of_seq"], page["as_of_hash"]), (as_of, index["as_of_hash"]))
+                    pieces.append(page["content"])
+                    if not page["has_more"]:
+                        break
+                    offset = page["next_offset"]
+                body = json.loads("".join(pieces))
+                self.assertEqual((body["handoff_status"], body["handoff_warning"]), (status, warning))
+                self.assertNotIn("PRIVATE_BAD_QUOTE", json.dumps(body))
+                if status == "omitted_invalid":
+                    self.assertNotIn("handoff", body)
+                else:
+                    self.assertEqual(body["handoff"]["evidence"], [])
+                unauthorized = self.read(delivery, task=outside)
+                self.assert_error(unauthorized)
+                self.assertNotIn("handoff_status", unauthorized)
+                self.assertNotIn("handoff_warning", unauthorized)
+                artifact_page = self.read_artifact(delivery, artifact, as_of_seq=as_of)
+                self.assertNotIn("handoff_status", artifact_page)
+                self.assertNotIn("handoff_warning", artifact_page)
+
+    def test_unrecognized_or_malformed_history_warnings_are_not_projected(self):
+        malformed = [
+            {"handoff_status": "UNKNOWN_PRIVATE_STATUS", "handoff_warning": HANDOFF_OMITTED_WARNING},
+            {"handoff_status": "omitted_invalid", "handoff_warning": "PRIVATE_WARNING"},
+            {"handoff_status": "omitted_invalid", "handoff_warning": "x" * 10000},
+            {"handoff_status": "omitted_invalid", "handoff_warning": None},
+            {"handoff_status": "omitted_invalid", "handoff_warning": REFERENCES_OMITTED_WARNING},
+            {"handoff_status": "references_omitted_invalid", "handoff_warning": REFERENCES_OMITTED_WARNING},
+            {"handoff_status": "references_omitted_invalid", "handoff_warning": REFERENCES_OMITTED_WARNING,
+             "handoff": {"why": "PRIVATE_FORGED_BODY", "evidence": [{"quote": "PRIVATE_FORGED_QUOTE"}]}},
+            {"handoff_status": "omitted_invalid", "handoff_warning": PARTIAL_HANDOFF_WARNING,
+             "handoff_partial": {"why": "PRIVATE_PARTIAL"}},
+        ]
+        for fields in malformed:
+            with self.subTest(fields=repr(fields)[:100]):
+                source = self.task(self.project)
+                delivery = self.candidate(source, changes=fields)
+                page = self.read(delivery, length=16000)
+                self.assertEqual(page["status"], "ok")
+                self.assertNotIn("handoff_status", page)
+                self.assertNotIn("handoff_warning", page)
+                body = json.loads(page["content"])
+                self.assertNotIn("handoff_status", body)
+                self.assertNotIn("handoff_warning", body)
+                self.assertNotIn("handoff", body)
+                self.assertNotIn("handoff_partial", body)
+                self.assertNotIn("PRIVATE_", json.dumps(page))
+        source = self.task(self.project)
+        forged = self.candidate(source, actor=Actor.human(), changes={"handoff_status": "omitted_invalid",
+                                                                       "handoff_warning": HANDOFF_OMITTED_WARNING})
+        self.assert_error(self.read(forged))
+
+    def test_reference_omission_history_removes_contradictory_evidence_and_commands(self):
+        source = self.task(self.project)
+        raw_handoff = {"version": 1, "why": "Some explanation", "changed": ["One change"], "impact": [],
+            "alternatives": [], "reproduce": ["One step"], "limits": ["Limited"],
+            "evidence": [{"source_seq": 42, "quote": "PRIVATE_CONTRADICTORY_QUOTE"}],
+            "command_receipts": [{"source_seq": 43, "stdout": "PRIVATE_COMMAND_OUTPUT"}],
+            "unknown_field": "PRIVATE_UNKNOWN_VALUE"}
+        delivery = self.candidate(source, changes={"handoff_status": "references_omitted_invalid",
+            "handoff_warning": REFERENCES_OMITTED_WARNING, "handoff": raw_handoff})
+        original = copy.deepcopy(delivery.payload)
+        index = self.history.index(self.target)
+        pages, offset = [], 0
+        while True:
+            page = self.read(delivery, as_of_seq=index["as_of_seq"], offset=offset, length=53)
+            self.assertEqual((page["handoff_status"], page["handoff_warning"]),
+                             ("references_omitted_invalid", REFERENCES_OMITTED_WARNING))
+            self.assertEqual((page["source"]["delivery_seq"], page["source"]["delivery_hash"]),
+                             (delivery.seq, delivery.hash))
+            pages.append(page["content"])
+            if not page["has_more"]:
+                break
+            offset = page["next_offset"]
+        body = json.loads("".join(pages))
+        self.assertEqual(body["handoff"]["why"], raw_handoff["why"])
+        self.assertEqual(body["handoff"]["changed"], raw_handoff["changed"])
+        self.assertEqual(list(body["handoff"]), ["version", "why", "changed", "impact", "alternatives",
+                                                  "reproduce", "limits", "evidence"])
+        self.assertEqual(body["handoff"]["evidence"], [])
+        self.assertNotIn("command_receipts", body["handoff"])
+        self.assertNotIn("unknown_field", body["handoff"])
+        for secret in ("PRIVATE_CONTRADICTORY_QUOTE", "PRIVATE_COMMAND_OUTPUT", "PRIVATE_UNKNOWN_VALUE"):
+            self.assertNotIn(secret, "".join(pages))
+        self.assertEqual(self.events(source, "team.objective_completed")[-1].payload, original)
+        self.assertEqual(delivery.payload, original)
+        self.assertTrue(self.rt.verify_chain().ok)
+        with Runtime(self.database, roles_path=self.roles, drivers={"team_test": self.driver}) as reopened:
+            after_restart = ProjectHistory(reopened.team).read(self.target, {"section": "delivery",
+                "delivery_seq": delivery.seq, "as_of_seq": index["as_of_seq"], "length": 16000})
+            self.assertEqual(after_restart["content"], "".join(pages))
+
+    def test_reference_omission_is_consistent_in_read_archive_and_restart(self):
+        source = self.task(self.project)
+        artifact = self.publish(source)
+        handoff = {"version": 1, "why": "Public reason", "changed": ["Public change"], "impact": [],
+            "alternatives": [], "reproduce": ["Public step"], "limits": ["Public limit"],
+            "evidence": [{"kind": "artifact", "source_seq": artifact.seq, "quote": "PRIVATE_QUOTE"}],
+            "command_receipts": [{"source_seq": 9, "stdout": "PRIVATE_COMMAND"}],
+            "unknown_field": "PRIVATE_UNKNOWN"}
+        refs = [{key: artifact.payload[key] for key in ("filename", "content_sha256")} | {"seq": artifact.seq}]
+        delivery = self.candidate(source, changes={"artifacts": refs, "handoff_status": "references_omitted_invalid",
+            "handoff_warning": REFERENCES_OMITTED_WARNING, "handoff": handoff})
+        original = copy.deepcopy(delivery.payload)
+
+        def check(runtime):
+            read = runtime.team.delivery.read(source, {"delivery_seq": delivery.seq})["delivery"]
+            self.assertEqual((read["handoff_status"], read["handoff_warning"]),
+                             ("references_omitted_invalid", REFERENCES_OMITTED_WARNING))
+            self.assertEqual(read["handoff"]["why"], "Public reason")
+            self.assertEqual(read["handoff"]["evidence"], [])
+            self.assertNotIn("command_receipts", read["handoff"])
+            self.assertNotIn("unknown_field", read["handoff"])
+            with zipfile.ZipFile(io.BytesIO(runtime.team.archive(source, expected_delivery_seq=delivery.seq))) as archive:
+                markdown = archive.read("__cater__/交付说明.md").decode("utf-8")
+                self.assertEqual(archive.read("result.txt"), b"Frozen source file\n")
+            self.assertIn("Public reason", markdown)
+            self.assertIn(REFERENCES_OMITTED_WARNING, markdown)
+            for private in ("PRIVATE_QUOTE", "PRIVATE_COMMAND", "PRIVATE_UNKNOWN"):
+                self.assertNotIn(private, json.dumps(read))
+                self.assertNotIn(private, markdown)
+            self.assertEqual(self.events(source, "team.objective_completed")[-1].payload, original)
+            return read, markdown
+
+        before = check(self.rt)
+        with Runtime(self.database, roles_path=self.roles, drivers={"team_test": self.driver}) as reopened:
+            self.assertEqual(check(reopened), before)
+        self.assertEqual(delivery.payload, original)
+        self.assertTrue(self.rt.verify_chain().ok)
+
+    def test_contradictory_or_unrecognized_status_never_exposes_notes(self):
+        handoff = {"version": 1, "why": "PRIVATE_PROSE", "changed": [], "impact": [],
+            "alternatives": [], "reproduce": [], "limits": [],
+            "evidence": [{"kind": "artifact", "quote": "PRIVATE_QUOTE"}]}
+        cases = [
+            {"handoff_status": "omitted_invalid", "handoff_warning": HANDOFF_OMITTED_WARNING},
+            {"handoff_status": "omitted_invalid", "handoff_warning": PARTIAL_HANDOFF_WARNING,
+             "handoff_partial": {**handoff, "evidence": []}},
+            {"handoff_status": "references_omitted_invalid", "handoff_warning": "PRIVATE_WARNING"},
+            {"handoff_status": "PRIVATE_STATUS", "handoff_warning": REFERENCES_OMITTED_WARNING},
+            {"handoff_warning": "PRIVATE_WARNING"},
+            {"handoff_status": "references_omitted_invalid"},
+        ]
+        for fields in cases:
+            with self.subTest(fields=fields):
+                source = self.task(self.project)
+                artifact = self.publish(source)
+                refs = [{key: artifact.payload[key] for key in ("filename", "content_sha256")} | {"seq": artifact.seq}]
+                delivery = self.candidate(source, changes={"artifacts": refs, "handoff": handoff, **fields})
+                original = copy.deepcopy(delivery.payload)
+                read = self.rt.team.delivery.read(source, {"delivery_seq": delivery.seq})["delivery"]
+                for key in ("handoff", "handoff_partial", "handoff_status", "handoff_warning"):
+                    self.assertNotIn(key, read)
+                self.assertFalse(self.rt.team.delivery.index(source)["has_handoff"])
+                page = self.read(delivery, length=16000)
+                self.assertNotIn("PRIVATE_", json.dumps(page))
+                with zipfile.ZipFile(io.BytesIO(self.rt.team.archive(source, expected_delivery_seq=delivery.seq))) as archive:
+                    self.assertNotIn("__cater__/交付说明.md", archive.namelist())
+                self.assertEqual(self.events(source, "team.objective_completed")[-1].payload, original)
+        self.assertTrue(self.rt.verify_chain().ok)
+        with Runtime(self.database, roles_path=self.roles, drivers={"team_test": self.driver}) as reopened:
+            read = reopened.team.delivery.read(source, {"delivery_seq": delivery.seq})["delivery"]
+            for key in ("handoff", "handoff_partial", "handoff_status", "handoff_warning"):
+                self.assertNotIn(key, read)
+            with zipfile.ZipFile(io.BytesIO(reopened.team.archive(source, expected_delivery_seq=delivery.seq))) as archive:
+                self.assertNotIn("__cater__/交付说明.md", archive.namelist())
+
+    def test_forged_partial_shape_is_not_projected_into_history(self):
+        source = self.task(self.project)
+        forged = {"version": 1, "why": "visible", "changed": [], "impact": [], "alternatives": [],
+                  "reproduce": [], "limits": [], "evidence": [{"quote": "PRIVATE_FORGED_QUOTE"}],
+                  "private": "PRIVATE_FORGED_BODY"}
+        delivery = self.candidate(source, changes={"handoff_status": "omitted_invalid",
+            "handoff_warning": PARTIAL_HANDOFF_WARNING, "handoff_partial": forged})
+        index = self.history.index(self.target)
+        self.assertNotIn("has_handoff_partial", index["entries"][0])
+        data = json.loads(self.read(delivery, length=16000)["content"])
+        self.assertNotIn("handoff_partial", data)
+        self.assertNotIn("handoff_warning", data)
+        self.assertNotIn("PRIVATE_FORGED", json.dumps(data))
 
     def test_manifest_membership_and_event_bytes_not_disk_control_artifact_reads(self):
         source = self.task(self.project)

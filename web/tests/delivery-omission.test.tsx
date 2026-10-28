@@ -51,14 +51,15 @@ test.each([false, true])('无新字段的旧回执保持原行为：handoff=%s',
 })
 
 test('旧详情与可选 handoff 警告不被新说明取代', () => {
-  const evidence = completion({ handoff_status: 'omitted_invalid', handoff_warning: '原有说明省略警告' })
+  const warning = '可选交付说明未通过校验，未保存；主要交付结论与成果已保留。'
+  const evidence = completion({ handoff_status: 'omitted_invalid', handoff_warning: warning })
   const { rerender } = render(<MessageDetails item={itemFor(evidence, { details: ['原有详情'] })} />)
   expect(screen.getByText('查看判断与依据')).toBeTruthy()
   expect(screen.getByText('原有详情')).toBeTruthy()
-  expect(screen.getByText('可选交付说明：原有说明省略警告')).toBeTruthy()
+  expect(screen.getByText(`可选交付说明：${warning}`)).toBeTruthy()
   rerender(<MessageDetails item={itemFor({ ...evidence, payload: { ...evidence.payload, omitted_approved_artifacts_reason: reason } })} />)
   expect(screen.getByText('查看判断与依据')).toBeTruthy()
-  expect(screen.getByText('可选交付说明：原有说明省略警告')).toBeTruthy()
+  expect(screen.getByText(`可选交付说明：${warning}`)).toBeTruthy()
   expect(screen.getByText(reason)).toBeTruthy()
 })
 

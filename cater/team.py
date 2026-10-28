@@ -21,7 +21,7 @@ from .events import Actor, Event
 from .drivers import DriverProtocolError, tool_failure_diagnostics, tool_protocol_error_usage
 from .room_dialogue import addressed_role
 from .team_recovery import RECOVERY_CONTRACT, TeamRecovery, _same_scope
-from .team_delivery import HandoffError, REFERENCES_OMITTED_WARNING, TeamDelivery, handoff_schema, omission_reason
+from .team_delivery import HandoffError, HANDOFF_OMITTED_WARNING, PARTIAL_HANDOFF_WARNING, REFERENCES_OMITTED_WARNING, TeamDelivery, handoff_schema, omission_reason
 from .team_browser import BROWSER_CONTRACT, TeamBrowser, browser_schema
 from .team_context import history_window, json_bytes, model_context, model_json
 from .team_pending_display import display_pending, pending_counts
@@ -1633,8 +1633,14 @@ class TeamService:
                         payload["handoff"] = self.delivery.normalize_without_references(task_id, arguments["handoff"],
                             artifacts=payload["artifacts"], revision=current_work["revision"])
                     except HandoffError:
-                        omitted = {"handoff_status": "omitted_invalid",
-                                   "handoff_warning": "可选交付说明未通过校验，未保存；主要交付结论与成果已保留。"}
+                        omitted = {"handoff_status": "omitted_invalid", "handoff_warning": HANDOFF_OMITTED_WARNING}
+                        try:
+                            payload["handoff_partial"] = self.delivery.normalize_partial(task_id, arguments["handoff"],
+                                artifacts=payload["artifacts"], revision=current_work["revision"])
+                        except HandoffError:
+                            pass
+                        else:
+                            omitted["handoff_warning"] = PARTIAL_HANDOFF_WARNING
                     else:
                         omitted = {"handoff_status": "references_omitted_invalid",
                                    "handoff_warning": REFERENCES_OMITTED_WARNING}

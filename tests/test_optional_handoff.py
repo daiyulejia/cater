@@ -8,7 +8,7 @@ from unittest.mock import patch
 import zipfile
 
 from cater.events import Actor
-from cater.team_delivery import HandoffError, HOST, REFERENCES_OMITTED_WARNING
+from cater.team_delivery import HandoffError, HOST, PARTIAL_HANDOFF_WARNING, REFERENCES_OMITTED_WARNING
 import test_simple_team
 import test_team_handoff
 import test_team_review_cycle
@@ -273,6 +273,134 @@ class OptionalHandoffTests(unittest.TestCase):
             result = self.finish(self.handoff())
         self.assertEqual(result["status"], "error")
         self.assertEqual(self.events("team.objective_completed"), [])
+
+
+class PartialHandoffTests(unittest.TestCase):
+    setUp = test_team_handoff.TeamHandoffTests.setUp
+    events = test_team_handoff.TeamHandoffTests.events
+    run_ok = test_team_handoff.TeamHandoffTests.run_ok
+    artifact = test_team_handoff.TeamHandoffTests.artifact
+    refs = test_team_handoff.TeamHandoffTests.refs
+    handoff = test_team_handoff.TeamHandoffTests.handoff
+    normalize = test_team_handoff.TeamHandoffTests.normalize
+    finish = test_team_handoff.TeamHandoffTests.finish
+    receipt = test_team_handoff.TeamHandoffTests.receipt
+
+    def test_why_paragraphs_keep_order_and_existing_normalized_shape(self):
+        artifact = self.artifact("a real source")
+        value = self.handoff([{"source_seq": artifact.seq, "quote": "a real source"}])
+        value["why"] = [" 第一段 🐾 ", "第二段\n原有换行"]
+        result = self.finish(value)
+        self.assertEqual(result["status"], "ok")
+        completed, = self.events("team.objective_completed")
+        note = completed.payload["handoff"]
+        self.assertEqual(note["why"], "第一段 🐾 \n\n第二段\n原有换行")
+        self.assertEqual(note["evidence"][0]["quote"], "a real source")
+        self.assertNotIn("handoff_status", completed.payload)
+        self.assertNotIn("handoff_partial", completed.payload)
+
+    def test_why_array_bounds_and_unicode_are_validated(self):
+        self.artifact()
+        value = self.handoff()
+        value["why"] = ["🐾" * 1999, "中" * 1999]
+        self.assertEqual(len(self.normalize(value)["why"]), 4000)
+        invalid = [[], [" "] , ["ok", ""], ["ok", True], ["ok", {"text": "x"}],
+                   ["x"] * 13, ["x" * 4001], ["x" * 2000, "y" * 1999], ["\ud800"]]
+        for why in invalid:
+            with self.subTest(why=repr(why)[:40]), self.assertRaises(HandoffError):
+                self.normalize({**value, "why": why})
+
+    def test_partial_preserves_only_valid_prose_without_sources_or_unknown_fields(self):
+        artifact = self.artifact("VALID_SOURCE_SECRET")
+        receipt = self.receipt()
+        other = self.rt.create_task("Foreign fixture")
+        foreign = self.artifact("FOREIGN_BODY_SECRET", task=other)
+        note = {**self.handoff(), "why": ["第一段 🐾", "第二段"],
+                "changed": ["只保留说明"], "evidence_note": "UNKNOWN_PRIVATE_SECRET",
+                "thinking": {"secret": "PRIVATE_NESTED_SECRET"},
+                "evidence": [{"source_seq": artifact.seq, "quote": "VALID_SOURCE_SECRET"},
+                             {"source_seq": foreign.seq, "quote": "FOREIGN_BODY_SECRET"}],
+                "command_receipts": [receipt.seq]}
+        original = copy.deepcopy(note)
+        result = self.finish(note)
+        self.assertEqual(note, original)
+        self.assertEqual(PARTIAL_HANDOFF_WARNING, "仅保存部分内容；其他内容和引用未保存，请结合记录核对。")
+        self.assertEqual((result["status"], result["handoff_status"], result["handoff_warning"]),
+                         ("ok", "omitted_invalid", PARTIAL_HANDOFF_WARNING))
+        completed, = self.events("team.objective_completed")
+        self.assertNotIn("handoff", completed.payload)
+        partial = completed.payload["handoff_partial"]
+        self.assertEqual(partial["why"], "第一段 🐾\n\n第二段")
+        self.assertEqual(partial["evidence"], [])
+        self.assertNotIn("command_receipts", partial)
+        self.assertEqual(completed.payload["handoff_warning"], PARTIAL_HANDOFF_WARNING)
+        saved = self.rt.team.delivery.read(self.task, {})["delivery"]
+        self.assertEqual(saved["handoff_partial"], partial)
+        markdown = self.rt.team.delivery.markdown(completed)
+        self.assertIn("说明不完整", markdown)
+        self.assertIn(PARTIAL_HANDOFF_WARNING, markdown)
+        self.assertIn("第一段 🐾\n\n第二段", markdown)
+        with zipfile.ZipFile(io.BytesIO(self.rt.team.archive(self.task,
+                expected_delivery_seq=completed.seq))) as archive:
+            self.assertEqual(archive.read("__cater__/交付说明.md").decode(), markdown)
+        public = json.dumps({"result": result, "delivery": saved, "markdown": markdown}, ensure_ascii=False)
+        for secret in ("evidence_note", "UNKNOWN_PRIVATE_SECRET", "thinking", "PRIVATE_NESTED_SECRET",
+                       "VALID_SOURCE_SECRET", "FOREIGN_BODY_SECRET"):
+            self.assertNotIn(secret, public)
+        # The original tool-start event remains a separate record; it is not redacted here.
+        started, = [e for e in self.events("team.tool_started") if e.payload["name"] == "finish_work"]
+        self.assertEqual(started.payload["arguments"]["handoff"], original)
+        self.assertTrue(self.rt.verify_chain().ok)
+
+    def test_partial_requires_valid_complete_known_body_and_budget(self):
+        self.artifact()
+        good = {**self.handoff(), "extra_private": "UNKNOWN_SECRET"}
+        cases = [
+            {k: v for k, v in good.items() if k != "limits"},
+            {**good, "why": []}, {**good, "why": ["valid", False]},
+            {**good, "why": ["x" * 2000, "y" * 1999]},
+            {**good, "changed": [" "]}, {**good, "limits": "invalid"},
+            {**good, "changed": ["中" * 1000] * 12},
+        ]
+        for value in cases:
+            with self.subTest(value=repr(value)[:80]):
+                with self.assertRaises(HandoffError):
+                    self.rt.team.delivery.normalize_partial(self.task, value, artifacts=[], revision=0)
+        result = self.finish(cases[-1])
+        completed, = self.events("team.objective_completed")
+        self.assertEqual(result["handoff_status"], "omitted_invalid")
+        self.assertNotIn("handoff_partial", completed.payload)
+        self.assertNotIn("UNKNOWN_SECRET", json.dumps(completed.payload, ensure_ascii=False))
+
+    def test_partial_budget_checks_exact_serialized_utf8_boundary(self):
+        self.artifact()
+        value = {**self.handoff(), "why": "中", "changed": ["a" * 1000] * 12,
+                 "impact": ["b" * 1000] * 11, "unknown": "PRIVATE_SECRET"}
+        base = {k: v for k, v in value.items() if k != "unknown"}
+        size = len(json.dumps(self.normalize(base), ensure_ascii=False).encode("utf-8"))
+        padding = 24000 - size
+        self.assertTrue(0 < padding < 3999)
+        value["why"] += "x" * padding
+        partial = self.rt.team.delivery.normalize_partial(self.task, value, artifacts=self.refs(), revision=0)
+        self.assertEqual(len(json.dumps(partial, ensure_ascii=False).encode("utf-8")), 24000)
+        with self.assertRaises(HandoffError):
+            self.rt.team.delivery.normalize_partial(self.task, {**value, "why": value["why"] + "x"},
+                                                    artifacts=self.refs(), revision=0)
+
+    def test_partial_repeat_is_frozen_and_different_request_cannot_replace_it(self):
+        self.artifact()
+        value = {**self.handoff(), "why": ["原因一", "原因二"], "evidence_note": "private"}
+        first = self.finish(value)
+        completed, = self.events("team.objective_completed")
+        saved = copy.deepcopy(completed.payload)
+        self.assertEqual(first["handoff_status"], "omitted_invalid")
+        with patch.object(self.rt.team.delivery, "normalize", side_effect=AssertionError("Unexpected retry")):
+            same = self.finish(value)
+            different = self.finish({**value, "why": ["不同原因"]})
+        self.assertTrue(same["already_completed"])
+        self.assertEqual(different["code"], "delivery_already_completed")
+        self.assertEqual([event.payload for event in self.events("team.objective_completed")], [saved])
+        self.assertEqual(self.rt.team.delivery.read(self.task, {})["delivery"]["handoff_partial"], saved["handoff_partial"])
 
 
 class OptionalHandoffGateTests(unittest.TestCase):

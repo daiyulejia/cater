@@ -11,6 +11,7 @@ from .artifacts import safe_filename
 from .events import Actor, GENESIS_HASH
 from .json_fields import UNAMBIGUOUS_OBJECT_SQL
 from .tool_protocol import json_utf8
+from .team_delivery import saved_handoff_projection, saved_handoff_warning
 from .workspace_archive import MAX_ARCHIVE_BYTES, portable_path, validate_manifest
 
 
@@ -245,6 +246,8 @@ class ProjectHistory:
                             "summary_excerpt": summary, "summary_truncated": summary_cut,
                             "artifact_count": len(row["artifacts"]), "artifacts": row["artifacts"][:3],
                             "artifacts_truncated": len(row["artifacts"]) > 3, "verification_kind": "manager_declared"}
+            if "handoff_partial" in saved_handoff_projection(event.payload):
+                entry["has_handoff_partial"] = True
             if len(json_utf8([*entries, entry])) > MAX_INDEX_BYTES - 2048:
                 break
             entries.append(entry)
@@ -289,9 +292,13 @@ class ProjectHistory:
             event = selected["event"]
             source = {"project_id": catalog["project_id"], "task_id": event.task_id,
                       "delivery_seq": event.seq, "delivery_hash": event.hash}
+            warning = None
             if section == "delivery":
+                projection = saved_handoff_projection(event.payload)
+                warning = saved_handoff_warning(event.payload)
                 content = json_utf8({"objective": selected["objective"], "artifacts": selected["artifacts"],
-                    **{k: event.payload[k] for k in ("summary", "verification", "handoff") if k in event.payload}},
+                    **{k: event.payload[k] for k in ("summary", "verification") if k in event.payload},
+                    **projection},
                     allow_nan=False).decode("utf-8")
             else:
                 ref = next((row for row in selected["artifacts"] if row["seq"] == arguments["artifact_seq"]), None)
@@ -316,7 +323,8 @@ class ProjectHistory:
             return {"status": "ok", "complete": True, "section": section, "historical_only": True,
                     **{k: catalog[k] for k in ("as_of_seq", "as_of_hash")}, "source": source,
                     "content": content[offset:end], "offset": offset, "total_chars": len(content),
-                    "next_offset": end if end < len(content) else None, "has_more": end < len(content), "note": NOTE}
+                    "next_offset": end if end < len(content) else None, "has_more": end < len(content),
+                    **(warning or {}), "note": NOTE}
         except _ScopeChanged:
             return _rejected("project_history_scope_changed")
         except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
