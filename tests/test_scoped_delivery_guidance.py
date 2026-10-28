@@ -113,10 +113,16 @@ class ScopedDeliveryGuidanceTests(unittest.TestCase):
                     worker = self.first_input(mode, worker=True, leader_id=leader_id)
                     self.assertEqual(manager[1]["you"]["id"], leader_id)
                     self.assertIn(guidance.MANAGER, manager[0])
-                    for clause in ("委托完整结果", "负责人组织实现、打包、独立复核和返修",
-                                   "伙伴直接往返", "局部协作按实际范围"):
+                    for clause in ("委托写清完整交付", "负责人协调复核、返修的职责",
+                                   "按需让伙伴直接往返"):
                         self.assertIn(clause, manager[0])
                         self.assertNotIn(clause, worker[0])
+                    for prompt in (manager[0], worker[0]):
+                        self.assertIn("局部委托按实际范围", prompt)
+                    for clause in ("对委托的完整结果负责", "需协作时直接交接并收回反馈",
+                                   "完成后交回委托人"):
+                        self.assertIn(clause, worker[0])
+                        self.assertNotIn(clause, manager[0])
                     self.assertIn("店长（角色ID：", worker[0])
                     self.assertIn(guidance.PARTNER, worker[0])
                     self.assertNotIn("【店长职责】", worker[0])
