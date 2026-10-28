@@ -109,6 +109,8 @@ class TeamExternal:
         stop_kind, delivered_text = None, ""
         settled_review_seq = None
         public_chars = 0
+        last_public_text = ""
+        plain_wait_reply = False
         calls = 0
         admission_blocked = False
         last_check = 0.0
@@ -183,16 +185,16 @@ class TeamExternal:
                 last_check = now
 
             def execute(call):
-                nonlocal revision, calls, stop_kind, awaiting_customer, last_scope, delivered_text, public_chars
-                nonlocal settled_review_seq
+                nonlocal revision, calls, stop_kind, awaiting_customer, last_scope, delivered_text
+                nonlocal settled_review_seq, plain_wait_reply
                 check(force=True)
-                if call.name == REPLY:
-                    public = run.state.text
-                    if public[public_chars:].strip():
-                        self.rt.log.emit(type="msg.said", actor=Actor.agent(role.id, role.role), task_id=task_id,
-                            payload={"text": public[public_chars:], "phase": "team", "run_id": started.payload["run_id"],
-                                     "reply_to": message.seq, "response_kind": "progress", "audience": "team"})
-                    public_chars = len(public)
+                # A plain answer followed only by wait remains a legacy reply.
+                # Tool-led work has explicit progress and reply/delivery channels.
+                from .team_reply import customer_source
+                plain_wait_reply = (call.name == "wait_for_reply" and calls == 0 and assignment is None
+                                    and customer_source(self.team, task_id, message, role) is not None)
+                if not plain_wait_reply:
+                    save_progress()
                 _, result = self.team._dispatch_tool(task_id, message, role, started, revision,
                     call, tools, workspace, binding, context, assignment,
                     external_started_seq=attempt.seq)
@@ -234,6 +236,25 @@ class TeamExternal:
                     run.revoke_tools()
                 return result
 
+            def save_progress():
+                nonlocal public_chars, last_public_text
+                public = run.state.text
+                text = public[public_chars:]
+                # Check and append under one write transaction: a pause,
+                # replacement objective or withdrawn assignment wins the race.
+                with self.rt.log.atomic():
+                    # A committed review handoff stays a valid text settlement
+                    # even if later client cleanup changes the run status.
+                    verify_scope(settled_review_seq=settled_review_seq)
+                    if text.strip():
+                        self.rt.log.emit(type="msg.said", actor=Actor.agent(role.id, role.role), task_id=task_id,
+                            payload={"text": text, "phase": "team", "run_id": started.payload["run_id"],
+                                     "reply_to": message.seq, "response_kind": "progress", "audience": "team",
+                                     "revision": revision})
+                if text.strip():
+                    last_public_text = text
+                public_chars = len(public)
+
             check(force=True)
             attempt = self.team.external_runs.begin(task_id, role, started, basis=basis,
                 binding=binding, tool_names=[tool["name"] for tool in tools],
@@ -259,7 +280,7 @@ class TeamExternal:
                         result = run.run(prompt)
                     terminal = "returned"
                     check(force=True)
-                    final = result.text
+                    final = result.text[public_chars:]
                     if result.stop_reason != "end_turn":
                         status, reason = "interrupted", "外部伙伴本轮未正常完成；已有操作保留，请按回执继续。"
                     elif assignment is not None and stop_kind != "returned":
@@ -385,10 +406,29 @@ class TeamExternal:
                 self.rt._driver_health.record_failure(role.driver)
         finally:
             observe(None)
+            if run is not None and stop_kind not in {"answered", "delivered", "delivery_unchanged"} and (
+                    sys.exception() is not None or status in {"failed", "interrupted"}
+                    or stop_kind in {"waiting", "returned"} and not plain_wait_reply):
+                try:
+                    # Accepted public text can outlive a failed client. Persist
+                    # its unflushed tail, never private thoughts or a new verdict.
+                    save_progress()
+                    # The upstream owner still receives the latest progress in
+                    # its notification; do not publish that text as another reply.
+                    final = last_public_text if status == "waiting" else ""
+                except WorkConflict as exc:
+                    # Earlier committed progress stays; stale late text does not.
+                    status, reason = "interrupted", str(exc)
+                    final = ""
+                except (sqlite3.Error, OSError) as exc:
+                    failure["public_progress_settlement_error"] = type(exc).__name__
+                    status, reason = "interrupted", "公开进展保存未完成；已有工具回执保留，请先核对本轮记录。"
+                    final = ""
             if attempt is not None and run is None:
                 self.team.external_runs.finish(attempt, phase="setup", prompt_attempted=False,
                                                cleanup_complete=True, result="failed")
-        if final.strip() and stop_kind != "answered":
+        if (final.strip() and stop_kind not in {"answered", "returned"}
+                and (stop_kind != "waiting" or plain_wait_reply)):
             if stop_kind == "delivered" and run is not None and not run.state.cleanup_complete:
                 final += "\n\n已发布成果可下载；外部客户端清理尚未确认，需核对进程，不能将本次交付理解为所有执行均已停止。"
             elif stop_kind == "delivery_unchanged" and run is not None and not run.state.cleanup_complete:

@@ -732,7 +732,9 @@ class TeamService:
                     history.append({"seq": e.seq, "sender": e.actor.id, "text": text,
                         "sender_name": name(e.actor.id), "sender_kind": e.actor.kind, "is_you": e.actor.id == role.id,
                         "recipient": e.payload.get("recipient"), "kind": e.payload.get("kind"),
-                        "reply_to": e.payload.get("reply_to"), "audience": e.payload.get("audience")})
+                        "reply_to": e.payload.get("reply_to"), "audience": e.payload.get("audience"),
+                        **{key: e.payload[key] for key in ("response_kind", "revision", "run_id")
+                           if key in e.payload}})
             elif e.type in {"conversation.received", "conversation.finished"}:
                 text = e.payload.get("instruction") or e.payload.get("reply")
                 if text:

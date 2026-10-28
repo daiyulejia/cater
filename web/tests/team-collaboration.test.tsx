@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { beforeEach, expect, test, vi } from 'vitest'
 import App from '../src/App'
 import type { TaskDetail } from '../src/App'
+import { conversationActivity } from '../src/conversationActivityState'
 import type { TeamState } from '../src/team'
 import { teamDeliveries, teamMessageAudience, teamMessageEchoes, teamProgressMessages, teamStatus } from '../src/team'
 
@@ -192,6 +193,148 @@ test('工具调用阶段的对客过程发言归入过程，实际答复保持�
     acknowledgement, event(4, 'team.tool_started', { run_id: 'read', role: 'store_manager', name: 'workspace_read' }), answer]))
   expect(stream().getByText('收到，我先核对文件。').closest('details.team-collaboration')?.open).toBe(false)
   expect(stream().getByText('双击网页文件就能打开。').closest('details.team-collaboration')).toBeNull()
+})
+
+test('同一外部 run 的多段持久进展合为可展开过程，显式顾客答复只显示一次', async () => {
+  const binding = { run_id: 'external-reply', role: 'store_manager', message_seq: 2, revision: 1 }
+  const progress = (seq: number, text: string) => event(seq, 'msg.said', { text, phase: 'team',
+    run_id: binding.run_id, reply_to: 2, revision: 1, audience: 'team', response_kind: 'progress' }, 'store_manager', 'agent')
+  const first = '我先核对本机入口。', second = '入口已找到，继续核对打开步骤。'
+  const events = [
+    event(2, 'team.message_received', { text: '这个网页怎么打开？', recipient: 'store_manager', kind: 'message' }, 'human', 'human'),
+    event(3, 'team.run_started', binding), event(4, 'team.external_run_started', { ...binding, run_started_seq: 3 }),
+    progress(5, first),
+    event(6, 'team.tool_started', { ...binding, name: 'workspace_read', arguments: { path: 'README.md' } }),
+    event(7, 'team.tool_finished', { ...binding, name: 'workspace_read', started_seq: 6, result: { status: 'ok', content: '本机入口说明' } }),
+    progress(8, second),
+  ]
+  const app = await mount(detail(events))
+  const group = stream().getByText('团队协作 · 2 条').closest('details')!
+  expect(group.open).toBe(false)
+  for (const text of [first, second]) expect(stream().getByText(text).closest('details.team-collaboration')).toBe(group)
+  expect(stream().queryByText(/店长最终交付/)).toBeNull()
+
+  const answer = '双击 index.html 即可打开网页。'
+  await app.update(detail([...events,
+    event(9, 'team.tool_started', { ...binding, name: 'reply_to_customer', arguments: { text: answer } }),
+    event(10, 'msg.said', { phase: 'team', run_id: binding.run_id, reply_to: 2, text: answer,
+      response_kind: 'reply', audience: 'customer', recipient: 'human', customer_reply_tool: 'reply_to_customer' }, 'store_manager', 'agent'),
+    event(11, 'team.tool_finished', { ...binding, name: 'reply_to_customer', started_seq: 9,
+      result: { status: 'ok', message_seq: 10, reply_to: 2 } }),
+    event(12, 'team.run_finished', { ...binding, status: 'completed' }),
+  ]))
+  const reply = await stream().findByText(answer)
+  expect(reply.closest('details.team-collaboration')).toBeNull()
+  expect(stream().getAllByText(answer)).toHaveLength(1)
+  expect(stream().queryByText(/店长最终交付/)).toBeNull()
+  expect(stream().getByText('团队协作 · 2 条').closest('details')).toBe(group)
+  expect(group.open).toBe(false)
+  fireEvent.click(within(group).getByText('团队协作 · 2 条'))
+  expect(group.open).toBe(true)
+  for (const text of [first, second]) expect(within(group).getAllByText(text)).toHaveLength(1)
+  expect(within(group).queryByText(answer)).toBeNull()
+  expect(await within(group).findByText('工具过程 · 2 项')).toBeTruthy()
+  expect(screen.getByLabelText('聊天记录').querySelectorAll('details.team-collaboration')).toHaveLength(1)
+  expect(app.fetchMock.mock.calls.filter(([, init]) => init.method === 'POST')).toHaveLength(0)
+})
+
+test.each(['waiting', 'interrupted'])('外部 run 的 %s 尾部进展保留在主聊天折叠组，不计为顾客答复或交付', async status => {
+  const binding = { run_id: 'external-tail', role: 'store_manager', message_seq: 2, revision: 1 }
+  const texts = ['已发起核对，正在等待回执。', '本轮停在这里，核对结果尚未确认。']
+  const progress = (seq: number, text: string) => event(seq, 'msg.said', { text, phase: 'team', run_id: binding.run_id,
+    reply_to: 2, audience: 'team', response_kind: 'progress', revision: 1 }, 'store_manager', 'agent')
+  const events = [
+    event(2, 'team.message_received', { text: '核对后告诉我结果', recipient: 'store_manager', kind: 'message' }, 'human', 'human'),
+    event(3, 'team.run_started', binding), progress(4, texts[0]),
+    event(5, 'team.tool_started', { ...binding, name: 'wait_for_reply' }),
+    event(6, 'team.tool_finished', { ...binding, name: 'wait_for_reply', started_seq: 5, result: { status: 'ok' } }),
+    progress(7, texts[1]), event(8, 'team.run_finished', { ...binding, status }),
+  ]
+  const team = teamState({ runs: [{ ...binding, status }] })
+  const activity = conversationActivity({ team, events, leaderId: 'store_manager', names: { store_manager: '店长' },
+    sending: false, executionState: 'running', activity: { active: false, state: 'completed' } })
+  expect(activity.message).toContain('最新消息')
+  expect(activity.message).not.toMatch(/已回应|已确认本次交付/)
+  await mount(detail(events, team))
+  const group = stream().getByText('团队协作 · 2 条').closest('details')!
+  expect(group.open).toBe(false)
+  fireEvent.click(within(group).getByText('团队协作 · 2 条'))
+  expect(group.open).toBe(true)
+  for (const text of texts) {
+    expect(stream().getAllByText(text)).toHaveLength(1)
+    expect(stream().getByText(text).closest('details.team-collaboration')).toBe(group)
+  }
+  expect(stream().queryByText(/店长最终交付/)).toBeNull()
+})
+
+test('外部 return_work 投递可见 report 后以 completed 结束，进展与报告保持内部，不冒充顾客答复', async () => {
+  const binding = { run_id: 'external-return', role: 'dev', message_seq: 3, revision: 1 }
+  const texts = ['先核对入口文件。', '核对告一段落，准备交回工作。']
+  const report = '入口资料已整理，仍需店长确认。'
+  const progress = (seq: number, text: string) => event(seq, 'msg.said', { text, phase: 'team', run_id: binding.run_id,
+    reply_to: 3, audience: 'team', response_kind: 'progress', revision: 1 }, 'dev', 'agent')
+  const events = [
+    event(2, 'team.message_received', { text: '核对后告诉我结果', recipient: 'store_manager', kind: 'message' }, 'human', 'human'),
+    event(3, 'team.message_received', { text: '核对入口资料并交回', recipient: 'dev', kind: 'assignment' }, 'store_manager', 'agent'),
+    event(4, 'team.run_started', binding), event(5, 'team.external_run_started', { ...binding, run_started_seq: 4 }),
+    progress(6, texts[0]),
+    event(7, 'team.tool_started', { ...binding, name: 'workspace_read', arguments: { path: 'README.md' } }),
+    event(8, 'team.tool_finished', { ...binding, name: 'workspace_read', started_seq: 7, result: { status: 'ok', content: '入口资料' } }),
+    progress(9, texts[1]),
+    event(10, 'team.tool_started', { ...binding, name: 'return_work', arguments: { text: report } }),
+    event(11, 'team.message_received', { text: report, kind: 'report', visible: true, recipient: 'store_manager', reply_to: 3 }, 'dev', 'agent'),
+    event(12, 'team.tool_finished', { ...binding, name: 'return_work', started_seq: 10, result: { status: 'ok', message_seq: 11 } }),
+    event(13, 'team.run_finished', { ...binding, status: 'completed' }),
+  ]
+  const team = teamState({ pending_count: 1, runs: [{ ...binding, status: 'completed' }] })
+  const activity = conversationActivity({ team, events, leaderId: 'store_manager', names: { store_manager: '店长', dev: '米寇' },
+    sending: false, executionState: 'running', activity: { active: false, state: 'completed' } })
+  expect(activity.message).toContain('最新消息')
+  expect(activity.message).not.toMatch(/已回应|已确认本次交付/)
+  await mount(detail(events, team))
+  const group = stream().getByText('团队协作 · 4 条').closest('details')!
+  expect(group.open).toBe(false)
+  fireEvent.click(within(group).getByText('团队协作 · 4 条'))
+  expect(group.open).toBe(true)
+  for (const text of [...texts, report]) {
+    expect(stream().getAllByText(text)).toHaveLength(1)
+    expect(stream().getByText(text).closest('details.team-collaboration')).toBe(group)
+  }
+  const reportRow = within(group).getByText(report).closest('article')!
+  expect(within(reportRow).getByText('@店长')).toBeTruthy()
+  expect(within(reportRow).getByText('回复 #3')).toBeTruthy()
+  expect(board().getByText('交回当前工作')).toBeTruthy()
+  expect(stream().queryByText(/店长最终交付/)).toBeNull()
+})
+
+test('多段外部进展保留折叠正文，正式交付到达后只替换完成摘要，不重复进过程', async () => {
+  const binding = { run_id: 'external-delivery', role: 'store_manager', message_seq: 2, revision: 1 }
+  const progress = (seq: number, text: string) => event(seq, 'msg.said', { text, phase: 'team', run_id: binding.run_id,
+    reply_to: 2, audience: 'team', response_kind: 'progress', revision: 1 }, 'store_manager', 'agent')
+  const texts = ['正在整理交付说明。', '已核对说明，准备正式交付。']
+  const events = [
+    event(2, 'team.message_received', { text: '请交付使用说明', recipient: 'store_manager', kind: 'message' }, 'human', 'human'),
+    event(3, 'team.run_started', binding), progress(4, texts[0]), progress(5, texts[1]),
+    event(6, 'team.objective_completed', { run_id: binding.run_id, summary: '完成记录中的摘要' }),
+  ]
+  const app = await mount(detail(events, teamState({ status: 'done', revision: 6 })))
+  expect(stream().getByText('完成记录中的摘要').closest('details.team-collaboration')).toBeNull()
+  const final = '使用说明已交付，包含打开步骤与当前限制。'
+  await app.update(detail([...events,
+    event(7, 'msg.said', { phase: 'team', run_id: binding.run_id, reply_to: 2, text: final,
+      delivery_seq: 6, response_kind: 'reply', audience: 'customer', recipient: 'human' }, 'store_manager', 'agent'),
+    event(8, 'team.run_finished', { ...binding, status: 'completed' }),
+  ], teamState({ status: 'done', revision: 6 })))
+  expect((await stream().findByText(final)).closest('details.team-collaboration')).toBeNull()
+  expect(stream().getAllByText(final)).toHaveLength(1)
+  expect(stream().getAllByText('· 店长最终交付')).toHaveLength(1)
+  expect(stream().queryByText('完成记录中的摘要')).toBeNull()
+  const group = stream().getByText('团队协作 · 2 条').closest('details')!
+  expect(group.open).toBe(false)
+  fireEvent.click(within(group).getByText('团队协作 · 2 条'))
+  expect(group.open).toBe(true)
+  for (const text of texts) expect(within(group).getAllByText(text)).toHaveLength(1)
+  expect(within(group).queryByText(final)).toBeNull()
 })
 
 test.each([true, false])('等待信息的对客发言不自动收起，避免隐藏真实澄清（明确类型=%s）', async (explicit) => {

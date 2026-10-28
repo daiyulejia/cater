@@ -3,7 +3,7 @@
 Compose existing disposable fixtures without inheriting their collected tests.
 Tool decisions and receipts use production dispatch; only the external client and
 the timing of concurrent host actions are scripted. Public text is essential:
-an empty ExternalAgentState.text skips the final scope validation being tested.
+Early public text is durable progress; a later stale tail must not settle as a reply.
 """
 
 from dataclasses import replace
@@ -17,6 +17,7 @@ import test_team_supervision as supervision
 
 
 PUBLIC_TEXT = "The exact submitted version was reviewed; see the recorded decision."
+LATE_TAIL = "New public tail before cleanup must not survive a later scope change."
 
 
 class ContinuedReviewSettlementTests(returns.ReturnWorkFixtures, unittest.TestCase):
@@ -49,7 +50,12 @@ class ContinuedReviewSettlementTests(returns.ReturnWorkFixtures, unittest.TestCa
             observed.append(run)
             self.assertEqual(run.context["message"]["seq"], source.seq)
             run.state = replace(run.state, text=PUBLIC_TEXT)
-            action(run)
+            try:
+                action(run)
+            except ExternalYield:
+                if settling:
+                    run.state = replace(run.state, text=PUBLIC_TEXT + LATE_TAIL)
+                raise
             self.fail("The scripted terminal tool should yield to the host")
 
         finish = f.rt.team.external_runs.finish
@@ -79,6 +85,17 @@ class ContinuedReviewSettlementTests(returns.ReturnWorkFixtures, unittest.TestCa
     def run_events(self, f, kind, started):
         return [e for e in f.events(kind)
                 if e.payload.get("run_id") == started.payload["run_id"]]
+
+    def assert_only_early_progress(self, f, started):
+        public, = self.run_events(f, "msg.said", started)
+        self.assertEqual(public.payload["text"], PUBLIC_TEXT)
+        self.assertEqual(public.payload["response_kind"], "progress")
+        self.assertEqual(public.payload["audience"], "team")
+        self.assertEqual(public.payload["reply_to"], started.payload["message_seq"])
+        self.assertEqual(public.payload["revision"], started.payload["revision"])
+        self.assertNotIn("delivery_seq", public.payload)
+        first_tool = min(e.seq for e in self.run_events(f, "team.tool_started", started))
+        self.assertLess(public.seq, first_tool, "Only previously committed progress may remain")
 
     def assert_decision(self, f, review, started, verdict):
         decision, = self.run_events(f, "team.review_recorded", started)
@@ -211,9 +228,9 @@ class ContinuedReviewSettlementTests(returns.ReturnWorkFixtures, unittest.TestCa
         original_decision, = [e for e in f.events("team.review_recorded")
                              if e.payload["review_seq"] == review.payload["review_seq"]]
         self.assertNotEqual(original_decision.payload["run_id"], started.payload["run_id"])
-        self.assertEqual(observed[0].state.text, PUBLIC_TEXT)
+        self.assertEqual(observed[0].state.text, PUBLIC_TEXT + LATE_TAIL)
         self.assertEqual(finished.payload["status"], "interrupted", finished.payload)
-        self.assertEqual(self.run_events(f, "msg.said", started), [])
+        self.assert_only_early_progress(f, started)
         self.assertEqual(len(self.reports(f, review)), 1)
         self.assertEqual(len(self.reports(f, other)), 1)
 
@@ -254,9 +271,9 @@ class ContinuedReviewSettlementTests(returns.ReturnWorkFixtures, unittest.TestCa
         self.assertEqual([e.payload["name"] for e in receipts], ["record_review", "wait_for_reply"])
         self.assertEqual(receipts[0].payload["result"]["status"], "error")
         self.assertEqual(self.run_events(f, "team.review_recorded", started), [])
-        self.assertEqual(observed[0].state.text, PUBLIC_TEXT)
+        self.assertEqual(observed[0].state.text, PUBLIC_TEXT + LATE_TAIL)
         self.assertEqual(finished.payload["status"], "interrupted", finished.payload)
-        self.assertEqual(self.run_events(f, "msg.said", started), [])
+        self.assert_only_early_progress(f, started)
         self.assertEqual(len(self.reports(f, review)), 1)
 
     def test_pause_or_new_customer_input_during_settlement_still_interrupts(self):
@@ -282,13 +299,13 @@ class ContinuedReviewSettlementTests(returns.ReturnWorkFixtures, unittest.TestCa
                     external, = self.run_events(f, "team.external_run_finished", started)
                     self.assertEqual(external.payload["outcome"], "yielded")
                     self.assertIs(external.payload["cleanup_complete"], True)
-                    self.assertEqual(observed[0].state.text, PUBLIC_TEXT)
+                    self.assertEqual(observed[0].state.text, PUBLIC_TEXT + LATE_TAIL)
                     self.assertLess(receipt.seq, external.seq)
                     self.assertLess(external.seq, changes[0])
                     self.assertLess(changes[0], finished.seq)
                     self.assertEqual(finished.payload["status"], "interrupted", finished.payload)
                     self.assertIn("暂停" if change == "pause" else "顾客", finished.payload["reason"])
-                    self.assertEqual(self.run_events(f, "msg.said", started), [])
+                    self.assert_only_early_progress(f, started)
                     self.assertEqual([e.payload["name"] for e in
                                       self.run_events(f, "team.tool_started", started)], ["record_review"])
 
