@@ -10,6 +10,13 @@ const label = '为什么这样做 · 如何运行'
 const stream = () => within(screen.getByLabelText('聊天记录'))
 beforeEach(() => window.sessionStorage.clear())
 
+test('交付引用明确说明摘录可能省略上下文', () => {
+  const saved = handoff()
+  const evidence = completion(10, saved)
+  const { container } = render(<MessageDetails item={{ id: 10, kind: 'agent', evidence } as ChatItem} />)
+  expect(within(container).getAllByText('原文摘录，可能省略上下文。')).toHaveLength(saved.evidence.length)
+})
+
 async function mount(initial: TaskDetail, other?: TaskDetail) {
   let current = initial
   const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } })

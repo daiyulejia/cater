@@ -474,7 +474,7 @@ class TeamService:
                            "description": "index每页1-50项，默认20；goal/source/artifact每页1-16000字符，默认8000。"}}, ["section"]))
         if role.id == self.rt.organization.leader.id:
             tools += [
-                _tool("read_handoff_sources", "按需读取交付说明可引用的实际片段。选择返回的evidence_id即可，无需手抄引文或猜编号种类；片段可能为节选，不认证观点。artifact_seqs与拟交付文件一致；不填时看当前目标最新成果。source_seq精确读取一个来源，before_seq/limit倒序分页。只读，不执行检查或交付。",
+                _tool("read_handoff_sources", "按需读取交付说明可引用的实际片段。选择返回的evidence_id即可，无需手抄引文或猜编号种类；片段可能为节选，不认证观点。ZIP的文件名和哈希是交付清单中的版本信息，不是可引用的正文。artifact_seqs与拟交付文件一致；不填时看当前目标最新成果。source_seq精确读取一个来源，before_seq/limit倒序分页。只读，不执行检查或交付。",
                       {"artifact_seqs": {"type": "array", "maxItems": 128,
                            "items": {"type": "integer", "minimum": 1}},
                        "source_seq": {"type": "integer", "minimum": 1},

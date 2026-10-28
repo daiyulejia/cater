@@ -31,6 +31,7 @@ function SourceQuote({ source, name, reply = false }: { source: HandoffEvidence;
       const hint = outputEncodingHint(source.output_utf8_valid?.[stream])
       return hint && <p key={stream}>{stream === 'stdout' ? '标准输出' : '错误输出'}：{hint}</p>
     })}
+    <p>原文摘录，可能省略上下文。</p>
     <blockquote className="whitespace-pre-wrap border-l-2 border-current pl-3">{source.quote}</blockquote>
     <details className="pt-1"><summary className="cursor-pointer">版本与事件标识</summary>
       {source.content_sha256 && <p>文件版本 SHA-256：{source.content_sha256}</p>}

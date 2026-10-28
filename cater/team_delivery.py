@@ -94,7 +94,7 @@ def handoff_schema():
                 {"type": "object", "additionalProperties": False,
                 "required": ["source_seq", "quote"], "properties": {
                     "source_seq": {"type": "integer", "minimum": 1,
-                        "description": "成果用artifact seq，工作区/浏览器检查用工具回执seq；伙伴复核用record_review返回或reviews中的decision_seq，不是review_seq/request_seq、message_seq或record_review工具回执seq。"},
+                        "description": "有已保存正文的文本成果用artifact seq，工作区/浏览器检查用工具回执seq；ZIP的文件名和哈希是交付清单中的版本信息，不是ZIP正文引文。伙伴复核用record_review返回或reviews中的decision_seq，不是review_seq/request_seq、message_seq或record_review工具回执seq。"},
                     "quote": {"type": "string", "maxLength": 2000}}}]}}}}
 
 
@@ -315,7 +315,8 @@ class TeamDelivery:
                     "has_more": len(ordered) > limit,
                     "next_before_seq": page[-1] if len(ordered) > limit else None,
                     "note": "选定片段后可在handoff.evidence中只填evidence_id，无需重抄quote。"
-                        "片段可能为节选；来源状态不认证观点、测试覆盖或当前文件正确性。读取不执行原操作，也不登记批准或交付。"}
+                        "长片段可能另有标记为end的尾部摘录；它是已保存片段的末尾，不一定是完整输出的末尾。"
+                        "来源状态不认证观点、测试覆盖或当前文件正确性。读取不执行原操作，也不登记批准或交付。"}
 
     def normalize(self, task_id, value, *, artifacts, revision):
         allowed = {"why", "changed", "impact", "alternatives", "reproduce", "limits", "evidence", "command_receipts"}
@@ -442,6 +443,7 @@ class TeamDelivery:
                     lines += [f"退出码：{ref['exit_code']}", ""]
                 if type(ref.get("complete")) is bool:
                     lines += ["回执采集完整。" if ref["complete"] else "回执采集未完成。", ""]
+                lines += ["原文摘录，可能省略上下文。", ""]
                 lines += ["> " + line for line in ref["quote"].splitlines()]
                 lines += ["", "来源事件哈希：" + str(ref.get("source_hash", "")), ""]
                 if ref.get("truncated") is True:

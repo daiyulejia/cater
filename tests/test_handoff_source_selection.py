@@ -2,9 +2,11 @@
 
 import copy
 import json
+from types import SimpleNamespace
 import unittest
 
 from cater.events import Actor
+from cater.handoff_sources import choices
 from cater.mcp_host import McpToolBridge
 from cater.team_delivery import HandoffError, HOST
 import test_handoff_diagnostics
@@ -175,6 +177,65 @@ class HandoffSourceSelectionTests(unittest.TestCase):
                 self.assertEqual(option["quote_truncated"], truncated)
                 ref, = self.normalize(self.handoff([{"evidence_id": option["evidence_id"]}]))["evidence"]
                 self.assertEqual(ref["quote"], option["quote"])
+
+    def test_long_source_offers_bound_suffix_without_changing_prefix_id(self):
+        content = "开头🐾" + "中🙂" * 400 + "\n末尾需要修复，不能交付。"
+        source = self.artifact(content)
+        row, = self.read(source_seq=source.seq)["sources"]
+        first, suffix = row["evidence_options"]
+        self.assertNotIn("quote_position", first)
+        self.assertEqual(suffix["quote_position"], "end")
+        self.assertTrue(first["quote_truncated"] and suffix["quote_truncated"])
+        self.assertTrue(content.startswith(first["quote"]))
+        self.assertTrue(content.endswith(suffix["quote"]))
+        self.assertIn("末尾需要修复，不能交付。", suffix["quote"])
+        self.assertLessEqual(len(suffix["quote"].encode("utf-8")), 512)
+        self.assertNotIn("\ufffd", suffix["quote"])
+        self.assertEqual(first, self.option(source))
+        selected, = self.normalize(self.handoff([{"evidence_id": suffix["evidence_id"]}]))["evidence"]
+        self.assertEqual((selected["source_seq"], selected["quote"]), (source.seq, suffix["quote"]))
+        self.rt.log.emit(type="team.objective_updated", task_id=self.task, actor=HOST,
+                         payload={"goal": "Different objective"})
+        self.reject([{"evidence_id": suffix["evidence_id"]}])
+
+    def test_suffix_slots_do_not_displace_existing_multipart_prefixes(self):
+        event = SimpleNamespace(hash="frozen-event-hash")
+        parts = ["a" * 600 + "尾一", "b" * 600 + "尾二", "c" * 600 + "尾三"]
+        options = [option for option, _, _ in choices({1: (event, parts, {})}, 1)]
+        self.assertEqual(len(options), 4)
+        self.assertEqual([option["quote"] for option in options[:3]], ["a" * 512, "b" * 512, "c" * 512])
+        self.assertEqual([option["evidence_id"] for option in options[:3]], [
+            "ev1_54709be3c422ff87d40a5840835fa86f3e1a8b3d531809cbbf73387e8125f779",
+            "ev1_8467fda24cad519e1705741b1afe4914e2a2523b004d3cfab8aacb80a3075b62",
+            "ev1_3dbc330ff8227b6ab4f71e14ed492831775542f824f8514542241c14a0ac6b83",
+        ])
+        self.assertTrue(options[3]["quote"].endswith("尾一"))
+        self.assertEqual(options[3]["quote_position"], "end")
+        four = [option for option, _, _ in choices({1: (event, parts + ["fourth"], {})}, 1)]
+        self.assertEqual(four[:3], options[:3])
+        self.assertEqual(four[3]["quote"], "fourth")
+        self.assertNotIn("quote_position", four[3])
+
+    def test_suffix_delivery_preserves_quote_and_identifies_it_as_excerpt(self):
+        source = self.artifact("复核背景。" * 300 + "\n结论：尚需修复。")
+        row, = self.read(source_seq=source.seq)["sources"]
+        suffix = next(option for option in row["evidence_options"] if option.get("quote_position") == "end")
+        result = self.finish(self.handoff([{"evidence_id": suffix["evidence_id"]}]))
+        self.assertEqual(result["status"], "ok")
+        completed, = self.events("team.objective_completed")
+        saved, = completed.payload["handoff"]["evidence"]
+        self.assertEqual(saved["quote"], suffix["quote"])
+        self.assertEqual(self.rt.team.delivery.read(self.task, {})["delivery"]["handoff"]["evidence"], [saved])
+        text = self.rt.team.delivery.markdown(completed)
+        self.assertIn("原文摘录，可能省略上下文。", text)
+        self.assertIn("结论：尚需修复。", text)
+
+    def test_suffix_handles_whitespace_overlap_and_invalid_unicode(self):
+        event = SimpleNamespace(hash="frozen-event-hash")
+        parts = [" " * 600 + "尾巴", "a" * 513, "\ud800", "z" * 600 + " " * 600]
+        options = [option for option, _, _ in choices({1: (event, parts, {})}, 1)]
+        self.assertEqual([option["quote"] for option in options], ["a" * 512, "z" * 512, "尾巴"])
+        self.assertEqual(options[-1]["quote_position"], "end")
 
     def test_receipt_options_keep_capture_failure_metadata_and_four_option_cap(self):
         receipt = self.receipt(result={"status": "error", "complete": False, "exit_code": 2,
