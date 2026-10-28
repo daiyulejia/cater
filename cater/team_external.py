@@ -107,6 +107,7 @@ class TeamExternal:
         failure, awaiting_customer = {}, False
         last_scope, attempt, run = None, None, None
         stop_kind, delivered_text = None, ""
+        settled_review_seq = None
         public_chars = 0
         calls = 0
         admission_blocked = False
@@ -141,9 +142,10 @@ class TeamExternal:
             fingerprint = driver_fingerprint(driver)
             rules = basis["rule_fingerprint"]
 
-            def verify_scope(*, observe_only=False):
+            def verify_scope(*, observe_only=False, settled_review_seq=None):
                 nonlocal admission_blocked
-                self.team._current(task_id, started, role, revision)
+                self.team._current(task_id, started, role, revision,
+                    **({"settled_review_seq": settled_review_seq} if settled_review_seq is not None else {}))
                 if budget_supervision and any(row.get("started_seq") != (attempt.seq if attempt is not None else None)
                                              for row in self.team._pending_operations(task_id)):
                     if not observe_only:
@@ -182,6 +184,7 @@ class TeamExternal:
 
             def execute(call):
                 nonlocal revision, calls, stop_kind, awaiting_customer, last_scope, delivered_text, public_chars
+                nonlocal settled_review_seq
                 check(force=True)
                 if call.name == REPLY:
                     public = run.state.text
@@ -214,6 +217,8 @@ class TeamExternal:
                             or call.name == "delegate" and result.get("waiting_for_review") is True):
                         stop_kind = "waiting"
                         awaiting_customer = call.name == "request_questions"
+                        if call.name in {"request_review", "delegate"}:
+                            settled_review_seq = result.get("review_seq")
                     elif call.name in {"send_message", "return_work"} and assignment is not None and any(
                         event.seq == result.get("message_seq")
                         and event.actor == Actor.agent(role.id, role.role)
@@ -392,7 +397,7 @@ class TeamExternal:
                 with self.rt.log.atomic():
                     # Settlement may outlast a pause or a scope change. Check and
                     # publish together; an earlier committed reply stays intact.
-                    verify_scope()
+                    verify_scope(settled_review_seq=settled_review_seq if status == "waiting" else None)
                     current = self.team.view(task_id)
                     completed = next((event for event in reversed(self.rt.log.read(task_id=task_id))
                                       if event.type == "team.objective_completed" and event.actor == HOST

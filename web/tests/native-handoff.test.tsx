@@ -31,7 +31,7 @@ async function mount(initial: TaskDetail, other?: TaskDetail) {
   } }
 }
 
-test('可信交付只扩展原折叠区，展示三类精确摘录、版本与有序运行步骤，无副作用', async () => {
+test('可信交付保留原详情与独立边界入口，展示三类精确摘录、版本与有序运行步骤，无副作用', async () => {
   const snapshot = completion()
   const saved = JSON.stringify(snapshot)
   const { fetchMock } = await mount(detail([snapshot]))
@@ -39,13 +39,18 @@ test('可信交付只扩展原折叠区，展示三类精确摘录、版本与�
   const fold = summary.closest('details')!
   const bubble = fold.closest('.message-bubble')!
   expect(fold.open).toBe(false)
-  expect(bubble.querySelectorAll('.message-details')).toHaveLength(1)
+  expect(bubble.querySelectorAll('.message-details')).toHaveLength(2)
+  const limitsFold = within(bubble as HTMLElement).getByText('使用边界 · 1项', { selector: 'summary' }).closest('details')!
+  expect(limitsFold.open).toBe(false)
+  expect(fold.contains(limitsFold)).toBe(false)
+  expect(within(limitsFold).getByText(handoff().limits[0])).toBeTruthy()
+  expect(within(fold).queryByText(handoff().limits[0])).toBeNull()
   expect(stream().queryByText('查看判断与依据')).toBeNull()
   expect(within(fold).getByText('原有验证范围 10')).toBeTruthy()
   const calls = fetchMock.mock.calls.length
   fireEvent.click(summary)
   expect(fold.open).toBe(true)
-  for (const heading of ['为什么这样做', '改动', '影响', '取舍与其他考虑', '运行与复查', '未验证范围', '引用来源']) {
+  for (const heading of ['为什么这样做', '改动', '影响', '取舍与其他考虑', '运行与复查', '引用来源']) {
     expect(within(fold).getByRole('heading', { name: heading })).toBeTruthy()
   }
   expect(Array.from(fold.querySelectorAll('ol > li')).map((li) => li.textContent)).toEqual(handoff().reproduce)
@@ -129,7 +134,9 @@ test('引用省略仍保留讲解和运行步骤，但夹带的引文与命令�
   expect(within(fold).getByText(`可选交付说明：${warning}`)).toBeTruthy()
   expect(within(fold).getByText(handoff().why)).toBeTruthy()
   expect(Array.from(fold.querySelectorAll('ol > li')).map(node => node.textContent)).toEqual(handoff().reproduce)
-  expect(within(fold).getByRole('heading', { name: '未验证范围' })).toBeTruthy()
+  expect(within(fold).queryByText(handoff().limits[0])).toBeNull()
+  const limitsFold = stream().getByText('使用边界 · 1项', { selector: 'summary' }).closest('details')!
+  expect(within(limitsFold).getByText(handoff().limits[0])).toBeTruthy()
   expect(fold.querySelector('blockquote, button')).toBeNull()
   expect(fold.textContent).not.toContain('不可显示的未核对命令')
   expect(within(fold).queryByRole('heading', { name: '引用来源' })).toBeNull()
@@ -220,8 +227,8 @@ test('采集完成与正文截断分别显示，伙伴和工具使用中文身�
 })
 
 test('交付版本跟随各自 completion，内部接力仍分组，店长后续发言不覆盖保存说明', async () => {
-  const first = completion(10, handoff('初版原因'))
-  const second = completion(20, handoff('新版原因'))
+  const first = completion(10, { ...handoff('初版原因'), limits: ['仅适用于初版数据。'] })
+  const second = completion(20, { ...handoff('新版原因'), limits: ['新版未覆盖离线场景。'] })
   const app = await mount(detail([first]))
   fireEvent.click(await stream().findByText(label, { selector: 'summary' }))
   await app.update(detail([first,
@@ -234,12 +241,20 @@ test('交付版本跟随各自 completion，内部接力仍分组，店长后续
   const history = stream().getByText('店长交付记录', { selector: 'summary' }).closest('details')!
   expect(history.open).toBe(false)
   expect(within(history).getByText('初版原因')).toBeTruthy()
+  expect(within(history).getByText('仅适用于初版数据。')).toBeTruthy()
+  expect(within(history).getByText('这是这次历史交付当时记录的使用边界，不代表当前版本。')).toBeTruthy()
+  expect(within(history).queryByText('新版未覆盖离线场景。')).toBeNull()
   const current = final.closest('article')!
   const currentDetails = within(current).getByText(label, { selector: 'summary' }).closest('details')!
   expect(currentDetails.open).toBe(false)
   expect(within(currentDetails).getByText('新版原因')).toBeTruthy()
   expect(within(currentDetails).getByText('原有验证范围 20')).toBeTruthy()
   expect(within(currentDetails).queryByText('初版原因')).toBeNull()
+  const currentLimits = within(current).getByText('使用边界 · 1项', { selector: 'summary' }).closest('details')!
+  expect(currentLimits.open).toBe(false)
+  expect(within(currentLimits).getByText('新版未覆盖离线场景。')).toBeTruthy()
+  expect(within(current).queryByText('仅适用于初版数据。')).toBeNull()
+  expect(stream().queryByText(handoff().limits[0])).toBeNull()
   expect(stream().queryByText('发言自报原因')).toBeNull()
   expect(final.closest('.team-collaboration')).toBeNull()
   expect(stream().getByText('团队协作 · 2 条').closest('details')!.open).toBe(false)
@@ -258,21 +273,31 @@ test('旧 verification 与新版说明并存，更新目标后都成为各自历
   expect(history).toHaveLength(2)
   for (const fold of history) expect(fold.open).toBe(false)
   expect(within(history[0]).queryByText(label)).toBeNull()
+  expect(within(history[0]).queryByText(/^使用边界 · /)).toBeNull()
   expect(within(history[0]).getByText('原有验证范围 10')).toBeTruthy()
   expect(within(history[1]).getByText(label, { selector: 'summary' })).toBeTruthy()
 })
 
 test('切换任务清除展开状态，同序号交付不会串用说明', async () => {
-  await mount(detail(), detail([completion(10, handoff('另一任务的原因'))], 'other-ui'))
+  await mount(detail(), detail([completion(10, { ...handoff('另一任务的原因'), limits: ['另一任务仅支持本地运行。'] })], 'other-ui'))
   fireEvent.click(await stream().findByText(label, { selector: 'summary' }))
+  fireEvent.click(stream().getByText('使用边界 · 1项', { selector: 'summary' }))
   fireEvent.click(screen.getByRole('button', { name: /另一件任务/ }))
   await waitFor(() => expect(stream().queryByText(handoff().why)).toBeNull())
   const next = (await stream().findByText(label, { selector: 'summary' })).closest('details')!
   expect(next.open).toBe(false)
   expect(within(next).getByText('另一任务的原因')).toBeTruthy()
+  const nextLimits = stream().getByText('使用边界 · 1项', { selector: 'summary' }).closest('details')!
+  expect(nextLimits.open).toBe(false)
+  expect(within(nextLimits).getByText('另一任务仅支持本地运行。')).toBeTruthy()
+  expect(stream().queryByText(handoff().limits[0])).toBeNull()
+  fireEvent.click(nextLimits.querySelector('summary')!)
   fireEvent.click(screen.getByRole('button', { name: /原生交付测试/ }))
   await waitFor(() => expect(stream().queryByText('另一任务的原因')).toBeNull())
   expect((await stream().findByText(label, { selector: 'summary' })).closest('details')!.open).toBe(false)
+  expect(stream().getByText('使用边界 · 1项', { selector: 'summary' }).closest('details')!.open).toBe(false)
+  expect(stream().getByText(handoff().limits[0])).toBeTruthy()
+  expect(stream().queryByText('另一任务仅支持本地运行。')).toBeNull()
 })
 
 const invalid = [null, [], '原始字符串', {}, { ...handoff(), version: 2 }, { ...handoff(), why: ' ' },
@@ -297,6 +322,7 @@ test.each(invalid.map((value, index) => [index, value] as const))('非法说明 
   expect(screen.getByText('查看判断与依据').closest('details')!.open).toBe(false)
   expect(screen.getByText('保留验证')).toBeTruthy()
   expect(screen.queryByText(label)).toBeNull()
+  expect(screen.queryByText(/^使用边界 · /)).toBeNull()
   expect(container.querySelector('blockquote, ol, h3')).toBeNull()
 })
 

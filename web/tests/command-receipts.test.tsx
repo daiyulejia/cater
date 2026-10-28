@@ -84,7 +84,9 @@ test('实际消息详情内嵌默认折叠事实，建议另列；展开和复�
   expect(writeText).toHaveBeenCalledTimes(1)
   expect(fetchMock).not.toHaveBeenCalled()
   expect(document.querySelectorAll('main, .delivery-panel, a, script, iframe')).toHaveLength(0)
-  expect(document.querySelectorAll('.message-details')).toHaveLength(1)
+  expect(document.querySelectorAll('.message-details')).toHaveLength(2)
+  expect(fold('使用边界 · 1项').open).toBe(false)
+  expect(fold('为什么这样做 · 如何运行').contains(fold('使用边界 · 1项'))).toBe(false)
   expect(JSON.stringify(saved)).toBe(before)
 })
 

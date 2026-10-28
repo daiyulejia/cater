@@ -70,7 +70,7 @@ export function MessageDetails({ item }: { item: ChatItem }) {
   </details>
   if (!handoff && !handoffWarning && !replyEvidenceWarning && !item.details?.length && omissionReason === undefined) return null
   const human = item.kind === 'human'
-  return <details className={`message-details mt-3 min-w-0 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#dfeae5] text-[#52766d]'}`}>
+  return <><details className={`message-details mt-3 min-w-0 border-t pt-2 text-xs ${human ? 'border-[#e99c80] text-[#fde9dd]' : 'border-[#dfeae5] text-[#52766d]'}`}>
     <summary className="cursor-pointer font-semibold">{handoff ? '为什么这样做 · 如何运行' : omissionReason !== undefined && !item.details?.length && !handoffWarning && !replyEvidenceWarning ? '交付文件说明' : '查看判断与依据'}</summary>
     {item.details?.length ? <ul className="mt-2 space-y-1.5 leading-5">{item.details.map((detail, index) => <li key={`${item.id}-${index}`}>{detail}</li>)}</ul> : null}
     <DeliveryOmissionNote event={item.evidence} historical={item.historicalDelivery} />
@@ -83,10 +83,19 @@ export function MessageDetails({ item }: { item: ChatItem }) {
       <DetailList title="取舍与其他考虑" items={handoff.alternatives} />
       <NativeCommandReceipts event={item.evidence} historical={item.historicalDelivery} name={item.auditName} />
       <DetailList title={Object.hasOwn(handoff, 'command_receipts') ? '成员建议的运行与复查' : '运行与复查'} items={handoff.reproduce} numbered />
-      <DetailList title="未验证范围" items={handoff.limits} />
       {handoff.evidence.length > 0 && <section><h3 className="font-semibold">引用来源</h3>
         <ul className="mt-2 space-y-3">{handoff.evidence.map((source, index) => <SourceQuote key={index} source={source} name={item.auditName} />)}</ul>
       </section>}
     </div>}
   </details>
+    {handoff && handoff.limits.length > 0 && <details key={`${item.id}-${item.evidence.seq}`} className="message-details mt-3 min-w-0 border-t border-[#dfeae5] pt-2 text-xs text-[#52766d]">
+      <summary className="cursor-pointer font-semibold">使用边界 · {handoff.limits.length}项</summary>
+      <div className="mt-2 space-y-2 leading-5">
+        <p>{item.historicalDelivery ? '这是这次历史交付当时记录的使用边界，不代表当前版本。' : '使用前，可以先看看这些适用条件与尚未验证的范围。'}</p>
+        <ul className="space-y-1 pl-5 list-disc">
+          {handoff.limits.map((text, index) => <li key={index} className="whitespace-pre-wrap">{text}</li>)}
+        </ul>
+      </div>
+    </details>}
+  </>
 }

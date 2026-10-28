@@ -898,10 +898,50 @@ class TeamService:
             "workspace": workspace_state, "rules": rules["rules"],
             "background": dialogue_background(background, reader="read_background") if background is not None else None}, rules
 
-    def _current(self, task_id, started, role, revision):
+    def _current(self, task_id, started, role, revision, *, settled_review_seq=None):
         if self.rt.conversation_list.is_removed(task_id):
             raise WorkConflict("对话已从列表删除；已有成果与在途回执保留，未启动后续操作。")
-        if started.payload["message_seq"] in self._inactive_messages(task_id, started=started):
+        events = self.rt.log.read(task_id=task_id)
+        if settled_review_seq is not None:
+            # Settlement only: a successful resubmission retires the feedback
+            # this run was consuming. Remove just that proven cause from the
+            # inactivity projection, never from history or tool admission.
+            messages = self._messages(task_id, events=events)
+            source = next((e for e in messages
+                           if e.seq == started.payload["message_seq"]), None)
+            own_review = next((e for e in events if e.seq == settled_review_seq
+                and e.type == "team.review_requested" and e.actor == HOST
+                and e.seq > started.seq and e.payload.get("run_id") == started.payload["run_id"]
+                and e.payload.get("author") == e.payload.get("requested_by") == role.id
+                and e.payload.get("revision") == revision
+                and source is not None and source.payload.get("kind") in {"report", "progress"}
+                and source.payload.get("recipient") == role.id and source.seq < started.seq), None)
+            previous = next((e for e in events if own_review is not None
+                and e.seq == own_review.payload.get("previous_review_seq")
+                and e.type == "team.review_requested" and e.actor == HOST
+                and e.seq < source.seq
+                and all(e.payload.get(k) == own_review.payload.get(k)
+                        for k in ("author", "reviewer", "revision"))), None)
+            deliveries = {e.seq for e in messages if previous is not None
+                and previous.seq < e.seq < source.seq
+                and e.actor.kind == "agent" and e.actor.id == role.id
+                and e.payload.get("kind") == "assignment"
+                and e.payload.get("review_seq") == previous.seq
+                and e.payload.get("recipient") == previous.payload["reviewer"]
+                and e.payload.get("revision") == revision}
+            from .team_work_control import linked_inputs
+
+            # Interrupted reviewers return progress without review_seq. Prove
+            # its relationship through the actual review delivery instead.
+            bound = source is not None and source.seq in linked_inputs(messages, deliveries)
+            settled = bound and any(e.type == "team.tool_finished" and e.actor == HOST
+                and e.seq > own_review.seq and e.payload.get("run_id") == started.payload["run_id"]
+                and e.payload.get("role") == role.id and e.payload.get("name") in {"request_review", "delegate"}
+                and e.payload.get("result", {}).get("status") == "ok"
+                and e.payload["result"].get("review_seq") == own_review.seq for e in events)
+            if settled:
+                events = [e for e in events if e.seq != own_review.seq]
+        if started.payload["message_seq"] in self._inactive_messages(task_id, events=events, started=started):
             raise WorkConflict("这份工作输入已明确撤回或被同链新版复核替代，未继续旧工作；已有操作回执保留。")
         control = self.rt.execution_control.view(task_id)
         if control["seq"] != started.payload["control_seq"]:

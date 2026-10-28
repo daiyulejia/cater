@@ -5,7 +5,7 @@ import { createServer } from 'vite'
 import { expect, test } from 'vitest'
 import { completion, detail, handoff, leader, members, summaries } from './native-handoff.fixtures'
 
-test.skipIf(process.env.CATER_WEB_BROWSER_TESTS !== '1').each([false, true])('真实浏览器在移动和桌面宽度保持同一折叠入口、长文换行和步骤只读，引用省略=%s', async omitted => {
+test.skipIf(process.env.CATER_WEB_BROWSER_TESTS !== '1').each([false, true])('真实浏览器在移动和桌面宽度支持独立边界入口、键盘开合与长文换行，引用省略=%s', async omitted => {
   // Reuse the repository's browser-check runtime without adding a web dependency.
   const { chromium } = createRequire(new URL('../../tools/browser-check/package.json', import.meta.url))('playwright')
   const server = await createServer({ root: fileURLToPath(new URL('../', import.meta.url)),
@@ -17,6 +17,7 @@ test.skipIf(process.env.CATER_WEB_BROWSER_TESTS !== '1').each([false, true])('�
     const saved = handoff()
     saved.evidence[0].filename = `${'long-file-name-'.repeat(30)}.html`
     saved.evidence[0].quote = `<script>${'unbroken-quote'.repeat(50)}</script>\n  精确摘录。  `
+    saved.limits = ['手机端离线场景尚未验证。', `  https://example.invalid/${'unbroken-limit'.repeat(70)}\n<script>仅为原文</script>  `]
     const tasks = [detail([completion(10, undefined), completion(20, saved)])]
     delete tasks[0].events[0].payload.handoff
     const warning = '交付讲解已保留；引用核对失败，未保存为验证证据。'
@@ -45,11 +46,42 @@ test.skipIf(process.env.CATER_WEB_BROWSER_TESTS !== '1').each([false, true])('�
       await summary.waitFor()
       expect(await fold.getAttribute('open')).toBeNull()
       expect(await page.locator('.delivery-history').getAttribute('open')).toBeNull()
+      const limitsSummary = page.locator('summary').filter({ hasText: /^使用边界 · 2项$/ })
+      const limitsFold = limitsSummary.locator('..')
+      expect(await limitsSummary.count()).toBe(1)
+      expect(await limitsSummary.isVisible()).toBe(true)
+      expect(await limitsFold.getAttribute('open')).toBeNull()
+      expect(await page.locator('.delivery-history').locator('summary').filter({ hasText: /^使用边界 · / }).count()).toBe(0)
+      await summary.focus()
+      await page.keyboard.press('Tab')
+      expect(await limitsSummary.evaluate((element: HTMLElement) => element === document.activeElement)).toBe(true)
+      expect(await limitsSummary.evaluate((element: HTMLElement) => getComputedStyle(element).outlineWidth)).toBe('2px')
+      await page.keyboard.press('Enter')
+      expect(await limitsFold.evaluate((element: HTMLDetailsElement) => element.open)).toBe(true)
+      expect(await fold.getAttribute('open')).toBeNull()
+      expect(await limitsFold.locator('li').allTextContents()).toEqual(saved.limits)
+      await page.keyboard.press('Space')
+      expect(await limitsFold.evaluate((element: HTMLDetailsElement) => element.open)).toBe(false)
+      expect(await limitsSummary.evaluate((element: HTMLElement) => element === document.activeElement)).toBe(true)
+      await limitsSummary.click()
       await summary.click()
       expect(await fold.evaluate((element: HTMLDetailsElement) => element.open)).toBe(true)
       expect(await fold.locator('details').count()).toBe(omitted ? 0 : 3)
       for (const metadata of await fold.locator('details').all()) expect(await metadata.getAttribute('open')).toBeNull()
       expect(await fold.locator('ol > li').allTextContents()).toEqual(saved.reproduce)
+      for (const limit of saved.limits) expect(await fold.textContent()).not.toContain(limit)
+      expect(await limitsFold.locator('button, a, script, iframe, [role="alert"]').count()).toBe(0)
+      const limitsGeometry = await limitsFold.evaluate((element: HTMLElement) => {
+        const rect = element.getBoundingClientRect()
+        return { left: rect.left, right: rect.right, viewport: innerWidth,
+          overflow: element.scrollWidth - element.clientWidth, wrapping: getComputedStyle(element).overflowWrap,
+          whitespace: getComputedStyle(element.querySelector('li')!).whiteSpace }
+      })
+      expect(limitsGeometry.left).toBeGreaterThanOrEqual(0)
+      expect(limitsGeometry.right).toBeLessThanOrEqual(limitsGeometry.viewport)
+      expect(limitsGeometry.overflow).toBeLessThanOrEqual(1)
+      expect(limitsGeometry.wrapping).toBe('anywhere')
+      expect(limitsGeometry.whitespace).toBe('pre-wrap')
       if (omitted) {
         expect(await fold.locator('blockquote').count()).toBe(0)
         expect(await fold.textContent()).toContain(warning)
