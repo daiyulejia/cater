@@ -59,6 +59,57 @@ def unreferenced_projection(value):
 
 
 class ContextReferenceTests(unittest.TestCase):
+    def test_review_feedback_references_exact_matching_report_without_mutating_evidence(self):
+        feedback = UNICODE + "\n完整反馈结尾"
+        message = row(245, "test", "复核结果🐾：" + feedback + "\n请继续处理。",
+                      sender_kind="agent", kind="report", recipient="manager", reply_to=98, review_seq=97, revision=1)
+        review = {"request_seq": 97, "decision_seq": 244, "message_seq": 98,
+                  "reviewer": "test", "author": "manager", "revision": 1, "status": "changes_requested",
+                  "feedback": feedback, "artifacts": [{"seq": 96, "content_sha256": "abc"}]}
+        original = context(message=message, reviews=[review])
+        snapshot = copy.deepcopy(original)
+        projected = model_context(original)
+        actual, = projected["reviews"]
+        self.assertEqual(projected["message"], message)
+        self.assertIsNone(actual["feedback"])
+        ref = actual["feedback_context_ref"]
+        self.assertEqual(ref["field"], "message.text")
+        self.assertEqual(projected["message"]["text"][ref["start"]:ref["end"]], feedback)
+        self.assertEqual({k: v for k, v in actual.items() if k != "feedback_context_ref"},
+                         {**review, "feedback": None})
+        self.assertIn("feedback_context_ref", projected["context_window"]["review_feedback_note"])
+        self.assertEqual(original, snapshot)
+        self.assertLess(len(wire(projected)), len(wire({**projected, "reviews": [review]})))
+
+    def test_review_feedback_stays_inline_if_identity_or_content_is_uncertain(self):
+        feedback = UNICODE
+        message = row(245, "test", "反馈：" + feedback, sender_kind="agent", kind="report", recipient="manager",
+                      reply_to=98, review_seq=97, revision=1)
+        review = {"request_seq": 97, "decision_seq": 244, "message_seq": 98,
+                  "reviewer": "test", "author": "manager", "revision": 1, "status": "approved", "feedback": feedback}
+        cases = [
+            ({"review_seq": 98}, {}), ({"reply_to": 99}, {}), ({"revision": True}, {}),
+            ({"sender": "other"}, {}), ({"recipient": "other"}, {}), ({"sender_kind": "human"}, {}), ({"kind": "message"}, {}),
+            ({"text_truncated": True}, {}), ({"text": "反馈：" + feedback * 2}, {}),
+            ({"text": "反馈：" + feedback[:-1]}, {}), ({}, {"request_seq": True}),
+            ({}, {"decision_seq": 245}), ({}, {"decision_seq": True}),
+            ({}, {"message_seq": True}), ({}, {"revision": True}), ({}, {"reviewer": "other"}), ({}, {"author": "other"}),
+            ({}, {"status": "pending"}), ({}, {"status": []}), ({}, {"feedback_truncated": True}),
+            ({}, {"feedback": ""}), ({}, {"feedback_context_ref": "other"}),
+        ]
+        for message_change, review_change in cases:
+            with self.subTest(message_change=message_change, review_change=review_change):
+                current_review = {**review, **review_change}
+                projected = model_context(context(message={**message, **message_change}, reviews=[current_review]))
+                self.assertEqual(projected["reviews"], [current_review])
+                self.assertNotIn("review_feedback_note", projected["context_window"])
+        duplicate = model_context(context(message=message, reviews=[review, dict(review)]))
+        self.assertEqual(duplicate["reviews"], [review, review])
+        overlap = {**review, "feedback": "a" * 200}
+        overlapping_message = {**message, "text": "a" * 201}
+        projected = model_context(context(message=overlapping_message, reviews=[overlap]))
+        self.assertEqual(projected["reviews"], [overlap])
+
     def assert_exact_input(self, projected, key, original):
         actual = projected[key]
         if "context_ref" not in actual:

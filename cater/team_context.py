@@ -75,9 +75,54 @@ def _reference_inputs(context):
     if not changed:
         return context
     candidate["context_window"] = {**context["context_window"], "note": (
-        "聊天和工作索引可能是节选，不是完整要求或验收结论。关键正文及当前目标reviews完整保留；旧目标复核节选可按review_reader读回。"
+        "聊天和工作索引可能是节选，不是完整要求或验收结论。关键正文及当前目标reviews完整保留或按同轮引用读取；旧目标复核节选可按review_reader读回。"
         "text为null且带context_ref时，读取本轮同名字段的完整text，一跳引用而非省略；需要其他细节时读来源。")}
     return candidate if json_bytes(candidate) < json_bytes(context) else context
+
+
+def _reference_review_feedback(context):
+    """Reference only a complete, identity-matched review report in this input."""
+    message = context.get("message")
+    reviews = context.get("reviews")
+    if (not isinstance(message, dict) or not isinstance(reviews, list)
+            or message.get("kind") != "report" or message.get("sender_kind") != "agent"
+            or "text_truncated" in message or "context_ref" in message
+            or type(message.get("seq")) is not int or type(message.get("review_seq")) is not int
+            or type(message.get("reply_to")) is not int or type(message.get("revision")) is not int
+            or not isinstance(message.get("text"), str)):
+        return context
+    matched = [row for row in reviews if isinstance(row, dict)
+               and type(row.get("request_seq")) is int and row["request_seq"] == message["review_seq"]]
+    if len(matched) != 1:
+        return context
+    review = matched[0]
+    feedback = review.get("feedback")
+    if (not isinstance(review.get("status"), str)
+            or review["status"] not in {"approved", "changes_requested"}
+            or type(review.get("decision_seq")) is not int
+            or not 0 < review["decision_seq"] < message["seq"]
+            or type(review.get("message_seq")) is not int or review["message_seq"] != message["reply_to"]
+            or type(review.get("revision")) is not int or review["revision"] != message["revision"]
+            or not isinstance(review.get("reviewer"), str) or not review["reviewer"]
+            or review["reviewer"] != message.get("sender")
+            or not isinstance(review.get("author"), str) or not review["author"]
+            or review["author"] != message.get("recipient")
+            or "feedback_truncated" in review or "feedback_context_ref" in review
+            or not isinstance(feedback, str) or not feedback):
+        return context
+    start = message["text"].find(feedback)
+    if start < 0 or message["text"].find(feedback, start + 1) >= 0:
+        return context
+    replacement = {**review, "feedback": None, "feedback_context_ref": {
+        "field": "message.text", "start": start, "end": start + len(feedback)}}
+    if json_bytes(replacement) >= json_bytes(review):
+        return context
+    result = dict(context)
+    result["reviews"] = [replacement if row is review else row for row in reviews]
+    result["context_window"] = {**context["context_window"], "review_feedback_note": (
+        "reviews中feedback为null且有feedback_context_ref时，它指向本轮message.text的完整反馈；"
+        "start和end是Unicode码点偏移，包含start、不包含end。其他复核反馈保持原样。")}
+    return result if json_bytes(result) < json_bytes(context) else context
 
 
 def model_context(context):
@@ -132,9 +177,9 @@ def model_context(context):
         "artifact_versions_total": len(context["artifacts"]),
         **({"artifact_versions_reader": {"name": "read_artifact", "section": "versions", "argument": "artifact_seq"}}
            if any(count > 1 for count in version_counts.values()) else {}),
-        "note": "聊天和工作索引可能是节选，不是完整要求或验收结论。message、active_assignment、最新顾客消息及当前目标reviews保留原文；旧目标复核节选可按review_reader读回。",
+        "note": "聊天和工作索引可能是节选，不是完整要求或验收结论。message、active_assignment、最新顾客消息及当前目标reviews保留原文或同轮引用；旧目标复核节选可按review_reader读回。",
     }
-    return _reference_inputs(result)
+    return _reference_review_feedback(_reference_inputs(result))
 
 
 def history_window(history, receipts, *, tools, budget=HISTORY_BYTES):
