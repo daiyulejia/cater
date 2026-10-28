@@ -42,6 +42,7 @@ class TeamExternal:
         self.team, self.rt = team, team.rt
         self._scheduler = None
         self._live = {}
+        self._live_scope_checks = {}
         self.progress = None
 
     def begin_scheduler(self, task_id):
@@ -65,26 +66,57 @@ class TeamExternal:
                     errors.append(exc)
         return errors
 
-    def owns(self, task_id, row, *, observe_only=False):
-        """Recognize a live handle, never a reconstructed permission or replay grant."""
+    def _live_entry(self, task_id, row):
+        """Match a persisted start to this scheduler's actual handle."""
         if not self.scheduling(task_id):
-            return False
+            return None
         entry = self._live.get(row.get('started_seq'))
         if entry is None or row.get('outcome') != 'unsettled' or row.get('run_ended') is not False:
-            return False
+            return None
         attempt, run, check = entry
         if (attempt.task_id != task_id or type(row.get('started_seq')) is not int
                 or any(type(row.get(key)) is not type(attempt.payload[key])
                        or row[key] != attempt.payload[key] for key in ('role', 'run_id', 'message_seq'))):
-            return False
+            return None
         stored = next((e for e in self.rt.log.read(task_id=task_id) if e.seq == attempt.seq), None)
         if stored != attempt or run.state.phase not in {'opening', 'prompting'}:
+            return None
+        return entry
+
+    def owns(self, task_id, row, *, observe_only=False):
+        """Recognize a live handle, never a reconstructed permission or replay grant."""
+        entry = self._live_entry(task_id, row)
+        if entry is None:
             return False
+        _, _, check = entry
         try:
             if observe_only:
                 check(force=True, observe_only=True)
             else:
                 check(force=True)
+        except Exception:
+            return False
+        return True
+
+    def _owns_current_scope(self, task_id, row):
+        """Validate a live peer without following its pending-peer dependencies."""
+        if row.get("name") != "external_agent":
+            return False
+        # Only raw durable pending facts qualify, never a display flag or a
+        # caller's reconstruction of a finished/unclean invocation as live.
+        current = next((item for item in self.team.external_runs.pending(task_id)
+                        if item["started_seq"] == row.get("started_seq")), None)
+        if (current is None or set(row) != set(current)
+                or any(type(row[key]) is not type(value) or row[key] != value
+                       for key, value in current.items())):
+            return False
+        entry = self._live_entry(task_id, row)
+        scope_entry = self._live_scope_checks.get(row.get("started_seq"))
+        if (entry is None or scope_entry is None or scope_entry[0] is not entry[1]
+                or entry[1].state.cleanup_failures):
+            return False
+        try:
+            scope_entry[1]()
         except Exception:
             return False
         return True
@@ -144,15 +176,9 @@ class TeamExternal:
             fingerprint = driver_fingerprint(driver)
             rules = basis["rule_fingerprint"]
 
-            def verify_scope(*, observe_only=False, settled_review_seq=None):
-                nonlocal admission_blocked
+            def verify_current_scope(*, settled_review_seq=None):
                 self.team._current(task_id, started, role, revision,
                     **({"settled_review_seq": settled_review_seq} if settled_review_seq is not None else {}))
-                if budget_supervision and any(row.get("started_seq") != (attempt.seq if attempt is not None else None)
-                                             for row in self.team._pending_operations(task_id)):
-                    if not observe_only:
-                        admission_blocked = attempt is None
-                    raise WorkConflict("监督接续前出现了未核对操作，先核对实际影响，不启动或继续旧范围工作。")
                 if getattr(driver, "closed", False):
                     raise WorkConflict("外部通道正在关闭，本轮停止接收新操作。")
                 if self.team._revision(task_id) != revision:
@@ -165,6 +191,22 @@ class TeamExternal:
                     raise WorkConflict("适用店规已更新，先理解新要求再继续。")
                 if driver_fingerprint(driver) != fingerprint:
                     raise WorkConflict("外部模型接入配置已变化，未继续旧会话。")
+
+            def verify_live_scope():
+                if stop_kind is not None:
+                    raise ExternalYield(stop_kind)
+                verify_current_scope()
+
+            def verify_scope(*, observe_only=False, settled_review_seq=None):
+                nonlocal admission_blocked
+                verify_current_scope(settled_review_seq=settled_review_seq)
+                if budget_supervision and any(
+                        row.get("started_seq") != (attempt.seq if attempt is not None else None)
+                        and not self._owns_current_scope(task_id, row)
+                        for row in self.team._pending_operations(task_id)):
+                    if not observe_only:
+                        admission_blocked = attempt is None
+                    raise WorkConflict("监督接续前出现了未核对操作，先核对实际影响，不启动或继续旧范围工作。")
 
             def check(force=False, *, observe_only=False):
                 nonlocal last_check
@@ -273,6 +315,7 @@ class TeamExternal:
                 try:
                     if self._scheduler == (task_id, threading.get_ident()):
                         self._live[attempt.seq] = (attempt, run, check)
+                        self._live_scope_checks[attempt.seq] = (run, verify_live_scope)
                     iterative = getattr(run, 'iter_run', None)
                     if callable(iterative):
                         result = yield from iterative(prompt)
@@ -302,6 +345,7 @@ class TeamExternal:
                         failure.update(diagnostics(exc))
                     raise
                 finally:
+                    self._live_scope_checks.pop(attempt.seq, None)
                     self._live.pop(attempt.seq, None)
                     primary = sys.exception()
                     revoke_error = None
