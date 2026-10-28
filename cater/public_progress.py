@@ -14,6 +14,15 @@ HOST = Actor.system("team")
 IDENTITY = ("role", "run_id", "message_seq")
 
 
+def _text_span(value, text):
+    if (isinstance(value, dict) and type(value.get("version")) is int and value["version"] == 1
+            and type(value.get("start")) is int and type(value.get("end")) is int
+            and 0 <= value["start"] < value["end"] <= 2 ** 53 - 1
+            and value["end"] - value["start"] == len(text)):
+        return {"version": 1, "start": value["start"], "end": value["end"]}
+    return None
+
+
 class PublicProgress:
     def __init__(self):
         self._lock = threading.Lock()
@@ -40,7 +49,6 @@ class PublicProgress:
                 text = update["content"].get("text")
                 if not isinstance(text, str) or not text or type(revision) is not int or revision < 0:
                     return
-                text = text[-MAX_TEXT:]
                 try:
                     text.encode("utf-8")
                 except UnicodeEncodeError:
@@ -48,12 +56,25 @@ class PublicProgress:
                 previous = rows.get(attempt.seq)
                 # A goal change must not carry the previous goal's prose forward.
                 previous = previous if previous and previous["revision"] == revision else None
+                span = _text_span(update.get("_cater_public_text_span"), text)
+                old_span = previous.get("text_span") if previous else None
+                if span is not None:
+                    if old_span and span["start"] < old_span["end"]:
+                        # A duplicate/older observation cannot refresh activity.
+                        return
+                    if not old_span or old_span["end"] != span["start"]:
+                        previous = None  # A missed callback is a real gap, not adjacency.
+                elif old_span:
+                    previous = None  # Do not lend coordinates to a legacy observation.
                 merged = (previous["text"] if previous else "") + text
+                window = merged[-MAX_TEXT:]
                 rows[attempt.seq] = {"external_started_seq": attempt.seq,
                     "run_started_seq": attempt.payload["run_started_seq"],
                     **{name: attempt.payload[name] for name in IDENTITY}, "revision": revision,
-                    "text": merged[-MAX_TEXT:], "truncated": bool(previous and previous["truncated"]
-                        or len(update["content"]["text"]) > MAX_TEXT or len(merged) > MAX_TEXT),
+                    "text": window, "truncated": bool(previous and previous["truncated"]
+                        or len(merged) > MAX_TEXT or span and span["end"] - len(window) > 0),
+                    **({"text_span": {"version": 1, "start": span["end"] - len(window),
+                                      "end": span["end"]}} if span else {}),
                     "observed": time.monotonic()}
                 while len(rows) > MAX_RUNS:
                     rows.pop(next(iter(rows)))

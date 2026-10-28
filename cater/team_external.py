@@ -156,6 +156,20 @@ class TeamExternal:
                 return
             if observer is not None and attempt is not None:
                 try:
+                    if isinstance(update, dict):
+                        # Coordinates belong to the host's accepted public stream,
+                        # never to a field supplied by the external client.
+                        update = {key: value for key, value in update.items()
+                                  if key != "_cater_public_text_span"}
+                        content = update.get("content")
+                        if (run is not None and run.state.phase == "prompting"
+                                and update.get("sessionUpdate") == "agent_message_chunk"
+                                and isinstance(content, dict) and content.get("type") == "text"
+                                and isinstance(content.get("text"), str) and content["text"]):
+                            public, chunk = run.state.text, content["text"]
+                            if public.endswith(chunk):
+                                update["_cater_public_text_span"] = {
+                                    "version": 1, "start": len(public) - len(chunk), "end": len(public)}
                     observer(attempt, revision, update)
                 except Exception:
                     # Optional observation must not change work, cleanup or delivery.
@@ -292,7 +306,9 @@ class TeamExternal:
                         self.rt.log.emit(type="msg.said", actor=Actor.agent(role.id, role.role), task_id=task_id,
                             payload={"text": text, "phase": "team", "run_id": started.payload["run_id"],
                                      "reply_to": message.seq, "response_kind": "progress", "audience": "team",
-                                     "revision": revision})
+                                     "revision": revision, "public_text_span": {
+                                         "version": 1, "external_started_seq": attempt.seq,
+                                         "start": public_chars, "end": len(public)}})
                 if text.strip():
                     last_public_text = text
                 public_chars = len(public)

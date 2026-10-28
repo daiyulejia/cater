@@ -22,7 +22,7 @@ export type ConversationActivityInput = {
   syncError?: string
   controlBusy?: boolean
 }
-type Line = { id: string; role?: string; text: string; moving?: boolean; warning?: boolean; publicText?: string; publicTruncated?: boolean }
+type Line = { id: string; role?: string; text: string; moving?: boolean; warning?: boolean; publicText?: string; publicSegments?: string[]; publicTruncated?: boolean; publicActive?: boolean }
 export type ConversationActivityView = {
   visible: boolean
   message?: string
@@ -791,7 +791,8 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       text += `；冻结历史 · 来源群 ${source.task_id} · 原成果 #${source.seq} · 冻结截止 #${snapshot.source_seq}`
     }
     lines.push({ id: role, role, text: `${label(role)} · ${text}`, moving,
-      ...(report ? { publicText: report.text, publicTruncated: report.truncated } : {}),
+      ...(report ? { publicText: report.displaySegments.join('\n\n（中间进展已记录在团队记录中）\n\n'),
+        publicSegments: report.displaySegments, publicTruncated: report.truncated, publicActive: true } : {}),
       warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已存回执已读取', '已存文件读取观察已读取', '当前筛选无匹配文件读取记录', '已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回', '历史目录已读取', '历史交付说明已读取', '历史文件已读取', '成果正文已读取', '成果本页已读取', '成果发布历史已读取，未读正文', '工程文件清单已读取', '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对', '历史文件已创建', '已有相同文件，未重写'].includes(toolOutcome(finished, toolName))) })
   }
   const reported = new Set(events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'agent'

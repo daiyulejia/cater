@@ -74,6 +74,13 @@ class ExternalPublicProgressTests(unittest.TestCase):
                             if e.seq < event.seq and e.actor == HOST
                             and e.type in {"team.objective_updated", "team.objective_completed"}), default=0)
             self.assertEqual(p["revision"], revision)
+            span = p["public_text_span"]
+            attempt = next(e for e in self.events("team.external_run_started")
+                           if e.seq == span["external_started_seq"])
+            self.assertEqual(span["version"], 1)
+            self.assertEqual(attempt.payload["run_id"], p["run_id"])
+            self.assertGreaterEqual(span["start"], 0)
+            self.assertEqual(span["end"] - span["start"], len(p["text"]))
             self.assertNotIn("delivery_seq", p)
             self.assertLess(start.seq, event.seq)
         return rows
@@ -125,7 +132,9 @@ class ExternalPublicProgressTests(unittest.TestCase):
             return run.state.text
 
         self.run_one(script)
-        self.assert_progress(["A useful public finding.", "A second finding."])
+        first, second = self.assert_progress(["A useful public finding.", "A second finding."])
+        self.assertEqual(first.payload["public_text_span"]["start"], 0)
+        self.assertEqual(second.payload["public_text_span"]["start"], len("A useful public finding. \n\t"))
         self.assertEqual(len(self.events("team.tool_finished")), 5)
         self.assertEqual(self.said("reply"), [])
 
@@ -163,6 +172,7 @@ class ExternalPublicProgressTests(unittest.TestCase):
         self.assertEqual(before.payload["revision"], 0)
         self.assertEqual(after.payload["revision"], objective.seq)
         self.assertEqual(before.payload["run_id"], after.payload["run_id"])
+        self.assertEqual(before.payload["public_text_span"]["end"], after.payload["public_text_span"]["start"])
         self.assertEqual(self.said("reply"), [])
 
     def test_no_tool_answer_remains_one_customer_reply(self):
@@ -359,6 +369,7 @@ class ExternalPublicProgressTests(unittest.TestCase):
                     for key in ("response_kind", "audience", "revision", "run_id", "reply_to"):
                         self.assertEqual(history[event.seq][key], event.payload[key])
                     self.assertEqual(history[event.seq]["sender"], self.worker)
+                    self.assertNotIn("public_text_span", history[event.seq])
             self.assertEqual(run.context["reviews"], [])
             run.call("wait_for_reply")
 

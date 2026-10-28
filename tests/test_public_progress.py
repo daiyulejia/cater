@@ -1,5 +1,6 @@
 """Public observations stay live, bounded and separate from work receipts."""
 from contextlib import contextmanager
+from dataclasses import replace
 import http.client
 from http.server import ThreadingHTTPServer
 import json
@@ -23,6 +24,10 @@ def attempt(seq=3, task='task', role='dev'):
 
 def chunk(text, kind='agent_message_chunk'):
     return {'sessionUpdate': kind, 'content': {'type': 'text', 'text': text}}
+
+
+def positioned(text, start):
+    return {**chunk(text), '_cater_public_text_span': {'version': 1, 'start': start, 'end': start + len(text)}}
 
 
 class PublicProgressBufferTests(unittest.TestCase):
@@ -81,6 +86,69 @@ class PublicProgressBufferTests(unittest.TestCase):
             old(attempt(), 0, chunk('迟到'))
             previous.__exit__(None, None, None)
             self.assertEqual(progress.snapshot('task', 'activity')[0]['text'], '当前')
+
+    def test_absolute_unicode_coordinates_survive_window_truncation(self):
+        progress = PublicProgress()
+        public = '🐈' * 3999 + '中e\u0301\r\n'
+        with progress.capture('task', 'activity') as observe:
+            observe(attempt(), 0, positioned(public[:3999], 0))
+            observe(attempt(), 0, positioned(public[3999:], 3999))
+            row, = progress.snapshot('task', 'activity')
+            self.assertEqual(row['text'], public[-MAX_TEXT:])
+            self.assertEqual(row['text_span'], {'version': 1, 'start': len(public) - MAX_TEXT, 'end': len(public)})
+            self.assertTrue(row['truncated'])
+            self.assertEqual(len(row['text']), MAX_TEXT)
+
+    def test_missing_callback_revision_reset_and_eviction_never_join_unrelated_ranges(self):
+        progress = PublicProgress()
+        with progress.capture('task', 'activity') as observe:
+            observe(attempt(), 0, positioned('旧', 0))
+            observe(attempt(), 0, positioned('跳过一段后', 9))
+            row, = progress.snapshot('task', 'activity')
+            self.assertEqual(row['text'], '跳过一段后')
+            self.assertEqual(row['text_span']['start'], 9)
+            self.assertTrue(row['truncated'])
+            observe(attempt(), 8, positioned('新目标', 15))
+            row, = progress.snapshot('task', 'activity')
+            self.assertEqual(row['text_span'], {'version': 1, 'start': 15, 'end': 18})
+            self.assertEqual(row['text'], '新目标')
+            for seq in range(4, MAX_RUNS + 4):
+                observe(attempt(seq), 8, positioned('其它运行', 0))
+            observe(attempt(), 8, positioned('回来', 20))
+            row = next(r for r in progress.snapshot('task', 'activity') if r['external_started_seq'] == 3)
+            self.assertEqual(row['text_span'], {'version': 1, 'start': 20, 'end': 22})
+            self.assertEqual(row['text'], '回来')
+
+    def test_duplicate_or_backward_observation_does_not_refresh_freshness(self):
+        progress = PublicProgress()
+        with patch('cater.public_progress.time.monotonic', return_value=100) as clock:
+            with progress.capture('task', 'activity') as observe:
+                observe(attempt(), 0, positioned('有效', 4))
+                clock.return_value = 150
+                for update in (positioned('有效', 4), positioned('旧', 2), positioned('重叠', 5)):
+                    observe(attempt(), 0, update)
+                row, = progress.snapshot('task', 'activity')
+                self.assertEqual(row['text'], '有效')
+                self.assertEqual(row['age_ms'], 50000)
+                clock.return_value = 160
+                self.assertEqual(progress.snapshot('task', 'activity'), [])
+
+    def test_invalid_and_legacy_coordinates_keep_text_without_claiming_coverage(self):
+        for span in (None, {'version': True, 'start': 0, 'end': 2},
+                     {'version': 1, 'start': -1, 'end': 1}, {'version': 1, 'start': False, 'end': 2},
+                     {'version': 1, 'start': 0, 'end': 9}, {'version': 1, 'start': 2 ** 53, 'end': 2 ** 53 + 2}):
+            with self.subTest(span=span):
+                progress = PublicProgress()
+                with progress.capture('task', 'activity') as observe:
+                    observe(attempt(), 0, positioned('已有', 0))
+                    observe(attempt(), 0, {**chunk('未知'), '_cater_public_text_span': span})
+                    row, = progress.snapshot('task', 'activity')
+                    self.assertEqual(row['text'], '未知')
+                    self.assertNotIn('text_span', row)
+                    observe(attempt(), 0, positioned('恢复', 4))
+                    row, = progress.snapshot('task', 'activity')
+                    self.assertEqual(row['text'], '恢复')
+                    self.assertEqual(row['text_span']['start'], 4)
 
 
 class PublicRun(fixture.ScriptedExternalRun):
@@ -188,6 +256,43 @@ class PublicProgressIntegrationTests(unittest.TestCase):
         answers = [event for event in self.fx.events('msg.said') if event.payload.get('customer_reply_tool')]
         self.assertEqual(len(answers), 1)
         self.assertEqual(self.fx.events('team.run_finished')[-1].payload['status'], 'completed')
+
+    def test_host_coordinates_match_durable_text_despite_missed_observation_and_client_spoof(self):
+        progress = PublicProgress()
+        snapshots = []
+        with progress.capture(self.fx.task, 'coordinate-proof') as observe:
+            def observer(attempt, revision, update):
+                if update is not None and update.get('content', {}).get('text') == '漏掉':
+                    raise OSError('optional observer missed one callback')
+                observe(attempt, revision, update)
+            self.fx.rt.team.external.progress = observer
+            def work(run):
+                for part in ('🐈中\r\n', '漏掉', '新尾'):
+                    run.state = replace(run.state, text=run.state.text + part)
+                    incoming = positioned(part, 99999)  # A client coordinate is never authoritative.
+                    run.on_update(incoming)
+                    self.assertEqual(incoming['_cater_public_text_span']['start'], 99999)
+                    snapshots.append(progress.snapshot(self.fx.task, 'coordinate-proof'))
+                    if part == '🐈中\r\n':
+                        run.call('read_messages', limit=1)
+                run.call('reply_to_customer', text='答复只有一份。')
+            self.driver.scripts = {self.fx.manager: [work]}
+            self.fx.receive()
+            self.fx.drain()
+            self.assertEqual(progress.snapshot(self.fx.task, 'coordinate-proof'), [])
+        first, missed, tail = [rows[0] for rows in snapshots]
+        self.assertEqual(first['text_span'], {'version': 1, 'start': 0, 'end': 4})
+        self.assertEqual({k: v for k, v in missed.items() if k != 'age_ms'},
+                         {k: v for k, v in first.items() if k != 'age_ms'})
+        self.assertGreaterEqual(missed['age_ms'], first['age_ms'])
+        self.assertEqual(tail['text'], '新尾')
+        self.assertEqual(tail['text_span'], {'version': 1, 'start': 6, 'end': 8})
+        stored = [e for e in self.fx.events('msg.said') if e.payload.get('response_kind') == 'progress']
+        self.assertEqual([e.payload['text'] for e in stored], ['🐈中\r\n', '漏掉新尾'])
+        self.assertEqual([(e.payload['public_text_span']['start'], e.payload['public_text_span']['end'])
+                          for e in stored], [(0, 4), (4, 8)])
+        self.assertTrue(all(e.payload['public_text_span']['external_started_seq'] == tail['external_started_seq']
+                            for e in stored))
 
 
 if __name__ == '__main__':

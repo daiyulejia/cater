@@ -21,7 +21,7 @@ export function ConversationActivity(props: ConversationActivityProps) {
   const lines = [...view.lines].sort((a, b) => Number(Boolean(b.warning)) - Number(Boolean(a.warning))
     || Number(Boolean(b.moving)) - Number(Boolean(a.moving))).slice(0, 2)
   const publicLine = lines.find(line => line.publicText)
-  const publicPreview = publicLine?.publicText?.trim().split('\n').filter(Boolean).at(-1)
+  const publicPreview = publicLine?.publicSegments?.at(-1)?.trim().split('\n').filter(Boolean).at(-1)
   const compactText = publicPreview ? `${props.names[publicLine!.role!] ?? publicLine!.role} · ${Array.from(publicPreview).slice(-100).join('')}` : view.message ?? lines[0]?.text
   const warningCount = view.lines.filter(line => line.warning).length
   const deadline = view.visible ? view.nextCheckAt : undefined
@@ -65,11 +65,15 @@ export function ConversationActivity(props: ConversationActivityProps) {
         {line.role ? <span aria-hidden="true" className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden">{props.portrait(line.role)}</span>
           : <Clock3 size={14} className="mt-1 shrink-0" aria-hidden="true" />}
         <span className="min-w-0 flex-1">{line.text}</span>
-        {line.moving && <LoaderCircle size={14} aria-label={line.publicText ? '有近期活动反馈' : '有近期执行反馈'} className="mt-1 shrink-0 motion-safe:animate-spin" />}
+        {line.moving && <LoaderCircle size={14} aria-label={line.publicActive ? '有近期活动反馈' : '有近期执行反馈'} className="mt-1 shrink-0 motion-safe:animate-spin" />}
         </p>
+        {line.publicActive && line.publicText === '' && <p className="ml-10 mt-1 text-[#58776e]">公开进展已保存至团队记录</p>}
         {line.publicText && <details aria-live="off" className="ml-10 mt-1 text-[#58776e]">
           <summary className="cursor-pointer font-medium">工作说明<span className="ml-2 text-[11px] font-normal text-[#839087]">{line.publicTruncated ? '最近片段 · 成员自述' : '成员自述'}</span></summary>
-          <pre className="mt-1 max-h-28 overflow-y-auto whitespace-pre-wrap break-words font-sans text-xs leading-5 [overflow-wrap:anywhere]">{line.publicText}</pre>
+          <div className="mt-1 max-h-28 overflow-y-auto">{line.publicSegments?.map((segment, index) => <div key={index}>
+            {index > 0 && <p className="my-2 text-[11px] text-[#839087]">中间进展已记录在团队记录中</p>}
+            <pre className="whitespace-pre-wrap break-words font-sans text-xs leading-5 [overflow-wrap:anywhere]">{segment}</pre>
+          </div>)}</div>
         </details>}
       </div>)}
       {notice && <p className="activity-notice flex items-start gap-2 text-[#b55f51]"><CircleAlert size={14} className="mt-1 shrink-0" aria-hidden="true" /><span className="min-w-0">{notice}</span></p>}
