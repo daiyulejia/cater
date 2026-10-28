@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager, nullcontext
 import json
+import os
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 import tempfile
@@ -14,6 +15,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from cater.events import Actor
+from cater.artifact_store import _extended_windows_path
 from cater.external_agent import QoderAcpDriver
 from cater.runtime import Runtime
 from cater.team import HOST, TeamService
@@ -179,8 +181,11 @@ class ResumeAdmissionTests(unittest.TestCase):
     def scenario(self, *, external=False):
         evidence = Path(__file__).resolve().parents[1] / ".cater/qa/resume-admission-20261022"
         evidence.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="test-runtime-", dir=evidence) as directory:
-            fixture = _Scenario(self, Path(directory), external)
+        # TemporaryDirectory must clean up through an extended path on Windows;
+        # keep the runtime's own paths unchanged so the test exercises normal use.
+        temp_parent = _extended_windows_path(evidence) if os.name == "nt" else evidence
+        with tempfile.TemporaryDirectory(prefix="test-runtime-", dir=temp_parent) as directory:
+            fixture = _Scenario(self, evidence / Path(directory).name, external)
             with patch("cater.web.ActivityRunner", return_value=fixture.runner):
                 handler = make_handler(fixture.db, runtime_factory=fixture.factory)
             with patch.object(fixture.runner, "_start"), patch.object(handler, "log_message"):
