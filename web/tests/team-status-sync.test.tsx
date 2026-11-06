@@ -73,7 +73,8 @@ test.each<SyncCase>([
   } else if (oldRuns.length) {
     expect(baselineProgress).toContain('dev · 本轮处理未完成，需核对过程')
     expect(baselineProgress).toContain('后台有 1 条消息等待处理')
-    expect(baselineProgress).not.toContain('后台协作异常')
+    if (old.activity?.state === 'failed') expect(baselineProgress).toContain('后台协作异常')
+    else expect(baselineProgress).not.toContain('后台协作异常')
   } else {
     expect(baselineProgress).toContain('后台协作异常')
   }
