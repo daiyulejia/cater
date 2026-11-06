@@ -55,6 +55,38 @@ _CUSTOMER_MESSAGE_GUIDANCE = ("customer_message需要message_seq和expected_hash
     "工具完成回执请用read_receipts的receipt_seq读取。")
 
 
+def _review_attention(reviews, assignments, owner, revision):
+    """Join existing views for model guidance, never authorize or schedule work."""
+    rows = [r for r in reviews if r.get('author') == owner and r.get('status') == 'pending']
+    review_counts, assignments_by_seq = {}, {}
+    for review in rows:
+        seq = review.get('message_seq')
+        if isinstance(seq, (int, float)):
+            review_counts[seq] = review_counts.get(seq, 0) + 1
+    for assignment in assignments:
+        seq = assignment.get('seq')
+        if assignment.get('sender') == owner and isinstance(seq, (int, float)):
+            assignments_by_seq.setdefault(seq, []).append(assignment)
+    hints = []
+    for review in rows:
+        seq = review.get('message_seq')
+        hint = {'review_seq': review.get('request_seq'), 'recorded_run_status': 'unknown'}
+        if (type(seq) is int and seq > 0 and type(review.get('revision')) is int
+                and review['revision'] == revision and review_counts.get(seq) == 1):
+            matches = [a for a in assignments_by_seq.get(seq, []) if a.get('recipient') == review.get('reviewer')]
+            if len(matches) == 1:
+                status = matches[0].get('status')
+                hint.update(assignment_seq=seq,
+                            recorded_run_status=status if type(status) is str and status in {'queued', 'running', 'waiting', 'completed',
+                                                                     'interrupted', 'failed'} else 'unknown')
+        hints.append(hint)
+    if not hints:
+        return None
+    return {'entries': hints[-20:], 'total': len(hints), 'truncated': len(hints) > 20,
+            'note': '仅为现有记录提示，关联及前序复核链未认证，不代表可安全接续。'
+                    '请结合当前要求核对检查点，再自行决定；需要时可按原委托使用continue_work。'}
+
+
 def _model_return_field(value, name):
     accessor = getattr_static(type(value), "__getattribute__", None)
     if not isinstance(accessor, WrapperDescriptorType):
@@ -981,6 +1013,7 @@ class TeamService:
         outgoing_states = {row["seq"]: row for row in work_states}
         background = self.rt.conversation_background(task_id)
         revision = current_work["revision"]
+        review_attention = _review_attention(current_work['reviews'], work_states, role.id, revision)
         open_assignments = [{"seq": e.seq, "sender": e.actor.id, "text": e.payload["text"]} for e in messages
                             if e.actor.kind == "agent" and e.payload.get("recipient") == role.id
                             and e.payload.get("kind") in {"assignment", "message"}
@@ -1052,6 +1085,7 @@ class TeamService:
             "active_assignment": {"seq": assignment.seq, "sender": assignment.actor.id, **assignment.payload} if assignment else None,
             "open_assignments": open_assignments, "outgoing_work": outgoing,
             "work_checkpoint": checkpoint,
+            **({'review_attention': review_attention} if review_attention is not None else {}),
             "delivery_index": self.delivery.index(task_id),
             **({"delivery_followup_sources": followup_sources} if followup_sources is not None else {}),
             **({"mcp_index": self.rt.mcp.index(**self.rt.mcp.scope(task_id, role.id))} if self.rt.mcp.configured else {}),
