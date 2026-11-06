@@ -1093,6 +1093,10 @@ class TeamService:
         if self.rt.conversation_list.is_removed(task_id):
             raise WorkConflict("对话已从列表删除；已有成果与在途回执保留，未启动后续操作。")
         events = self.rt.log.read(task_id=task_id)
+        # An existing transaction pins this read to the caller's SQLite
+        # snapshot. Outside a transaction keep the live re-reads below: they
+        # can observe a customer input committed during this check.
+        message_events = events if self.rt.log.db.in_transaction else None
         from .supervision_barrier import check as check_supervision_barrier
 
         check_supervision_barrier(task_id, started, role, events)
@@ -1155,7 +1159,8 @@ class TeamService:
         control = self.rt.execution_control.view(task_id)
         if control["seq"] != started.payload["control_seq"]:
             raise WorkConflict("执行已暂停或控制发生变化；已有成果与回执保留。")
-        source = next((e for e in self._messages(task_id) if e.seq == started.payload["message_seq"]), None)
+        messages = self._messages(task_id, events=message_events)
+        source = next((e for e in messages if e.seq == started.payload["message_seq"]), None)
         from .team_review_direction import answered_observation
         formal_report = (source is not None and source.actor.kind == 'agent'
                          and source.payload.get('kind') == 'report' and type(source.payload.get('review_seq')) is int)
@@ -1172,7 +1177,7 @@ class TeamService:
         if any(e.actor == Actor.human() and e.seq > started.payload["message_seq"]
                and e.payload["recipient"] == role.id
                and not (formal_report and answered_observation(self, task_id, e, before_seq=started.seq, events=events))
-               for e in self._messages(task_id)):
+               for e in (messages if message_events is not None else self._messages(task_id))):
             raise WorkConflict("收到顾客的新消息，先理解新的上下文；已有操作未重放。")
         if source is not None and source.payload.get("kind") == "recovery":
             if self.recovery.superseded(task_id, source):
@@ -1186,7 +1191,7 @@ class TeamService:
                 and r.get("result", {}).get("status") == "ok" and any(
                     e.seq == r["result"].get("message_seq") and e.payload.get("kind") == "report"
                     and e.payload.get("reply_to") == source.payload.get("continue_assignment_seq")
-                    for e in self._messages(task_id)) for r in self._receipts(task_id))
+                    for e in (messages if message_events is not None else self._messages(task_id))) for r in self._receipts(task_id))
             if not own_return:
                 raise WorkConflict("原委托已经交回或失效，未将旧接续当作新的独立工作。")
         if role.id != self.rt.organization.leader.id:
