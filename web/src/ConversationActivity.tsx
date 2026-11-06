@@ -19,12 +19,17 @@ export function ConversationActivity(props: ConversationActivityProps) {
   const toggleRef = useRef<HTMLButtonElement>(null)
   const [, tick] = useReducer((value: number) => value + 1, 0)
   const view = conversationActivity(props)
-  const lines = [...view.lines].sort((a, b) => Number(Boolean(b.warning)) - Number(Boolean(a.warning))
-    || Number(Boolean(b.moving)) - Number(Boolean(a.moving))).slice(0, 2)
+  const openWork = view.lines.find(line => line.id === 'open-work')
+  const lines = view.lines.filter(line => line.id !== 'open-work').sort((a, b) => Number(Boolean(b.warning)) - Number(Boolean(a.warning))
+    || Number(Boolean(b.moving)) - Number(Boolean(a.moving)))
+    .filter((line, index) => index < 2 || line.warning || line.id === 'pending')
   const publicLine = lines.find(line => line.publicText)
   const publicPreview = publicLine?.publicSegments?.at(-1)?.trim().split('\n').filter(Boolean).at(-1)
   const blockedText = view.lines.find(line => line.id === 'activity-blocked')?.text
-  const compactText = blockedText ?? (publicPreview ? `${props.names[publicLine!.role!] ?? publicLine!.role} · ${Array.from(publicPreview).slice(-100).join('')}` : view.message ?? lines[0]?.text)
+  const conflictText = view.lines.find(line => line.id === 'execution-conflict')?.text
+  const effectsText = view.lines.find(line => line.id === 'effects')?.text
+  const orphanText = view.lines.find(line => line.id.startsWith('orphan-'))?.text
+  const compactText = blockedText ?? conflictText ?? effectsText ?? orphanText ?? openWork?.text ?? (publicPreview ? `${props.names[publicLine!.role!] ?? publicLine!.role} · ${Array.from(publicPreview).slice(-100).join('')}` : view.message ?? lines[0]?.text)
   const warningCount = view.lines.filter(line => line.warning).length
   const deadline = view.visible ? view.nextCheckAt : undefined
   useEffect(() => {
@@ -34,11 +39,12 @@ export function ConversationActivity(props: ConversationActivityProps) {
   }, [deadline])
   const stopped = props.executionState === 'paused' || props.executionState === 'cancelled'
   // Execution control is displayed by App even if this lazy panel cannot load.
-  if (!view.visible || stopped && !props.sending && !props.activity?.active && !props.syncError && !safeAuditBlocked(props.activity)) return null
+  if (!view.visible || stopped && !props.sending && !props.activity?.active && !props.syncError && !safeAuditBlocked(props.activity)
+    && !view.lines.some(line => line.id === 'effects' || line.id.startsWith('orphan-'))) return null
   const notice = stopped && !props.syncError ? undefined : view.notice
   const canPause = props.activity?.active === true && props.executionState === 'running' && !props.controlBusy
   const buttonClass = 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[#52766d] hover:bg-[#edf4ef] focus-visible:outline-2 focus-visible:outline-[#d77a6b] disabled:opacity-40'
-  return <section aria-label="当前工作进展" data-expanded={expanded} data-has-lines={lines.length > 0} onKeyDown={event => {
+  return <section aria-label="当前工作进展" data-expanded={expanded} data-has-lines={lines.length > 0 || Boolean(openWork)} onKeyDown={event => {
     if (expanded && event.key === 'Escape' && event.currentTarget.contains(event.target as Node)) {
       event.preventDefault()
       setExpanded(false)
@@ -50,7 +56,7 @@ export function ConversationActivity(props: ConversationActivityProps) {
       <div className="flex shrink-0 items-center gap-1">
         {!view.waitsForCustomer && <button ref={toggleRef} type="button" aria-label={expanded ? '收起工作进展' : '展开工作进展'} title={expanded ? '收起工作进展' : '展开工作进展'} aria-expanded={expanded} aria-controls={bodyId}
           className={`${buttonClass} sm:hidden`} onClick={() => setExpanded((value) => !value)}><ChevronDown size={16} className={expanded ? 'rotate-180' : ''} aria-hidden="true" /></button>}
-        <button type="button" aria-label="查看过程" title={view.lines.length > lines.length ? `查看过程，另有 ${view.lines.length - lines.length} 项进展` : '查看过程'} className={buttonClass} onClick={props.onInspect}><ListTree size={16} aria-hidden="true" /></button>
+        <button type="button" aria-label="查看过程" title={view.lines.length > lines.length + Number(Boolean(openWork)) ? `查看过程，另有 ${view.lines.length - lines.length - Number(Boolean(openWork))} 项进展` : '查看过程'} className={buttonClass} onClick={props.onInspect}><ListTree size={16} aria-hidden="true" /></button>
         <button type="button" aria-label="刷新状态" title="刷新状态（仅查询）" className={buttonClass} onClick={props.onRefresh}><RefreshCw size={16} aria-hidden="true" /></button>
         {!view.waitsForCustomer && !stopped && <button type="button" aria-label="暂停后续执行" title="暂停后续执行；在途调用仍可能返回" className={buttonClass} disabled={!canPause}
           onClick={() => { if (canPause) props.onPause() }}><Pause size={16} aria-hidden="true" /></button>}
@@ -58,6 +64,7 @@ export function ConversationActivity(props: ConversationActivityProps) {
     </div>
     {!view.waitsForCustomer && <div id={bodyId} tabIndex={expanded ? 0 : -1} role="status" aria-live="polite" aria-atomic="true" className="activity-body space-y-1.5">
       {compactText && <p className="activity-compact-summary" aria-label="当前进展摘要" aria-live={publicPreview ? 'off' : undefined}>{compactText}</p>}
+      {openWork && <p className="activity-line text-[#b55f51]">{openWork.text}</p>}
       {view.message && <p className="activity-message flex min-w-0 items-start gap-2 text-[#294a40]">
         {view.messageRole && !lines.some((line) => line.role === view.messageRole) && <span aria-hidden="true" className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden">{props.portrait(view.messageRole)}</span>}
         <span className="min-w-0">{view.message}</span>

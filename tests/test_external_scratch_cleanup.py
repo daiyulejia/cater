@@ -375,8 +375,146 @@ class ExternalScratchCleanupTests(unittest.TestCase):
             retry.assert_not_called()
         self.assertEqual(event.payload["status"], "retained")
         self.assertEqual(event.payload["error_type"], "PermissionError")
+        self.assertEqual(event.payload["failure_stage"], "remove_tree")
         self.assertNotIn(self.private_cleanup, json.dumps(event.payload))
         self.assert_directory_receipts("retained", 1)
+
+    def test_identity_lookup_error_is_safe_and_does_not_attempt_removal(self):
+        scratch = self.new_scratch()
+        with patch.object(Path, 'lstat', side_effect=PermissionError(self.private_cleanup)), \
+                patch('cater.external_scratch.shutil.rmtree') as remove:
+            event = scratch.close(client_stopped=True)
+        remove.assert_not_called()
+        self.assertEqual(event.payload['status'], 'retained')
+        self.assertEqual(event.payload['failure_stage'], 'identity_check')
+        self.assertEqual(event.payload['error_type'], 'PermissionError')
+        self.assertNotIn(self.private_cleanup, json.dumps(event.payload))
+        self.assertEqual(self.rt.team.external_runs.launch_directories(self.task)[0]['settlement']['failure_stage'], 'identity_check')
+
+    def test_subclass_file_not_found_does_not_claim_removed(self):
+        class Impostor(FileNotFoundError):
+            pass
+        scratch = self.new_scratch()
+        with patch.object(Path, 'lstat', side_effect=Impostor(self.private_cleanup)):
+            event = scratch.close(client_stopped=True)
+        self.assertEqual(event.payload['status'], 'retained')
+        self.assertNotIn(self.private_cleanup, json.dumps(event.payload))
+
+    @unittest.expectedFailure
+    def test_known_race_replacement_after_lstat_cannot_be_deleted(self):
+        scratch = self.new_scratch()
+        path = Path(scratch.path)
+        original = path.with_name(path.name + '-original')
+        original_lstat = Path.lstat
+        switched = False
+        def race(target, *args, **kwargs):
+            nonlocal switched
+            info = original_lstat(target, *args, **kwargs)
+            if target == path and not switched:
+                switched = True
+                path.rename(original)
+                path.mkdir()
+                (path / 'replacement-sentinel').write_text('safe', encoding='ascii')
+            return info
+        with patch.object(Path, 'lstat', race):
+            event = scratch.close(client_stopped=True)
+        self.assertTrue(switched)
+        self.assertEqual((path / 'replacement-sentinel').read_text(encoding='ascii'), 'safe')
+        self.assertNotEqual(event.payload['status'], 'removed')
+
+    def test_historical_error_type_cannot_expose_arbitrary_text(self):
+        scratch = self.new_scratch()
+        self.rt.log.emit(type='team.external_directory_settled', actor=HOST, task_id=self.task,
+            payload={**scratch.reference, 'created_seq': scratch.created.seq, 'created_hash': scratch.created.hash,
+                     'status': 'retained', 'client_stopped': True, 'error_type': self.private_cleanup})
+        row, = self.rt.team.external_runs.launch_directories(self.task)
+        self.assertNotIn(self.private_cleanup, json.dumps(row['settlement']))
+
+    @unittest.skipUnless('winerror' in OSError.__dict__, 'native Windows winerror descriptor unavailable')
+    def test_windows_error_code_uses_builtin_descriptor_only(self):
+        scratch = self.new_scratch()
+        error = PermissionError(13, self.private_cleanup, 'PRIVATE_FILENAME', 32)
+        error.__dict__['winerror'] = 'PRIVATE_ATTRIBUTE'
+        with patch('cater.external_scratch.shutil.rmtree', side_effect=error):
+            event = scratch.close(client_stopped=True)
+        self.assertEqual(event.payload['winerror'], 32)
+        settlement = self.rt.team.external_runs.launch_directories(self.task)[0]['settlement']
+        self.assertEqual(settlement['winerror'], 32)
+        self.assertNotIn('PRIVATE_', json.dumps(settlement))
+        self.assertNotIn('PRIVATE_', json.dumps(event.payload))
+
+    @unittest.skipUnless('winerror' in OSError.__dict__, 'native Windows winerror descriptor unavailable')
+    def test_invalid_windows_error_values_are_not_recorded(self):
+        for value in (True, 'PRIVATE_TOKEN', -1, 0x100000000):
+            with self.subTest(value=type(value).__name__):
+                scratch = self.new_scratch()
+                error = PermissionError(self.private_cleanup)
+                error.winerror = value
+                with patch('cater.external_scratch.shutil.rmtree', side_effect=error):
+                    event = scratch.close(client_stopped=True)
+                self.assertNotIn('winerror', event.payload)
+                self.assertNotIn('PRIVATE_', json.dumps(event.payload))
+
+    def test_partial_removal_remains_retained_and_never_replays(self):
+        scratch = self.new_scratch()
+        first, second = Path(scratch.path) / 'one', Path(scratch.path) / 'two'
+        first.write_text('fixture', encoding='ascii')
+        second.write_text('fixture', encoding='ascii')
+        def partial(path):
+            first.unlink()
+            raise PermissionError(self.private_cleanup)
+        with patch('cater.external_scratch.shutil.rmtree', side_effect=partial) as remove:
+            event = scratch.close(client_stopped=True)
+            self.assertIs(scratch.close(client_stopped=True), event)
+            self.assertEqual(remove.call_count, 1)
+        self.assertFalse(first.exists())
+        self.assertTrue(second.exists())
+        self.assertEqual((event.payload['status'], event.payload['failure_stage']), ('retained', 'remove_tree'))
+        self.assertNotIn(self.private_cleanup, json.dumps(event.payload))
+
+    def test_untrusted_oserror_subclass_cannot_inject_diagnostic_fields(self):
+        class Meta(type):
+            def __hash__(cls):
+                raise AssertionError('untrusted metaclass hash')
+        class Hostile(PermissionError, metaclass=Meta):
+            def __getattribute__(self, name):
+                raise AssertionError('untrusted exception attribute')
+        scratch = self.new_scratch()
+        with patch('cater.external_scratch.shutil.rmtree', side_effect=Hostile(self.private_cleanup)):
+            event = scratch.close(client_stopped=True)
+        self.assertEqual(event.payload['error_type'], 'OSError')
+        self.assertEqual(event.payload['failure_stage'], 'remove_tree')
+        self.assertNotIn('winerror', event.payload)
+        self.assertNotIn(self.private_cleanup, json.dumps(event.payload))
+
+    def test_unexpected_exception_does_not_forge_retained_receipt(self):
+        scratch = self.new_scratch()
+        with patch('cater.external_scratch.shutil.rmtree', side_effect=RuntimeError(self.private_cleanup)) as remove:
+            with self.assertRaises(RuntimeError):
+                scratch.close(client_stopped=True)
+            self.assertEqual(remove.call_count, 1)
+        self.assertEqual(self.events('team.external_directory_settled'), [])
+        self.assertEqual(self.rt.team.external_runs.launch_directories(self.task)[0]['status'], 'unconfirmed')
+
+    def test_legacy_retained_receipt_does_not_invent_new_diagnostics(self):
+        scratch = self.new_scratch()
+        self.rt.log.emit(type='team.external_directory_settled', actor=HOST, task_id=self.task,
+            payload={**scratch.reference, 'created_seq': scratch.created.seq, 'created_hash': scratch.created.hash,
+                     'status': 'retained', 'client_stopped': True, 'error_type': 'PermissionError'})
+        row, = self.rt.team.external_runs.launch_directories(self.task)
+        self.assertEqual(row['settlement'], {'status': 'retained', 'client_stopped': True,
+                                             'error_type': 'PermissionError'})
+
+    def test_projection_ignores_invalid_new_fields(self):
+        scratch = self.new_scratch()
+        self.rt.log.emit(type='team.external_directory_settled', actor=HOST, task_id=self.task,
+            payload={**scratch.reference, 'created_seq': scratch.created.seq, 'created_hash': scratch.created.hash,
+                     'status': 'retained', 'client_stopped': True, 'error_type': 'PermissionError',
+                     'failure_stage': 'PRIVATE_PATH', 'winerror': True})
+        row, = self.rt.team.external_runs.launch_directories(self.task)
+        self.assertNotIn('failure_stage', row['settlement'])
+        self.assertNotIn('winerror', row['settlement'])
+        self.assertNotIn('PRIVATE_PATH', json.dumps(row['settlement']))
 
     def test_deferred_directory_survives_gc_without_finalizer_or_retry(self):
         scratch = self.new_scratch()
@@ -525,7 +663,7 @@ class ExternalScratchCleanupTests(unittest.TestCase):
                          [row["started_seq"] for row in pending])
         self.assertEqual(body["launch_directories"][0]["settlement"],
                          {"status": "retained", "client_stopped": True,
-                          "error_type": "PermissionError"})
+                          "error_type": "PermissionError", "failure_stage": "remove_tree"})
         self.assertIsNone(body["launch_directories"][-1]["settlement"])
         self.assertNotIn(self.private_cleanup, output.getvalue())
         self.assertEqual(self.rt.team.external_runs.pending(self.task), pending)

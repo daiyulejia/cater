@@ -1,4 +1,4 @@
-import { isTeamHost, isTeamRecovery, isTeamReturnWorkReceipt, isTeamContinueWorkReceipt, teamMessageAudience, teamProgressMessages, teamSpeaker } from './team'
+import { isTeamHost, isTeamRecovery, isTeamReturnWorkReceipt, isTeamContinueWorkReceipt, teamEffectsPendingCount, teamMessageAudience, teamProgressMessages, teamSpeaker } from './team'
 import type { TeamEvent, TeamRun, TeamState } from './team'
 import { archiveEntries, portableArchivePart } from './archiveManifest'
 import { artifactHistoryReceipt, isArtifactHistoryReceipt } from './artifactHistoryReceipt'
@@ -686,6 +686,11 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       status: end ? string(end.payload.status) ?? 'uncertain' : snapshot?.status ?? 'running' })
   }
   const allRuns = [...runs.values()]
+  const rawRunning = team.runs.some((run) => active(run.status))
+  const projectedRunning = allRuns.some((run) => active(run.status))
+  let executionConflict = Boolean(team.runs.some(run => active(run.status) && !active(runs.get(key(run.message_seq, run.role))?.status))
+    || activity?.active === false && (rawRunning || projectedRunning || ['running', 'queued'].includes(activity.state))
+    || activity?.active === true && ['idle', 'completed', 'failed', 'blocked'].includes(activity.state))
   const deliveredAt = done ? completed ? completion.seq : team.revision : undefined
   const recipient = currentHuman ? string(currentHuman.payload.recipient) ?? leaderId : undefined
   const customerRun = currentHuman ? runs.get(key(currentHuman.seq, recipient)) : undefined
@@ -763,6 +768,59 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
     const source = typeof event.payload.message_seq === 'number' ? bySeq.get(event.payload.message_seq) : undefined
     return event.payload.message_seq === undefined || currentSource(source)
   })
+  // A partial event snapshot can omit the run start. A current-scope tool start
+  // without a matching receipt is uncertainty, not proof that execution ended.
+  const orphanTools = hosts.filter(event => {
+    if (event.type !== 'team.tool_started' || typeof event.payload.role !== 'string'
+      || typeof event.payload.run_id !== 'string' || event.seq < floor
+      || event.payload.revision !== undefined && (typeof event.payload.revision !== 'number'
+        || !Number.isSafeInteger(event.payload.revision) || !revisions.has(event.payload.revision))
+      || deliveredAt !== undefined && event.seq <= deliveredAt) return false
+    if (hosts.some(start => start.type === 'team.run_started' && start.seq < event.seq
+      && start.payload.run_id === event.payload.run_id && start.payload.role === event.payload.role)) return false
+    const message = event.payload.message_seq
+    if (message === undefined) return true
+    if (typeof message !== 'number' || !Number.isSafeInteger(message) || message <= 0 || message >= event.seq) return false
+    const source = bySeq.get(message)
+    if (source && (source.type !== 'team.message_received'
+      || source.payload.recipient !== undefined && source.payload.recipient !== event.payload.role)) return false
+    if (message < floor) return event.payload.revision === floor
+    return !source || currentSource(source)
+  })
+  // Host receipts that reference the same start cannot establish a unique result.
+  const receiptsByStart = new Map<number, TeamEvent[]>()
+  const legacyReceiptsByCall = new Map<string, TeamEvent[]>()
+  for (const event of hosts) {
+    if (event.type !== 'team.tool_finished') continue
+    const started = event.payload.started_seq, call = event.payload.call_id
+    if (typeof started === 'number') receiptsByStart.set(started, [...(receiptsByStart.get(started) ?? []), event])
+    else if (typeof call === 'string') legacyReceiptsByCall.set(call, [...(legacyReceiptsByCall.get(call) ?? []), event])
+  }
+  const duplicateReceipts = new Set([...currentTools, ...orphanTools].filter(start =>
+    [...(receiptsByStart.get(start.seq) ?? []), ...(typeof start.payload.call_id === 'string'
+      ? (legacyReceiptsByCall.get(start.payload.call_id) ?? []).filter(event => teamToolReceipt(start, [event]) === event) : [])]
+      .filter(event => event.seq > start.seq).length > 1).map(start => start.seq))
+  const orphanReceipt = (start: TeamEvent) => {
+    if (duplicateReceipts.has(start.seq)) return undefined
+    return teamToolReceipt(start, (receiptsByStart.get(start.seq) ?? []).filter(event => event.payload.started_seq === start.seq
+      && event.payload.role === start.payload.role && event.payload.run_id === start.payload.run_id))
+  }
+  const orphanOpenTool = orphanTools.some(event => !orphanReceipt(event))
+  const orphanOutcomes = new Set<string>()
+  for (const start of orphanTools) {
+    const receipt = orphanReceipt(start)
+    if (!receipt) continue
+    const result = object(receipt.payload.result)
+    if (result.outcome === 'effects_unknown') orphanOutcomes.add('工具回执曾记录操作影响待核对')
+    if ([receipt.payload.status, result.status, result.outcome].some(value =>
+      ['error', 'failed', 'timeout', 'launch_error', 'blocked', 'cancelled'].includes(String(value)))
+      || typeof result.exit_code === 'number' && result.exit_code !== 0) orphanOutcomes.add('工具回执记录工具执行未完成')
+    if (result.complete === false && result.outcome !== 'effects_unknown') orphanOutcomes.add('工具回执记录工具结果待核对')
+    if (receipt.payload.result === null || typeof receipt.payload.result !== 'object' || Array.isArray(receipt.payload.result)
+      || ![receipt.payload.status, result.status, result.outcome].some(value =>
+        ['ok', 'done', 'completed', 'succeeded', 'passed', 'success', 'error', 'failed', 'timeout', 'launch_error', 'blocked', 'cancelled', 'effects_unknown'].includes(String(value))))
+      orphanOutcomes.add('工具回执记录工具结果待核对')
+  }
   const latestTools = new Map<string, TeamEvent>()
   for (const tool of currentTools) latestTools.set(String(tool.payload.role), tool)
   const roles = new Set([...roleRuns.keys(), ...latestTools.keys(), ...pendingQuestions.keys()])
@@ -770,7 +828,8 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   for (const role of roles) {
     const run = roleRuns.get(role), tool = latestTools.get(role)
     const toolName = tool?.payload.name ?? (isNativeMcpTool(tool?.payload.tool) || ['read_receipts', 'read_project_history', 'read_artifact', 'read_background', 'workspace_restore_project_file'].includes(String(tool?.payload.tool)) ? tool?.payload.tool : undefined)
-    const receipt = tool ? teamToolReceipt(tool, hosts) : undefined
+    const receiptConflict = Boolean(tool && duplicateReceipts.has(tool.seq))
+    const receipt = tool && !receiptConflict ? teamToolReceipt(tool, hosts) : undefined
     const finished = receipt && hasReceiptReadMetadata(receipt) ? receiptReadArguments(receipt, events)
       : receipt && (toolName === 'workspace_restore_project_file' || toolName === 'read_project_history'
       && (Object.hasOwn(object(receipt.payload.result), 'archive_read') || object(object(receipt.payload.result).source).format === 'archive'))
@@ -792,15 +851,15 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
     const awaitingCustomer = pendingQuestions.has(role) && !running
     const report = running && run?.start ? reports.get(String(run.start.payload.run_id)) : undefined
     if (report) nextCheckAt = Math.min(nextCheckAt ?? Infinity, report.expiresAt)
-    const moving = !awaitingCustomer && running && (freshness(records) || Boolean(report))
+    const moving = !executionConflict && !awaitingCustomer && running && (freshness(records) || Boolean(report))
     const action = toolBelongs ? tools[string(toolName) ?? ''] ?? '工具调用' : undefined
     const handling = bySeq.get(run?.message_seq ?? -1)?.actor.kind === 'human' ? '正在处理消息' : '正在处理工作'
-    let text = awaitingCustomer ? '等待你的补充' : running ? moving ? handling : '暂无新反馈，执行状态待确认'
+    let text = awaitingCustomer ? '等待你的补充' : running ? executionConflict ? '执行状态待核对' : moving ? handling : '暂无新反馈，执行状态待确认'
       : run?.status === 'waiting' ? confirmedWaitingForReply(run, role) ? '等待伙伴回复' : '本轮处于等待状态'
         : failed(run?.status) ? '本轮处理未完成，需核对过程'
           : successful(run?.status) ? '本轮消息处理已结束' : '执行结果待确认'
     if (!awaitingCustomer && requestFailure(run)) text += `：${requestFailure(run)}`
-    if (action && tool?.payload.name !== 'wait_for_reply' && !awaitingCustomer) text = `${action} · ${finished ? toolOutcome(finished, toolName) : '已发起，等待回执'}；${text}`
+    if (action && tool?.payload.name !== 'wait_for_reply' && !awaitingCustomer) text = `${action} · ${receiptConflict ? '回执存在冲突，结果待核对' : finished ? toolOutcome(finished, toolName) : '已发起，等待回执'}；${text}`
     if (finished && isFrozenArchiveReceipt(finished) && frozenArchiveReadEvent(finished)) {
       const result = object(finished.payload.result), source = object(result.source), snapshot = object(result.snapshot)
       text += `；冻结历史 · 来源群 ${source.task_id} · 原成果 #${source.seq} · 冻结截止 #${snapshot.source_seq}`
@@ -809,6 +868,11 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       ...(report ? { publicText: report.displaySegments.join('\n\n（中间进展已记录在团队记录中）\n\n'),
         publicSegments: report.displaySegments, publicTruncated: report.truncated, publicActive: true } : {}),
       warning: failed(run?.status) || Boolean(toolBelongs && finished && !['已存回执已读取', '已存文件读取观察已读取', '当前筛选无匹配文件读取记录', '已完成', '检查通过', '目录已读取', '指引已读取', '宿主服务目录已读取（未连接）', '工具目录已读取', '调用已返回', '历史目录已读取', '历史交付说明已读取', '历史文件已读取', '成果正文已读取', '成果本页已读取', '成果发布历史已读取，未读正文', '工程文件清单已读取', '工程文件正文已读取', '工程文件本页已读取', '工程二进制字节已核对', '历史文件已创建', '已有相同文件，未重写'].includes(toolOutcome(finished, toolName))) })
+  }
+  if (orphanOpenTool || duplicateReceipts.size > 0 || anyOpenTool && activity?.active === false) executionConflict = true
+  if (executionConflict) for (const line of lines) {
+    line.moving = false
+    line.text = line.text.replace(/正在处理(?:消息|工作)/, '执行状态待核对')
   }
   const reported = new Set(events.filter((event) => event.type === 'team.message_received' && event.actor.kind === 'agent'
     && event.payload.kind === 'report' && (() => {
@@ -831,26 +895,44 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
     const detail = safeAuditBlocked(activity) ? activity.error : '请查看过程并核对后再继续。'
     lines.unshift({ id: 'activity-blocked', text: `后台协作已阻塞：${detail}`, warning: true })
   }
+  if (executionConflict) {
+    lines.unshift({ id: 'execution-conflict', text: '执行状态待核对：记录存在冲突，可查看过程', warning: true })
+    if (!sending && currentHuman && !responded && active(customerRun?.status)) message = '最新消息答复与执行状态待核对'
+  }
+  if (duplicateReceipts.size) lines.push({ id: 'orphan-receipt-conflict', text: '工具回执存在重复或冲突，结果待核对；可查看过程', warning: true })
+  for (const outcome of orphanOutcomes) lines.push({ id: `orphan-${outcome}`, text: `${outcome}；可查看过程核对`, warning: true })
+  const effects = teamEffectsPendingCount(team)
+  if (effects === null || effects !== undefined && effects > 0)
+    lines.push({ id: 'effects', text: effects === null ? '操作状态待核对' : `有 ${effects} 项操作影响待核对`, warning: true })
+  if ((!done || executionConflict) && !activityBlocked && activity?.state === 'failed')
+    lines.push({ id: 'failure', text: activity.active
+      ? '后台收到失败状态，执行状态存在冲突；需查看过程核对'
+      : '后台协作异常，尚未确认交付；需查看过程核对', warning: true })
+  else if (!done && !activityBlocked && ['failed', 'blocked'].includes(team.status))
+    lines.push({ id: 'failure', text: '后台工作需要跟进，尚未确认交付', warning: true })
   const fault = lines.some((line) => line.warning)
   if (pending > 0) lines.push({ id: 'pending', text: `后台有 ${pending} 条消息等待处理` })
   if (activity?.active && !anyRunning && !pending) lines.push({ id: 'activity', text: activity.state === 'queued'
     ? `后台协作已排队，等待执行记录${done ? '' : '；尚未确认交付'}`
     : `后台暂无新反馈，等待执行记录${done ? '' : '；尚未确认交付'}` })
   if (!anyRunning && !pending && !activity?.active && !activityBlocked) {
+    const inactiveConfirmed = !syncError && activity?.active === false && ['idle', 'completed', 'failed'].includes(activity.state)
     if (!done && !pendingQuestions.size && !syncError && !sending && !controlBusy && executionState === 'running'
-      && activity?.active === false && team.pending_count === 0 && Number.isSafeInteger(team.open_work_count)
-      && (team.open_work_count ?? 0) > 0 && !team.runs.some((run) => active(run.status)))
-      lines.push({ id: 'open-work', text: `当前暂无执行，仍有 ${team.open_work_count} 项委托未交回；等待接续或核对过程`, warning: true })
-    else if (activity?.state === 'failed' && !done) lines.push({ id: 'failure', text: '后台协作异常，尚未确认交付；需查看过程核对', warning: true })
-    else if (['failed', 'blocked'].includes(team.status) && !done) lines.push({ id: 'failure', text: '后台工作需要跟进，尚未确认交付', warning: true })
-    else if (!done && !pendingQuestions.size) lines.push({ id: 'delivery', text: '当前暂无执行，尚未确认交付' })
+      && inactiveConfirmed && !executionConflict && team.pending_count === 0 && Number.isSafeInteger(team.open_work_count)
+      && (team.open_work_count ?? 0) > 0 && !team.runs.some((run) => active(run.status))) {
+      const pendingReview = team.reviews?.some(review => review.status === 'pending' && review.revision === team.revision)
+      lines.push({ id: 'open-work', text: `当前暂无执行，仍有 ${team.open_work_count} 项委托未交回${pendingReview ? '，复核待处理' : ''}；可查看过程核对`, warning: true })
+      if (currentHuman && !responded) message = '最新消息尚未确认答复'
+    }
+    else if (!executionConflict && activity?.state !== 'failed' && !['failed', 'blocked'].includes(team.status) && !done && !pendingQuestions.size) lines.push({ id: 'delivery', text: inactiveConfirmed
+      ? '当前暂无执行，尚未确认交付' : '执行状态待确认，尚未确认交付' })
   }
   const notice = syncError ? '同步失败，状态待确认；可刷新核对。'
     : executionState === 'paused' ? '已暂停后续执行；在途调用仍可能返回。仍可直接聊天。'
       : executionState === 'cancelled' ? '已取消后续执行；在途调用仍可能返回。仍可直接聊天，继续执行需新建任务。'
         : controlBusy ? '执行控制请求待确认。仍可直接聊天。'
           : executionState !== 'running' ? '执行控制状态待确认。仍可直接聊天。' : undefined
-  if (!sending && currentHuman && !responded && active(customerRun?.status) && !lines.find((line) => line.role === recipient)?.moving)
+  if (!executionConflict && !sending && currentHuman && !responded && active(customerRun?.status) && !lines.find((line) => line.role === recipient)?.moving)
     message = `最新消息已收到 · ${label(recipient!)}暂无新反馈，答复待确认`
   return { visible: team.enabled && Boolean(sending || currentHuman && !responded || !done || anyRunning || pending || pendingQuestions.size || activity?.active || fault || notice),
     message, messageRole: sending ? undefined : recipient, lines, notice, nextCheckAt,

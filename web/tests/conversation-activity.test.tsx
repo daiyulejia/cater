@@ -44,6 +44,181 @@ test('仅在空闲且无待处理消息时提示未交回委托', () => {
   ]) expect(text(extra)).not.toContain(warning)
 })
 
+test('复核中断后空闲提示不被历史等待和其他角色警告挤掉', () => {
+  const manager = { id: 'manager', kind: 'agent', role: 'manager' }
+  const reviewer = { id: 'test', kind: 'agent', role: 'test' }
+  const events = [human(1, 'manager'), start(2, 1, 'manager', 0, 'manager-first'),
+    tool(3, { role: 'manager', run_id: 'manager-first', message_seq: 1, name: 'wait_for_reply' }),
+    event(4, 'team.tool_finished', { role: 'manager', run_id: 'manager-first', name: 'wait_for_reply',
+      started_seq: 3, result: { status: 'ok', waiting: true } }), end(5, 'waiting', 1, 'manager', 'manager-first'),
+    event(6, 'team.message_received', { kind: 'assignment', recipient: 'test', revision: 0, review_seq: 10 }, manager),
+    start(7, 6, 'test', 0, 'review-run'), end(8, 'interrupted', 6, 'test', 'review-run'),
+    event(9, 'team.message_received', { kind: 'progress', recipient: 'manager', revision: 0, reply_to: 6 }, reviewer),
+    start(10, 9, 'manager', 0, 'manager-followup'), end(11, 'interrupted', 9, 'manager', 'manager-followup')]
+  const current = { ...team, open_work_count: 1, runs: [
+    { message_seq: 1, role: 'manager', status: 'waiting', revision: 0 },
+    { message_seq: 6, role: 'test', status: 'interrupted', revision: 0 },
+    { message_seq: 9, role: 'manager', status: 'interrupted', revision: 0 }],
+    reviews: [{ root_seq: 5, request_seq: 10, author: 'manager', reviewer: 'test', artifacts: [], status: 'pending' as const, revision: 0 }] }
+  const input = props({ team: current, events, activity: { active: false, state: 'idle' } })
+  render(<ConversationActivity {...input} />)
+  const region = screen.getByRole('region', { name: '当前工作进展' })
+  const summary = screen.getByLabelText('当前进展摘要')
+  expect(summary.textContent).toContain('当前暂无执行，仍有 1 项委托未交回')
+  expect(summary.textContent).toContain('复核待处理')
+  expect(region.textContent).toContain('店长 · 本轮处理未完成')
+  expect(region.textContent).toContain('测试 · 本轮处理未完成')
+  expect(region.textContent).not.toContain('等待伙伴回复')
+  expect(region.textContent).not.toMatch(/自动恢复|自动重试|目录已保留/)
+})
+
+test('活动状态未知时不宣称暂无执行', () => {
+  const value = text({ team: { ...team, open_work_count: 1 }, activity: undefined })
+  expect(value).not.toContain('当前暂无执行')
+  expect(value).toContain('执行状态待确认')
+  for (const state of ['queued', 'running', 'uncertain', 'unrecognized']) {
+    const inconsistent = text({ team: { ...team, open_work_count: 1 }, activity: { active: false, state } })
+    expect(inconsistent).not.toContain('当前暂无执行')
+    expect(inconsistent).toMatch(/执行状态待(确认|核对)/)
+  }
+  expect(text({ team: { ...team, open_work_count: 1 }, activity: { active: false, state: 'idle' }, syncError: 'offline' }))
+    .not.toContain('当前暂无执行')
+})
+
+test('原始运行与活动或结束事件矛盾时要求核对，旧版本也不冒称空闲', () => {
+  const idle = { active: false, state: 'idle' }
+  const rawRun = { message_seq: 1, role: 'dev', status: 'running', revision: 0 }
+  const old = text({ team: { ...team, revision: 10, runs: [rawRun], open_work_count: 1 }, activity: idle })
+  const ended = text({ team: { ...team, runs: [rawRun], open_work_count: 1 }, events: [human(), start(), end()], activity: idle })
+  const projected = text({ events: [human(), start()], activity: idle })
+  const activeTool = text({ events: [tool(3, { message_seq: undefined, run_id: undefined })], activity: idle })
+  for (const value of [old, ended, projected, activeTool]) {
+    expect(value).toContain('执行状态待核对')
+    expect(value).not.toContain('当前暂无执行')
+    expect(value).not.toContain('正在处理最新消息')
+  }
+  expect(text({ team: { ...team, open_work_count: 1 }, activity: idle })).toContain('当前暂无执行')
+  expect(text({ team: { ...team, runs: [rawRun] }, events: [human(), start()], activity: { active: true, state: 'running' } }))
+    .not.toContain('执行状态待核对')
+})
+
+test('当前方向可信工具开始缺少运行开始时，未收到工具回执不冒称空闲', () => {
+  const idle = { active: false, state: 'idle' }
+  const current = { ...team, revision: 10, open_work_count: 1 }
+  const objective = event(10, 'team.objective_updated')
+  const source = human(11)
+  const orphan = tool(12, { message_seq: 11, revision: 10, run_id: 'missing-run' })
+  const input = { team: current, events: [objective, source, orphan], activity: idle }
+  const value = text(input)
+  expect(value).toContain('执行状态待核对')
+  expect(value).not.toContain('当前暂无执行')
+  const finished = event(13, 'team.tool_finished', { role: 'dev', run_id: 'missing-run', name: 'workspace_read', started_seq: 12, result: { status: 'ok' } })
+  expect(text({ ...input, events: [...input.events, finished] })).toContain('当前暂无执行')
+  expect(text({ ...input, events: [tool(3), objective] })).toContain('当前暂无执行')
+  expect(text({ ...input, events: [objective, source, { ...orphan, payload: { ...orphan.payload, revision: 0 } }] })).toContain('当前暂无执行')
+  expect(text({ ...input, events: [objective, source, { ...orphan, actor: { id: 'dev', kind: 'agent', role: 'dev' } }] })).toContain('当前暂无执行')
+})
+
+test('工具自身处于当前版本时，较早的消息来源不能掩盖未结算记录', () => {
+  const source = human(1), objective = event(10, 'team.objective_updated')
+  const started = tool(12, { message_seq: 1, revision: 10, run_id: 'missing-run' })
+  const input = { team: { ...team, revision: 10 }, events: [source, objective, started], activity: { active: false, state: 'idle' } }
+  expect(text(input)).toContain('执行状态待核对')
+  expect(text(input)).not.toContain('当前暂无执行')
+  const receipt = event(13, 'team.tool_finished', { role: 'dev', run_id: 'missing-run', name: 'workspace_read', started_seq: 12,
+    result: { status: 'error', outcome: 'effects_unknown' } })
+  expect(text({ ...input, events: [...input.events, receipt] })).toContain('操作影响待核对')
+  for (const revision of [0, undefined, '10']) {
+    expect(text({ ...input, events: [source, objective, { ...started, payload: { ...started.payload, revision } }] })).not.toContain('执行状态待核对')
+  }
+  expect(text({ ...input, events: [human(1, 'test'), objective, started] })).not.toContain('执行状态待核对')
+})
+
+test.each([false, true])('同一工具重复宿主回执须核对，缺失运行开始：%s', missingRun => {
+  const source = human(1), started = tool(3), run = start(2)
+  const ok = event(4, 'team.tool_finished', { role: 'dev', run_id: 'run', name: 'workspace_read', started_seq: 3, result: { status: 'ok' } })
+  const unknown = event(5, 'team.tool_finished', { role: 'dev', run_id: 'run', name: 'workspace_read', started_seq: 3, result: { status: 'error', outcome: 'effects_unknown' } })
+  for (const receipts of [[ok, unknown], [{ ...unknown, seq: 4 }, { ...ok, seq: 5 }], [ok, { ...ok, seq: 5 }]]) {
+    const value = text({ events: [source, ...(missingRun ? [] : [run]), started, ...receipts], activity: { active: false, state: 'idle' } })
+    expect(value).toContain('工具回执存在重复或冲突')
+    expect(value).not.toContain('当前暂无执行')
+    expect(value).not.toContain('读取文件 · 已完成')
+  }
+  const forged = { ...unknown, actor: { id: 'dev', kind: 'agent', role: 'dev' } }
+  expect(text({ events: [source, started, ok, forged], activity: { active: false, state: 'idle' } })).not.toContain('工具回执存在重复或冲突')
+  const mismatched = { ...unknown, payload: { ...unknown.payload, run_id: 'other' } }
+  expect(text({ events: [source, ...(missingRun ? [] : [run]), started, ok, mismatched], activity: { active: false, state: 'idle' } }))
+    .toContain('工具回执存在重复或冲突')
+  const legacy = [ok, unknown].map(receipt => ({ ...receipt, payload: { ...receipt.payload, started_seq: undefined, call_id: 'read' } }))
+  expect(text({ events: [source, ...(missingRun ? [] : [run]), started, ...legacy], activity: { active: false, state: 'idle' } }))
+    .toContain('工具回执存在重复或冲突')
+})
+
+test('活动同时标记活跃和失败时两种事实都可查看', () => {
+  const input = props({ activity: { active: true, state: 'failed' } })
+  render(<ConversationActivity {...input} />)
+  expect(screen.getByLabelText('当前进展摘要').textContent).toContain('执行状态待核对')
+  fireEvent.click(screen.getByRole('button', { name: '展开工作进展' }))
+  expect(screen.getByRole('region', { name: '当前工作进展' }).textContent).toContain('收到失败状态')
+})
+
+test.each([
+  [{ status: 'error', outcome: 'failed', error: 'token_secret C:\\private' }, '工具执行未完成'],
+  [{ status: 'error', outcome: 'effects_unknown', error: 'token_secret C:\\private' }, '操作影响待核对'],
+  [{ status: 'ok', complete: false, error: 'token_secret C:\\private' }, '工具结果待核对'],
+])('无运行开始记录时可信工具回执显示安全结果：%j', (result, expected) => {
+  const objective = event(10, 'team.objective_updated')
+  const source = human(11)
+  const orphan = tool(12, { message_seq: 11, revision: 10, run_id: 'missing-run' })
+  const finished = event(13, 'team.tool_finished', { role: 'dev', run_id: 'missing-run', name: 'workspace_read', started_seq: 12, result })
+  const input = { team: { ...team, revision: 10 }, activity: { active: false, state: 'idle' }, events: [objective, source, orphan, finished] }
+  const value = text(input)
+  expect(value).toContain(expected)
+  expect(value).not.toMatch(/token_secret|private/)
+  expect(text({ ...input, team: { ...team, revision: 20 }, events: [orphan, finished, event(20, 'team.objective_updated')] })).not.toContain(expected)
+  expect(text({ ...input, events: [objective, source, orphan, { ...finished, actor: { id: 'dev', kind: 'agent', role: 'dev' } }] })).not.toContain(expected)
+  expect(text({ ...input, events: [objective, source, orphan, { ...finished, payload: { ...finished.payload, run_id: 'other' } }] })).not.toContain(expected)
+  expect(text({ ...input, events: [objective, source, { ...orphan, payload: { ...orphan.payload, revision: 9 } }, finished] })).not.toContain(expected)
+  expect(text({ ...input, events: [objective, source, orphan, { ...finished, payload: { ...finished.payload, role: undefined } }] })).not.toContain(expected)
+  expect(text({ ...input, events: [objective, source, orphan, { ...finished, payload: { ...finished.payload, result: null } }] })).toContain('工具结果待核对')
+  render(<ConversationActivity {...props(input)} />)
+  expect(screen.getByLabelText('当前进展摘要').textContent).toContain(expected)
+  fireEvent.click(screen.getByRole('button', { name: '展开工作进展' }))
+  expect(screen.getByRole('region', { name: '当前工作进展' }).textContent).not.toMatch(/token_secret|private/)
+})
+
+test.each([1, null, -1])('未结算效果计数 %s 在已交付和暂停时仍可查看', count => {
+  const input = props({ team: { ...team, status: 'done', effects_pending_count: count }, activity: { active: false, state: 'idle' }, executionState: 'paused' })
+  render(<ConversationActivity {...input} />)
+  const region = screen.getByRole('region', { name: '当前工作进展' })
+  expect(region.textContent).toContain(count === 1 ? '有 1 项操作影响待核对' : '操作状态待核对')
+})
+
+test.each([0, undefined])('无未结算效果计数 %s 不显示效果警告', count => {
+  expect(text({ team: { ...team, effects_pending_count: count }, activity: { active: false, state: 'idle' } })).not.toContain('操作影响待核对')
+})
+
+test('多角色中断时后台失败和待处理消息在展开进展中仍可访问', () => {
+  const events = [human(1, 'dev'), start(2, 1, 'dev', 0, 'dev-run'), end(3, 'interrupted', 1, 'dev', 'dev-run'),
+    human(4, 'test'), start(5, 4, 'test', 0, 'test-run'), end(6, 'interrupted', 4, 'test', 'test-run')]
+  render(<ConversationActivity {...props({ events, team: { ...team, pending_count: 1 }, activity: { active: false, state: 'failed' } })} />)
+  fireEvent.click(screen.getByRole('button', { name: '展开工作进展' }))
+  const region = screen.getByRole('region', { name: '当前工作进展' })
+  expect(region.textContent).toContain('后台有 1 条消息等待处理')
+  expect(region.textContent).toContain('后台协作异常')
+  expect(region.textContent).toContain('开发 · 本轮处理未完成')
+  expect(region.textContent).toContain('测试 · 本轮处理未完成')
+})
+
+test('开放委托提示保留团队失败警告，不把旧复核当作当前待处理', () => {
+  const value = text({ team: { ...team, status: 'failed', open_work_count: 1,
+    reviews: [{ root_seq: 1, request_seq: 2, author: 'manager', reviewer: 'test', artifacts: [], status: 'pending', revision: 99 }] },
+  activity: { active: false, state: 'idle' } })
+  expect(value).toContain('委托未交回')
+  expect(value).toContain('后台工作需要跟进')
+  expect(value).not.toContain('复核待处理')
+})
+
 test('恢复通知等待处理及检查点读取保留工作语义，不作为顾客请求或交付依据', () => {
   const recovery = event(4, 'team.message_received', { kind: 'recovery', recipient: 'manager', text: '先核对事实', recovery_of: 2,
     interrupted_seq: 3, revision: 0, recovery_hash: 'hash', scope: { revision: 0 } })
@@ -185,7 +360,7 @@ test('答复完成与工作完成独立；缺少答复事件不猜已回答', ()
   expect(text({ events: [human(), start(), end()] })).toContain('尚未确认答复')
   const content = text({ events: [human(), start(), end(), reply()] })
   expect(content).toContain('开发已回应最新消息')
-  expect(content).toContain('当前暂无执行，尚未确认交付')
+  expect(content).toContain('执行状态待确认，尚未确认交付')
   expect(content).not.toContain('工作已完成')
   expect(content).not.toContain('答复正文不重复')
 })
@@ -332,7 +507,7 @@ test.each([true, false])('交付结清采用为目标的顾客请求，不要求
 test('另一角色活跃时保留其动作，失败仅属于失败角色', () => {
   const events = [human(), start(), end(3, 'failed'), event(4, 'team.message_received', { recipient: 'test', kind: 'assignment', revision: 0 }, { id: 'manager', kind: 'agent', role: 'manager' }),
     start(5, 4, 'test', 0, 'test-run'), tool(6, { role: 'test', run_id: 'test-run', message_seq: 4, name: 'workspace_run' })]
-  const view = conversationActivity(props({ events, activity: { active: true, state: 'failed' } }), now)
+  const view = conversationActivity(props({ events, activity: { active: true, state: 'running' } }), now)
   expect(view.lines.find((line) => line.role === 'dev')?.warning).toBe(true)
   expect(view.lines.find((line) => line.role === 'test')?.moving).toBe(true)
   expect(view.lines.find((line) => line.role === 'test')?.text).toContain('运行命令')
