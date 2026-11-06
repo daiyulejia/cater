@@ -350,6 +350,13 @@ class ProjectHistory:
                 "historical_only": True, "note": NOTE}
 
     def read(self, task_id, arguments, *, expected_project_id=None):
+        # A standalone read establishes one SQLite snapshot at _catalog's
+        # first head query. Existing caller transactions keep their own
+        # snapshot and ownership; no external work is performed here.
+        with self.team._context_read():
+            return self._read_snapshot(task_id, arguments, expected_project_id=expected_project_id)
+
+    def _read_snapshot(self, task_id, arguments, *, expected_project_id=None):
         allowed = {"section", "as_of_seq", "before_seq", "limit", "delivery_seq", "artifact_seq", "path", "offset", "length"}
         if (not isinstance(arguments, dict) or set(arguments) - allowed or not isinstance(arguments.get("section"), str)
                 or arguments["section"] not in {"index", "delivery", "artifact"}

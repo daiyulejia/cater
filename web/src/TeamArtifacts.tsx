@@ -2,7 +2,7 @@ import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import { Download, GitCompareArrows, LoaderCircle, X } from 'lucide-react'
 import type { Artifact } from './Artifact'
-import type { TeamEvent, TeamState } from './team'
+import type { ReviewDeliveryStats, TeamEvent, TeamState } from './team'
 import { teamArtifactCatalog } from './artifactCatalog'
 import { request } from './request'
 import { hasComparisonCandidates } from './artifactComparisonData'
@@ -96,14 +96,17 @@ function History({ items, names, later = false, taskId, accessToken }: { items: 
   </details>
 }
 
-export function TeamArtifacts({ team, taskId, artifacts, events, names, accessToken = '' }: {
-  team: TeamState; taskId: string; artifacts: Artifact[]; events: TeamEvent[]; names: Record<string, string>; accessToken?: string
+export function TeamArtifacts({ team, taskId, artifacts, events, names, accessToken = '', reviewDeliveryStats }: {
+  team: TeamState; taskId: string; artifacts: Artifact[]; events: TeamEvent[]; names: Record<string, string>; accessToken?: string; reviewDeliveryStats?: ReviewDeliveryStats | null
 }) {
   const catalog = teamArtifactCatalog(team, artifacts, events)
   const comparable = useMemo(() => hasComparisonCandidates(artifacts), [artifacts])
   const title = catalog.kind === 'delivery' ? '本次交付文件' : catalog.kind === 'current' ? '本轮发布' : '已发布版本'
   const categories = Object.fromEntries([...catalog.primary.map(item => [item.seq, title]),
     ...catalog.history.map(item => [item.seq, '历史发布']), ...catalog.later.map(item => [item.seq, '交付后发布，不在本次交付包内'])])
+  const counts = [reviewDeliveryStats?.review_conclusions, reviewDeliveryStats?.changes_requested, reviewDeliveryStats?.artifact_set_change_resubmissions]
+  const statsReady = catalog.kind === 'delivery' && reviewDeliveryStats?.delivery_seq === catalog.deliverySeq
+    && reviewDeliveryStats?.complete === true && counts.every(value => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
   return <section aria-label="成果版本" className="min-w-0 border-t border-[#eaded1] pt-4 [overflow-wrap:anywhere]">
     <div className="mb-2 flex flex-wrap items-start justify-between gap-2">
       <h2 className="text-sm font-semibold">{title}<span className="ml-2 text-[11px] font-normal text-[#728679]">{catalog.primary.length} 份</span></h2>
@@ -114,6 +117,11 @@ export function TeamArtifacts({ team, taskId, artifacts, events, names, accessTo
     </div>
     <p className="mb-3 text-[11px] leading-5 text-[#728679]">{catalog.kind === 'delivery' ? `店长交付记录 #${catalog.deliverySeq} · 验证范围以交付说明及实际回执为准。`
       : catalog.kind === 'current' ? '本轮最新发布，尚未确认交付。' : '发布记录不等于当前交付版本。'}</p>
+    {team.status === 'done' && <div aria-label="交付复核统计" className="mb-3 text-xs leading-5 text-[#52766d]">
+      {statsReady ? <><p>正式复核结论 {counts[0]} 条 · 要求修改 {counts[1]} 条 · 要求修改后，成果集合变化并重新送审 {counts[2]} 次</p>
+        <p>仅统计与本次交付关联的记录；重新送审不等于实际返工或内容修改。</p></>
+        : <p>交付复核统计待核对。</p>}
+    </div>}
     {catalog.issue && <p role="alert" className="mb-3 text-xs leading-5 text-amber-800">{catalog.issue}</p>}
     {catalog.primary.length ? <ArtifactRows items={catalog.primary} names={names} label={title} taskId={taskId} accessToken={accessToken} />
       : <p className="text-xs leading-5 text-[#728679]">{catalog.kind === 'delivery' ? '这次交付没有附带文件。' : '本轮还没有发布成果。'}</p>}

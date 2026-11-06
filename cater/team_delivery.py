@@ -15,6 +15,79 @@ REFERENCES_OMITTED_WARNING = "讲解已保留，引用核对失败未保存，�
 HANDOFF_OMITTED_WARNING = "可选交付说明未通过校验，未保存；主要交付结论与成果已保留。"
 PARTIAL_HANDOFF_WARNING = "仅保存部分内容；其他内容和引用未保存，请结合记录核对。"
 HANDOFF_PROSE_FIELDS = frozenset({"why", "changed", "impact", "alternatives", "reproduce", "limits"})
+FINISH_WORK_FIELDS = frozenset({"summary", "verification", "artifact_seqs", "handoff", "omitted_approved_artifacts_reason"})
+
+
+def _receipted_completion(team, event, run, events, effective):
+    """Conservatively bind a local atomic finish receipt to this completion.
+
+    The contract and adjacent event order are trusted host-log evidence, not
+    independent cryptographic proof of SQLite's original transaction.
+    """
+    from .team import LOCAL_EVENT_CONTRACT
+    from .team_review_direction import direction_at
+
+    if run.payload.get('role') != team.rt.organization.leader.id:
+        return False
+    matches = []
+    for tool in events:
+        p = tool.payload
+        if (tool.actor != HOST or tool.type != 'team.tool_started' or p.get('name') != 'finish_work'
+                or not run.seq < tool.seq < event.seq
+                or any(p.get(k) != run.payload.get(k) for k in ('run_id', 'role', 'message_seq'))
+                or p.get('execution_contract') != LOCAL_EVENT_CONTRACT
+                or type(p.get('execution_contract', {}).get('version')) is not int):
+            continue
+        receipts = [e for e in events if e.actor == HOST and e.type == 'team.tool_finished'
+                    and e.payload.get('started_seq') == tool.seq]
+        if len(receipts) != 1:
+            continue
+        receipt = receipts[0]
+        r = receipt.payload
+        result = r.get('result')
+        if (receipt.seq != event.seq + 1 or any(r.get(k) != p.get(k) for k in ('run_id', 'role', 'name'))
+                or 'call_id' in r and r['call_id'] != p.get('call_id')
+                or type(result) is not dict or result.get('status') != 'ok' or 'already_completed' in result
+                or any(e.actor == HOST and e.type == 'team.objective_completed'
+                       and e.seq != event.seq and tool.seq < e.seq < receipt.seq for e in events)):
+            continue
+        direction = direction_at(events, run.seq)
+        if direction is None or direction_at(events, tool.seq) != direction or direction_at(events, event.seq) != direction:
+            continue
+        previous = [e.seq for e in events if e.seq < tool.seq and e.seq in effective]
+        revision = max(previous, default=0)
+        boundary = max((e.seq for e in events if e.seq < tool.seq and e.actor == HOST
+                        and (e.type == 'team.started' or e.type == 'team.objective_updated' and e.seq in effective)), default=0)
+        args = _recorded_finish_arguments(tool)
+        if (type(p.get('revision')) is not int or p['revision'] != revision
+                or type(event.payload.get('objective_seq')) is not int or event.payload['objective_seq'] != boundary
+                or _completion_request(args) is None
+                or args['summary'].strip() != event.payload.get('summary')
+                or args['verification'].strip() != event.payload.get('verification')):
+            continue
+        refs = event.payload.get('artifacts')
+        if (type(refs) is not list or len(refs) > 128
+                or event.payload.get('artifact_selection') != ('explicit' if 'artifact_seqs' in args else 'current_objective')):
+            continue
+        by_seq = {e.seq: e for e in events}
+        selected = []
+        valid_refs = True
+        for ref in refs:
+            if type(ref) is not dict or set(ref) != {'seq', 'filename', 'content_sha256'} or type(ref.get('seq')) is not int:
+                valid_refs = False
+                break
+            published = by_seq.get(ref['seq'])
+            if (published is None or published.seq >= event.seq or published.type != 'deliverable.published'
+                    or published.actor.kind != 'agent' or any(published.payload.get(k) != ref[k]
+                    for k in ('filename', 'content_sha256'))):
+                valid_refs = False
+                break
+            selected.append(ref['seq'])
+        if (not valid_refs or len(set(selected)) != len(selected)
+                or 'artifact_seqs' in args and sorted(selected) != sorted(args['artifact_seqs'])):
+            continue
+        matches.append(tool.seq)
+    return len(matches) == 1
 
 
 def omission_reason(value):
@@ -33,7 +106,7 @@ def omission_reason(value):
 
 
 def _completion_request(arguments):
-    if not isinstance(arguments, dict) or any(not isinstance(arguments.get(key), str)
+    if not isinstance(arguments, dict) or set(arguments) - FINISH_WORK_FIELDS or any(not isinstance(arguments.get(key), str)
             or not arguments[key].strip() or len(arguments[key]) > 32000 for key in ("summary", "verification")):
         return None
     request = dict(arguments)
@@ -76,7 +149,6 @@ def _recorded_finish_arguments(event):
         # The host wraps only when the original public arguments cannot be encoded.
         # Exact regeneration rejects normal input, duplicate keys and altered wrappers.
         if (not isinstance(decoded, dict)
-                or set(decoded) - {"summary", "verification", "artifact_seqs", "handoff", "omitted_approved_artifacts_reason"}
                 or _completion_request(decoded) is None
                 or WorkspaceService._public_arguments("finish_work", decoded) != value):
             return None
@@ -609,9 +681,15 @@ class TeamDelivery:
         seq = arguments.get("delivery_seq")
         if "delivery_seq" in arguments and (type(seq) is not int or seq < 1):
             raise ValueError("交付读取需要本群有效交付序号。")
+        # Reuse the caller's snapshot when nested; release only our own read
+        # transaction. Selection, statistics and current status share a view.
+        with self.team._context_read():
+            return self._read_snapshot(task_id, seq)
+
+    def _read_snapshot(self, task_id, seq):
         events = self.rt.log.read(task_id=task_id)
-        from .team_review_direction import effective_objectives
-        effective = effective_objectives(events) if seq is None else None
+        from .team_review_direction import direction_at, effective_objectives
+        effective = effective_objectives(events)
         event = next((e for e in reversed(events)
                       if e.type == "team.objective_completed" and e.actor == HOST
                       and (e.seq in effective if seq is None else e.seq == seq)), None)
@@ -620,10 +698,41 @@ class TeamDelivery:
                           if e.type == "team.objective_completed" and e.actor == HOST), None)
         if event is None:
             raise ValueError("找不到本群这次交付记录。")
+        # effective_objectives intentionally accepts some older source-less
+        # records for historical compatibility. That is not source proof.
+        runs = [e for e in events if e.seq < event.seq and e.actor == HOST
+                and e.type == 'team.run_started' and isinstance(event.payload.get('run_id'), str)
+                and event.payload['run_id'] and e.payload.get('run_id') == event.payload['run_id']]
+        source = next((e for e in events if len(runs) == 1 and e.seq == runs[0].payload.get('message_seq')
+                       and e.seq < runs[0].seq and e.type == 'team.message_received'
+                       and e.payload.get('recipient') == runs[0].payload.get('role')), None)
+        attributed = (event.seq in effective and len(runs) == 1 and source is not None
+                      and direction_at(events, runs[0].seq) is not None
+                      and _receipted_completion(self.team, event, runs[0], events, effective))
+        source_status = 'direction_attributed' if attributed else 'unverified'
+        source_note = ("来源、当时任务方向与正式交付回执可关联；这不证明交付内容正确或当前任务已完成。" if attributed else
+                       "这条历史交付记录的来源或当时任务方向无法核对；保留原文供查看，不能据此认定当前任务已完成。")
         projection = saved_handoff_projection(event.payload)
         current = self.team.view(task_id)
+        # Statistics are optional display evidence. Never expose internal
+        # feedback or exception text, and never obstruct an existing delivery.
+        review_stats = {"delivery_seq": event.seq, "complete": False,
+                        "note": "复核过程记录不完整，次数待核对。"}
+        try:
+            from .review_delivery_stats import project_review_delivery_stats
+            stats = project_review_delivery_stats(events, task_id=task_id, delivery_seq=event.seq)
+            fields = ("review_conclusions", "changes_requested", "artifact_set_change_resubmissions")
+            if (attributed and stats.get("complete") is True and stats.get("delivery_seq") == event.seq
+                    and all(type(stats.get(key)) is int and stats[key] >= 0 for key in fields)):
+                review_stats = {"delivery_seq": event.seq, "complete": True,
+                    **{key: stats[key] for key in fields},
+                    "note": "仅统计本次交付范围内可核对的正式复核；仅将要求修改后成果集合变化并续审计入该项。集合变化包含改名，不代表实际返工或问题已修复。"}
+        except Exception:
+            pass
         return {"status": "ok", "delivery": {"seq": event.seq,
                 **{k: event.payload[k] for k in ("summary", "verification", "artifacts",
                     "omitted_approved_artifacts_reason") if k in event.payload}, **projection},
                 "historical": current["status"] != "done" or current["revision"] != event.seq,
+                "source_status": source_status, "source_note": source_note,
+                "review_stats": review_stats,
                 "note": "保存的版本说明；步骤未因此执行，引用摘录匹配不证明判断正确或当前文件未变化。"}

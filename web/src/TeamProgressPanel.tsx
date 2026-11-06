@@ -1,6 +1,6 @@
 import type { Artifact } from './Artifact'
 import { isTeamHost, teamEffectsPendingCount, teamRunStatus, teamStatus } from './team'
-import type { TeamActivity, TeamEvent, TeamReview, TeamState } from './team'
+import type { ReviewDeliveryStats, TeamActivity, TeamEvent, TeamReview, TeamState } from './team'
 import { NativeBrowserReceipt } from './browserReport'
 import { isNativeMcpTool, nativeBrowserReceiptStatus, nativeSkillReceiptStatus, nativeMcpReceiptStatus, toolTitle, nativeProjectHistoryReceiptStatus, nativeProjectRestoreReceiptStatus, projectHistoryReadArguments } from './conversationActivityState'
 import { TeamArtifacts } from './TeamArtifacts'
@@ -216,12 +216,12 @@ export function TeamProgressPanel({ team, events, names, executionState = 'runni
   </section>
 }
 
-export function TeamWorkboard({ team, taskId, artifacts, events, names, accessToken, executionState, activity }: {
-  team: TeamState; taskId: string; artifacts: Artifact[]; events: TeamEvent[]; names: Record<string, string>; accessToken?: string; executionState?: ExecutionControl['state']; activity?: TeamActivity
+export function TeamWorkboard({ team, taskId, artifacts, events, names, accessToken, executionState, activity, reviewDeliveryStats }: {
+  team: TeamState; taskId: string; artifacts: Artifact[]; events: TeamEvent[]; names: Record<string, string>; accessToken?: string; executionState?: ExecutionControl['state']; activity?: TeamActivity; reviewDeliveryStats?: ReviewDeliveryStats | null
 }) {
   return <div className="space-y-5">
     <TeamProgressPanel team={team} events={events} names={names} executionState={executionState} activity={activity} />
-    <TeamArtifacts team={team} taskId={taskId} artifacts={artifacts} events={events} names={names} accessToken={accessToken} />
+    <TeamArtifacts team={team} taskId={taskId} artifacts={artifacts} events={events} names={names} accessToken={accessToken} reviewDeliveryStats={reviewDeliveryStats} />
     <details className="border-t border-[#eaded1] pt-4 text-xs text-[#52766d]"><summary className="cursor-pointer font-semibold">过程证据 · {events.length} 条记录</summary><a className="mt-2 inline-block underline" href={`/tasks/${encodeURIComponent(taskId)}`}>打开完整审计回放</a></details>
   </div>
 }

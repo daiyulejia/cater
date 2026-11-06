@@ -822,15 +822,17 @@ class TeamService:
                 **({"finished_seq": finished.seq} if finished else {})})
         return sorted([*rows, *self.external_runs.pending(task_id)], key=lambda row: row["started_seq"])
 
-    def _skill_scope(self, task_id, role, tool_names=None):
+    def _skill_scope(self, task_id, role, tool_names=None, *, has_project_history=None):
         binding = self.rt.workspaces.view(task_id)
         workspace = None
         if binding["available"]:
             from .workspace_tools import WorkspaceExecutor
             workspace = WorkspaceExecutor(self.rt.workspaces.config[binding["workspace_id"]]["policy"])
+        if has_project_history is None:
+            has_project_history = self.project_history.available(task_id)
         current = {t["name"] for t in self._schemas(role, workspace, has_background=self.rt.conversation_background(task_id) is not None,
                                                   workspace_id=binding.get("workspace_id") if binding["available"] else None,
-                                                  has_project_history=self.project_history.available(task_id))}
+                                                  has_project_history=has_project_history)}
         tool_names = current if tool_names is None else current & set(tool_names)
         if self.rt.execution_control.view(task_id)["state"] != "running":
             tool_names &= PAUSED_TOOLS
@@ -888,9 +890,10 @@ class TeamService:
             if binding["available"]:
                 from .workspace_tools import WorkspaceExecutor
                 workspace = WorkspaceExecutor(self.rt.workspaces.config[binding["workspace_id"]]["policy"])
+            project_history = self.project_history.index(task_id)
             tools = self._schemas(role, workspace, has_background=self.rt.conversation_background(task_id) is not None,
                                   workspace_id=binding.get("workspace_id") if binding["available"] else None,
-                                  has_project_history=self.project_history.available(task_id))
+                                  has_project_history=project_history["available"])
             from .team_reply import customer_source
 
             if customer_source(self, task_id, message, role) is None or self._waiting_assignment(task_id, message, role) is not None:
@@ -916,13 +919,14 @@ class TeamService:
                     and not callable(getattr(driver, "agent_run", None))):
                 tools = with_loader(tools)
             context, rules = self._context_snapshot(task_id, message, role, run_id=run_id,
-                                                   tool_names={tool["name"] for tool in tools})
+                                                   tool_names={tool["name"] for tool in tools},
+                                                   project_history=project_history)
         applied = self.rt.rulebook._record_snapshot(task_id, rules)
         basis = {"as_of_seq": head[0] if head else 0, "as_of_hash": head[1] if head else None,
                  "rule_fingerprint": applied["fingerprint"], "rule_snapshot_seq": applied["seq"]}
         return context, workspace, binding, tools, basis
 
-    def _context_snapshot(self, task_id, message, role, *, run_id=None, tool_names=None):
+    def _context_snapshot(self, task_id, message, role, *, run_id=None, tool_names=None, project_history=None):
         from .conversations import dialogue_background
 
         events = self.rt.log.read(task_id=task_id)
@@ -1026,7 +1030,8 @@ class TeamService:
                 observed += 1
         workspace_state = self.rt.workspaces.view(task_id)
         file_sources = self.read_sources.index(task_id, workspace=workspace_state, events=events)
-        project_history = self.project_history.index(task_id)
+        if project_history is None:
+            project_history = self.project_history.index(task_id)
         rules = self.rt.rulebook.current_snapshot(task_id, privacy_safe=True)
         followup_sources = None
         if (role.id == self.rt.organization.leader.id and message.actor == Actor.human()
@@ -1050,7 +1055,8 @@ class TeamService:
             "delivery_index": self.delivery.index(task_id),
             **({"delivery_followup_sources": followup_sources} if followup_sources is not None else {}),
             **({"mcp_index": self.rt.mcp.index(**self.rt.mcp.scope(task_id, role.id))} if self.rt.mcp.configured else {}),
-            "skills_index": self.rt.skills.index(**self._skill_scope(task_id, role, tool_names)),
+            "skills_index": self.rt.skills.index(**self._skill_scope(task_id, role, tool_names,
+                has_project_history=project_history["available"])),
             "reviews": current_work["reviews"],
             "notifications": [{"seq": e.seq, "sender": e.actor.id, "sender_name": name(e.actor.id), **e.payload}
                               for e in notifications[-20:]], "notifications_truncated": len(notifications) > 20,

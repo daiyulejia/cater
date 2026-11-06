@@ -48,7 +48,7 @@ import type { ControlAction, ExecutionControl } from './executionControl'
 import { clearCreationRecovery, CREATION_RECOVERY_TTL, loadCreationRecovery, readAccessToken, saveCreationRecovery } from './creationRecovery'
 import type { CreationAttempt } from './creationRecovery'
 import { compareTeamSnapshots as summaryOrder, hasActiveTeamMessages, hasNewTeamObjective, isTeamHost, isTeamRecovery, resolveTeam, resolveTeamActivity, resolveTeamTask, teamDeliveries, teamMessageAudience, teamMessageEchoes, teamProgressMessages, teamRunStatus, teamSpeaker, teamStatus } from './team'
-import type { TeamState, TeamSummary } from './team'
+import type { ReviewDeliveryStats, TeamState, TeamSummary } from './team'
 import { AsyncPanel } from './AsyncPanel'
 import { ReloadContext } from './pageReloadContext'
 import { loadPageRecovery, openNavigationMemory } from './pageRecovery'
@@ -105,7 +105,7 @@ type Event = { seq: number; ts?: string; type: string; category: string; actor: 
 type QuestionResult = { question_seq?: number; answer?: string; evidence?: { source_seq: number; quote: string }[]; limits?: string[]; reason?: string; speaker_id?: string; driver?: string; tokens?: number; token_usage?: string }
 type Question = QuestionResult & { seq: number; status: string; question: string; role_id: string; basis: QuestionBasis; outdated: boolean }
 type ConversationReceipt = { seq: number; status: string }
-export type TaskDetail = { task: Task; team?: TeamState | null; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; questionnaires?: Questionnaire[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string } | null; activity?: Activity; execution_control?: ExecutionControl; workspace?: WorkspaceBinding; public_progress?: PublicProgressSnapshot; progressReceivedAt?: number }
+export type TaskDetail = { task: Task; team?: TeamState | null; review_delivery_stats?: ReviewDeliveryStats | null; events: Event[]; questions?: Question[]; clarifications?: Clarification[]; questionnaires?: Questionnaire[]; conversation?: ConversationReceipt[]; summary?: TaskSummary; background?: ConversationBackground | null; organization_memory?: MemoryItem[]; review: { health?: string; summary?: string } | null; activity?: Activity; execution_control?: ExecutionControl; workspace?: WorkspaceBinding; public_progress?: PublicProgressSnapshot; progressReceivedAt?: number }
 type DerivationSource = { id: string; goal: string }
 export type ChatItem = { replyEvidence?: ReplyEvidence; replyEvidenceWarning?: string; internal?: boolean; historicalDelivery?: boolean; id: number; actor: string; display: string; role: string; kind: 'human' | 'agent' | 'system'; systemActor: boolean; category: 'collaboration' | 'decision' | 'deliverable' | 'system'; title?: string; text: string; details?: string[]; progress?: Event[]; question?: QuestionContext; clarification?: Clarification; questionnaire?: Questionnaire; notice?: boolean; joined?: string[]; assignments?: WorkAssignment[]; handoff?: { owners: string[]; reviewers: string[] }; targets: string[]; replyTo?: number; evidence: Event; retryStatus?: 'waiting' | 'succeeded' | 'failed' | 'cancelled'; auditEvents?: Event[]; auditName?: (id: string) => string }
 
@@ -1822,7 +1822,7 @@ function VerificationBoard({ items }: { items: Verification[] }) {
 }
 
 function Workboard({ task, detail, activity, names, accessToken, executionState, driverCoverage, showEvidence, onToggleEvidence }: { task: Task; detail: TaskDetail | null; activity?: Activity; names: Record<string, string>; accessToken?: string; executionState: ExecutionControl['state']; driverCoverage?: DriverCoverage[]; showEvidence: boolean; onToggleEvidence: () => void }) {
-  if (task.team?.enabled) return <AsyncPanel fallback={<p role="status" className="text-xs text-[#52766d]">正在读取团队进度…</p>}><TeamWorkboard team={task.team} taskId={task.id} artifacts={task.deliverables ?? []} events={detail?.events ?? []} names={names} accessToken={accessToken} executionState={executionState} activity={activity} /></AsyncPanel>
+  if (task.team?.enabled) return <AsyncPanel fallback={<p role="status" className="text-xs text-[#52766d]">正在读取团队进度…</p>}><TeamWorkboard team={task.team} taskId={task.id} artifacts={task.deliverables ?? []} events={detail?.events ?? []} names={names} accessToken={accessToken} executionState={executionState} activity={activity} reviewDeliveryStats={detail?.review_delivery_stats} /></AsyncPanel>
   const assignments = [...task.assignments].reverse().filter((item, index, all) => all.findIndex((other) => other.owner === item.owner) === index).filter((item) => item.status === undefined || item.status === 'assigned')
   const participants = assignments.length
     ? assignments.map((item) => item.owner)

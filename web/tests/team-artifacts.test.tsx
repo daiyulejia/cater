@@ -21,6 +21,24 @@ const ready = (extra: Partial<Parameters<typeof TeamArtifacts>[0]> = {}) => prop
 const jsonZip = () => new Response(new Blob(['zip-bytes']), { status: 200, headers: { 'Content-Type': 'application/zip' } })
 const tick = async () => act(async () => { await Promise.resolve() })
 
+test('交付统计只描述正式结论和集合变化，不声称返工次数', () => {
+  render(<TeamArtifacts {...ready({ reviewDeliveryStats: { delivery_seq: 20, complete: true,
+    review_conclusions: 2, changes_requested: 1, artifact_set_change_resubmissions: 1 } })} />)
+  const stats = screen.getByLabelText('交付复核统计')
+  expect(stats.textContent).toContain('正式复核结论 2 条 · 要求修改 1 条 · 要求修改后，成果集合变化并重新送审 1 次')
+  expect(stats.textContent).toContain('不等于实际返工或内容修改')
+  expect(screen.getByRole('button', { name: '下载本次交付包' })).toBeTruthy()
+})
+
+test.each([undefined, { delivery_seq: 20, complete: false },
+  { delivery_seq: 19, complete: true, review_conclusions: 2, changes_requested: 1, artifact_set_change_resubmissions: 1 },
+  { delivery_seq: 20, complete: true, review_conclusions: -1, changes_requested: 1, artifact_set_change_resubmissions: 1 }])
+('缺失、未完成、过期或无效统计待核对且不影响下载', stats => {
+  render(<TeamArtifacts {...ready({ reviewDeliveryStats: stats })} />)
+  expect(screen.getByLabelText('交付复核统计').textContent).toContain('待核对')
+  expect(screen.getByRole('button', { name: '下载本次交付包' })).toBeTruthy()
+})
+
 beforeAll(async () => { await import('../src/Artifact') })
 
 beforeEach(() => {

@@ -3003,6 +3003,26 @@ def task_api_payload(
         return _task_api_payload(rt, task_id, activity=activity, public_progress=public_progress)
 
 
+def _review_delivery_summary(events: list[Event], task_id: str, team: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not team or not team.get("enabled") or team.get("status") != "done":
+        return None
+    seq = team.get("revision")
+    if type(seq) is not int or seq <= 0:
+        return {"complete": False}
+    unavailable = {"delivery_seq": seq, "complete": False}
+    try:
+        from .review_delivery_stats import project_review_delivery_stats
+        result = project_review_delivery_stats(events, task_id=task_id, delivery_seq=seq)
+        keys = ("review_conclusions", "changes_requested", "artifact_set_change_resubmissions")
+        if (result.get("delivery_seq") != seq or result.get("complete") is not True
+                or any(type(result.get(k)) is not int or not 0 <= result[k] <= 2**53 - 1 for k in keys)):
+            return unavailable
+        return {"delivery_seq": seq, "complete": True, **{k: result[k] for k in keys}}
+    except Exception:
+        _LOGGER.warning("Cannot project delivery review statistics.")
+        return unavailable
+
+
 def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | None,
                       public_progress: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     version = _event_version(rt)
@@ -3025,6 +3045,7 @@ def _task_api_payload(rt: Runtime, task_id: str, *, activity: dict[str, Any] | N
                               for e in events))), activity or {"state": "idle", "active": False}),
         "task": task_to_dict(task, team=team),
         "team": team,
+        "review_delivery_stats": _review_delivery_summary(events, task_id, team),
         "execution_control": rt.execution_control.view(task_id),
         "workspace": rt.workspaces.view(task_id),
         "events": [event_to_dict(e) for e in events],

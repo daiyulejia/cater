@@ -29,6 +29,11 @@ export type TeamReview = {
   revision: number
 }
 
+export type ReviewDeliveryStats = {
+  delivery_seq?: number; complete: boolean; review_conclusions?: number
+  changes_requested?: number; artifact_set_change_resubmissions?: number
+}
+
 export type TeamWithdrawal = {
   message_seq: number
   source_hash: string
