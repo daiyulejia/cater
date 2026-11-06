@@ -407,8 +407,11 @@ class TeamDelivery:
                 if len({a["filename"] for a in selected}) != len(selected):
                     raise HandoffError("同一文件名只能选择一个成果版本。")
             else:
-                boundary = max((e.seq for e in self.rt.log.read(task_id=task_id) if e.actor == HOST
-                    and e.type in {"team.started", "team.objective_updated"}), default=0)
+                from .team_review_direction import effective_objectives
+                events = self.rt.log.read(task_id=task_id)
+                effective = effective_objectives(events)
+                boundary = max((e.seq for e in events if e.actor == HOST
+                    and (e.type == "team.started" or e.type == "team.objective_updated" and e.seq in effective)), default=0)
                 latest = {a["filename"]: a for a in artifacts if a["seq"] > boundary
                           and a.get("filename") and a.get("content_sha256")}
                 selected = [a for a in latest.values() if a["seq"] not in retired]
@@ -511,16 +514,23 @@ class TeamDelivery:
         return self.normalize(task_id, prose, artifacts=artifacts, revision=revision)
 
     def index(self, task_id):
-        event = next((e for e in reversed(self.rt.log.read(task_id=task_id))
-                      if e.type == "team.objective_completed" and e.actor == HOST), None)
+        from .team_review_direction import effective_objectives
+        events = self.rt.log.read(task_id=task_id)
+        effective = effective_objectives(events)
+        event = next((e for e in reversed(events)
+                      if e.type == "team.objective_completed" and e.seq in effective), None)
+        if event is None:
+            event = next((e for e in reversed(events)
+                          if e.type == "team.objective_completed" and e.actor == HOST), None)
         if event is None:
             return None
         summary = event.payload.get("summary")
         projection = saved_handoff_projection(event.payload)
+        current = self.team.view(task_id)
         return {"seq": event.seq, "summary": summary[:1000] if isinstance(summary, str) else "",
                 "has_handoff": isinstance(projection.get("handoff"), dict),
                 **({"has_handoff_partial": True} if "handoff_partial" in projection else {}),
-                "historical": self.team.view(task_id)["revision"] != event.seq}
+                "historical": current["status"] != "done" or current["revision"] != event.seq}
 
     @staticmethod
     def markdown(event):
@@ -599,13 +609,21 @@ class TeamDelivery:
         seq = arguments.get("delivery_seq")
         if "delivery_seq" in arguments and (type(seq) is not int or seq < 1):
             raise ValueError("交付读取需要本群有效交付序号。")
-        event = next((e for e in reversed(self.rt.log.read(task_id=task_id))
-                      if e.type == "team.objective_completed" and e.actor == HOST and (seq is None or e.seq == seq)), None)
+        events = self.rt.log.read(task_id=task_id)
+        from .team_review_direction import effective_objectives
+        effective = effective_objectives(events) if seq is None else None
+        event = next((e for e in reversed(events)
+                      if e.type == "team.objective_completed" and e.actor == HOST
+                      and (e.seq in effective if seq is None else e.seq == seq)), None)
+        if event is None and seq is None:
+            event = next((e for e in reversed(events)
+                          if e.type == "team.objective_completed" and e.actor == HOST), None)
         if event is None:
             raise ValueError("找不到本群这次交付记录。")
         projection = saved_handoff_projection(event.payload)
+        current = self.team.view(task_id)
         return {"status": "ok", "delivery": {"seq": event.seq,
                 **{k: event.payload[k] for k in ("summary", "verification", "artifacts",
                     "omitted_approved_artifacts_reason") if k in event.payload}, **projection},
-                "historical": self.team.view(task_id)["revision"] != event.seq,
+                "historical": current["status"] != "done" or current["revision"] != event.seq,
                 "note": "保存的版本说明；步骤未因此执行，引用摘录匹配不证明判断正确或当前文件未变化。"}

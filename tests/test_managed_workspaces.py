@@ -188,6 +188,28 @@ class ManagedWorkspaceTests(unittest.TestCase):
                 self.assertTrue(rebound["available"])
                 self.assertNotEqual(rebound["root"], binding["root"])
 
+    def test_path_derived_legacy_binding_requires_explicit_rebind(self):
+        import hashlib
+        import os
+
+        def legacy(log):
+            value = "file:" + os.path.normcase(os.path.realpath(log.path))
+            return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+        with patch("cater.workspaces.database_namespace", side_effect=legacy):
+            with self.runtime() as rt:
+                task, _, _ = self.prepare(rt)
+                binding = rt.workspaces.view(task)
+                self.assertTrue(binding["available"])
+        with self.runtime() as rt:
+            self.assertFalse(rt.workspaces.view(task)["available"])
+            self.assertIsNone(rt.workspaces.config.get(binding["workspace_id"]))
+            self.assertIsNone(rt.team.read_sources._scope(task))
+            rebound = rt.workspaces.bind(task, MANAGED_ID, expected_revision=binding["revision"])
+            self.assertTrue(rebound["available"])
+            self.assertNotEqual(rebound["root"], binding["root"])
+            self.assertTrue(Path(binding["root"]).is_dir())
+
     def test_concurrent_requests_are_idempotent_and_isolated(self):
         with self.runtime():
             pass

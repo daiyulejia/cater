@@ -160,14 +160,16 @@ def _design_lens(
     native_issues, readable, historical = [], 0, 0
     for task in tasks:
         timeline = by_task.get(task.id, [])
+        from .team_review_direction import effective_objectives
+        effective = effective_objectives(timeline)
         if not any(event.type in {"team.started", "team.objective_updated", "team.objective_completed"}
                    for event in timeline):
             continue
         # Completion belongs to the latest trusted objective, even if its goal text is unchanged.
         boundary = max((event.seq for event in timeline if event.actor == Actor.system("team")
-                        and event.type in {"team.started", "team.objective_updated"}), default=0)
+                        and (event.type == "team.started" or event.type == "team.objective_updated" and event.seq in effective)), default=0)
         completions = [event for event in timeline
-                       if event.type == "team.objective_completed" and event.actor == Actor.system("team")]
+                       if event.type == "team.objective_completed" and event.seq in effective]
         historical += sum(event.seq <= boundary for event in completions)
         completion = next((event for event in reversed(completions) if event.seq > boundary), None)
         # Reuse native routing trust rules, also requiring readable text before the delivery.
@@ -403,7 +405,8 @@ def _cost_lens(tasks: list[TaskSnapshot], events: list[Event]) -> dict[str, str]
         return _lens(
             "cost",
             "watch",
-            f"Token usage is unavailable for {unavailable} of {records} usage record(s); the recorded {tokens} token(s) is incomplete.",
+            f"Token usage is unavailable for {unavailable} of {records} usage record(s); the recorded {tokens} token(s) is incomplete."
+            + (f" The log also records {failed_attempts} failed driver attempt(s)." if failed_attempts else ""),
             "Treat cost as unknown until the connected driver reports verified usage telemetry.",
         )
     if estimated:

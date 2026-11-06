@@ -262,9 +262,9 @@ class ConsumedFeedbackTests(unittest.TestCase):
                     if action == "error":
                         self.assertEqual(self.receipt(receipts, "send_message").payload["result"]["status"], "error")
                     elif action == "implicit":
-                        # External end_turn deliberately leaves delegated work
-                        # open; native legacy plain text emits an implicit return.
-                        self.assertEqual(len(self.h.reports(f, parent)), int(mode == "native"))
+                        # Plain text leaves delegated work open in both drivers.
+                        self.assertEqual(len(self.h.reports(f, parent)), 0)
+                        self.assertIn(parent.seq, {r["seq"] for r in f.rt.team.recovery.assignments(f.task)})
 
     def test_visible_feedback_with_wrong_direction_or_revision_is_not_consumed(self):
         f, parent, child, report = self.arrange()

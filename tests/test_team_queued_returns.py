@@ -54,7 +54,7 @@ class QueuedChildReturnTests(unittest.TestCase):
         child = self.b.child(claimed[0])
         helper = self.rt.team._claim(self.task)
         self.assertEqual(helper[0].seq, child.seq)
-        self.b.execute(helper, self.f.native_turn("Checked child evidence."), status="completed")
+        self.b.execute(helper, self.f.native_turn("", ("return_work", {"text": "Checked child evidence."})), status="completed")
         report, = [e for e in self.b.messages() if e.payload["kind"] == "report"]
         self.assertEqual(report.payload["reply_to"], child.seq)
         return claimed, owner, child, report

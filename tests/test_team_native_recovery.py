@@ -252,7 +252,7 @@ with activity_owner(sys.argv[1], sys.argv[2], "simple-team") as owned:
         self.driver.steps = {self.manager: [inspect, resume,
             test_simple_team.turn("成果已核对。", ("finish_work", {"summary": "交付说明", "verification": "仅核对说明正文"})),
             test_simple_team.turn("说明已准备好，未验证转换引擎。")],
-            self.worker: [work, test_simple_team.turn("原委托已完成，说明已保存。") ]}
+            self.worker: [work, test_simple_team.turn("", ("return_work", {"text": "原委托已完成，说明已保存。"})) ]}
         self.rt.collaborate(self.task)
         self.assertEqual([e.seq for e in self.events("team.message_received") if e.payload.get("kind") == "assignment"], [original.seq])
         reports = [e for e in self.events("team.message_received") if e.payload.get("kind") == "report"]
@@ -323,17 +323,19 @@ with activity_owner(sys.argv[1], sys.argv[2], "simple-team") as owned:
         self.assertEqual(receipt.payload["result"]["assignments"][0]["seq"], original.seq)
         self.assertEqual(self.rt.team.view(self.task)["status"], "running")
 
-    def test_run_terminal_and_automatic_report_rollback_together(self):
+    def test_return_receipt_crash_rolls_back_report_and_preserves_recovery(self):
         original, run = self.orphan(worker=True)
         emit = self.rt.log.emit
         def crash(**kwargs):
-            if kwargs["type"] == "team.message_received" and kwargs["payload"].get("kind") == "report":
-                raise SystemExit("Crash between run terminal and report")
+            if kwargs["type"] == "team.tool_finished" and kwargs["payload"].get("name") == "return_work":
+                self.assertTrue(any(e.payload.get("reply_to") == original.seq for e in self.events("team.message_received")))
+                raise SystemExit("Crash after report before return receipt")
             return emit(**kwargs)
-        self.driver.steps[self.worker] = [test_simple_team.turn("原委托已完成。")]
+        self.driver.steps[self.worker] = [test_simple_team.turn("", ("return_work", {"text": "原委托已完成。"}))]
         with patch.object(self.rt.log, "emit", side_effect=crash), self.assertRaises(SystemExit):
             list(self.rt.team._run_message(self.task, original, self.rt.team._role(self.worker), run))
         self.assertEqual(self.events("team.run_finished"), [])
+        self.assertFalse([e for e in self.events("team.message_received") if e.payload.get("kind") == "report"])
         self.assertEqual(len(self.rt.team.recovery.prepare(self.task)), 1)
         self.assertEqual(self.rt.team.recovery.assignments(self.task)[0]["seq"], original.seq)
 
@@ -385,7 +387,8 @@ with activity_owner(sys.argv[1], sys.argv[2], "simple-team") as owned:
         arguments = {"filename": " guide.md ", "format": "markdown", "summary": "Actual first publication", "content": "# Original guide"}
         start = self.rt.log.emit(type="team.tool_started", actor=HOST, task_id=self.task, payload={
             "message_seq": source.seq, "role": self.manager, "run_id": run.payload["run_id"],
-            "name": "publish_artifact", "call_id": "spaced-file-publication", "arguments": {"filename": " guide.md "}})
+            "revision": run.payload["revision"], "name": "publish_artifact", "call_id": "spaced-file-publication",
+            "arguments": {"filename": " guide.md "}})
         result = self.rt.team._execute(self.task, self.rt.organization.leader, "publish_artifact", arguments,
                                        None, self.rt.workspaces.view(self.task), start, None)
         self.assertEqual(result["filename"], "guide.md")
@@ -399,6 +402,45 @@ with activity_owner(sys.argv[1], sys.argv[2], "simple-team") as owned:
         self.assertEqual(first_path.read_bytes(), original_bytes)
         receipt, = [e for e in self.events("team.tool_finished") if e.payload["name"] == "publish_artifact"]
         self.assertEqual(receipt.payload["result"]["status"], "error")
+
+    def test_legacy_publication_without_revision_is_unknown_and_never_replayed(self):
+        source, run = self.orphan()
+        arguments = {"filename": "legacy.txt", "format": "text", "summary": "fixture", "content": "fixture"}
+        start = self.rt.log.emit(type="team.tool_started", actor=HOST, task_id=self.task, payload={
+            "message_seq": source.seq, "role": self.manager, "run_id": run.payload["run_id"],
+            "name": "publish_artifact", "call_id": "legacy-missing-revision", "arguments": arguments})
+        for changed in (False, True):
+            if changed:
+                self.rt.command(self.task, "new goal", goal="changed goal")
+            result = self.rt.team._execute(self.task, self.rt.organization.leader, "publish_artifact", arguments,
+                                           None, self.rt.workspaces.view(self.task), start, None)
+            self.assertEqual(result["code"], "publication_binding_unverified")
+            self.assertEqual(result["outcome"], "unknown")
+            self.assertFalse(result["complete"])
+            self.assertEqual(self.rt.task(self.task).deliverables, [])
+            self.assertIn(start.seq, [row["started_seq"] for row in self.rt.team._pending_operations(self.task)])
+
+    def test_publication_rejects_mismatched_revision_and_finished_run(self):
+        source, run = self.orphan()
+        arguments = {"filename": "binding.txt", "format": "text", "summary": "fixture", "content": "fixture"}
+        def start(revision, call_id):
+            return self.rt.log.emit(type="team.tool_started", actor=HOST, task_id=self.task, payload={
+                "message_seq": source.seq, "role": self.manager, "run_id": run.payload["run_id"],
+                "revision": revision, "name": "publish_artifact", "call_id": call_id, "arguments": arguments})
+        bad = start(run.payload["revision"] + 1, "mismatch")
+        result = self.rt.team._execute(self.task, self.rt.organization.leader, "publish_artifact", arguments,
+                                       None, self.rt.workspaces.view(self.task), bad, None)
+        self.assertEqual(result["outcome"], "unknown")
+        self.rt.log.emit(type="team.tool_finished", actor=HOST, task_id=self.task, payload={
+            "message_seq": source.seq, "role": self.manager, "run_id": run.payload["run_id"],
+            "started_seq": bad.seq, "name": "publish_artifact", "call_id": "mismatch",
+            "result": {"status": "error"}})
+        valid = start(run.payload["revision"], "finished-run")
+        self.finish(run)
+        result = self.rt.team._execute(self.task, self.rt.organization.leader, "publish_artifact", arguments,
+                                       None, self.rt.workspaces.view(self.task), valid, None)
+        self.assertEqual(result["outcome"], "unknown")
+        self.assertEqual(self.rt.task(self.task).deliverables, [])
 
     def test_unknown_publication_blocks_delivery_and_needs_trusted_reconciliation(self):
         source, run = self.orphan()

@@ -242,9 +242,9 @@ class SupersededReviewAssignmentsTests(unittest.TestCase):
         self.assertTrue(current["requires_return"])
         self.assertEqual(current["status"], "interrupted")
         result = self.f.finish()
-        self.assertEqual((result["status"], result.get("code")), ("error", "work_pending"), result)
-        self.assertIn(current_message.seq, {r["seq"] for r in result["assignments"]})
-        self.assertNotIn(self.old_message.seq, {r["seq"] for r in result["assignments"]})
+        self.assertEqual((result["status"], result.get("code")), ("error", "review_pending"), result)
+        self.assertIn(current_message.seq, {r["message_seq"] for r in result["reviews"]})
+        self.assertNotIn(self.old_message.seq, {r["message_seq"] for r in result["reviews"]})
         self.assertEqual(self.f.events("team.objective_completed"), [])
 
     def test_superseded_projection_respects_explicit_event_snapshot(self):

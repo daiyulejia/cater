@@ -2,6 +2,7 @@
 
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -193,6 +194,81 @@ class ProtocolUsageTests(unittest.TestCase):
                         self.assertEqual(call.payload["response_status"], "protocol_error")
                         self.assertEqual(len(requests), 1)
                         self.assertEqual(f.events("team.tool_started"), [])
+
+    def test_conflict_recorded_in_normal_and_malformed_tool_responses(self):
+        for malformed_response in (False, True):
+            data = malformed(OpenAICompatibleDriver) if malformed_response else response(OpenAICompatibleDriver)
+            data["usage"] = {"total_tokens": 1, "prompt_tokens": 80001, "private": "SECRET"}
+            with self.subTest(malformed=malformed_response), self.session(OpenAICompatibleDriver, [(200, data)]) as (f, _, requests):
+                self.run_message(f)
+                call, = f.events("team.model_called")
+                self.assertEqual((call.payload["tokens"], call.payload["token_usage"]), (0, "unavailable"))
+                self.assertEqual(call.payload["usage_issue"], "total_below_reported_components")
+                self.assertEqual(call.payload["usage"], {"total_tokens": 1, "prompt_tokens": 80001})
+                notice, = f.events("driver.usage_inconsistent")
+                self.assertEqual(notice.payload["usage_issue"], "total_below_reported_components")
+                self.assertFalse(notice.payload["budget_enforced"])
+                self.assertEqual(f.rt._reported_driver_tokens("team_test"), 0)
+                self.assertEqual(len(requests), 1)
+                self.assertNotIn("SECRET", json.dumps(call.payload))
+                with Runtime(f.root / "test.db", roles_path=f.roles, drivers={"team_test": f.rt.drivers["team_test"]}) as reopened:
+                    self.assertEqual(reopened._reported_driver_tokens("team_test"), 0)
+                    self.assertTrue(reopened.verify_chain().ok)
+
+    def test_budgeted_tool_call_stops_next_request_after_conflict(self):
+        data = response(OpenAICompatibleDriver, tool=True)
+        data["usage"] = {"total_tokens": 1, "prompt_tokens": 80001}
+        with self.session(OpenAICompatibleDriver, [(200, data), (200, response(OpenAICompatibleDriver))]) as (f, driver, requests):
+            driver.token_budget = 80000
+            self.run_message(f)
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(len(f.events("team.tool_finished")), 1)
+            notice, = f.events("driver.usage_inconsistent")
+            self.assertTrue(notice.payload["budget_enforced"])
+            self.assertIn("用量记录", f.events("team.run_finished")[-1].payload["reason"])
+            self.assertIn("剩余额度", f.events("team.run_finished")[-1].payload["reason"])
+            self.assertEqual(f.rt._reported_driver_tokens("team_test"), 0)
+            self.assertTrue(f.rt._budget_usage_uncertainty("team_test", driver))
+            with Runtime(f.root / "test.db", roles_path=f.roles, drivers={"team_test": driver}) as reopened:
+                self.assertTrue(reopened._budget_usage_uncertainty("team_test", driver))
+            driver.token_budget = None
+            self.assertIsNone(f.rt._budget_usage_uncertainty("team_test", driver))
+
+    def test_unbudgeted_channel_can_continue_after_conflict(self):
+        data = response(OpenAICompatibleDriver, tool=True)
+        data["usage"] = {"total_tokens": 1, "prompt_tokens": 80001}
+        with self.session(OpenAICompatibleDriver, [(200, data), (200, response(OpenAICompatibleDriver))]) as (f, driver, requests):
+            self.assertIsNone(driver.token_budget)
+            self.run_message(f)
+            self.assertEqual(len(requests), 2)
+            self.assertEqual(f.events("team.run_finished")[-1].payload["status"], "completed")
+            self.assertEqual(f.rt._reported_driver_tokens("team_test"), 14)
+
+    def test_budgeted_channel_still_continues_after_plain_missing_usage(self):
+        data = response(OpenAICompatibleDriver, tool=True)
+        data.pop("usage")
+        with self.session(OpenAICompatibleDriver, [(200, data), (200, response(OpenAICompatibleDriver))]) as (f, driver, requests):
+            driver.token_budget = 100
+            self.run_message(f)
+            self.assertEqual(len(requests), 2)
+            self.assertEqual(f.events("team.model_called")[0].payload["token_usage"], "unavailable")
+            self.assertEqual(f.events("driver.usage_inconsistent"), [])
+            self.assertEqual(f.rt._reported_driver_tokens("team_test"), 14)
+
+    def test_untrusted_team_driver_metadata_does_not_trigger_conflict_notice_or_pause(self):
+        fixture = simple.SimpleTeamTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.driver.token_budget = 100
+        forged = replace(simple.turn("已核对。"), tokens=0, meta={"mode": "openai_compatible",
+            "token_usage": "unavailable", "usage_issue": "total_below_reported_components",
+            "usage": {"total_tokens": 1, "prompt_tokens": 101}})
+        fixture.driver.steps = {fixture.manager: [forged]}
+        self.run_message(fixture)
+        call, = fixture.events("team.model_called")
+        self.assertNotIn("usage_issue", call.payload)
+        self.assertEqual(fixture.events("driver.usage_inconsistent"), [])
+        self.assertIsNone(fixture.rt._budget_usage_uncertainty("team_test", fixture.driver))
 
     def test_explicit_zero_usage_remains_reported_after_protocol_failure(self):
         for cls in CLASSES:

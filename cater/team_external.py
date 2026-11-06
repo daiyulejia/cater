@@ -144,6 +144,8 @@ class TeamExternal:
         last_public_text = ""
         plain_wait_reply = False
         calls = 0
+        review_supervision = message.payload.get('trigger') == 'review_return_candidate'
+        review_action = False
         admission_blocked = False
         last_check = 0.0
         terminal = "failed"
@@ -181,12 +183,15 @@ class TeamExternal:
             if self.rt._is_circuit_open(role.driver):
                 raise WorkConflict("此通道连续调用失败，暂未继续请求；请检查接入状态。")
             budget = getattr(driver, "token_budget", None)
+            uncertainty = self.rt._budget_usage_uncertainty(role.driver, driver)
+            if uncertainty:
+                raise WorkConflict(uncertainty)
             if valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget:
-                raise WorkConflict("当前通道已达到顾客配置的用量上限，未继续调用。")
+                raise WorkConflict("当前通道的已报告用量累计达到本地预算，未继续调用；未知和在途用量可能漏计，此预算不是硬上限。")
             raw, workspace, binding, tools, basis = self.team._model_input(
                 task_id, message, role, run_id=started.payload["run_id"])
             last_scope = dict(raw["work_checkpoint"]["scope"])
-            context = model_context(raw)
+            context = model_context(raw, basis=basis)
             fingerprint = driver_fingerprint(driver)
             rules = basis["rule_fingerprint"]
 
@@ -201,7 +206,7 @@ class TeamExternal:
                 if any(live.get(key) != binding.get(key)
                        for key in ("available", "workspace_id", "revision", "fingerprint", "root")):
                     raise WorkConflict("工程目录或权限已变化，未继续旧范围操作。")
-                if self.rt.rulebook.current_snapshot(task_id)["fingerprint"] != rules:
+                if self.rt.rulebook.current_snapshot(task_id, privacy_safe=True)["fingerprint"] != rules:
                     raise WorkConflict("适用店规已更新，先理解新要求再继续。")
                 if driver_fingerprint(driver) != fingerprint:
                     raise WorkConflict("外部模型接入配置已变化，未继续旧会话。")
@@ -214,7 +219,7 @@ class TeamExternal:
             def verify_scope(*, observe_only=False, settled_review_seq=None):
                 nonlocal admission_blocked
                 verify_current_scope(settled_review_seq=settled_review_seq)
-                if budget_supervision and any(
+                if (budget_supervision or review_supervision) and any(
                         row.get("started_seq") != (attempt.seq if attempt is not None else None)
                         and not self._owns_current_scope(task_id, row)
                         for row in self.team._pending_operations(task_id)):
@@ -243,6 +248,7 @@ class TeamExternal:
             def execute(call):
                 nonlocal revision, calls, stop_kind, awaiting_customer, last_scope, delivered_text
                 nonlocal settled_review_seq, plain_wait_reply
+                nonlocal review_action
                 check(force=True)
                 # A plain answer followed only by wait remains a legacy reply.
                 # Tool-led work has explicit progress and reply/delivery channels.
@@ -256,6 +262,9 @@ class TeamExternal:
                     external_started_seq=attempt.seq)
                 calls += 1
                 if result.get("status") == "ok":
+                    if review_supervision and call.name in {'finish_work', 'delegate', 'send_message', 'continue_work',
+                                                            'request_questions', 'withdraw_work', 'wait_for_reply'}:
+                        review_action = True
                     if call.name in {"set_objective", "finish_work"}:
                         revision = self.team.view(task_id)["revision"]
                         last_scope = self.team.recovery.run_scope(task_id, started, observed=last_scope)
@@ -273,7 +282,13 @@ class TeamExternal:
                         delivered_text = call.arguments["text"].strip()
                     elif (call.name in {"wait_for_reply", "request_questions", "request_review", "record_review"}
                             or call.name == "delegate" and result.get("waiting_for_review") is True):
-                        stop_kind = "waiting"
+                        if (review_supervision and call.name == 'wait_for_reply'
+                                and not self.team.recovery.assignments(task_id)
+                                and not self.team.view(task_id)['pending_count']
+                                and not any(row['status'] == 'pending' for row in self.rt.questionnaires.view(task_id))):
+                            stop_kind = 'empty_wait'
+                        else:
+                            stop_kind = "waiting"
                         awaiting_customer = call.name == "request_questions"
                         if call.name in {"request_review", "delegate"}:
                             settled_review_seq = result.get("review_seq")
@@ -346,13 +361,16 @@ class TeamExternal:
                         status, reason = "interrupted", "外部伙伴本轮回复结束，但尚未正式交回原委托；需根据成果和回执继续交接。"
                     self.rt._driver_health.record_success(role.driver)
                 except ExternalYield:
-                    if stop_kind not in {"waiting", "delivered", "delivery_unchanged", "returned", "answered"}:
+                    if stop_kind not in {"waiting", "empty_wait", "delivered", "delivery_unchanged", "returned", "answered"}:
                         raise WorkConflict("外部运行停止，但没有对应的宿主交接记录；保留原委托，不按完成处理。")
                     terminal = "yielded"
                     final = run.state.text
                     self.rt._driver_health.record_success(role.driver)
                     if stop_kind == "waiting":
                         status = "waiting"
+                    elif stop_kind == 'empty_wait':
+                        status, reason = 'interrupted', '补充监督选择等待，但当前没有待处理工作或待答问题；请核对后继续。'
+                        failure['interruption_kind'] = 'review_supervision_empty_wait'
                     elif stop_kind in {"delivered", "delivery_unchanged", "answered"}:
                         final = delivered_text
                 except Exception as exc:
@@ -517,5 +535,8 @@ class TeamExternal:
                                  **({"delivery_seq": delivery} if delivery is not None else {})})
             except WorkConflict as exc:
                 status, reason, final = "interrupted", str(exc), ""
+        if review_supervision and status == 'completed' and stop_kind is None and not review_action:
+            status, reason = 'interrupted', '补充监督未作出明确后续动作；已有记录保留，任务尚未交付。'
+            failure['interruption_kind'] = 'review_supervision_no_action'
         return {"revision": revision, "status": status, "reason": reason, "final": final,
                 "failure": failure, "awaiting_customer": awaiting_customer, "last_scope": last_scope}

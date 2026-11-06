@@ -307,6 +307,19 @@ class RuleApiTests(unittest.TestCase):
             self.request(f"/api/rules/{rule['id']}", {"revision": 1, "text": "Old", "status": "retired"})
         self.assertEqual(error.exception.code, 409)
 
+    def test_task_rule_api_reports_ambiguous_foreign_metadata(self):
+        detail = self.request("/api/tasks", {"goal": "Current task"})
+        task_id = detail["task"]["id"]
+        log = EventLog(Path(self.tmp.name) / 'web.db')
+        try:
+            log.emit(type='task.created', task_id='foreign-ambiguous', actor=Actor.human(),
+                     payload={'goal': 'private fixture', 'irrelevant\0key': 'x'})
+        finally:
+            log.close()
+        result = self.request(f'/api/rules?task_id={task_id}')
+        self.assertTrue(result['metadata_incomplete'])
+        self.assertEqual(result['enforcement'], 'guidance_only')
+
     def test_rule_writes_reject_cross_origin_and_unsupported_guarantees(self):
         with self.assertRaises(HTTPError) as error:
             self.request("/api/rules", {"text": "Injected", "scope": "workspace"}, Origin="https://untrusted.example")

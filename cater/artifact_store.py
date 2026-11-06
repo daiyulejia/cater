@@ -242,6 +242,165 @@ def _extended_windows_path(path: Path) -> Path:
     return Path("\\\\?\\" + value)
 
 
+def _validate_windows_root(base: Path) -> None:
+    value, drive = str(base), base.drive
+    lower = value.casefold()
+    if lower.startswith("\\\\.\\"):
+        raise ArtifactStoreError("device namespace is not a supported artifact root")
+    if lower.startswith("\\\\?\\"):
+        if not (re.match(r"^\\\\\?\\[a-zA-Z]:\\", value)
+                or re.match(r"^\\\\\?\\UNC\\[^\\]+\\[^\\]+(?:\\|$)", value, re.IGNORECASE)):
+            raise ArtifactStoreError("unsupported extended artifact root")
+    if drive and not base.is_absolute():
+        raise ArtifactStoreError("drive-relative artifact root is ambiguous")
+    # UNC server and share form part of the anchor, not Path.parts[1:].
+    if drive.casefold().startswith("\\\\?\\unc\\"):
+        anchor_parts = drive[8:].split("\\")
+    elif drive.startswith("\\\\") and not drive.startswith("\\\\?\\"):
+        anchor_parts = drive[2:].split("\\")
+    else:
+        anchor_parts = []
+    components = [*anchor_parts, *(base.parts[1:] if base.anchor else base.parts)]
+    for part in components:
+        # Win32 interprets the literal filesystem name, not its NFKC spelling.
+        # Superscript device digits are reserved even without normalization.
+        device = part.split(".")[0].rstrip(" ").upper()
+        if (part in {"", ".", ".."} or part.endswith((".", " "))
+                or re.search(r'[\\/:*?"<>|]', part)
+                # Format characters and other code points can be valid names.
+                or any(ord(char) < 32 for char in part)
+                or device in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+                or re.fullmatch(r"(?:COM|LPT)[1-9¹²³]", device)):
+            raise ArtifactStoreError("unsafe artifact root component")
+
+
+def _validated_root(root: str | os.PathLike[str]) -> Path:
+    """Validate raw and complete absolute paths before entering the Win32 namespace."""
+    raw = os.fspath(root)
+    if os.name == "nt" and isinstance(raw, str) and raw.replace("/", "\\").startswith("\\\\?\\"):
+        # Path and abspath normalize syntax that the extended namespace does not.
+        # Never turn a different or invalid raw path into an authorized root.
+        parts = raw[4:].split("\\")
+        if ("/" in raw or any(part in {".", ".."} for part in parts)
+                or any(not part for part in parts[:-1])):
+            raise ArtifactStoreError("ambiguous extended artifact root")
+    base = Path(raw)
+    if ".." in base.parts:
+        raise ArtifactStoreError("root must not contain parent traversal")
+    if os.name == "nt":
+        _validate_windows_root(base)
+    # abspath normalizes separators and relative roots; never resolve away links.
+    base = Path(os.path.abspath(base))
+    if os.name == "nt":
+        if not base.is_absolute():
+            raise ArtifactStoreError("artifact root must be absolute")
+        _validate_windows_root(base)
+        # For validated filesystem paths, the two namespace spellings identify
+        # the same root. Select the long-path namespace later from actual lengths,
+        # so a short explicit extended root does not change receipt identity.
+        value = str(base)
+        if value.casefold().startswith("\\\\?\\unc\\"):
+            base = Path("\\\\" + value[8:])
+        elif value.startswith("\\\\?\\"):
+            base = Path(value[4:])
+        _validate_windows_root(base)
+    return base
+
+
+def _same_materialized_receipt(left: dict, right: dict) -> bool:
+    """Recognize namespace spellings and verified Windows case aliases."""
+    if os.name != "nt" or not isinstance(left, dict) or not isinstance(right, dict):
+        return False
+    if left.keys() != right.keys() or any(left[k] != right[k] for k in left if k not in {"directory", "files"}):
+        return False
+
+    def same_path(a: object, b: object, *, directory: bool) -> bool:
+        if not isinstance(a, str) or not isinstance(b, str):
+            return False
+        if a == b:
+            return True
+
+        def plain(value: str) -> str | None:
+            try:
+                path = Path(value)
+                if not path.is_absolute():
+                    return None
+                if value.casefold().startswith("\\\\?\\unc\\"):
+                    unprefixed = "\\\\" + value[8:]
+                elif value.startswith("\\\\?\\"):
+                    unprefixed = value[4:]
+                else:
+                    unprefixed = value
+                # Validate before removing a prefix and reject lexical changes.
+                return unprefixed if str(_validated_root(value)) == unprefixed else None
+            except (ArtifactStoreError, OSError, ValueError):
+                return None
+
+        a_plain, b_plain = plain(a), plain(b)
+        if a_plain is None or b_plain is None:
+            return False
+        if a_plain == b_plain:
+            return True
+        if a_plain.casefold() != b_plain.casefold():
+            return False
+        # Case folding alone is unsafe on case-sensitive Windows directories.
+        # Check both paths without following reparse points; files must also pass
+        # the existing no-hardlink and opened-handle identity checks.
+        try:
+            a_path = _extended_windows_path(Path(a_plain))
+            b_path = _extended_windows_path(Path(b_plain))
+            if directory:
+                _directories(a_path)
+                _directories(b_path)
+                a_stat, b_stat = _inspect(a_path, True), _inspect(b_path, True)
+            else:
+                a_fd = _open(a_path, os.O_RDONLY)
+                try:
+                    b_fd = _open(b_path, os.O_RDONLY)
+                    try:
+                        a_stat, b_stat = os.fstat(a_fd), os.fstat(b_fd)
+                    finally:
+                        os.close(b_fd)
+                finally:
+                    os.close(a_fd)
+            return bool(a_stat.st_dev and a_stat.st_ino and b_stat.st_dev and b_stat.st_ino
+                        and os.path.samestat(a_stat, b_stat))
+        except (ArtifactStoreError, OSError, ValueError):
+            return False
+
+    if not same_path(left.get("directory"), right.get("directory"), directory=True):
+        return False
+    old_files, new_files = left.get("files"), right.get("files")
+    if not isinstance(old_files, list) or not isinstance(new_files, list) or len(old_files) != len(new_files):
+        return False
+    for old, new in zip(old_files, new_files):
+        if not isinstance(old, dict) or not isinstance(new, dict) or old.keys() != new.keys():
+            return False
+        if (any(old[k] != new[k] for k in old if k != "path")
+                or not same_path(old.get("path"), new.get("path"), directory=False)):
+            return False
+    return True
+
+
+def _legacy_directory(root: str | os.PathLike[str], manifest: dict) -> Path:
+    """Choose one namespace for the lock, staging, final version and receipt."""
+    base = _validated_root(root)
+    target = base / manifest["directory"]
+    if os.name == "nt" and not str(base).startswith("\\\\?\\"):
+        # Directory creation on legacy Win32 has a smaller limit than file open.
+        staging = target.parent / (".staging-" + "0" * 32)
+        directories = (target.parent, target.parent / ".locks", target, target / "files",
+                       staging, staging / "files")
+        files = [target.parent / ".locks" / (manifest["submission_digest"] + ".lock"),
+                 target / "manifest.json", staging / "manifest.json"]
+        for entry in manifest["files"]:
+            files.extend((target / entry["path"], staging / entry["path"]))
+        units = lambda path: len(str(path).encode("utf-16-le", errors="surrogatepass")) // 2
+        if any(units(path) >= 248 for path in directories) or any(units(path) >= 260 for path in files):
+            target = _extended_windows_path(base) / manifest["directory"]
+    return target
+
+
 def materialize_team_artifact(root: str | os.PathLike[str], task_id: str, artifact: dict, *, body: bytes | None = None) -> str:
     """Save a ledger-derived team artifact without fabricating a legacy work submission."""
     _name(task_id)
@@ -259,14 +418,7 @@ def materialize_team_artifact(root: str | os.PathLike[str], task_id: str, artifa
     if (not _positive(artifact.get("seq")) or sha != artifact.get("content_sha256")
             or len(content) > limit):
         raise ArtifactStoreError("invalid team artifact")
-    base = Path(root)
-    if ".." in base.parts:
-        raise ArtifactStoreError("root must not contain parent traversal")
-    if os.name == "nt" and str(base).startswith("\\\\.\\"):
-        raise ArtifactStoreError("device namespace is not a supported artifact root")
-    if os.name == "nt" and any(part.endswith((".", " ")) for part in base.parts):
-        raise ArtifactStoreError("ambiguous trailing dot or space in artifact root")
-    base = base.absolute()
+    base = _validated_root(root)
     directory_name = "team-" + hashlib.sha256(task_id.encode()).hexdigest()
     version_name = str(artifact["seq"]) + "-" + sha
     if os.name == "nt" and len(str(base / directory_name / version_name / filename).encode(
@@ -302,11 +454,7 @@ def materialize(root: str | os.PathLike[str], task_id: str, submission: dict[str
     guarantee of directory durability through power loss on all filesystems.
     """
     manifest, bodies = _prepare(task_id, submission, artifacts)
-    base = Path(root)
-    if ".." in base.parts:
-        raise ArtifactStoreError("root must not contain parent traversal")
-    base = Path(os.path.abspath(base))  # Do not resolve away links before checking them.
-    target = base / manifest["directory"]
+    target = _legacy_directory(root, manifest)
     try:
         _directories(target.parent, create=True)
         locks = target.parent / ".locks"

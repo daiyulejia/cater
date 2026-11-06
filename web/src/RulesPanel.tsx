@@ -5,7 +5,7 @@ import { SubmissionUnknownError } from './request'
 
 type Project = { id: string; name: string }
 type Rule = { id: string; revision: number; text: string; scope: string; status: string; rationale?: string; source: { kind: string; actor?: string; event_seq?: number; task_id?: string; rule_id?: string }; seq: number }
-type RuleState = { project_id: string | null; rules: Rule[]; enforcement: string }
+type RuleState = { project_id: string | null; rules: Rule[]; enforcement: string; metadata_incomplete?: boolean }
 type Request = <T>(path: string, init?: RequestInit) => Promise<T>
 const scopeName: Record<string, string> = { workspace: '猫咖通用', project: '当前项目', task: '本次任务' }
 const stateName: Record<string, string> = { active: '已采用', candidate: '待采用', retired: '已停用' }
@@ -140,6 +140,7 @@ export function RulesPanel({ request, taskId, projectId, draft, busy, onProjectC
         </section>
         {error && <p role="alert" className="mt-4 text-xs text-rose-700">{error}</p>}
         {notice && <p role="status" className="mt-4 text-xs text-[#327665]">{notice}</p>}
+        {state?.metadata_incomplete && <p role="alert" className="mt-4 text-xs leading-5 text-amber-800">店规元数据不完整，部分继承要求可能未列出。请核对适用要求；店规仅作为上下文指导。</p>}
         <section className="border-b border-[#dde6dc] py-4">
           <div className="mb-2 flex items-center justify-between gap-3"><h2 className="text-sm font-bold">{editing ? `修改店规 · v${editing.revision}` : '记下一条要求'}</h2>
             <select aria-label="店规适用范围" value={editing?.scope ?? effectiveScope} disabled={Boolean(editing) || saving} onChange={(event) => setScope(event.target.value)} className="rounded-md border border-[#cfddd4] bg-white px-2 py-1 text-xs"><option value="" disabled>请选择范围</option><option value="workspace">猫咖通用</option><option value="project" disabled={!projectId}>当前项目</option><option value="task" disabled={!taskId}>本次任务</option></select>
@@ -151,7 +152,7 @@ export function RulesPanel({ request, taskId, projectId, draft, busy, onProjectC
         </section>
         <section className="pt-4">
           <div className="mb-3 flex items-center justify-between gap-2"><h2 className="text-sm font-bold">适用店规</h2><label className="flex items-center gap-1.5 text-xs text-[#718574]"><input type="checkbox" checked={showRetired} onChange={(event) => setShowRetired(event.target.checked)} />包含已停用</label></div>
-          {loading && !state ? <p className="py-4 text-sm text-[#718574]">正在读取…</p> : state && !state.rules.filter((rule) => showRetired || rule.status !== 'retired').length ? <p className="py-4 text-sm text-[#718574]">这个范围还没有店规。</p> : null}
+          {loading && !state ? <p className="py-4 text-sm text-[#718574]">正在读取…</p> : state && !state.rules.filter((rule) => showRetired || rule.status !== 'retired').length ? <p className="py-4 text-sm text-[#718574]">{state.metadata_incomplete ? '当前未列出店规，不能据此判断没有适用要求。' : '这个范围还没有店规。'}</p> : null}
           {state?.rules.filter((rule) => showRetired || rule.status !== 'retired').map((rule) => <article key={rule.id} className="border-b border-[#e0e6dc] py-3 last:border-0">
             <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#738478]"><span className={rule.status === 'candidate' ? 'font-semibold text-[#b26a3e]' : 'font-semibold text-[#3d7460]'}>{stateName[rule.status]}</span><span>{scopeName[rule.scope]}</span><span>v{rule.revision}</span><span>{rule.source.kind === 'human' ? '由你制定' : rule.source.kind === 'inherited' ? `创建时继承 · #${rule.source.event_seq}` : `成员建议 · #${rule.source.event_seq}`}</span></div>
             <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">{rule.text}</p>

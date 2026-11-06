@@ -100,11 +100,12 @@ test.each(['fetch', 'body', 'network', 'invalid-json'])('write %s failure is an 
   expect(vi.getTimerCount()).toBe(0)
 })
 
-test.each([400, 401, 403, 409, 422, 429])('HTTP %i remains a known rejection, including its server explanation', async (status) => {
-  vi.stubGlobal('fetch', vi.fn(async () => new Response('服务端明确拒绝', { status })))
+test.each([400, 401, 403, 409, 422, 429])('HTTP %i 的未知正文使用安全提示', async (status) => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('private-token /private/path', { status })))
   const error = await read('/api/tasks', { method: 'POST' }).catch((error) => error)
   expect(error).not.toBeInstanceOf(SubmissionUnknownError)
-  expect(error.message).toBe('服务端明确拒绝')
+  expect(error.message).toBe(`请求未完成（HTTP ${status}），请核对后重试。`)
+  expect(error.message).not.toMatch(/private-token|\/private\/path/)
   expect(vi.getTimerCount()).toBe(0)
 })
 
@@ -114,7 +115,7 @@ test.each([500, 502, 503, 504])('HTTP %i after a write is unknown and never auto
   const error = await read('/api/tasks', { method: 'POST' }).catch((error) => error)
   expect(error).toBeInstanceOf(SubmissionUnknownError)
   expect(error.message).toContain(`HTTP ${status}`)
-  expect(error.message).toContain('持久化后发生异常')
+  expect(error.message).not.toContain('持久化后发生异常')
   expect(error.message).toContain('提交结果未知')
   await vi.advanceTimersByTimeAsync(SUBMIT_TIMEOUT_MS)
   expect(fetchMock).toHaveBeenCalledTimes(1)
@@ -125,5 +126,33 @@ test('HTTP 503 for a read remains a read failure rather than an unknown submissi
   vi.stubGlobal('fetch', vi.fn(async () => new Response('读取失败', { status: 503 })))
   const error = await read('/api/task-summaries').catch((error) => error)
   expect(error).not.toBeInstanceOf(SubmissionUnknownError)
-  expect(error.message).toBe('读取失败')
+  expect(error.message).toBe('请求未完成（HTTP 503），请核对后重试。')
+})
+
+test.each([
+  '事件日志已有签名记录，但当前没有签名密钥；未写入，请核对审计配置。',
+  '事件日志签名与当前审计密钥配置不匹配或历史不完整；未写入，请核对审计配置。',
+  '执行已暂停或取消，恢复后再提交；仍可直接聊天。',
+  '工作区绑定已变化，请刷新后重试。',
+  'rule version changed; refresh before editing',
+])('固定业务拒绝保留安全提示：%s', async (message) => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response(message, { status: 409 })))
+  const error = await read('/api/tasks', { method: 'POST' }).catch((value) => value)
+  expect(error.message).toBe(message)
+})
+
+test('伪造固定文案的前后缀和 5xx 正文不能显示敏感数据', async () => {
+  const known = '执行已暂停或取消，恢复后再提交；仍可直接聊天。'
+  for (const status of [400, 500]) {
+    const fetchMock = vi.fn(async () => new Response(`${known} /private/path token=synthetic`, { status }))
+    vi.stubGlobal('fetch', fetchMock)
+    const error = await read('/api/tasks', { method: 'POST' }).catch((value) => value)
+    expect(error.message).not.toMatch(/private|token|synthetic/)
+    if (status === 500) {
+      expect(error).toBeInstanceOf(SubmissionUnknownError)
+      expect(error.message).toContain('提交结果未知')
+      expect(error.message).toContain('没有自动重发')
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  }
 })

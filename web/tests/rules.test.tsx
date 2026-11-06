@@ -34,6 +34,17 @@ const open = async () => { fireEvent.click(screen.getByTitle('项目与店规'))
 const editor = () => screen.getByRole('textbox', { name: '店规内容' }) as HTMLTextAreaElement
 const save = () => screen.getByRole('button', { name: '保存店规' }) as HTMLButtonElement
 
+test('不完整店规明确提示且不把空列表说成没有要求', async () => {
+  handler = (path) => path.startsWith('/api/rules')
+    ? Promise.resolve({ project_id: project.id, rules: [], enforcement: 'guidance_only', metadata_incomplete: true })
+    : undefined
+  mount()
+  fireEvent.click(screen.getByTitle('项目与店规'))
+  expect(await screen.findByText(/店规元数据不完整/)).toBeTruthy()
+  expect(screen.getByText(/不能据此判断没有适用要求/)).toBeTruthy()
+  expect(screen.queryByText('这个范围还没有店规。')).toBeNull()
+})
+
 test('打开只读取店规，候选不会自动采用；明确采用才发出版本化请求', async () => {
   rules = [{ ...rule, status: 'candidate', source: { kind: 'agent_report', actor: 'dev' } }]
   handler = (path, init) => path === '/api/rules/rule-1' && init?.method === 'POST' ? Promise.resolve(rule) : undefined

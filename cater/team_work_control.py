@@ -78,13 +78,15 @@ class TeamWorkControl:
         """Project only authentic withdrawals, using the supplied snapshot alone."""
         events = list(events) if events is not None else self.rt.log.read(task_id=task_id)
         events = sorted((e for e in events if e.task_id == task_id), key=lambda e: e.seq)
+        from .team_review_direction import effective_objectives
+        effective = effective_objectives(events)
         messages = {e.seq: e for e in events if e.type == "team.message_received"}
         rows, seen = [], set()
         revision = 0
         for event in events:
             if event.actor != HOST:
                 continue
-            if event.type in {"team.objective_updated", "team.objective_completed"}:
+            if event.seq in effective:
                 revision = event.seq
             if event.type != "team.assignment_withdrawn":
                 continue

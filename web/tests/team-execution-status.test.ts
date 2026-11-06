@@ -7,6 +7,12 @@ const team = (extra: Partial<TeamSummary> = {}): TeamSummary => ({
 })
 const activity = (state: string, active = false): TeamActivity => ({ state, active })
 
+test('安全审计阻塞优先于待处理消息，不回显未知异常', () => {
+  const error = '事件日志签名与当前审计密钥配置不匹配或历史不完整；未写入，请核对审计配置。'
+  expect(teamStatus(team({ pending_count: 2 }), { state: 'blocked', active: false, error })).toBe('审计状态受阻，需核对')
+  expect(teamStatus(team({ pending_count: 2 }), { state: 'blocked', active: false, error: `${error} private` })).toBe('消息等待处理')
+})
+
 test.each([
   ['queued', true, '消息处理已排队'],
   ['running', true, '正在处理消息'],

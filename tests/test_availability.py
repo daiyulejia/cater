@@ -1,16 +1,44 @@
 from __future__ import annotations
 
 import json
+import tempfile
+import threading
 import unittest
+from http.server import ThreadingHTTPServer
+from pathlib import Path
 from unittest.mock import patch
+from urllib.request import urlopen
 
 from cater.availability import team_availability
-from cater.drivers import OpenAICompatibleDriver
+from cater.drivers import GuidedDriver, OpenAICompatibleDriver
 from cater.events import Actor
 from cater.runtime import Runtime
+from cater.web import make_handler
 
 
 class AvailabilityTests(unittest.TestCase):
+    def test_profile_http_keeps_member_shape_and_reports_history_as_optional_sibling(self):
+        driver = GuidedDriver("product", token_budget=1000)
+        with tempfile.TemporaryDirectory() as temp:
+            db = Path(temp) / "availability.db"
+            with Runtime(db, drivers={"product": driver}) as rt:
+                task = rt.create_task("历史用量")
+                rt.log.emit(actor=Actor.system("team"), type="team.model_called", task_id=task,
+                            payload={"driver": "product", "tokens": 1, "token_usage": "reported",
+                                     "usage": {"total_tokens": 1, "prompt_tokens": 99}})
+            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db, shared_drivers={"product": driver}, recover_on_startup=False))
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+            thread.start()
+            try:
+                with urlopen(f"http://127.0.0.1:{server.server_port}/api/organization/profile", timeout=5) as response:
+                    availability = json.load(response)["availability"]
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+                server.server_close()
+            self.assertTrue(all(set(member) == {"role_id", "status", "reason"} for member in availability["members"]))
+            self.assertIn({"role_id": "product", "code": "historical_source_unknown"}, availability["usage_warnings"])
+
     def api(self, name="product"):
         return OpenAICompatibleDriver(name, endpoint="https://fixture.test/v1/chat/completions", model="fixture", api_key_env="CATER_AVAILABILITY_KEY")
 
@@ -61,6 +89,33 @@ class AvailabilityTests(unittest.TestCase):
             driver.token_budget = None
             for _ in range(rt.circuit_breaker_threshold): rt._driver_health.record_failure("product")
             self.assertEqual(self.member(rt)["reason"], "circuit_open")
+
+    def test_budgeted_channel_reports_inconsistent_usage_without_a_probe(self):
+        driver = self.api(); driver.token_budget = 100
+        with Runtime(":memory:", drivers={"product": driver}) as rt, patch.object(driver, "complete") as complete:
+            task = rt.create_task("用量状态")
+            rt.log.emit(actor=Actor.system("driver_gateway"), type="driver.usage_inconsistent", task_id=task,
+                        payload={"driver": "product", "usage_issue": "total_below_reported_components",
+                                 "usage": {"total_tokens": 1, "prompt_tokens": 101}})
+            self.assertEqual(self.member(rt)["reason"], "usage_inconsistent")
+            self.assertEqual(self.member(rt, "cabinet_product")["status"], "on_leave")
+            complete.assert_not_called()
+
+    def test_history_warning_does_not_block_and_budget_evidence_is_scanned_once(self):
+        drivers = {name: self.api(name) for name in ("product", "design", "dev", "test")}
+        for driver in drivers.values(): driver.token_budget = 1000
+        with Runtime(":memory:", drivers=drivers) as rt, patch.dict("cater.availability.os.environ", {"CATER_AVAILABILITY_KEY": "fixture"}):
+            task = rt.create_task("旧记录")
+            rt.log.emit(actor=Actor.system("team"), type="team.model_called", task_id=task,
+                        payload={"driver": "product", "tokens": 1, "token_usage": "reported",
+                                 "usage": {"total_tokens": 1, "prompt_tokens": 99}})
+            with patch.object(rt.log, "iter_events", wraps=rt.log.iter_events) as events:
+                result = team_availability(rt)
+                self.assertEqual(events.call_count, 2)
+            member = next(item for item in result["members"] if item["role_id"] == "product")
+            self.assertEqual(set(member), {"role_id", "status", "reason"})
+            self.assertIn({"role_id": "product", "code": "historical_source_unknown"}, result["usage_warnings"])
+            self.assertNotEqual(member["status"], "on_leave")
 
     def test_old_event_success_does_not_claim_new_server_connection_is_available(self):
         with Runtime(":memory:", drivers={"product": self.api()}) as rt, patch.dict("cater.availability.os.environ", {"CATER_AVAILABILITY_KEY": "fixture"}):

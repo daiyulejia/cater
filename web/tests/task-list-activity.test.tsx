@@ -6,6 +6,7 @@ import type { ExecutionControl } from '../src/executionControl'
 import { executionLabel } from '../src/executionControl'
 import type { TeamActivity, TeamSummary } from '../src/team'
 import { teamStatus } from '../src/team'
+import { safeAuditBlocked } from '../src/activityDiagnostics'
 
 const activityCss = readFileSync('src/TaskList.css', 'utf8')
 
@@ -20,11 +21,20 @@ const team = (extra: Partial<TeamSummary> = {}): TeamSummary => ({
 const row = (extra: Partial<Row> = {}): Row => ({
   id: 'cafe', goal: '核对猫咖菜单', status: 'running', status_label: '等待下一轮', ...extra,
 })
-const statusLabel = (task: Row) => executionLabel(task.execution_control?.state)
+const statusLabel = (task: Row) => safeAuditBlocked(task.activity) ? '审计状态受阻，需核对' : executionLabel(task.execution_control?.state)
   || (task.team?.enabled ? teamStatus(task.team, task.activity) : task.status_label)
 const props = { selectedId: 'cafe', drafts: {}, collapsed: false, searchOpen: true, onChoose: vi.fn(), statusLabel }
 const entry = () => within(screen.getByRole('navigation', { name: '任务列表' })).getByRole('button')
 const indicator = () => entry().querySelector('.task-list-activity')!
+
+test.each(['running', 'paused', 'cancelled'] as const)('审计阻塞在 %s 状态下不显示为等待', state => {
+  const error = '事件日志签名与当前审计密钥配置不匹配或历史不完整；未写入，请核对审计配置。'
+  const task = row({ activity: { active: false, state: 'blocked', error },
+    team: team({ pending_count: 1 }), execution_control: { state, seq: 11, reason: '' } })
+  render(<TaskList {...props} tasks={[task]} />)
+  expect(indicator().getAttribute('data-state')).toBe('blocked')
+  expect(within(entry()).getByText('审计状态受阻，需核对')).toBeTruthy()
+})
 
 test.each<{ name: string; task: Row; state: string; label: string; moving?: boolean }>([
   { name: '真实运行', task: row({ activity: { active: true, state: 'running' }, team: team() }), state: 'running', label: '正在处理消息', moving: true },

@@ -337,9 +337,9 @@ class TeamSupervisionTests(unittest.TestCase):
             self.worker: [
                 self.native_turn("", ("delegate", {"recipient": helper, "instruction": "Review this implementation"})),
                 self.native_turn("", ("wait_for_reply", {})),
-                self.native_turn(final_text),
+                self.native_turn("", ("return_work", {"text": final_text})),
             ],
-            helper: [self.native_turn("Review complete: the correction is sufficient.")],
+            helper: [self.native_turn("", ("return_work", {"text": "Review complete: the correction is sufficient."}))],
         }
         self.rt.team.receive(self.task, "Implement and review", request_id="nested-supervision")
         self.run_team()
@@ -349,7 +349,7 @@ class TeamSupervisionTests(unittest.TestCase):
                    if event.payload["kind"] == "report" and event.actor.id == self.worker
                    and event.payload["recipient"] == self.manager
                    and event.payload.get("reply_to") == assignment.seq]
-        self.assertEqual(len(reports), 1, "The original delegation must receive exactly one final automatic report")
+        self.assertEqual(len(reports), 1, "The original delegation must receive exactly one explicit report")
         self.assertIn(final_text, reports[0].payload["text"])
         self.assertTrue(any(call["context"]["you"]["id"] == self.manager
                             and call["context"]["message"]["seq"] == reports[0].seq for call in self.driver.calls))

@@ -474,7 +474,7 @@ class TeamReviewCycleTests(TeamSupervisionTests):
                              ("wait_for_reply", {})),
             self.native_turn("", ("finish_work", {"summary": "Explanation delivered", "verification": "Text only; no files requested"})),
             self.native_turn("The explanation is complete."),
-        ], self.worker: [self.native_turn("Review, fix, changes_requested, approved: these are just words in this answer.")]}
+        ], self.worker: [self.native_turn("", ("return_work", {"text": "Review, fix, changes_requested, approved: these are just words in this answer."}))]}
         self.rt.team.receive(self.task, "Explain review vocabulary without creating files", request_id="review-simple-answer")
         self.run_team()
         self.assertEqual(self.events("team.review_requested"), [])

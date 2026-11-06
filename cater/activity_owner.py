@@ -7,19 +7,21 @@ import os
 from pathlib import Path
 import tempfile
 
+from .events import _windows_io_path
+
 
 @contextmanager
-def activity_owner(database: str, task_id: str, activity_id: str):
+def activity_owner(database: str | os.PathLike[str], task_id: str, activity_id: str):
     """Try ownership without waiting; closing the handle or process releases it.
 
     Keep lock files in place: unlinking a released lock can split contenders
     across different inodes. No PID probing or expiry can evict a live worker.
     """
     root = (Path(tempfile.gettempdir()) / "cater-memory-activity-locks" if database == ":memory:"
-            else Path(str(Path(database).resolve()) + ".activity-locks"))
-    root.mkdir(parents=True, exist_ok=True)
+            else Path(str(Path(_windows_io_path(database)).resolve()) + ".activity-locks"))
+    Path(_windows_io_path(str(root))).mkdir(parents=True, exist_ok=True)
     identity = hashlib.sha256((task_id + "\0" + activity_id).encode()).hexdigest()
-    with (root / identity).open("a+b") as handle:
+    with Path(_windows_io_path(str(root / identity))).open("a+b") as handle:
         handle.seek(0)
         if os.name == "nt":
             import msvcrt

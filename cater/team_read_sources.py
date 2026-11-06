@@ -45,7 +45,7 @@ _READ_FIELDS = tuple((f"$.{key}", maximum) for key, maximum in {
     "result.encoding": 32, "result.truncated": 0,
 }.items())
 _BINDING_FIELDS = tuple((f"$.{key}", maximum) for key, maximum in {
-    "workspace_id": 128, "root": 8192, "fingerprint": 256,
+    "workspace_id": 128, "root": 8192, "fingerprint": 256, "mode": 32,
 }.items())
 _RECEIPT_INDEX_FIELDS = tuple((f"$.{key}", maximum) for key, maximum in {
     "started_seq": 0, "run_id": 128, "role": 128, "name": 128, "call_id": 256,
@@ -432,7 +432,8 @@ class TeamReadSources:
             return None
         p = binding.payload
         configured = self.rt.workspaces.config.get(p.get("workspace_id"))
-        if not configured or configured["fingerprint"] != p.get("fingerprint"):
+        from .workspaces import _binding_matches
+        if not configured or not _binding_matches(configured, p):
             return None
         return {"binding_seq": binding.seq, "workspace_id": p["workspace_id"],
                 "fingerprint": p["fingerprint"], "root": p.get("root")}

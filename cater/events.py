@@ -9,7 +9,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
+import re
 import sqlite3
+import stat
 import uuid
 from dataclasses import dataclass
 from contextlib import contextmanager
@@ -18,6 +21,85 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping
 
 GENESIS_HASH = "0" * 64
+
+
+def _check_extended_syntax(path: str) -> None:
+    # SQLite and pathlib can normalize syntax that Win32 extended paths do not.
+    parts = path[4:].split("\\")
+    if ("/" in path or any(part in {".", ".."} for part in parts)
+            or any(not part for part in parts[:-1])):
+        raise ValueError("ambiguous extended Windows path")
+
+
+def _windows_io_path(path: str | os.PathLike[str]) -> str:
+    """Use extended syntax for long local paths without changing their meaning."""
+    path = os.fspath(path)
+    if not isinstance(path, str):
+        raise TypeError("path must be a string or a string-valued path-like object")
+    if os.name != "nt" or path == ":memory:":
+        return path
+    if path.startswith("file:"):
+        # SQLite may enable URI interpretation globally. Inspect the decoded
+        # filename only, without altering URI query, fragment, or native behavior.
+        filename = path[5:].split("?", 1)[0].split("#", 1)[0]
+        decoded = re.sub(r"%([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), filename)
+        start = decoded.replace("/", "\\").find("\\\\?\\")
+        if start >= 0:
+            _check_extended_syntax(decoded[start:])
+        return path
+    namespace = path.replace("/", "\\")
+    if namespace.startswith("\\\\?\\"):
+        _check_extended_syntax(path)
+        return path
+    if namespace.startswith("\\\\.\\"):
+        return path
+    absolute = os.path.abspath(path)
+    # Win32 limits count UTF-16 code units, including two for non-BMP characters.
+    # Preserve lone surrogates as Windows path strings do; leave rejection to I/O.
+    # Leave room for SQLite journal/WAL suffixes and for directory operations.
+    if len(absolute.encode("utf-16-le", errors="surrogatepass")) // 2 < 240:
+        return path
+    if absolute.startswith(("\\\\?\\", "\\\\.\\")):
+        raise ValueError("cannot safely extend a path relative to a Windows device namespace")
+    drive, absolute_tail = os.path.splitdrive(absolute)
+    _, original_tail = os.path.splitdrive(path.replace("/", "\\"))
+    for tail in (original_tail, absolute_tail):
+        for part in tail.split("\\"):
+            if part in {"", ".", ".."}:
+                continue
+            if (part.endswith((" ", ".")) or re.search(r'[<>:"|?*\x00-\x1f]', part)
+                    or re.match(r"^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³]) *(?:\.|$)", part, re.I)):
+                raise ValueError("ambiguous Windows path cannot be used as a long path")
+    if drive.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute[2:]
+    return "\\\\?\\" + absolute
+
+
+def _managed_database_path_state(path: str):
+    """Observe database and ancestors without resolving links; return None if unproven."""
+    if path == ":memory:" or path.startswith("file:"):
+        return None
+    try:
+        target = Path(os.path.abspath(_windows_io_path(path)))
+        parents = []
+        for parent in reversed(target.parents):
+            info = os.lstat(_windows_io_path(str(parent)))
+            if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                    or getattr(info, "st_file_attributes", 0) & 0x400
+                    or not info.st_dev or not info.st_ino):
+                return None
+            parents.append((info.st_dev, info.st_ino))
+        try:
+            info = os.lstat(_windows_io_path(str(target)))
+        except FileNotFoundError:
+            return (tuple(parents), None)
+        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                or getattr(info, "st_file_attributes", 0) & 0x400
+                or not info.st_dev or not info.st_ino):
+            return None
+        return (tuple(parents), (info.st_dev, info.st_ino))
+    except (OSError, ValueError, TypeError):
+        return None
 
 EVENT_CATEGORIES = {
     "team.started": "lifecycle",
@@ -29,6 +111,7 @@ EVENT_CATEGORIES = {
     "team.objective_updated": "planning",
     "team.objective_completed": "outcome",
     "team.model_called": "driver",
+    "team.native_response_completed": "driver",
     "team.response_correction_requested": "driver",
     "team.external_run_started": "driver",
     "team.external_run_finished": "driver",
@@ -42,6 +125,7 @@ EVENT_CATEGORIES = {
     "team.review_requested": "review",
     "team.review_recorded": "review",
     "team.review_followup_requested": "review",
+    "team.review_supervision_intended": "review",
     "planning.requested": "planning",
     "planning.started": "planning",
     "planning.finished": "planning",
@@ -90,6 +174,8 @@ EVENT_CATEGORIES = {
     "plan.proposed": "planning",
     "plan.amended": "planning",
     "driver.failed": "driver",
+    "driver.usage_inconsistent": "driver",
+    "driver.probe_called": "driver",
     "driver.retry_scheduled": "driver",
     "driver.retry_finished": "driver",
     "driver.budget_exhausted": "driver",
@@ -108,6 +194,8 @@ EVENT_CATEGORIES = {
     "workspace.work_reconciled": "execution",
     "workspace.execution_stopped": "execution",
     "workspace.model_called": "driver",
+    "driver.invocation_skipped": "driver",
+    "driver.model_called": "driver",
     "workspace.files_captured": "outcome",
     "workspace.response_recorded": "driver",
     "handoff.published": "outcome",
@@ -142,6 +230,20 @@ class UnknownEventType(ValueError):
 
 class HeadChanged(ValueError):
     """A conditional append must be recomputed from the current event head."""
+
+
+class AuditSigningRequired(ValueError):
+    """Appending to signed history requires an active signing key."""
+
+    def __init__(self):
+        super().__init__('事件日志已有签名记录，但当前没有签名密钥；未写入，请核对审计配置。')
+
+
+class AuditSigningMismatch(AuditSigningRequired):
+    """The configured keyring cannot authenticate signed history for an append."""
+
+    def __init__(self):
+        ValueError.__init__(self, '事件日志签名与当前审计密钥配置不匹配或历史不完整；未写入，请核对审计配置。')
 
 
 @dataclass(frozen=True)
@@ -207,7 +309,7 @@ class EventLog:
         key_id: str = "local",
         audit_keys: Mapping[str, str | bytes] | None = None,
     ):
-        self.path = str(path)
+        self.path = os.fspath(path) if isinstance(path, os.PathLike) else str(path)
         self.key_id = _normalize_key_id(key_id)
         self.audit_keys = _normalize_audit_keys(audit_keys)
         self.audit_key = _normalize_audit_key(audit_key)
@@ -216,9 +318,15 @@ class EventLog:
             self.audit_keys[self.key_id] = self.audit_key
         elif self.key_id in self.audit_keys:
             self.audit_key = self.audit_keys[self.key_id]
+        io_path = _windows_io_path(self.path)
         if self.path != ":memory:":
-            Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path, timeout=5)
+            Path(io_path).parent.mkdir(parents=True, exist_ok=True)
+        before = _managed_database_path_state(self.path)
+        self.db = sqlite3.connect(io_path, timeout=5)
+        after = _managed_database_path_state(self.path)
+        self._managed_database_path_proof = (after if before is not None and after is not None
+            and after[1] is not None and before[0] == after[0]
+            and (before[1] is None or before[1] == after[1]) else None)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA busy_timeout = 5000")
         self._init_schema()
@@ -281,6 +389,7 @@ class EventLog:
         # the write transaction before reading the previous hash prevents two
         # writers from attaching different events to the same chain head.
         with self.atomic():
+            signing_key, signing_id = self.require_signing_for_append()
             prev = self.head_hash()
             if expected_head is not None and prev != expected_head:
                 raise HeadChanged("event head changed")
@@ -303,8 +412,8 @@ class EventLog:
                     payload=payload,
                     prev_hash=prev,
                 )
-                signature = self._sign(fingerprint) if self.audit_key else None
-                key_id = self.key_id if signature else None
+                signature = self._sign_with(signing_key, fingerprint) if signing_key is not None else None
+                key_id = signing_id if signature else None
                 cur = self.db.execute(
                     """INSERT INTO events
                        (id, ts, task_id, actor_json, type, category, payload_json, prev_hash, hash, key_id, signature)
@@ -339,6 +448,63 @@ class EventLog:
                 ))
                 prev = fingerprint
         return events
+
+    def require_signing_for_append(self) -> tuple[bytes | None, str]:
+        """Check signing configuration against one historical sample per key ID.
+
+        The caller holds the write transaction. This prevents an inconsistent
+        configured key from appending to trusted history and detects an unsigned
+        suffix. Samples do not authenticate every historical signature or the
+        event hash chain; use verify_chain for complete historical verification.
+        """
+        if not self.db.in_transaction:
+            raise RuntimeError('Signing admission requires a write transaction')
+        signing_key, signing_id = self.audit_key, self.key_id
+        keys, fallback = dict(self.audit_keys), self._single_audit_key_fallback
+        configured = keys.get(signing_id)
+        if (signing_key is not None and (not isinstance(signing_key, bytes)
+                or not isinstance(configured, bytes) or not hmac.compare_digest(signing_key, configured))):
+            raise AuditSigningMismatch()
+        first = self.db.execute("SELECT seq FROM events INDEXED BY events_signed "
+                                "WHERE signature IS NOT NULL AND signature <> '' ORDER BY seq LIMIT 1").fetchone()
+        if first is None:
+            return signing_key, signing_id
+        if signing_key is None:
+            raise AuditSigningRequired()
+        if self.db.execute("SELECT 1 FROM events INDEXED BY events_unsigned_seq "
+                           "WHERE (signature IS NULL OR signature = '') AND seq > ? LIMIT 1",
+                           (first['seq'],)).fetchone():
+            raise AuditSigningMismatch()
+
+        def check(row):
+            if row is None:
+                return
+            raw_id = row['key_id']
+            if raw_id is not None and type(raw_id) is not str:
+                raise AuditSigningMismatch()
+            event_key_id = raw_id or signing_id
+            key = keys.get(event_key_id)
+            if key is None and fallback:
+                key = signing_key
+            signature, digest = row['signature'], row['hash']
+            if (key is None or type(signature) is not str or type(digest) is not str
+                    or len(signature) != 64 or not signature.isascii()
+                    or re.fullmatch(r'[0-9a-f]{64}', digest) is None
+                    or not hmac.compare_digest(signature, self._sign_with(key, digest))):
+                raise AuditSigningMismatch()
+
+        where = "signature IS NOT NULL AND signature <> ''"
+        columns = 'key_id, hash, signature'
+        index = 'events INDEXED BY events_signed_key_seq'
+        check(self.db.execute(f'SELECT {columns} FROM {index} WHERE {where} '
+                              'AND key_id IS NULL ORDER BY seq LIMIT 1').fetchone())
+        row = self.db.execute(f'SELECT {columns} FROM {index} WHERE {where} '
+                              'AND key_id IS NOT NULL ORDER BY key_id, seq LIMIT 1').fetchone()
+        while row is not None:
+            check(row)
+            row = self.db.execute(f'SELECT {columns} FROM {index} WHERE {where} '
+                                  'AND key_id > ? ORDER BY key_id, seq LIMIT 1', (row['key_id'],)).fetchone()
+        return signing_key, signing_id
 
     def read(self, task_id: str | None = None) -> list[Event]:
         return list(self.iter_events(task_id=task_id))
@@ -472,6 +638,12 @@ class EventLog:
         )
         self._ensure_column("events", "key_id", "TEXT")
         self._ensure_column("events", "signature", "TEXT")
+        self.db.execute("CREATE INDEX IF NOT EXISTS events_signed ON events(seq) "
+                        "WHERE signature IS NOT NULL AND signature <> ''")
+        self.db.execute("CREATE INDEX IF NOT EXISTS events_signed_key_seq ON events(key_id, seq) "
+                        "WHERE signature IS NOT NULL AND signature <> ''")
+        self.db.execute("CREATE INDEX IF NOT EXISTS events_unsigned_seq ON events(seq) "
+                        "WHERE signature IS NULL OR signature = ''")
         self.db.commit()
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:

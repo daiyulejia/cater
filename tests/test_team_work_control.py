@@ -43,6 +43,7 @@ class TeamWorkControlTests(unittest.TestCase):
         self.control = TeamWorkControl(self.team)
         self.rt.team = self.team
         self.rt.team_reviews = TeamReviews(self.rt)
+        self.emit("task.created", {"goal": "Current objective"}, Actor.human())
         self.revision = self.emit("team.objective_updated", {"goal": "Current objective"}).seq
         self.source = self.message()
 

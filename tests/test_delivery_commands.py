@@ -230,6 +230,14 @@ class DeliveryCommandTests(unittest.TestCase):
         shadow.row_factory = sqlite3.Row
         schema = original.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'events'").fetchone()[0]
         shadow.execute(schema)
+        # Keep the real indexes needed by event-log admission and receipt
+        # queries. Do not copy append-only triggers: this shadow deliberately
+        # mutates one row to test how readers handle malformed JSON.
+        indexes = original.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events' AND sql IS NOT NULL"
+        ).fetchall()
+        for index in indexes:
+            shadow.execute(index[0])
         cursor = original.execute("SELECT * FROM events")
         placeholders = ",".join("?" for _ in cursor.description)
         shadow.executemany("INSERT INTO events VALUES (" + placeholders + ")", cursor)

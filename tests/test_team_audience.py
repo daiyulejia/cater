@@ -13,7 +13,8 @@ class TeamAudienceTests(SimpleTeamTests):
                 turn("I received the stage result.", ("finish_work", {
                     "summary": "Final delivery", "verification": "Fixture only"})),
                 turn("This is the final delivery for the customer.")],
-            self.worker: [turn("The stage result is ready for the manager.")],
+            self.worker: [turn("The stage result is ready for the manager.",
+                               ("return_work", {"text": "The stage result is ready for the manager."}))],
         }
         self.rt.team.receive(self.task, "Check and deliver", request_id="audience-delivery")
         self.run_ok()
@@ -113,7 +114,7 @@ class TeamAudienceTests(SimpleTeamTests):
             self.manager: [turn("", ("delegate", {"recipient": self.worker, "instruction": "Check permissions"})),
                 turn("", ("wait_for_reply", {})), turn("", ("wait_for_reply", {})), turn("", ("wait_for_reply", {}))],
             self.worker: [turn("", ("send_message", {"recipient": self.manager, "text": "Still checking; progress only."})),
-                turn("Final conclusion: permission verification failed; repair is needed.")],
+                turn("", ("return_work", {"text": "Final conclusion: permission verification failed; repair is needed."}))],
         }
         self.rt.team.receive(self.task, "Check permissions", request_id="audience-progress-then-failure")
         self.run_ok()

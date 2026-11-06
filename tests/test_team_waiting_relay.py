@@ -26,7 +26,7 @@ class WaitingRelayTests(unittest.TestCase):
         def author(context, history, tools):
             if context["message"]["kind"] == "report":
                 self.assertEqual(context["active_assignment"]["sender"], f.manager)
-                return f.native_turn("Original result complete with the helper's evidence.")
+                return f.native_turn("", ("return_work", {"text": "Original result complete with the helper's evidence."}))
             if history:
                 return f.native_turn(final, ("wait_for_reply", {}))
             tool = ("send_message", {"recipient": self.helper, "text": "Return the evidence for this result"}) if addressed else (
@@ -34,7 +34,7 @@ class WaitingRelayTests(unittest.TestCase):
             return f.native_turn("" if separate_wait else final, tool, *(() if separate_wait else (("wait_for_reply", {}),)))
 
         f.driver.steps = {f.manager: [manager] * 4, f.worker: [author] * 4,
-                          self.helper: [f.native_turn("Evidence ready; verified only within this scripted fixture.")]}
+                          self.helper: [f.native_turn("", ("return_work", {"text": "Evidence ready; verified only within this scripted fixture."}))]}
         f.rt.team.receive(f.task, "Prepare and hand back the result", request_id="waiting-relay-chain")
         f.run_team()
         messages = f.rt.team._messages(f.task)
@@ -44,6 +44,10 @@ class WaitingRelayTests(unittest.TestCase):
         self.assertIn(original.seq, _reported_messages(messages))
         self.assertIn(child.seq, _reported_messages(messages))
         self.assertEqual(f.rt.team.view(f.task)["pending_count"], 0)
+        returns = [e for e in f.events("team.tool_finished") if e.payload.get("name") == "return_work"]
+        self.assertEqual(len(returns), 2)
+        self.assertTrue(all(e.payload["result"]["status"] == "ok" for e in returns))
+        self.assertIsNone(f.rt.team._claim(f.task))
         return messages
 
     def test_delegate_and_wait_does_not_wake_parent_without_new_information(self):
@@ -98,11 +102,12 @@ class WaitingRelayTests(unittest.TestCase):
         f.driver.steps = {
             f.manager: [f.native_turn("", ("delegate", {"recipient": f.worker,
                 "instruction": "Prepare and return evidence"}), ("wait_for_reply", {})), supervise,
+                f.native_turn("The interruption notice was received; follow-up is already underway."),
                 f.native_turn("Missing evidence and the incomplete outcome acknowledged.")],
             f.worker: [f.native_turn("", ("delegate", {"recipient": self.helper,
                 "instruction": "Collect and return evidence"})),
                 f.native_turn("", ("read_messages", {})), f.native_turn("", ("read_messages", {})),
-                f.native_turn("", ("wait_for_reply", {})), f.native_turn(boundary)],
+                f.native_turn("", ("wait_for_reply", {})), f.native_turn("", ("return_work", {"text": boundary}))],
             self.helper: [f.native_turn("", ("read_messages", {})), preempt,
                 f.native_turn("I am the helper. This answer does not collect evidence.")],
         }
@@ -112,14 +117,19 @@ class WaitingRelayTests(unittest.TestCase):
         original, = [e for e in messages if e.actor.id == f.manager and e.payload["kind"] == "assignment"]
         self.assertIn(original.seq, _reported_messages(messages))
         self.assertEqual([c["context"]["message"]["kind"] for c in f.driver.calls
-                          if c["context"]["you"]["id"] == f.manager], ["message", "progress", "report"])
+                          if c["context"]["you"]["id"] == f.manager], ["message", "progress", "progress", "report"])
         report, = [e for e in messages if e.actor.id == f.worker and e.payload["kind"] == "report"]
         self.assertEqual((report.payload["text"], report.payload["reply_to"]), (boundary, original.seq))
-        self.assertFalse([e for e in messages if e.actor.id == self.helper and e.payload["recipient"] == f.worker])
+        notice, = [e for e in messages if e.actor.id == self.helper and e.payload["recipient"] == f.worker]
+        self.assertEqual(notice.payload["kind"], "progress")
         self.assertEqual(team.view(f.task)["pending_count"], 0)
         self.assertIsNone(team._claim(f.task))
         self.assertEqual(f.rt.task(f.task).deliverables, [])
         self.assertNotEqual(team.view(f.task)["status"], "done")
+        returns = [e for e in f.events("team.tool_finished") if e.payload.get("name") == "return_work"]
+        self.assertEqual(len(returns), 1)
+        self.assertEqual(returns[0].payload["result"]["status"], "ok")
+        self.assertLessEqual(len(f.driver.calls), 13)
 
 
 if __name__ == "__main__":

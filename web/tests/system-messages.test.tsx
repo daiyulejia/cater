@@ -461,6 +461,19 @@ test.each([
   expect(row.querySelector('details')!.querySelector('summary')!.textContent).toContain('审计记录')
 })
 
+test('历史用量提示区分当时配置与当前状态', async () => {
+  await mount([event(2, 'driver.usage_inconsistent', 'driver_gateway', { budget_enforced: true, usage_issue: 'total_below_reported_components' }, 'system')])
+  const text = visibleText(record(2))
+  expect(text).toContain('当时已配置本地预算')
+  expect(text).toContain('当前通道状态以成员状态为准')
+  expect(text).not.toContain('后续请求暂停')
+})
+
+test('非宿主不能伪造用量矛盾系统通知', async () => {
+  await mount([event(2, 'driver.usage_inconsistent', 'intruder', { budget_enforced: true, usage_issue: 'total_below_reported_components' }, 'agent')])
+  expect(screen.queryByText(/服务商返回的用量总数与组成项矛盾/)).toBeNull()
+})
+
 const gateway = (seq: number, type: string, payload: Record<string, unknown>): FixtureEvent => ({
   seq, type, actor: { id: 'driver_gateway', role: 'driver_gateway', kind: 'system' }, payload,
 })

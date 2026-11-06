@@ -138,7 +138,7 @@ class QuestionnaireTests(unittest.TestCase):
         self.assertEqual(question["role_id"], self.worker)
         message, _ = self.reply(question)
         self.assertEqual(message.payload["recipient"], self.worker)
-        self.driver.steps[self.worker] = [turn("规划草稿已整理，交回店长。")]
+        self.driver.steps[self.worker] = [turn("", ("return_work", {"text": "规划草稿已整理，交回店长。"}))]
         self.driver.steps[self.manager] = [turn("我来给你汇总。")]
         self.rt.collaborate(self.task)
         worker_context = self.driver.calls[-2]["context"]
@@ -147,6 +147,10 @@ class QuestionnaireTests(unittest.TestCase):
         reports = [e for e in self.events("team.message_received") if e.payload["kind"] == "report"]
         self.assertEqual(len(reports), 1)
         self.assertEqual(reports[0].payload["reply_to"], worker_context["active_assignment"]["seq"])
+        receipts = [e.payload["result"] for e in self.events("team.tool_finished") if e.payload["name"] == "return_work"]
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0]["status"], "ok")
+        self.assertEqual(receipts[0]["message_seq"], reports[0].seq)
         self.assertTrue(self.rt.verify_chain().ok)
 
     def test_queued_answer_does_not_restart_old_work_after_objective_change(self):
@@ -167,7 +171,7 @@ class QuestionnaireTests(unittest.TestCase):
         self.reply(question)
         name = self.rt._role_by_id(self.worker).name
         message = self.rt.team.receive(self.task, f"@{name} 还要考虑我的家庭安排", request_id="new-after-answer")
-        self.driver.steps[self.worker] = [turn("把家庭安排纳入同一份规划，现交回草稿。")]
+        self.driver.steps[self.worker] = [turn("", ("return_work", {"text": "把家庭安排纳入同一份规划，现交回草稿。"}))]
         self.driver.steps[self.manager] = [turn("收到更新的规划。")]
         self.rt.collaborate(self.task)
         context = next(c["context"] for c in self.driver.calls if c["context"]["message"]["seq"] == message.seq)
@@ -177,6 +181,10 @@ class QuestionnaireTests(unittest.TestCase):
         self.assertEqual(len(reports), 1)
         self.assertIn("家庭安排", reports[0].payload["text"])
         self.assertNotIn("收到顾客的新消息", reports[0].payload["text"])
+        receipts = [e.payload["result"] for e in self.events("team.tool_finished") if e.payload["name"] == "return_work"]
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0]["status"], "ok")
+        self.assertEqual(receipts[0]["message_seq"], reports[0].seq)
 
     def test_two_members_questions_can_both_be_answered_without_invalidating_each_other(self):
         other = next(r.id for r in self.rt.worker_roles if r.id != self.worker)

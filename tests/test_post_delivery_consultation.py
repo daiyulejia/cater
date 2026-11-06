@@ -44,6 +44,8 @@ class PostDeliveryConsultationTests(unittest.TestCase):
         if old_request:
             f.old_request = self.delegate(f)
             self.exchange(f, WAIT, source=f.old_request)
+            changed, = self.exchange(f, ('set_objective', {'goal': 'Complete the replacement objective.'}))
+            self.assertEqual(changed['status'], 'ok', changed)
         published, = self.exchange(f, ('publish_artifact', {
             'filename': 'source.py', 'content': 'print(17 + 29)\n',
             'summary': 'Original source', 'format': 'code'}))

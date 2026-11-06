@@ -94,5 +94,7 @@ def command_intent(instruction: str, aliases: Iterable[str] = ()) -> str:
 
 
 def changes_direction(payload: dict[str, Any]) -> bool:
+    if payload.get("direction_semantics") == "structured_fields_v1":
+        return "goal" in payload or "acceptance" in payload
     return ("goal" in payload or "acceptance" in payload
             or payload.get("intent") not in {"status", "resume"})

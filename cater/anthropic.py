@@ -13,7 +13,8 @@ from urllib.request import Request
 
 from .drivers import (MAX_API_RESPONSE_BYTES, DriverProtocolError, DriverResponse,
                       DriverUnavailable, TextRequestRejected, TextTransportFailure, _open_api_request, _safe_api_endpoint,
-                      _retry_after_seconds, _text_only_request, _token_budget, _tool_api_request, _tool_response_error)
+                      _retry_after_seconds, _text_only_request, _token_budget, _tool_api_request, _tool_response_error,
+                      trusted_driver_method)
 from .tool_loading import validate_mode
 from .tool_protocol import ToolTurn, anthropic_history, anthropic_turn, prepare_tool_turn
 from .usage import valid_token_count
@@ -104,7 +105,7 @@ class AnthropicMessagesDriver:
         turn = self.tool_turn
         # Preserve synchronous billing guards and caller-supplied transports.
         if ("tool_turn" in self.__dict__
-                or getattr(turn, "__func__", None) is not _ANTHROPIC_TOOL_TURN
+                or not trusted_driver_method(self, "tool_turn", _ANTHROPIC_TOOL_TURN)
                 or _open_api_request is not _DEFAULT_API_OPENER):
             if check_current is not None:
                 check_current()
@@ -122,6 +123,9 @@ class AnthropicMessagesDriver:
             raise
         if cleanup_failed(data):
             result = replace(result, meta={**(result.meta or {}), "native_cleanup_failed": True})
+        from .native_transport import NativeResponse
+        if type(data) is NativeResponse and data.cleanup_confirmed is True and not cleanup_failed(data):
+            result = replace(result, meta={**(result.meta or {}), "native_cleanup_confirmed": True})
         return result
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
@@ -203,3 +207,6 @@ class AnthropicMessagesDriver:
 
 
 _ANTHROPIC_TOOL_TURN = AnthropicMessagesDriver.tool_turn
+_ANTHROPIC_ITER_TOOL_TURN = AnthropicMessagesDriver.iter_tool_turn
+_ANTHROPIC_TOOL_INPUT = AnthropicMessagesDriver._tool_input
+_ANTHROPIC_TOOL_RESULT = AnthropicMessagesDriver._tool_result

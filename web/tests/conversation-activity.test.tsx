@@ -26,6 +26,24 @@ const tool = (seq = 3, extra = {}) => event(seq, 'team.tool_started', { role: 'd
 const receipt = (extra = {}) => event(4, 'team.tool_finished', { role: 'dev', run_id: 'run', name: 'workspace_read', started_seq: 3,
   result: { status: 'ok' }, ...extra })
 
+test('仅在空闲且无待处理消息时提示未交回委托', () => {
+  const idle = { state: 'completed', active: false }
+  const open = { ...team, open_work_count: 1 }
+  const warning = '仍有 1 项委托未交回'
+  expect(text({ team: open, activity: idle })).toContain(warning)
+  expect(text({ team: open, activity: { state: 'failed', active: false } })).toContain(warning)
+  for (const extra of [
+    { team: { ...open, pending_count: 1 }, activity: idle },
+    { team: { ...open, status: 'done' }, activity: idle },
+    { team: { ...open, open_work_count: 0 }, activity: idle },
+    { team: open, activity: { state: 'running', active: true } },
+    { team: open, activity: undefined },
+    { team: open, activity: idle, executionState: 'paused' },
+    { team: open, activity: idle, syncError: 'offline' },
+    { team: { ...open, runs: [{ message_seq: 1, role: 'dev', status: 'running' }] }, activity: idle },
+  ]) expect(text(extra)).not.toContain(warning)
+})
+
 test('恢复通知等待处理及检查点读取保留工作语义，不作为顾客请求或交付依据', () => {
   const recovery = event(4, 'team.message_received', { kind: 'recovery', recipient: 'manager', text: '先核对事实', recovery_of: 2,
     interrupted_seq: 3, revision: 0, recovery_hash: 'hash', scope: { revision: 0 } })
@@ -206,6 +224,36 @@ test.each(['progress', undefined])('交付后的追问只有过程发言时仍�
   expect(screen.queryByRole('region', { name: '当前工作进展' })).toBeNull()
 })
 
+test('等待状态没有等待伙伴的工具回执时，不虚构等待对象', () => {
+  const events = [human(), start(), end(3, 'waiting')]
+  const view = conversationActivity(props({ events }), now)
+  expect(view.message).toContain('本轮处于等待状态')
+  expect(view.message).not.toContain('等待伙伴回复')
+  expect(view.lines.find(line => line.role === 'dev')?.text).toContain('本轮处于等待状态')
+  expect(view.lines.find(line => line.role === 'dev')?.text).not.toContain('等待伙伴回复')
+})
+
+test('等待回执必须属于同一角色、运行及工具启动', () => {
+  const started = tool(3, { name: 'wait_for_reply' })
+  const finished = event(4, 'team.tool_finished', { role: 'dev', run_id: 'run', name: 'wait_for_reply',
+    started_seq: 3, result: { status: 'ok', waiting: true } })
+  const valid = [human(), start(), started, finished, end(5, 'waiting')]
+  const validView = conversationActivity(props({ events: valid }), now)
+  expect(validView.message).toContain('等待伙伴回复')
+  expect(validView.lines.find(line => line.role === 'dev')?.text).toContain('等待伙伴回复')
+  const inconsistent = [
+    [human(), start(), finished, end(5, 'waiting')],
+    [human(), start(), started, { ...finished, payload: { ...finished.payload, role: 'test' } }, end(5, 'waiting')],
+    [human(), start(), started, finished, { ...end(5, 'waiting'), payload: { ...end(5, 'waiting').payload, run_id: undefined } }],
+  ]
+  for (const events of inconsistent) {
+    const view = conversationActivity(props({ events }), now)
+    expect(view.message).toContain('本轮处于等待状态')
+    expect(view.lines.find(line => line.role === 'dev')?.text).toContain('本轮处于等待状态')
+    expect(view.lines.find(line => line.role === 'dev')?.text).not.toContain('等待伙伴回复')
+  }
+})
+
 test('明确答复即使后续调用工具也仍算已回应', () => {
   const answer = { ...reply(3), payload: { ...reply(3).payload, response_kind: 'reply' } }
   expect(text({ events: [human(), start(), answer, tool(4)] })).toContain('已回应最新消息')
@@ -337,12 +385,73 @@ test('call_id 兼容回执仍核对 run，失败与不完整结果不能冒充�
 })
 
 test('等待、协作故障与无执行状态均有明确文案，不因 completed activity 推断交付', () => {
-  expect(text({ events: [human(), start(), end(3, 'waiting')] })).toContain('等待伙伴回复')
+  expect(text({ events: [human(), start(), end(3, 'waiting')] })).toContain('本轮处于等待状态')
   expect(text({ activity: { active: true, state: 'queued' } })).toContain('后台协作已排队')
   expect(text({ activity: { active: false, state: 'failed', error: 'raw detail' } })).toContain('后台协作异常')
   expect(text({ activity: { active: false, state: 'completed' } })).toContain('尚未确认交付')
   expect(text({ events: [human(), start(), end(), reply()], activity: { active: true, state: 'running' } })).toContain('尚未确认交付')
   expect(text({ events: [human(), start(), end()], activity: { active: false, state: 'completed' } })).toContain('尚未确认答复')
+})
+
+test('后台和重启后的阻塞状态显示固定的宿主审计诊断', () => {
+  const diagnostics = [
+    '事件日志已有签名记录，但当前没有签名密钥；未写入，请核对审计配置。',
+    '事件日志签名与当前审计密钥配置不匹配或历史不完整；未写入，请核对审计配置。',
+    '监督未启动：事件日志无法校验，请核对日志和审计配置。',
+    '监督未启动：缺少事件日志所需的审计验证密钥，请核对审计配置。',
+    '监督未启动：事件日志完整性校验未通过，请核对日志和审计配置。',
+  ]
+  for (const error of diagnostics) {
+    // Running-worker failure and startup recovery share the activity projection.
+    for (const activity of [
+      { id: 'background', state: 'blocked', active: false, error },
+      { id: 'recovered', instance_id: 'new-instance', state: 'blocked', active: false, error },
+    ]) {
+      const view = conversationActivity(props({ activity }), now)
+      expect(view.visible).toBe(true)
+      expect(view.lines[0]).toMatchObject({ id: 'activity-blocked', warning: true })
+      expect(view.lines[0].text).toContain(error)
+    }
+  }
+  const { container } = render(<ConversationActivity {...props({ activity: {
+    state: 'blocked', active: false, error: diagnostics[0],
+  } })} />)
+  expect(container.textContent).toContain('后台协作已阻塞')
+  expect(container.textContent).toContain(diagnostics[0])
+})
+
+test.each(['paused', 'cancelled'])('%s 且活动不活跃时仍显示安全审计阻塞', executionState => {
+  const error = '事件日志签名与当前审计密钥配置不匹配或历史不完整；未写入，请核对审计配置。'
+  const view = render(<ConversationActivity {...props({ executionState, activity: {
+    id: 'recovered', state: 'blocked', active: false, error,
+  } })} />)
+  expect(screen.getByRole('region', { name: '当前工作进展' }).textContent).toContain(error)
+  expect(view.container.querySelector('.activity-compact-summary')?.textContent).toContain(error)
+  view.rerender(<ConversationActivity {...props({ executionState, activity: {
+    state: 'blocked', active: false, error: `${error} private exception`,
+  } })} />)
+  expect(screen.queryByRole('region', { name: '当前工作进展' })).toBeNull()
+})
+
+test('阻塞优先于等待提示且绝不展示未知原始异常', () => {
+  const raw = 'private exception: token and local path'
+  for (const extra of [
+    { team: { ...team, open_work_count: 1 } },
+    { team: { ...team, pending_count: 1 } },
+    { team: { ...team, status: 'done' } },
+  ]) {
+    const view = conversationActivity(props({ ...extra, activity: { state: 'blocked', active: false, error: raw } }), now)
+    expect(view.visible).toBe(true)
+    expect(view.lines[0].text).toBe('后台协作已阻塞：请查看过程并核对后再继续。')
+    expect(view.lines.map(line => line.text).join(' ')).not.toContain(raw)
+  }
+  const malformed = '事件日志已有签名记录，但当前没有签名密钥；未写入，请核对审计配置。 ' + raw
+  expect(text({ activity: { state: 'blocked', active: false, error: malformed } })).not.toContain(raw)
+  expect(text({ activity: { state: 'blocked', active: false } })).toContain('后台协作已阻塞')
+  const { container } = render(<ConversationActivity {...props({ events: [human()],
+    activity: { state: 'blocked', active: false, error: raw } })} />)
+  expect(container.querySelector('.activity-compact-summary')?.textContent).toContain('后台协作已阻塞')
+  expect(container.textContent).not.toContain(raw)
 })
 
 test.each(['paused', 'cancelled'])('%s 活跃时保留进展且不重复父级控制说明，没有动画或重复暂停按钮', (executionState) => {

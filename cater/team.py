@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import threading
 import time
 import uuid
 import zipfile
@@ -18,7 +19,7 @@ from types import WrapperDescriptorType
 from .artifacts import MAX_CONTENT_BYTES, content_metrics, normalize_deliverables, safe_filename
 from .activity_owner import activity_owner
 from .events import Actor, Event
-from .drivers import DriverProtocolError, tool_failure_diagnostics, tool_protocol_error_usage
+from .drivers import DriverProtocolError, tool_failure_diagnostics, tool_protocol_error_usage, native_openai_usage
 from .room_dialogue import addressed_role
 from .team_recovery import RECOVERY_CONTRACT, TeamRecovery, _same_scope
 from .team_delivery import HandoffError, HANDOFF_OMITTED_WARNING, PARTIAL_HANDOFF_WARNING, REFERENCES_OMITTED_WARNING, TeamDelivery, handoff_schema, omission_reason
@@ -27,7 +28,7 @@ from .team_context import history_window, json_bytes, model_context, model_json
 from .team_pending_display import display_pending, pending_counts
 from .delivery_followup_sources import delivery_followup_sources
 from .tool_protocol import contained_response_diagnostics, safe_tool_usage
-from .usage import valid_token_count
+from .usage import usage_conflict_diagnostics, valid_token_count
 from .team_response_correction import correctable, correction_context
 from .mcp import CALL as MCP_CALL, LIST as MCP_LIST, read_only_call
 from .project_history import ProjectHistory, TOOL as PROJECT_HISTORY
@@ -39,6 +40,7 @@ from .tool_loading import TOOL as LOAD_TOOLS, load_result, select_tools, with_lo
 
 HOST = Actor.system("team")
 MAX_ACTOR_TURNS = 32
+MAX_REVIEW_SUPERVISION_TURNS = 3
 MAX_ACTIVE_ROLES = 5
 LOCAL_EVENT_TOOLS = frozenset({"delegate", "send_message", "continue_work", "return_work", "set_objective", "request_questions",
                                "request_review", "record_review", "finish_work", "withdraw_work", "reply_to_customer", LOAD_TOOLS})
@@ -48,6 +50,9 @@ PAUSED_TOOLS = frozenset({"read_artifact", "read_receipts", "read_messages", "re
                           "read_delivery", "read_handoff_sources", "list_skills", "read_skill", "wait_for_reply", "reply_to_customer", PROJECT_HISTORY, LOAD_TOOLS})
 _MISSING_RETURN_FIELD = object()
 _DYNAMIC_RETURN_FIELD = object()
+_CUSTOMER_MESSAGE_GUIDANCE = ("customer_message需要message_seq和expected_hash：用read_messages的customer_index获取同一条目的seq和hash；"
+    "验收项还需acceptance_index，旧式命令原话用source_field=instruction。核对分页及参数是否适用；"
+    "工具完成回执请用read_receipts的receipt_seq读取。")
 
 
 def _model_return_field(value, name):
@@ -118,6 +123,54 @@ def _publication_rejected(code, message, **details):
             "message": message, **details}
 
 
+def _publication_direction(team, task_id, events, run):
+    """Compare the run's trusted historical direction with the live direction.
+
+    Legacy runs without the new fields can be reconstructed from the same
+    task history; incomplete or contradictory bindings are never guessed.
+    Caller owns the action's write transaction.
+    """
+    from .team_review_direction import direction_at
+
+    try:
+        original = direction_at(events, run.seq)
+        current = direction_at(events, events[-1].seq) if events else None
+        anchor = next((event for event in events if event.seq == original), None)
+        if (type(original) is not int or anchor is None or anchor.task_id != task_id
+                or type(anchor.hash) is not str or not anchor.hash
+                or type(current) is not int or team.rt.work.scope(task_id).get('direction_seq') != current):
+            return 'unverified'
+        payload = run.payload
+        if 'work_direction_seq' in payload or 'work_direction_hash' in payload:
+            if (type(payload.get('work_direction_seq')) is not int
+                    or payload['work_direction_seq'] != original
+                    or type(payload.get('work_direction_hash')) is not str
+                    or payload['work_direction_hash'] != anchor.hash):
+                return 'unverified'
+        return 'current' if original == current else 'changed'
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return 'unverified'
+
+
+def _tool_direction(team, task_id, events, run, role, tool_start):
+    """Bind the direction check to this persisted run and tool invocation."""
+    if (run not in events or tool_start not in events or run.task_id != task_id
+            or tool_start.task_id != task_id or run.actor != HOST or tool_start.actor != HOST
+            or run.type != 'team.run_started' or tool_start.type != 'team.tool_started'
+            or run.seq >= tool_start.seq or run.payload.get('role') != role.id
+            or type(run.payload.get('run_id')) is not str or not run.payload['run_id']
+            or type(run.payload.get('message_seq')) is not int
+            or any(run.payload.get(k) != tool_start.payload.get(k) for k in ('run_id', 'role', 'message_seq'))
+            or sum(e.actor == HOST and e.type == 'team.run_started'
+                   and all(e.payload.get(k) == run.payload.get(k) for k in ('run_id', 'role', 'message_seq'))
+                   for e in events) != 1
+            or any(e.actor == HOST and e.type == 'team.run_finished' and e.seq > run.seq
+                   and all(e.payload.get(k) == run.payload.get(k) for k in ('run_id', 'role', 'message_seq'))
+                   for e in events)):
+        return 'unverified'
+    return _publication_direction(team, task_id, events, run)
+
+
 def _contained_reason(name, failure):
     reason, stop = failure.get("response_reason"), failure.get("response_stop")
     issue = {"invalid_content": "返回内容的结构未通过校验",
@@ -182,6 +235,7 @@ def _reported_messages(messages):
 class TeamService:
     def __init__(self, runtime):
         self.rt = runtime
+        self._drain_owner = None
         self.recovery = TeamRecovery(self)
         self.delivery = TeamDelivery(self)
         self.browser = TeamBrowser(self)
@@ -243,50 +297,98 @@ class TeamService:
         events = events if events is not None else self.rt.log.read(task_id=task_id)
         by_seq = {e.seq: e for e in events}
         members = {r.id for r in [self.rt.organization.leader, *self.rt.roles]}
+        def recovery_visible(event):
+            if self.recovery.is_message(event, events, by_seq=by_seq):
+                return True
+            if event.payload.get('trigger') != 'review_return_candidate':
+                return False
+            return any(self.recovery.claimed_review_candidate(task_id, event, run, events=events)
+                       for run in events if run.actor == HOST and run.type == 'team.run_started'
+                       and run.payload.get('message_seq') == event.seq)
         return [e for e in events if e.type == "team.message_received"
-                and (self.recovery.is_message(e, events, by_seq=by_seq) if e.payload.get("kind") == "recovery"
+                and (recovery_visible(e) if e.payload.get("kind") == "recovery"
                      else e.actor == Actor.human() or e.actor.kind == "agent" and e.actor.id in members)]
 
     def _revision(self, task_id):
-        return max((e.seq for e in self.rt.log.iter_events(task_id=task_id,
-                    event_types=("team.objective_updated", "team.objective_completed")) if e.actor == HOST), default=0)
+        from .team_review_direction import effective_objectives, projection_events
+        log = self.rt.log
+        head = log.db.execute('SELECT seq, hash FROM events WHERE task_id=? ORDER BY seq DESC LIMIT 1', (task_id,)).fetchone()
+        key = (head['seq'], head['hash']) if head else None
+        cache = getattr(self, '_direction_revision_cache', None)
+        if not log.db.in_transaction and cache is not None and task_id in cache and cache[task_id][0] == key:
+            return cache[task_id][1]
+        objectives = list(log.iter_events(task_id=task_id,
+                          event_types=('team.objective_updated', 'team.objective_completed')))
+        if objectives:
+            events = projection_events(log, task_id, objectives=objectives)
+            revision = max(effective_objectives(events), default=0)
+        else:
+            revision = 0
+        if not log.db.in_transaction:
+            latest = log.db.execute('SELECT seq, hash FROM events WHERE task_id=? ORDER BY seq DESC LIMIT 1', (task_id,)).fetchone()
+            if ((latest['seq'], latest['hash']) if latest else None) != key:
+                raise WorkConflict('目标版本读取期间事件发生变化，请重新核对。')
+            if cache is None:
+                self._direction_revision_cache = cache = {}
+            cache[task_id] = (key, revision)
+        return revision
 
     def _inactive_messages(self, task_id, *, events=None, started=None):
         from .team_feedback import consumed_feedback
+        from .team_review_direction import direction_at
+        from .team_work_control import linked_inputs
 
         events = events if events is not None else self.rt.log.read(task_id=task_id)
+        direction = direction_at(events, events[-1].seq) if events else None
+        messages = [e for e in events if e.type == "team.message_received" and e.actor.kind == "agent"]
+        roots = {e.seq for e in messages if e.payload.get("kind") in {"assignment", "message"}
+                 and (direction is None or e.seq < direction)}
+        stale = linked_inputs(messages, roots)
+        stale.update(e.seq for e in messages if e.payload.get("kind") in {"assignment", "message", "continuation", "report", "progress"}
+                     and (direction is None or e.seq < direction))
         return (self.rt.team_reviews.superseded_assignments(task_id, events=events)
                 | self.work_control.inactive(task_id, events=events, started=started)
-                | consumed_feedback(events))
+                | consumed_feedback(events) | stale)
 
     def view(self, task_id):
+        from .team_review_direction import direction_at, objective_projection, effective_objectives
+
         events = self.rt.log.read(task_id=task_id)
         starts, finishes = {}, {}
-        objective = self.rt.task(task_id).goal
+        objective, _, _, effective_objective_seq = objective_projection(events, self.rt.task(task_id).goal)
+        effective = effective_objectives(events)
+        direction = direction_at(events, events[-1].seq) if events else None
         revision, status, checkpoint = 0, "running", "等待店长理解消息。"
         assignments = []
         sources = {e.seq: e for e in events if e.type == "team.message_received"}
+        superseded = self._inactive_messages(task_id, events=events)
         for e in events:
             if e.type == "team.message_received" and e.payload.get("kind") == "assignment":
                 assignments.append({"seq": e.seq, "sender": e.actor.id, **e.payload})
             if e.actor != HOST:
                 continue
-            if e.type == "team.objective_updated":
-                objective, revision, status = e.payload["goal"], e.seq, "running"
-                checkpoint = "当前目标：" + objective
-            elif e.type == "team.objective_completed":
-                status, checkpoint, revision = "done", e.payload["summary"], e.seq
+            if e.type == "team.objective_updated" and e.seq in effective:
+                revision = e.seq
+                if direction is not None and e.seq == effective_objective_seq:
+                    status = "running"
+                    checkpoint = "当前目标：" + objective
+            elif e.type == "team.objective_completed" and e.seq in effective:
+                revision = e.seq
+                if direction is not None and e.seq == effective_objective_seq:
+                    status, checkpoint = "done", e.payload["summary"]
             elif e.type == "team.run_started":
                 starts[e.payload["message_seq"]] = e
             elif e.type == "team.run_finished":
                 finishes[e.payload["message_seq"]] = e
                 source = sources.get(e.payload["message_seq"])
                 current_source = source is None or source.actor.kind != "agent" or source.payload.get("revision") == revision
-                if status != "done" and current_source and e.payload["status"] in {"failed", "interrupted"}:
+                started = starts.get(e.payload["message_seq"])
+                if (status != "done" and current_source and direction is not None and started is not None
+                        and started.seq >= direction and e.payload["message_seq"] not in superseded
+                        and e.payload["status"] in {"failed", "interrupted"}):
                     checkpoint = e.payload.get("reason", "本轮未完成，已有记录保留。")
         messages = self._messages(task_id)
         reported = _reported_messages(messages)
-        superseded = self._inactive_messages(task_id, events=events)
         unhandled = self.recovery.unhandled_inputs(task_id, events)
         finishes = {seq: finish for seq, finish in finishes.items() if seq in starts
                     and all(finish.payload.get(key) == starts[seq].payload.get(key) for key in ("run_id", "role"))}
@@ -303,12 +405,14 @@ class TeamService:
                         "withdrawal_reason": withdrawn[row["seq"]]["reason"]} if row["seq"] in withdrawn else {})}
                        for row in assignments]
         if status != "done":
-            active = [self._role(r["role"]).name for r in runs if r["status"] == "running"]
+            active = [self._role(r["role"]).name for r in runs if r["status"] == "running"
+                      and direction is not None and starts[r["message_seq"]].seq >= direction
+                      and r["message_seq"] not in superseded]
             if active:
                 checkpoint = "、".join(active) + "正在处理消息和工作。"
             elif pending:
                 checkpoint = f"已收到 {len(pending)} 条待处理消息。"
-            elif runs and runs[-1]["status"] not in {"failed", "interrupted"}:
+            elif runs and direction is not None and starts[runs[-1]["message_seq"]].seq >= direction and runs[-1]["status"] not in {"failed", "interrupted"}:
                 checkpoint = "本轮消息已处理；是否交付以店长的成果说明为准。"
         return {"enabled": self.enabled(task_id), "objective": objective, "revision": revision, "status": status,
                 "pending_count": len(pending), "runs": runs, "assignments": assignments, "checkpoint": checkpoint,
@@ -347,6 +451,8 @@ class TeamService:
             reported = _reported_messages(messages)
             superseded = self._inactive_messages(task_id, events=events)
             pending = [e for e in messages if e.payload.get("kind") != "notification"
+                       and not (e.payload.get("kind") == "recovery"
+                                and e.payload.get("trigger") == "review_return_candidate")
                        and (e.seq not in starts or e.seq in unhandled) and e.seq not in reported and e.seq not in superseded
                        and e.payload["recipient"] not in busy
                        and (not human_only or e.actor == Actor.human())
@@ -357,10 +463,18 @@ class TeamService:
             # A new customer message is read before the next delegated job.
             message = min(pending, key=lambda e: (0 if e.actor.kind == "human" else 1 if e.payload.get("kind") == "recovery" else 2, e.seq))
             role = self._role(message.payload["recipient"])
+            from .team_review_direction import direction_at
+
+            direction = direction_at(events, events[-1].seq) if events else None
+            anchor = next((event for event in events if event.seq == direction), None)
+            if (anchor is None or type(direction) is not int
+                    or self.rt.work.scope(task_id).get('direction_seq') != direction):
+                direction, anchor = None, None
             started = self.rt.log.emit(type="team.run_started", task_id=task_id, actor=HOST,
                 payload={"message_seq": message.seq, "role": role.id, "run_id": uuid.uuid4().hex,
                          "revision": self.view(task_id)["revision"],
                          "control_seq": self.rt.execution_control.view(task_id)["seq"],
+                         "work_direction_seq": direction, "work_direction_hash": anchor.hash if anchor else None,
                          **({"recovery_contract": dict(RECOVERY_CONTRACT), "recovery_scope": self.recovery.scope(task_id)} if durable else {})})
             return message, role, started
 
@@ -444,9 +558,14 @@ class TeamService:
                    "before_seq": {"type": "integer", "minimum": 1},
                    "include_pending": {"type": "boolean", "description": "分页时同时读取未结算操作详情；不与receipt_seq或section=file_reads合用。上下文pending_operations提供索引，旧项用pending_next_before_seq填before_seq。不授权重放。"},
                    "limit": {"type": "integer", "minimum": 1, "maximum": 50}}, []),
-            _tool("read_messages", "按序号分页补读消息原文，不重新执行。默认inbox读取发给你的历史消息/知会；scope=conversation读取模型共享聊天窗口对应的本群对话，用于核对节选外的上下文。",
+            _tool("read_messages", "按需补读本群消息，不重新执行。默认inbox按序读取发给你的消息；conversation按序读取团队共享对话。customer_index列创建目标、逐条验收项、旧式人类命令的目标、逐条验收项及直接命令原话和顾客消息；按next_before_seq与next_before_part倒序分页，as_of_seq和as_of_hash固定版本。customer_message凭seq/hash读取原文，验收项另带零起点acceptance_index，旧式原话用source_field=instruction；offset/length按字符分页。预览可能完整也可能为节选，看preview_truncated；旧式原话不自动预览。仅用于发现和按需核对，不能直接推为当前要求。",
                   {"after_seq": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-                   "scope": {"type": "string", "enum": ["inbox", "conversation"]},
+                   "scope": {"type": "string", "enum": ["inbox", "conversation", "customer_index", "customer_message"]},
+                   "before_seq": {"type": "integer", "minimum": 1}, "before_part": {"type": "integer", "minimum": 0}, "as_of_seq": {"type": "integer", "minimum": 1}, "as_of_hash": {"type": "string"},
+                   "message_seq": {"type": "integer", "minimum": 1, "description": "customer_message必填：取customer_index的entries[].seq；工具完成回执用read_receipts的receipt_seq。"}, "expected_hash": {"type": "string", "description": "customer_message必填：取同一customer_index条目的entries[].hash，必须与message_seq匹配。"},
+                   "acceptance_index": {"type": "integer", "minimum": 0, "description": "customer_message读取验收项时必填：取索引条目的零起点acceptance_index。"},
+                   "source_field": {"type": "string", "enum": ["instruction"], "description": "customer_message读取旧式直接命令原话时填instruction；不可与acceptance_index合用。"},
+                   "offset": {"type": "integer", "minimum": 0}, "length": {"type": "integer", "minimum": 1, "maximum": 4000},
                    "kind": {"type": "string", "enum": ["all", "notification"]}}, []),
             _tool("publish_artifact", "保存完整文本成果的确切版本并返回artifact_seq，不代表验收或最终交付。需要独立复核时，可自行request_review或将版本交给送审负责人，不为送审重复发布；最终由店长finish_work选择版本。已在工作目录写好文件时可用publish_workspace_file直接保存真实文件，避免转写。",
                   {"filename": string, "content": string, "summary": string,
@@ -528,11 +647,11 @@ class TeamService:
         return tools
 
     def _waiting_assignment(self, task_id, message, role, *, events=None):
+        from .team_review_direction import effective_objectives
         events = self.rt.log.read(task_id=task_id) if events is None else events
         messages = self._messages(task_id, events=events)
         inactive = self._inactive_messages(task_id, events=events)
-        revision = max((e.seq for e in events if e.actor == HOST
-                        and e.type in {"team.objective_updated", "team.objective_completed"}), default=0)
+        revision = max(effective_objectives(events), default=0)
         if message.seq in inactive:
             return None
         if message.payload.get("kind") == "continuation":
@@ -776,10 +895,24 @@ class TeamService:
 
             if customer_source(self, task_id, message, role) is None or self._waiting_assignment(task_id, message, role) is not None:
                 tools = [tool for tool in tools if tool["name"] != "reply_to_customer"]
+            if message.payload.get('trigger') == 'review_return_candidate':
+                # Only event-atomic actions and read-only inspection are offered.
+                # Review workspace snapshots and all direct external effects stay closed.
+                allowed = {'finish_work', 'delegate', 'send_message', 'continue_work', 'wait_for_reply',
+                           'request_questions', 'withdraw_work', 'read_artifact', 'read_messages',
+                           'read_receipts', 'read_checkpoint', 'read_delivery', 'read_handoff_sources',
+                           'list_skills', 'read_skill'}
+                from copy import deepcopy
+
+                tools = deepcopy([tool for tool in tools if tool['name'] in allowed])
+                for tool in tools:
+                    if tool['name'] == 'delegate':
+                        tool['input_schema']['properties'].pop('review', None)
             if self.rt.execution_control.view(task_id)["state"] != "running":
                 tools = [tool for tool in tools if tool["name"] in PAUSED_TOOLS]
             driver = self.rt.drivers.get(role.driver)
-            if (getattr(driver, "tool_loading", "all") == "on_demand"
+            if (message.payload.get('trigger') != 'review_return_candidate'
+                    and getattr(driver, "tool_loading", "all") == "on_demand"
                     and not callable(getattr(driver, "agent_run", None))):
                 tools = with_loader(tools)
             context, rules = self._context_snapshot(task_id, message, role, run_id=run_id,
@@ -794,6 +927,8 @@ class TeamService:
 
         events = self.rt.log.read(task_id=task_id)
         history = self._conversation(events, role, run_id=run_id)
+        from .team_customer_sources import CustomerSourceIndexError, index as customer_sources_index
+
         members = {r.id: r for r in [self.rt.organization.leader, *self.rt.roles]}
         def name(actor_id):
             return "顾客" if actor_id == "human" else members[actor_id].name if actor_id in members else actor_id
@@ -802,6 +937,40 @@ class TeamService:
         messages = self._messages(task_id)
         reported = _reported_messages(messages)
         current_work = self.view(task_id)
+        review_inputs = None
+        if message.payload.get('trigger') == 'review_return_candidate':
+            review_inputs = message.payload.get('customer_inputs', [])
+        elif message.actor.kind == 'agent' and message.payload.get('kind') == 'report' and type(message.payload.get('review_seq')) is int:
+            from .team_review_direction import report_customer_sources
+            start = next((e for e in events if e.type == 'team.run_started' and e.actor == HOST
+                          and e.payload.get('run_id') == run_id and e.payload.get('message_seq') == message.seq), None)
+            if start is not None:
+                review_inputs = report_customer_sources(self, task_id, message, before_seq=start.seq, events=events)
+        review_sources = None
+        if review_inputs is not None:
+            by_seq = {e.seq: e for e in events}
+            rows = []
+            for ref in review_inputs:
+                source = by_seq.get(ref['seq'])
+                if source is None or source.hash != ref['hash'] or source.actor != Actor.human():
+                    raise WorkConflict('复核后顾客来源未通过核对，未继续旧报告。')
+                rows.append({**ref, 'text': source.payload['text']})
+            review_sources = {'complete': True, 'entries': rows,
+                'note': '这些是复核报告之后、原报告处理运行开始之前的全部顾客消息原文；已回复只证明处理回执，不证明没有新要求。请结合原文判断是否改变交付。'}
+        latest_customer = next((row for row in reversed(history) if row.get("sender_kind") == "human"), None)
+        preview_refs = {(message.seq, 0): "message.text"}
+        if latest_customer and (latest_customer.get("seq"), 0) not in preview_refs:
+            preview_refs[(latest_customer["seq"], 0)] = "latest_customer_message.text"
+        for event in events:
+            if (event.type in {"task.created", "human.commanded"} and event.actor == Actor.human()
+                    and event.payload.get("goal") == current_work["objective"]):
+                preview_refs[(event.seq, 0)] = "current_work.objective"
+        try:
+            customer_sources = customer_sources_index(events, preview_refs=preview_refs, member_ids=set(members), task_id=task_id)
+        except CustomerSourceIndexError:
+            customer_sources = {"status": "unavailable", "complete": False,
+                "note": "顾客输入来源索引暂不可用，完整性未知，不代表没有其他来源。"
+                        "共享对话仍可用read_messages的conversation分页读取，但不保证覆盖其他来源。"}
         superseded = self._inactive_messages(task_id, events=events)
         pending = display_pending(self, task_id)
         checkpoint, work_states = self.recovery._capture(task_id, pending_view=pending)
@@ -858,7 +1027,7 @@ class TeamService:
         workspace_state = self.rt.workspaces.view(task_id)
         file_sources = self.read_sources.index(task_id, workspace=workspace_state, events=events)
         project_history = self.project_history.index(task_id)
-        rules = self.rt.rulebook.current_snapshot(task_id)
+        rules = self.rt.rulebook.current_snapshot(task_id, privacy_safe=True)
         followup_sources = None
         if (role.id == self.rt.organization.leader.id and message.actor == Actor.human()
                 and message.payload.get("kind") == "message" and assignment is None
@@ -869,8 +1038,8 @@ class TeamService:
                 and event.type == "team.objective_completed" and event.actor == HOST), None)
             if delivery is not None:
                 # Initial work has revision 0, while objective_seq points to team.started.
-                objective_revision = max((event.seq for event in events if event.seq < delivery.seq
-                    and event.actor == HOST and event.type in {"team.objective_updated", "team.objective_completed"}), default=0)
+                from .team_review_direction import effective_objectives
+                objective_revision = max((seq for seq in effective_objectives(events) if seq < delivery.seq), default=0)
                 followup_sources = delivery_followup_sources(delivery, bound_receipts(self, task_id, events),
                     objective_revision=objective_revision)
         return {"you": asdict(role), "members": [asdict(r) for r in [self.rt.organization.leader, *self.rt.roles]],
@@ -887,23 +1056,55 @@ class TeamService:
                               for e in notifications[-20:]], "notifications_truncated": len(notifications) > 20,
             "current_work": current_work, "message": {"seq": message.seq, "sender": message.actor.id,
                 "sender_name": name(message.actor.id), "sender_kind": message.actor.kind, **message.payload},
-            "latest_customer_message": next((row for row in reversed(history) if row.get("sender_kind") == "human"), None),
+            "latest_customer_message": latest_customer,
+            **({'review_customer_inputs': review_sources} if review_sources and review_sources['entries'] else {}),
+            **({"customer_input_sources": customer_sources} if customer_sources
+               and (customer_sources.get("status") == "unavailable" or customer_sources.get("entries")) else {}),
+            **({"objective_source_note": "current_work.objective是工作视图投影，顾客来源未验证；"
+                  "不能仅凭该投影认定顾客原话或全部有效要求，需按可用来源核对。"}
+               if customer_sources and (customer_sources.get("status") == "unavailable"
+                    or customer_sources.get("objective_source", {}).get("status") == "unknown") else {}),
             "receipt_index": receipt_index, "receipts_truncated": len(receipts) > 20,
             **({"command_record_note": "command_record是配对原回执的历史请求、原环境argv与目录，不是当前文件验收、覆盖证明或顾客终端的复现命令；状态仍看原回执，stdin仅保留指纹。按自身seq作为receipt_seq用read_receipts读原完成结果；要核对原检查脚本，用section=request及request_part=stdin按需分页读取，不能从argv或输出倒推原请求。"}
                if any("command_record" in row for row in receipt_index) else {}),
             **({"file_read_sources": file_sources} if file_sources is not None else {}),
             "pending_operations": [{k: row[k] for k in row if k != "arguments"} for row in pending[-20:]],
             "pending_operations_truncated": len(pending) > 20,
-            "conversation": history[-60:], "artifacts": [{k: a.get(k) for k in
+            "conversation": history[-60:],
+            **({"conversation_earlier_omitted": len(history) - 60,
+                "conversation_earlier_customer_omitted": sum(row.get("sender_kind") == "human" for row in history[:-60])}
+               if len(history) > 60 else {}),
+            "artifacts": [{k: a.get(k) for k in
                 ("seq", "filename", "actor", "source", "summary", "content_bytes", "content_sha256", "local_path", "format")} for a in task.deliverables],
             "questionnaires": self.rt.questionnaires.view(task_id)[-5:],
             "workspace": workspace_state, "rules": rules["rules"],
+            **({"rules_metadata": {"complete": False, "enforcement": "guidance_only",
+                 "note": "店规元数据不完整，部分继承要求可能未列出；不能声称已看到全部适用要求，请向顾客核对。店规仅为上下文指导。"}}
+               if rules.get("metadata_incomplete") else {}),
             "background": dialogue_background(background, reader="read_background") if background is not None else None}, rules
 
     def _current(self, task_id, started, role, revision, *, settled_review_seq=None):
         if self.rt.conversation_list.is_removed(task_id):
             raise WorkConflict("对话已从列表删除；已有成果与在途回执保留，未启动后续操作。")
         events = self.rt.log.read(task_id=task_id)
+        from .supervision_barrier import check as check_supervision_barrier
+
+        check_supervision_barrier(task_id, started, role, events)
+        claimed_source = next((e for e in events if e.seq == started.payload.get('message_seq')
+                               and e.type == 'team.message_received'
+                               and e.payload.get('trigger') == 'review_return_candidate'), None)
+        if claimed_source is not None:
+            from .team_review_direction import current_matches
+            if not current_matches(self, task_id, events, claimed_source.payload.get('evidence')):
+                raise WorkConflict('正式复核对应的工作方向已变化，未继续旧监督或提交旧结论。')
+            if not self.recovery.owns_review_candidate(task_id, started):
+                raise WorkConflict('必须从持有团队执行锁的监督领取中运行。')
+            if (not self.recovery.claimed_review_candidate(task_id, claimed_source, started, events=events)
+                    or self.recovery.run_scope(task_id, started, events=events) is None
+                    or any(e.actor == HOST and e.type == 'team.run_finished'
+                           and all(e.payload.get(k) == started.payload.get(k) for k in ('run_id', 'role', 'message_seq'))
+                           for e in events)):
+                raise WorkConflict('监督领取记录或工作范围已变化，未继续旧请求。')
         if settled_review_seq is not None:
             # Settlement only: a successful resubmission retires the feedback
             # this run was consuming. Remove just that proven cause from the
@@ -948,10 +1149,25 @@ class TeamService:
         control = self.rt.execution_control.view(task_id)
         if control["seq"] != started.payload["control_seq"]:
             raise WorkConflict("执行已暂停或控制发生变化；已有成果与回执保留。")
-        if any(e.actor == Actor.human() and e.seq > started.payload["message_seq"]
-               and e.payload["recipient"] == role.id for e in self._messages(task_id)):
-            raise WorkConflict("收到顾客的新消息，先理解新的上下文；已有操作未重放。")
         source = next((e for e in self._messages(task_id) if e.seq == started.payload["message_seq"]), None)
+        from .team_review_direction import answered_observation
+        formal_report = (source is not None and source.actor.kind == 'agent'
+                         and source.payload.get('kind') == 'report' and type(source.payload.get('review_seq')) is int)
+        if formal_report:
+            from .team_review_direction import direction_at, report_customer_sources
+            request = next((e for e in events if e.seq == source.payload['review_seq']
+                            and e.actor == HOST and e.type == 'team.review_requested'), None)
+            direction = direction_at(events, events[-1].seq) if events else None
+            if (request is None or direction is None or direction_at(events, request.seq) != direction
+                    or self.rt.work.scope(task_id).get('direction_seq') != direction):
+                raise WorkConflict('正式复核对应的工作方向已变化，未继续旧报告或提交旧动作。')
+            if report_customer_sources(self, task_id, source, before_seq=started.seq, events=events) is None:
+                raise WorkConflict('复核报告后的顾客输入尚未完整核对，未继续旧报告。')
+        if any(e.actor == Actor.human() and e.seq > started.payload["message_seq"]
+               and e.payload["recipient"] == role.id
+               and not (formal_report and answered_observation(self, task_id, e, before_seq=started.seq, events=events))
+               for e in self._messages(task_id)):
+            raise WorkConflict("收到顾客的新消息，先理解新的上下文；已有操作未重放。")
         if source is not None and source.payload.get("kind") == "recovery":
             if self.recovery.superseded(task_id, source):
                 raise WorkConflict("顾客已补充新的输入，本轮分段监督让位；已有成果与原委托保留。")
@@ -1160,8 +1376,27 @@ class TeamService:
                     "work_status": "running" if changed else current_work["status"], "scope_changed": changed,
                     **({"continuation_note": OBJECTIVE_CHANGED} if changed else {})}
         if name == "read_messages":
-            after, limit, kind = arguments.get("after_seq", 0), arguments.get("limit", 20), arguments.get("kind", "all")
             scope = arguments.get("scope", "inbox")
+            if scope in {"customer_index", "customer_message"}:
+                from .team_customer_sources import index as customer_sources_index, read as read_customer_source
+
+                events = self.rt.log.read(task_id=task_id)
+                if scope == "customer_index":
+                    if set(arguments) - {"scope", "as_of_seq", "as_of_hash", "before_seq", "before_part", "limit"}:
+                        raise ValueError("顾客输入索引不能混用其他读取参数。")
+                    member_ids = {r.id for r in [self.rt.organization.leader, *self.rt.roles]}
+                    page = customer_sources_index(events, member_ids=member_ids, task_id=task_id,
+                                                  **{k: v for k, v in arguments.items() if k != "scope"})
+                    return {"status": "ok", **page} if page else {"status": "ok", "entries": [], "has_more": False}
+                if not {"message_seq", "expected_hash"} <= set(arguments):
+                    raise ValueError("customer_message必填message_seq和expected_hash：先用read_messages的customer_index获取同一条目的seq和hash；验收项还需acceptance_index，旧式命令原话用source_field=instruction。若要读取工具完成回执，请用read_receipts的receipt_seq。")
+                if (set(arguments) - {"scope", "message_seq", "expected_hash", "acceptance_index", "source_field", "offset", "length"}
+                        or "acceptance_index" in arguments and (type(arguments["acceptance_index"]) is not int or arguments["acceptance_index"] < 0)):
+                    raise ValueError("顾客输入正文需要来源序号和指纹，不能混用索引参数。")
+                return read_customer_source(events, **{k: v for k, v in arguments.items() if k != "scope"})
+            after, limit, kind = arguments.get("after_seq", 0), arguments.get("limit", 20), arguments.get("kind", "all")
+            if set(arguments) - {"scope", "after_seq", "limit", "kind"}:
+                raise ValueError("消息读取不能混用顾客来源参数。")
             if (type(after) is not int or after < 0 or type(limit) is not int or not 1 <= limit <= 50
                     or kind not in {"all", "notification"} or scope not in {"inbox", "conversation"}):
                 raise ValueError("消息读取需要有效的序号、分页大小和类型。")
@@ -1359,9 +1594,57 @@ class TeamService:
                 _name(payload["filename"])
             except ArtifactStoreError:
                 return _publication_rejected("invalid_artifact_filename", "文件名不符合可落盘的便携命名要求，未开始发布。请使用普通文件名，避免保留设备名、控制字符或特殊路径。")
-            self._publication_guard(task_id, payload["filename"], tool_start)
-            e = self.rt.log.emit(type="deliverable.published", actor=Actor.agent(role.id, role.role), task_id=task_id,
-                                 payload={**payload, "source": "team", "phase": "team"})
+            # The publication event is the admission point. Serialize the
+            # final scope check with that event; the later filesystem copy is
+            # a separate effect and must retain its actual receipt.
+            with self.rt.log.atomic():
+                self._publication_guard(task_id, payload["filename"], tool_start)
+                events = self.rt.log.read(task_id=task_id)
+                matches = [event for event in events
+                    if event.type == "team.run_started" and event.actor == HOST
+                    and all(event.payload.get(k) == tool_start.payload.get(k)
+                            for k in ("run_id", "role", "message_seq"))]
+                revision = tool_start.payload.get("revision")
+                from .team_review_direction import effective_objectives
+                effective = effective_objectives(events)
+                revision_at_start = max((seq for seq in effective if seq < tool_start.seq), default=0)
+                own_revision = (len(matches) == 1 and any(
+                    event.seq in effective
+                    and event.seq == revision and matches[0].seq < event.seq < tool_start.seq
+                    and event.payload.get("run_id") == matches[0].payload.get("run_id")
+                    for event in events))
+                if (type(tool_start.payload.get("revision")) is not int
+                        or tool_start.actor != HOST or tool_start.type != "team.tool_started"
+                        or tool_start.task_id != task_id or tool_start not in events
+                        or tool_start.payload.get("name") not in {"publish_artifact", "publish_workspace_file"}
+                        or tool_start.payload.get("role") != role.id or len(matches) != 1
+                        or type(matches[0].payload.get("revision")) is not int
+                        or (matches[0].payload["revision"] != revision and not own_revision)
+                        or revision != revision_at_start
+                        or matches[0].seq >= tool_start.seq
+                        or any(event.actor == HOST and event.type == "team.run_finished"
+                               and event.seq > matches[0].seq
+                               and all(event.payload.get(k) == matches[0].payload.get(k)
+                                       for k in ("run_id", "role", "message_seq")) for event in events)):
+                    # A legacy or incomplete tool-start record cannot establish
+                    # the invocation's publication scope. It may describe an
+                    # earlier effect, so do not claim that effect never began.
+                    return {"status": "error", "code": "publication_binding_unverified",
+                            "outcome": "unknown", "complete": False,
+                            "message": "发布记录或范围版本无法核对，未再次发布；原操作影响可能未知，请先核对已有成果及回执。"}
+                direction = _publication_direction(self, task_id, events, matches[0])
+                if direction == 'unverified':
+                    return {"status": "error", "code": "publication_binding_unverified",
+                            "outcome": "unknown", "complete": False,
+                            "message": "发布记录或工作方向无法核对，未再次发布；原操作影响可能未知，请先核对已有成果及回执。"}
+                if direction == 'changed':
+                    return _publication_rejected("publication_scope_changed", "任务方向已变化；未提交这次成果发布。")
+                try:
+                    self._current(task_id, matches[0], role, tool_start.payload["revision"])
+                except WorkConflict:
+                    return _publication_rejected("publication_scope_changed", "任务方向或发布条件已变化；未提交这次成果发布。")
+                e = self.rt.log.emit(type="deliverable.published", actor=Actor.agent(role.id, role.role), task_id=task_id,
+                                     payload={**payload, "source": "team", "phase": "team"})
             result = {"status": "ok", "artifact_seq": e.seq, "filename": payload["filename"]}
             if self.rt._artifact_root is not None:
                 from .artifact_store import materialize_team_artifact
@@ -1427,10 +1710,28 @@ class TeamService:
             with (nullcontext(None) if invalid else prepare(self, task_id, role, call, workspace, binding, tool_start)) as review_input:
                 with self.rt.log.atomic() if call.name in LOCAL_EVENT_TOOLS else nullcontext():
                     self._current(task_id, started, role, revision)
+                    if call.name in LOCAL_EVENT_TOOLS and call.name != LOAD_TOOLS:
+                        direction = _tool_direction(self, task_id, self.rt.log.read(task_id=task_id),
+                                                    started, role, tool_start)
+                        if direction == 'changed':
+                            raise _RejectedLocalTool(_publication_rejected(
+                                'action_scope_changed', '任务方向已变化；未提交本次旧动作。'))
+                        if direction != 'current':
+                            raise _RejectedLocalTool({'status': 'error', 'code': 'action_binding_unverified',
+                                'complete': False, 'outcome': 'unknown',
+                                'message': '运行记录或工作方向无法核对；未提交本次动作，请先核对已有回执。'})
+                    if 'customer_input_barrier' in started.payload and call.name in LOCAL_EVENT_TOOLS:
+                        pending = [row for row in self._pending_operations(task_id)
+                                   if row.get('started_seq') not in {tool_start.seq, tool_start.payload.get('external_started_seq')}
+                                   and not self.external._owns_current_scope(task_id, row)]
+                        live_binding = self.rt.workspaces.view(task_id)
+                        if (pending or live_binding.get('available') and live_binding.get('root')
+                                and self.rt.workspaces.pending(root=live_binding['root'], effects_only=True)):
+                            raise WorkConflict('出现尚未核对的操作，未提交本次监督动作。')
                     if invalid:
                         # No executor has run: this is a correctable input error, not an unknown effect.
                         return settle({"status": "error", "code": "invalid_arguments", "complete": True,
-                            "outcome": "not_started", "message": "工具参数不符合字段要求，未执行工具动作。请按字段说明修正后重试。",
+                            "outcome": "not_started", "message": (_CUSTOMER_MESSAGE_GUIDANCE if call.name == "read_messages" and call.arguments.get("scope") == "customer_message" else "工具参数不符合字段要求，未执行工具动作。请按字段说明修正后重试。"),
                             "allowed_fields": sorted(schema["properties"]), "required_fields": sorted(schema["required"])})
                     result = (load_result(call.arguments, schema) if call.name == LOAD_TOOLS else
                         self._execute(task_id, role, call.name, call.arguments, workspace, binding, tool_start, assignment,
@@ -1449,7 +1750,7 @@ class TeamService:
         except WorkConflict as exc:
             result = {"status": "error", "message": str(exc)}
         except (ValueError, KeyError, TypeError, OSError):
-            result = {"status": "error", "message": "操作未完成，请核对工具参数、权限与已有记录后修正。"}
+            result = {"status": "error", "message": (_CUSTOMER_MESSAGE_GUIDANCE if call.name == "read_messages" and call.arguments.get("scope") == "customer_message" else "操作未完成，请核对工具参数、权限与已有记录后修正。")}
             if call.name in EXTERNAL_EFFECT_TOOLS:
                 result.update(complete=False, outcome="effects_unknown")
         return settle(result)
@@ -1503,6 +1804,18 @@ class TeamService:
             if unknown_seqs:
                 return {"status": "error", "code": "operation_pending", "started_seqs": sorted(unknown_seqs),
                         "message": "工作目录仍有未结算或影响待核对的操作，不能将未知结果作为最终交付。请先核对实际文件、进程和工具回执。"}
+            reviews = self.rt.team_reviews.blockers(task_id)
+            if reviews:
+                return {"status": "error", "code": "review_pending", "reviews": reviews,
+                        "message": "修复与复核尚未闭环，未结束工作。请让作者修正并发布新版，交回原复核者；通过后再交付。"}
+            from .team_review_direction import direction_at
+            direction_events = self.rt.log.read(task_id=task_id)
+            direction = direction_at(direction_events, direction_events[-1].seq) if direction_events else None
+            approved_reviews = [r for r in current_work['reviews'] if r.get('status') == 'approved'
+                                or r.get('status') == 'stale' and r.get('historical_status') == 'approved']
+            if approved_reviews and (direction is None or direction != self.rt.work.scope(task_id).get('direction_seq')):
+                return {"status": "error", "code": "review_direction_changed",
+                        "message": "工作方向已变化，旧方向的复核不能作为当前交付依据；请核对新要求并重新复核。"}
             open_work = self.recovery.assignments(task_id)
             def current_input(row):
                 # Finishing answers this exact incoming request, not other queued work.
@@ -1510,14 +1823,6 @@ class TeamService:
                         and row["latest_message_seq"] == tool_start.payload["message_seq"]
                         and row["run_id"] == tool_start.payload["run_id"])
 
-            unfinished = [r for r in open_work if r["requires_return"] and not current_input(r)]
-            if unfinished:
-                return {"status": "error", "code": "work_pending", "assignments": unfinished,
-                        "message": "仍有中断或失败后未正式交回的工作。请核对现状并接续原委托，收回结果后再交付。"}
-            reviews = self.rt.team_reviews.blockers(task_id)
-            if reviews:
-                return {"status": "error", "code": "review_pending", "reviews": reviews,
-                        "message": "修复与复核尚未闭环，未结束工作。请让作者修正并发布新版，交回原复核者；通过后再交付。"}
             superseded = self._inactive_messages(task_id)
             messages = self._messages(task_id)
             # An acknowledged input still proves that its child work returned.
@@ -1551,33 +1856,34 @@ class TeamService:
             if open_authors:
                 return {"status": "error", "code": "author_pending", "assignments": open_authors,
                         "message": "成果作者的委托尚未正式交回，可能仍在处理复核意见。请收回最终成果与复核结论；不要在作者收尾时结束目标。"}
-            incoming = next((e for e in current_messages if e.seq == tool_start.payload["message_seq"]
-                             and e.payload.get("kind") == "message"), None)
-            receiving = next((row for row in open_work if current_input(row)), None)
-            by_seq = {e.seq: e for e in current_messages}
-
-            def receiving_result(row):
-                # A plain upstream answer being consumed is not a new dependency.
-                return (incoming is not None and receiving is not None and row["status"] == "waiting"
-                        and row["sender"] == role.id and row["recipient"] == incoming.actor.id
-                        and row["seq"] < incoming.seq
-                        and incoming.payload.get("parent_assignment_seq") == row["seq"]
-                        and not any(child["seq"] != incoming.seq and child["seq"] in by_seq
-                            and child["sender"] == row["recipient"] and row["seq"] < child["seq"]
-                            and by_seq[child["seq"]].payload.get("parent_assignment_seq") == row["seq"]
-                            for child in open_work))
-
-            active_work = [row for row in open_work if (row["status"] in {"queued", "running"}
-                           or row["status"] == "waiting" and row.get("has_delegated_work"))
-                           and not current_input(row) and not receiving_result(row)]
-            if active_work:
-                return {"status": "error", "code": "work_pending", "assignments": active_work,
-                        "message": "本轮已派出的工作仍在排队或执行，包括尚无文件的分析委托。请等待已有回报，不要重复派活或在接收者首次产出前结束目标；阶段进展可以直接回复顾客。"}
-            boundary = max((e.seq for e in self.rt.log.read(task_id=task_id) if e.actor == HOST
-                            and e.type in {"team.started", "team.objective_updated"}), default=0)
+            # A report has already closed its original assignment. A plain
+            # related message may instead be a question or progress, so it
+            # cannot excuse any other unreturned assignment.
+            unfinished = [r for r in open_work if not current_input(r)]
+            if unfinished:
+                return {"status": "error", "code": "work_pending", "assignments": unfinished,
+                        "message": "仍有未正式交回的工作。请核对现状并接续或撤回原委托，收回结果后再交付。"}
+            from .team_review_direction import _recorded_agent_source
+            events = self.rt.log.read(task_id=task_id)
+            source = next((e for e in events if e.seq == tool_start.payload.get('message_seq')), None)
+            if source is not None and source.actor.kind == 'agent':
+                run = next((e for e in events if e.actor == HOST and e.type == 'team.run_started'
+                            and e.payload.get('run_id') == tool_start.payload.get('run_id')
+                            and e.payload.get('message_seq') == source.seq), None)
+                if run is None or not _recorded_agent_source(source, [e for e in events if e.seq < run.seq]):
+                    return {"status": "error", "code": "delivery_source_unverified", "complete": True,
+                            "outcome": "not_started", "message": "当前同事消息来源无法核对，未交付；请核对原委托及回执。"}
+            from .team_review_direction import effective_objectives
+            boundary_events = self.rt.log.read(task_id=task_id)
+            effective = effective_objectives(boundary_events)
+            boundary = max((e.seq for e in boundary_events if e.actor == HOST
+                            and (e.type == "team.started" or e.type == "team.objective_updated" and e.seq in effective)), default=0)
             artifacts = self.rt.task(task_id).deliverables
             retired = self.rt.team_reviews.superseded_artifacts(task_id, reviews=current_work["reviews"])
-            selected = [a for a in artifacts if a["seq"] > boundary
+            # A later customer direction does not rewrite history, but old
+            # publications are not implicitly part of the new delivery.
+            selection_boundary = max(boundary, direction if type(direction) is int else 0)
+            selected = [a for a in artifacts if a["seq"] > selection_boundary
                         and a.get("filename") and a.get("content_sha256")]
             if "artifact_seqs" in arguments:
                 seqs = arguments["artifact_seqs"]
@@ -1597,9 +1903,20 @@ class TeamService:
                 # Retiring the latest filename must not resurrect an older publication.
                 selected = [a for a in selected if a["seq"] not in retired]
             chosen = {a["filename"]: a for a in selected}
+            current_approved = [r for r in approved_reviews if r.get('status') == 'approved'
+                                and type(r.get('request_seq')) is int
+                                and direction_at(direction_events, r['request_seq']) == direction]
+            old_refs = [ref for r in approved_reviews if r not in current_approved for ref in r.get('artifacts', [])]
+            current_refs = [ref for r in current_approved for ref in r.get('artifacts', [])]
+            if any(all(artifact.get(k) == ref.get(k) for k in ('seq', 'filename', 'content_sha256'))
+                   and not any(all(artifact.get(k) == fresh.get(k) for k in ('seq', 'filename', 'content_sha256'))
+                               for fresh in current_refs)
+                   for artifact in selected for ref in old_refs):
+                return {"status": "error", "code": "review_direction_changed",
+                        "message": "所选成果只有旧方向的复核，不能作为当前交付依据；请核对新要求并重新复核。"}
             approved = {ref["filename"]: ref
-                for review in sorted(current_work["reviews"], key=lambda row: row.get("decision_seq", 0))
-                if review["status"] == "approved" for ref in review["artifacts"]}
+                for review in sorted(current_approved, key=lambda row: row.get("decision_seq", 0))
+                for ref in review["artifacts"]}
             mismatches = [ref for filename, ref in approved.items() if filename in chosen
                 and any(chosen[ref["filename"]].get(key) != ref.get(key)
                         for key in ("seq", "filename", "content_sha256"))]
@@ -1650,6 +1967,21 @@ class TeamService:
             return result
 
     def _run_message(self, task_id, message, role, started):
+        if (message.payload.get('trigger') == 'review_return_candidate'
+                and not self.recovery.owns_review_candidate(task_id, started)):
+            raise WorkConflict('必须从持有团队执行锁的监督领取中运行。')
+        return (yield from self._run_message_owned(task_id, message, role, started))
+
+    def _run_message_owned(self, task_id, message, role, started):
+        if (message.payload.get('trigger') == 'review_return_candidate'
+                and not self.recovery.owns_review_candidate(task_id, started)):
+            raise WorkConflict('必须从持有团队执行锁的监督领取中运行。')
+        if (message.payload.get('trigger') == 'review_return_candidate'
+                and any(e.type == 'team.run_finished' and e.actor == HOST
+                        and e.payload.get('run_id') == started.payload.get('run_id')
+                        and e.payload.get('message_seq') == message.seq and e.payload.get('role') == role.id
+                        for e in self.rt.log.read(task_id=task_id))):
+            return
         status, reason, final = "completed", "", ""
         failure = {}
         failure_stage = "setup"
@@ -1664,10 +1996,18 @@ class TeamService:
             if (message.actor == Actor.human() and isinstance(message.payload.get("questionnaire"), dict)
                     and message.payload.get("revision") != revision):
                 raise WorkConflict("这份补充对应的目标已变化，旧回答不会启动旧方案操作。")
-            if message.payload.get("kind") == "recovery" and not self.recovery.current(task_id, message):
+            claimed_review = (message.payload.get('trigger') == 'review_return_candidate'
+                              and self.recovery.claimed_review_candidate(task_id, message, started))
+            if message.payload.get("kind") == "recovery" and not (claimed_review or self.recovery.current(task_id, message)):
                 if budget_supervision and self._pending_operations(task_id):
                     failure["admission_not_started"] = True
                 raise WorkConflict("恢复通知对应的目标、控制或工作目录已变化，不再启动旧工作。")
+            if claimed_review:
+                if self.recovery.run_scope(task_id, started) is None:
+                    raise WorkConflict('监督领取后的目标或范围已变化，未启动旧工作。')
+                self._current(task_id, started, role, revision)
+                if self._pending_operations(task_id):
+                    raise WorkConflict('存在尚未核对的操作，未启动监督。')
             if message.actor.kind == "agent" and message.payload.get("revision") != revision:
                 raise WorkConflict("这份委托已被新的目标替代，不再执行旧方案。")
             if message.payload.get("kind") == "report" and "review_seq" in message.payload and not any(
@@ -1676,6 +2016,18 @@ class TeamService:
                 assignment = None
                 raise WorkConflict("这份复核反馈对应的提交已被新版替代，保留记录，不重新执行旧修复。")
             driver = self.rt.drivers[role.driver]
+            if claimed_review:
+                from .external_agent import QoderAcpDriver
+                from .native_response_evidence import trusted_protocol
+
+                if not isinstance(driver, QoderAcpDriver):
+                    protocol = trusted_protocol(driver)
+                    source_ref = message.payload.get('evidence', {}).get('native_response', {})
+                    source = next((e for e in self.rt.log.read(task_id=task_id)
+                                   if e.seq == source_ref.get('seq') and e.hash == source_ref.get('hash')
+                                   and e.type == 'team.native_response_completed'), None)
+                    if protocol is None or source is None or source.payload.get('protocol') != protocol:
+                        raise WorkConflict('此监督入口需要与来源一致的可信原生通道，未启动。')
             if not any(callable(getattr(driver, method, None)) for method in ("tool_turn", "agent_run")):
                 raise ValueError("这位伙伴的模型通道尚不支持工具执行。")
             from .team_instructions import base_instructions, context_instructions
@@ -1703,11 +2055,15 @@ class TeamService:
                 nonlocal failure_stage
                 failure_stage = "tool_execution"
 
-            for turn_index in range(MAX_ACTOR_TURNS):
+            turn_limit = MAX_REVIEW_SUPERVISION_TURNS if claimed_review else MAX_ACTOR_TURNS
+            for turn_index in range(turn_limit):
                 self._current(task_id, started, role, revision)
+                uncertainty = self.rt._budget_usage_uncertainty(role.driver, driver)
+                if uncertainty:
+                    raise WorkConflict(uncertainty)
                 budget = getattr(driver, "token_budget", None)
                 if valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget:
-                    raise WorkConflict("当前通道已达到顾客配置的用量上限，未继续调用。")
+                    raise WorkConflict("当前通道的已报告用量累计达到本地预算，未继续调用；未知和在途用量可能漏计，此预算不是硬上限。")
                 failure_stage = "context_assembly"
                 raw_context, next_workspace, next_binding, next_tools, basis = self._model_input(
                     task_id, message, role, run_id=started.payload["run_id"])
@@ -1720,7 +2076,7 @@ class TeamService:
                         for key in ("available", "workspace_id", "revision", "fingerprint"))):
                     raise WorkConflict("工程范围或工具集合已变化，请核对当前工程后从原委托继续；未重放旧操作。")
                 workspace, binding, tools = next_workspace, next_binding, next_tools
-                context = model_context(raw_context)
+                context = model_context(raw_context, basis=basis)
                 wire_tools, catalog = select_tools(tools, loaded_tools)
                 if catalog is not None:
                     context["tool_catalog"] = catalog
@@ -1744,6 +2100,12 @@ class TeamService:
                     with self._context_read():
                         self._current(task_id, started, role, revision)
                         live_scope = self.recovery.scope(task_id)
+                        if claimed_review:
+                            live_workspace = self.rt.workspaces.view(task_id)
+                            if (self._pending_operations(task_id) or live_workspace.get('available')
+                                    and live_workspace.get('root')
+                                    and self.rt.workspaces.pending(root=live_workspace['root'], effects_only=True)):
+                                raise WorkConflict('监督期间出现尚未核对的操作，未采用旧响应或继续请求。')
                     if not _same_scope(request_scope, live_scope):
                         raise WorkConflict("目标、规则、控制或工程权限已变化，未继续采用旧范围的模型响应。")
 
@@ -1761,7 +2123,7 @@ class TeamService:
                         raise WorkConflict("格式纠正请求前工作范围已变化，未继续旧响应。")
                     budget = getattr(driver, "token_budget", None)
                     if valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget:
-                        raise WorkConflict("当前通道已达到顾客配置的用量上限，未继续调用。")
+                        raise WorkConflict("当前通道的已报告用量累计达到本地预算，未继续调用；未知和在途用量可能漏计，此预算不是硬上限。")
                     # Scope/usage reads may interleave with a newly committed input.
                     # This is the last admission check, not a lock across network I/O.
                     self._current(task_id, started, role, revision)
@@ -1771,18 +2133,25 @@ class TeamService:
                 if review_followup is not None:
                     budget = getattr(driver, "token_budget", None)
                     if valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget:
-                        raise WorkConflict("当前通道已达到顾客配置的用量上限，未继续调用。")
+                        raise WorkConflict("当前通道的已报告用量累计达到本地预算，未继续调用；未知和在途用量可能漏计，此预算不是硬上限。")
                     if (self.rt.team_reviews.pending_for(task_id, role, assignment) is None
                             or self._pending_operations(task_id)
                             or not _same_scope(review_followup_scope, self.recovery.scope(task_id))):
                         raise WorkConflict("复核状态或工作范围已变化，或存在待核对操作，未继续补登记请求。")
                     self._current(task_id, started, role, revision)
                 try:
-                    if budget_supervision and self._pending_operations(task_id):
+                    uncertainty = self.rt._budget_usage_uncertainty(role.driver, driver)
+                    if uncertainty:
+                        raise WorkConflict(uncertainty)
+                    if (budget_supervision or claimed_review) and self._pending_operations(task_id):
                         if not invocation_started:
                             failure["admission_not_started"] = True
                         raise WorkConflict("监督请求前出现未核对操作，先核对实际影响，不重放旧工作。")
                     invocation_started = True
+                    from .native_response_evidence import trusted_protocol
+                    native_protocol = trusted_protocol(driver)
+                    if claimed_review and native_protocol is None:
+                        raise WorkConflict('原生监督通道或传输未通过可信检查，未启动。')
                     iter_turn = getattr(driver, "iter_tool_turn", None)
                     if callable(iter_turn):
                         turn = yield from iter_turn(role=role.role, prompt=prompt, history=wire_history,
@@ -1795,10 +2164,15 @@ class TeamService:
                     failure_stage = "response_handling"
                     counts = tool_protocol_error_usage(error)
                     if counts is not None:
+                        if not native_openai_usage(driver, tool=True):
+                            counts.pop("usage_issue", None)
                         self.rt.log.emit(type="team.model_called", actor=HOST, task_id=task_id, payload={
                             "role": role.id, "driver": role.driver, "run_id": started.payload["run_id"],
                             **counts, "request_sizes": request_sizes, "context_basis": basis, "response_status": "protocol_error",
                             **request_correction})
+                        diagnostics = usage_conflict_diagnostics({"mode": "openai_compatible", **counts})
+                        self.rt._record_usage_inconsistency(task_id=task_id, role_id=role.id,
+                                                            driver_name=role.driver, driver=driver, diagnostics=diagnostics)
                     raise
                 except Exception as error:
                     if not isinstance(error, WorkConflict):
@@ -1815,19 +2189,27 @@ class TeamService:
                 elif usable_return is True:
                     self.rt._driver_health.record_success(role.driver)
                 response_diagnostics = contained_response_diagnostics(meta)
+                usage_diagnostics = usage_conflict_diagnostics(meta) if native_openai_usage(driver, tool=True) else {}
                 model_call = self.rt.log.emit(type="team.model_called", actor=HOST, task_id=task_id, payload={
                     "role": role.id, "driver": role.driver, "run_id": started.payload["run_id"],
                     "tokens": turn.tokens if valid_token_count(turn.tokens) else 0,
                     "token_usage": meta.get("token_usage", "unavailable"), "request_sizes": request_sizes, "context_basis": basis,
-                    "usage": safe_tool_usage(meta.get("usage")), **response_diagnostics,
+                    "usage": safe_tool_usage(meta.get("usage")),
+                    **({"usage_issue": usage_diagnostics["usage_issue"]} if usage_diagnostics else {}),
+                    **response_diagnostics,
                     **({"response_client_tools_executed": False} if response_diagnostics else {}), **request_correction})
+                self.rt._record_usage_inconsistency(task_id=task_id, role_id=role.id, driver_name=role.driver,
+                                                    driver=driver, diagnostics=usage_diagnostics)
                 if type(meta) is dict and meta.get("native_cleanup_failed") is True:
                     failure["native_cleanup_failed"] = True
                     raise WorkConflict("模型已完整返回并记录可用用量，但本机请求进程或管道收尾存在异常；未采用本轮文本或工具动作。")
+                if claimed_review and (trusted_protocol(driver) != native_protocol
+                        or type(meta) is not dict or meta.get('native_cleanup_confirmed') is not True):
+                    raise WorkConflict('原生监督响应或本机请求清理未确认，未采用本轮动作。')
                 if meta.get("contained"):
                     failure.update(response_diagnostics)
                     failure["response_client_tools_executed"] = False
-                    if (not correction_used and turn_index + 1 < MAX_ACTOR_TURNS
+                    if (not claimed_review and not correction_used and turn_index + 1 < turn_limit
                             and correctable(driver, turn)):
                         self._current(task_id, started, role, revision)
                         if correction_scope is None:
@@ -1838,7 +2220,7 @@ class TeamService:
                             raise WorkConflict("存在尚未核对的操作影响，未启动新的格式纠正请求。")
                         budget = getattr(driver, "token_budget", None)
                         if valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget:
-                            raise WorkConflict("当前通道已达到顾客配置的用量上限，未继续调用。")
+                            raise WorkConflict("当前通道的已报告用量累计达到本地预算，未继续调用；未知和在途用量可能漏计，此预算不是硬上限。")
                         correction_used = True
                         correction = {"correction_of": model_call.seq, "issue": response_diagnostics["response_tool_issue"], "turn": turn}
                         self.rt.log.emit(type="team.response_correction_requested", actor=HOST, task_id=task_id, payload={
@@ -1856,6 +2238,13 @@ class TeamService:
                                                for call in turn.calls):
                     raise ValueError("模型请求了本轮尚未声明的工具，整批未执行；应先载入并在下一次请求使用。")
                 check_request()
+                if native_protocol is not None and trusted_protocol(driver) == native_protocol:
+                    from .native_response_evidence import record as record_native_response
+
+                    with self.rt.log.atomic():
+                        check_request()
+                        record_native_response(self, task_id, message, role, started, model_call,
+                                               request_scope, basis, turn, native_protocol)
                 if turn.text.strip():
                     with self.rt.log.atomic():
                         check_request()
@@ -1870,8 +2259,8 @@ class TeamService:
                             final = completed.payload["summary"]
                         from .team_reply import customer_source
 
-                        reply_source = customer_source(self, task_id, message, role) if assignment is None else None
-                        customer_facing = ((message.actor.kind == "human" or delivery is not None or reply_source is not None)
+                        reply_source = customer_source(self, task_id, message, role) if assignment is None and not claimed_review else None
+                        customer_facing = (not claimed_review and (message.actor.kind == "human" or delivery is not None or reply_source is not None)
                                            and not any(call.name == "reply_to_customer" for call in turn.calls))
                         self.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
                             payload={"text": final, "claim": final[:180], "phase": "team",
@@ -1881,11 +2270,16 @@ class TeamService:
                                      "recipient": "human" if customer_facing else message.actor.id,
                                      **({"delivery_seq": delivery} if delivery is not None else {})})
                 if not turn.calls:
+                    if claimed_review:
+                        status, reason = 'interrupted', '补充监督未作出明确后续动作；已有记录保留，任务尚未交付。'
+                        failure['interruption_kind'] = 'review_supervision_no_action'
+                        break
                     pending_review = self.rt.team_reviews.pending_for(task_id, role, assignment)
                     if pending_review is not None:
                         budget = getattr(driver, "token_budget", None)
                         can_continue = (turn_index + 1 < MAX_ACTOR_TURNS and not self._pending_operations(task_id)
-                            and not (valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget))
+                            and not (valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget)
+                            and not self.rt._budget_usage_uncertainty(role.driver, driver))
                         self._current(task_id, started, role, revision)
                         if can_continue and self.rt.team_reviews.followup(task_id, role, assignment, started, model_call.seq):
                             review_followup_scope = dict(last_scope)
@@ -1924,6 +2318,8 @@ class TeamService:
                     if call.name in {"set_objective", "finish_work"}:
                         revision = self.view(task_id)["revision"]
                     if call.name == "finish_work" and result.get("status") == "ok" and result.get("already_completed") is True:
+                        if claimed_review:
+                            raise WorkConflict('已有交付不再重复答复；请核对当前记录。')
                         final, answered = result["note"], True
                         self.rt.log.emit(type="msg.said", task_id=task_id, actor=Actor.agent(role.id, role.role),
                             payload={"text": final, "claim": final[:180], "phase": "team",
@@ -1941,6 +2337,9 @@ class TeamService:
                         break
                     if call.name == "finish_work" and result.get("status") == "ok":
                         finish_accepted = True
+                        break
+                    if claimed_review and call.name == 'delegate' and result.get('status') == 'ok':
+                        waiting = handoff_accepted = True
                         break
                     if call.name == "wait_for_reply" and result.get("status") == "ok":
                         waiting = True
@@ -1964,10 +2363,16 @@ class TeamService:
                         events = self.rt.log.read(task_id=task_id)
                         completed = next((e for e in reversed(events)
                             if e.type == "team.objective_completed" and e.actor == HOST
-                            and e.seq == current_work["revision"] and e.seq > started.seq
+                            and (claimed_review or e.seq == current_work["revision"]) and e.seq > started.seq
                             and e.payload.get("run_id") == started.payload["run_id"]), None)
-                        if current_work["status"] == "done" and completed is not None and not self._pending_operations(task_id):
-                            self._current(task_id, started, role, revision)
+                        receipt = next((e for e in events if e.type == 'team.tool_finished' and e.actor == HOST
+                            and e.payload.get('started_seq') == tool_start.seq and e.payload.get('run_id') == started.payload['run_id']
+                            and e.payload.get('role') == role.id and e.payload.get('name') == 'finish_work'
+                            and e.payload.get('result', {}).get('status') == 'ok'), None)
+                        committed_supervision = claimed_review and finish_accepted and receipt is not None and completed is not None
+                        if committed_supervision or (current_work["status"] == "done" and completed is not None and not self._pending_operations(task_id)):
+                            if not committed_supervision:
+                                self._current(task_id, started, role, revision)
                             final = completed.payload["summary"]
                             if not any(e.type == "msg.said" and e.actor == Actor.agent(role.id, role.role)
                                        and e.payload.get("run_id") == started.payload["run_id"]
@@ -1983,22 +2388,37 @@ class TeamService:
                             return
                 if finish_accepted:
                     raise WorkConflict("交付已记录，但当前范围或执行收尾已变化，先核对实际交付与未结算操作，不继续执行本批后续请求。")
+                if (claimed_review and waiting and not operation_failed and not handoff_accepted
+                        and not awaiting_customer and not self.recovery.assignments(task_id)
+                        and not self.view(task_id)['pending_count']
+                        and not any(row['status'] == 'pending' for row in self.rt.questionnaires.view(task_id))):
+                    other_active = any(row['status'] == 'running' and row.get('run_id') != started.payload['run_id']
+                                       for row in self.view(task_id)['runs'])
+                    status, reason = ('interrupted', '其他角色仍在处理独立工作，但本轮没有可确认唤醒的等待关系；请核对后继续。'
+                                      if other_active else '补充监督选择等待，但当前没有待处理工作或待答问题；请核对后继续。')
+                    failure['interruption_kind'] = 'review_supervision_empty_wait'
+                if claimed_review and failure.get('interruption_kind') == 'review_supervision_empty_wait':
+                    break
                 if awaiting_customer or handoff_accepted or waiting and not operation_failed:
                     status = "waiting"
                     break
                 yield
             else:
-                events = self.rt.log.read(task_id=task_id)
-                delivered = any(e.type == "team.objective_completed" and e.actor == HOST
-                                and e.payload.get("run_id") == started.payload["run_id"]
-                                for e in events)
-                returned = assignment is not None and any(e.type == "team.message_received" and e.seq > started.seq
-                    and e.actor == Actor.agent(role.id, role.role) and e.payload.get("kind") == "report"
-                    and e.payload.get("reply_to") == assignment.seq
-                    and e.payload.get("recipient") == assignment.actor.id for e in events)
-                if not delivered and not returned:
-                    status, reason = "interrupted", "本轮到达分段检查点，已有成果与回执保留；尚未宣告工作完成。"
-                    failure["interruption_kind"] = "turn_boundary"
+                if claimed_review:
+                    status, reason = 'interrupted', '补充监督已达到有限请求次数，尚未作出明确交付或交接；请核对后继续。'
+                    failure['interruption_kind'] = 'review_supervision_no_action'
+                else:
+                    events = self.rt.log.read(task_id=task_id)
+                    delivered = any(e.type == "team.objective_completed" and e.actor == HOST
+                                    and e.payload.get("run_id") == started.payload["run_id"]
+                                    for e in events)
+                    returned = assignment is not None and any(e.type == "team.message_received" and e.seq > started.seq
+                        and e.actor == Actor.agent(role.id, role.role) and e.payload.get("kind") == "report"
+                        and e.payload.get("reply_to") == assignment.seq
+                        and e.payload.get("recipient") == assignment.actor.id for e in events)
+                    if not delivered and not returned:
+                        status, reason = "interrupted", "本轮到达分段检查点，已有成果与回执保留；尚未宣告工作完成。"
+                        failure["interruption_kind"] = "turn_boundary"
         except WorkConflict as exc:
             status, reason = "interrupted", str(exc)
             if vars(exc).get("native_cleanup_failed") is True:
@@ -2065,11 +2485,14 @@ class TeamService:
         if scope is not None:
             self.recovery._notify(task_id, started, finished, scope, trigger="turn_boundary")
         already_reported = assignment is not None and assignment.seq in _reported_messages(self._messages(task_id))
-        if (status == "interrupted"
-                and any(e.seq > message.seq and e.actor == Actor.human() and e.payload["recipient"] == role.id
-                        for e in self._messages(task_id))):
-            # A newer customer message will resume the still-open assignment, not close it as a report.
-            already_reported = True
+        if status == "interrupted" and assignment is not None:
+            newer = [e for e in self._messages(task_id) if e.seq > message.seq
+                     and e.actor == Actor.human() and e.payload["recipient"] == role.id]
+            # Only suppress the interruption notice when the latest input really
+            # inherits this assignment. An ordinary question may be independent.
+            inherited = self._waiting_assignment(task_id, newer[-1], role) if newer else None
+            if inherited is not None and inherited.seq == assignment.seq:
+                already_reported = True
         if assignment is not None and status in {"completed", "waiting"} and final.strip():
             already_reported |= any(e.seq > started.seq and e.actor.id == role.id
                 and e.payload.get("visible") is True and e.payload.get("kind") == "message"
@@ -2114,18 +2537,29 @@ class TeamService:
                 for e in messages)
             published = "；".join(f"{a.get('filename', a.get('title', '成果'))}（成果 #{a['seq']}）" for a in artifacts)
             text = ("本轮已保存：" + published + "。" if published else "")
-            text += (final or "我已处理这轮消息，现在等待后续信息或安排。")
+            child_update = (message.payload.get("kind") == "progress"
+                            and message.payload.get("reply_to") in child_sources)
+            text += (final or (message.payload.get("text") if child_update else None)
+                     or "我已处理这轮消息，现在等待后续信息或安排。")
             if not notified_parent and (assignment.payload["kind"] == "assignment" or published):
-                if waiting_on_child or queued_child_report:
+                if waiting_on_child or queued_child_report or (message.payload.get("kind") == "progress" and not child_update):
                     if final.strip() or artifacts:
                         self._send(task_id, role, assignment.actor.id, text, "notification",
                                    parent_assignment_seq=assignment.seq)
                 else:
                     self._send(task_id, role, assignment.actor.id, text, "progress", reply_to=assignment.seq)
         if status != "waiting" and not already_reported and assignment is not None:
-            self._send(task_id, role, assignment.actor.id, reason or final or "委托已处理，请查看本轮成果和工具记录。",
-                       "report" if status == "completed" else "progress",
-                       reply_to=assignment.seq)
+            if status == "completed":
+                text = final or reason or "本轮已结束。"
+                self._send(task_id, role, assignment.actor.id, text + "\n原委托尚未正式交回，请核对后接续或撤回。",
+                           "progress", reply_to=assignment.seq)
+            else:
+                self._send(task_id, role, assignment.actor.id, reason or final or "本轮中断，委托尚未正式交回。",
+                           "progress", reply_to=assignment.seq)
+        if status == "completed":
+            from .review_supervision_intent import record
+
+            record(self, task_id, message, role, started, finished)
 
     def run(self, task_id):
         if self.rt.log.db.in_transaction:
@@ -2133,14 +2567,49 @@ class TeamService:
         with activity_owner(self.rt.log.path, task_id, "simple-team") as owned:
             if not owned:
                 return {"task_id": task_id, "team": self.view(task_id), "consumer_owned": False}
-            self._retire_interrupted(task_id)
-            return self._drain(task_id)
+            if self._drain_owner is not None:
+                raise WorkConflict('团队执行所有权不可重入。')
+            self._drain_owner = (task_id, threading.get_ident())
+            try:
+                self._retire_interrupted(task_id)
+                return self._drain(task_id)
+            finally:
+                self._drain_owner = None
+
+    def _owns_drain(self, task_id):
+        return self._drain_owner == (task_id, threading.get_ident())
 
     def _retire_interrupted(self, task_id):
         self.recovery.retire(task_id)
 
+    def _supervise_finished_review(self, task_id, started):
+        """One fresh supervision of a run completed in this drain only."""
+        from .external_agent import QoderAcpDriver
+        from .native_response_evidence import trusted_protocol
+        from .review_supervision_candidate import create
+
+        leader = self.rt.organization.leader
+        driver = self.rt.drivers.get(leader.driver)
+        if not isinstance(driver, QoderAcpDriver) and trusted_protocol(driver) is None:
+            return False
+        candidate = create(self, task_id, run_seq=started.seq, run_hash=started.hash)
+        if candidate is None:
+            return False
+        with self.recovery.drain_review_candidate_lease(task_id, candidate_seq=candidate.seq,
+                                                        candidate_hash=candidate.hash) as claimed:
+            if claimed is None:
+                return False
+            iterator = self._run_message(task_id, *claimed)
+            try:
+                for _ in iterator:
+                    time.sleep(0.001)
+            finally:
+                iterator.close()
+        return True
+
     def _drain(self, task_id):
         active = []
+        finished_reviews = []
         self.external.begin_scheduler(task_id)
         last_claim = 0.0
         priority_used = False
@@ -2162,6 +2631,11 @@ class TeamService:
                     else:
                         active.append(entry)
                 if not active:
+                    if finished_reviews:
+                        started = finished_reviews.pop(0)
+                        self._supervise_finished_review(task_id, started)
+                        last_claim = 0.0
+                        continue
                     break
                 preempt = next((item for item in active if any(e.actor == Actor.human()
                     and e.seq > item[0].seq and e.payload["recipient"] == item[1].id
@@ -2170,10 +2644,18 @@ class TeamService:
                 active.remove(entry)
                 priority_used = preempt is not None
                 try:
-                    next(entry[2])
+                    self._drain_step = (task_id, entry[3].seq, entry[3].hash, threading.get_ident())
+                    try:
+                        next(entry[2])
+                    finally:
+                        self._drain_step = None
                     active.append(entry)
                     time.sleep(0.001)
                 except StopIteration:
+                    if (entry[1].id == self.rt.organization.leader.id and entry[0].actor.kind == 'agent'
+                            and entry[0].payload.get('kind') == 'report'
+                            and type(entry[0].payload.get('review_seq')) is int):
+                        finished_reviews.append(entry[3])
                     last_claim = 0.0
         finally:
             original = sys.exception()
@@ -2218,8 +2700,11 @@ class TeamService:
                 if not isinstance(refs, list):
                     raise ValueError("交付文件清单无效。")
                 by_seq = {a["seq"]: a for a in artifacts}
-                boundary = max((e.seq for e in self.rt.log.read(task_id=task_id) if e.actor == HOST and e.seq < delivery.seq
-                                and e.type in {"team.started", "team.objective_updated"}), default=0)
+                from .team_review_direction import effective_objectives
+                events = self.rt.log.read(task_id=task_id)
+                effective = effective_objectives(events)
+                boundary = max((e.seq for e in events if e.actor == HOST and e.seq < delivery.seq
+                                and (e.type == "team.started" or e.type == "team.objective_updated" and e.seq in effective)), default=0)
                 frozen = {}
                 for ref in refs:
                     if (not isinstance(ref, dict) or type(ref.get("seq")) is not int or not 0 < ref["seq"] < delivery.seq

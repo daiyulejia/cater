@@ -2,24 +2,173 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack, contextmanager
 import hashlib
+import inspect
 import json
 import math
+import os
 from pathlib import Path
 import re
 import tempfile
 import time
 
 from .activity_owner import activity_owner
-from .drivers import DriverResponse, DriverUnavailable
+from .drivers import DriverResponse, DriverUnavailable, native_openai_usage, trusted_driver_method
 from .events import Actor
 from .managed_workspaces import (
     MANAGED_ID, WorkspaceConfiguration, database_namespace, managed_id, parse_template, task_policy,
 )
 from .responses import load_response_object
-from .tool_protocol import json_utf8
-from .usage import valid_token_count
+from .tool_protocol import ToolCall, ToolTurn, json_utf8
+from .usage import usage_conflict_diagnostics, valid_token_count
 from .work import WorkConflict
+
+
+class WorkspaceStopped(WorkConflict):
+    """Host-generated checkpoint classification, never a driver message."""
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+class WorkspaceBudgetStopped(DriverUnavailable):
+    """Host-generated local budget stop."""
+
+    def __init__(self, code, detail):
+        self.code = code
+        super().__init__(detail)
+
+
+class WorkspaceEffectsUncertain(DriverUnavailable):
+    """Host observed a tool receipt whose effects still require reconciliation."""
+
+
+def _driver_attribute(driver, name, default=None):
+    """Never treat an exception raised by a driver descriptor as a host stop."""
+    try:
+        return getattr(driver, name)
+    except AttributeError:
+        try:
+            absent = inspect.getattr_static(driver, name, _MISSING_DRIVER_ATTRIBUTE) is _MISSING_DRIVER_ATTRIBUTE
+        except Exception:
+            absent = False
+        if absent:
+            return default
+        raise DriverUnavailable("Driver attribute unavailable") from None
+    except Exception:
+        raise DriverUnavailable("Driver attribute unavailable") from None
+
+
+_MISSING_DRIVER_ATTRIBUTE = object()
+
+
+_TOOL_META_CRITICAL = frozenset({"token_usage", "usage", "usage_issue", "mode", "contained", "incomplete",
+                                 "reason", "tool_issue", "stop_reason", "finish_reason", "invocation_started",
+                                 "native_cleanup_failed", "native_cleanup_confirmed"})
+
+
+def _plain_json_value(value, depth=0):
+    """Copy JSON primitives without invoking methods on driver-owned objects."""
+    if depth > 64:
+        raise ValueError("metadata nesting limit")
+    kind = type(value)
+    if value is None or kind in (str, bool, int):
+        return value
+    if kind is float and math.isfinite(value):
+        return value
+    if kind is list:
+        return [_plain_json_value(item, depth + 1) for item in value]
+    if kind is dict:
+        result = {}
+        for key, item in dict.items(value):
+            if type(key) is not str:
+                raise ValueError("invalid metadata key")
+            result[key] = _plain_json_value(item, depth + 1)
+        return result
+    raise ValueError("unsupported metadata value")
+
+
+def _tool_metadata(raw_meta):
+    if raw_meta is None:
+        return {}
+    if not issubclass(type(raw_meta), dict):
+        raise ValueError("invalid metadata")
+    result = {}
+    # Calling the builtin directly avoids dict-subclass overrides such as items().
+    for key, item in dict.items(raw_meta):
+        if type(key) is not str:
+            # Any object can compare equal to a critical name; do not invoke
+            # its equality, hashing or conversion to decide which.
+            raise ValueError("invalid metadata key")
+        try:
+            value = _plain_json_value(item)
+            if key in {"contained", "incomplete", "invocation_started", "native_cleanup_failed", "native_cleanup_confirmed"} and type(value) is not bool:
+                raise ValueError("invalid protocol flag")
+            if key == "token_usage" and (type(value) is not str or value not in {"reported", "estimated", "unavailable"}):
+                raise ValueError("invalid usage source")
+            if key == "usage" and type(value) is not dict:
+                raise ValueError("invalid usage")
+            if key in {"usage_issue", "mode", "reason", "tool_issue", "stop_reason", "finish_reason"} and value is not None and type(value) is not str:
+                raise ValueError("invalid protocol field")
+        except (ValueError, RecursionError):
+            if key in _TOOL_META_CRITICAL:
+                raise
+            continue
+        result[key] = value
+    return result
+
+
+def _driver_value(value, *, tool):
+    """Validate and detach driver-owned values before host classifications apply."""
+    try:
+        if tool and not isinstance(value, ToolTurn):
+            raise ValueError
+        text = value.text
+        raw_meta = value.meta
+        raw_tokens = value.tokens
+        if type(text) is not str:
+            raise ValueError
+        if raw_meta is not None and not issubclass(type(raw_meta), dict):
+            if tool:
+                raise ValueError
+            raw_meta = None
+        if tool:
+            meta = _tool_metadata(raw_meta)
+        else:
+            meta = {}
+            for key, item in dict.items(raw_meta) if raw_meta is not None else ():
+                if type(key) is not str:
+                    raise ValueError("invalid metadata key")
+                try:
+                    meta[key] = json.loads(json_utf8(item))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+        valid_tokens = valid_token_count(raw_tokens)
+        tokens = raw_tokens if valid_tokens else 0
+        if not valid_tokens:
+            meta["token_usage"] = "unavailable"
+        if not tool:
+            return DriverResponse(text, tokens, meta)
+        raw_calls = value.calls
+        raw_message = value.message
+        if type(raw_calls) is not list or (raw_message is not None and type(raw_message) is not dict):
+            raise ValueError
+        calls = []
+        for call in raw_calls:
+            if not isinstance(call, ToolCall):
+                raise ValueError
+            call_id = call.id
+            name = call.name
+            arguments = call.arguments
+            if type(call_id) is not str or type(name) is not str or type(arguments) is not dict:
+                raise ValueError
+            calls.append(ToolCall(call_id, name, json.loads(json_utf8(arguments))))
+        message = json.loads(json_utf8(raw_message)) if raw_message is not None else None
+        return ToolTurn(text, calls, tokens, meta, message)
+    except Exception:
+        raise DriverUnavailable("Driver response invalid") from None
 
 
 HOST = Actor.system("workspace_gateway")
@@ -76,6 +225,33 @@ def _entry(identity, title, policy, checks):
             "fingerprint": fingerprint}
 
 
+def _binding_matches(row, payload):
+    if row["fingerprint"] == payload.get("fingerprint"):
+        policy = row["policy"].as_dict()
+        return payload.get("root") == policy["root"] and payload.get("mode") == policy["mode"]
+    # Old Windows policies retained the extended prefix in both stored root
+    # and fingerprint. Reconstruct only that exact policy, including checks;
+    # every component is revalidated before accepting the historical binding.
+    root = payload.get("root")
+    if os.name != "nt" or not isinstance(root, str) or not root.lower().startswith("\\\\?\\"):
+        return False
+    try:
+        from .workspace_tools import WorkspacePolicy
+        policy_data = row["policy"].as_dict()
+        if payload.get("mode") != policy_data["mode"]:
+            return False
+        if WorkspacePolicy.from_dict({**policy_data, "root": root}).as_dict() != policy_data:
+            return False
+        old_policy = {**policy_data, "root": root}
+        encoded = json.dumps(old_policy, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        policy_hash = hashlib.sha256(encoded).hexdigest()
+        fingerprint = hashlib.sha256(json.dumps({"policy": policy_hash, "checks": row["checks"]},
+            sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        return fingerprint == payload.get("fingerprint")
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return False
+
+
 class WorkspaceService:
     def __init__(self, runtime, config_path=None):
         self.rt = runtime
@@ -123,6 +299,8 @@ class WorkspaceService:
     def _managed_entry(self, task_id, *, create=False):
         if self._managed is None:
             raise ValueError("宿主未启用独立工作目录。")
+        if self._namespace is None or database_namespace(self.rt.log) != self._namespace:
+            raise ValueError("无法核对数据库连接身份，独立工作目录已停用；请检查数据库路径中的链接并使用真实路径重新启动。")
         try:
             policy = task_policy(self._managed, self._namespace, task_id, create=create)
         except OSError:
@@ -145,7 +323,8 @@ class WorkspaceService:
         self._refresh()
         event = self._binding(task_id)
         row = self.config.get(event.payload.get("workspace_id")) if event else None
-        return row["fingerprint"] if row else None
+        return (event.payload.get("fingerprint") if row and _binding_matches(row, event.payload)
+                else row["fingerprint"] if row else None)
 
     def pending(self, *, root=None, task_id=None, effects_only=False):
         """Keep missing receipts; known built-in reads need no effect reconciliation."""
@@ -156,7 +335,6 @@ class WorkspaceService:
         starts = {e.seq: e for e in events if (e.type == "workspace.tool_started" and e.actor == HOST
                   or e.type == "team.tool_started" and e.actor == team
                   and isinstance(e.payload.get("name"), str) and e.payload["name"].startswith("workspace_"))
-                  and (root is None or e.payload.get("root") == root)
                   and not (effects_only and type(e.payload.get("name")) is str
                            and e.payload["name"] in _READ_ONLY_TOOLS)}
         for event in events:
@@ -200,7 +378,26 @@ class WorkspaceService:
                         and isinstance(result.get("error"), dict) and result["error"].get("code") == "operation_failed"):
                     continue
             starts.pop(start.seq, None)
-        return list(starts.values())
+        remaining = list(starts.values())
+        if root is None:
+            return remaining
+        if os.name != "nt":
+            return [event for event in remaining if event.payload.get("root") == root]
+        from .workspace_tools import _workspace_identity
+
+        result = []
+        for event in remaining:
+            previous = event.payload.get("root")
+            if previous == root:
+                result.append(event)
+                continue
+            try:
+                if _workspace_identity(previous) == _workspace_identity(root):
+                    result.append(event)
+            except (OSError, ValueError, TypeError):
+                # A missing or unsafe prior root cannot be proved unrelated.
+                result.append(event)
+        return result
 
     def view(self, task_id):
         self._refresh()
@@ -209,7 +406,7 @@ class WorkspaceService:
             return {"revision": None, "workspace_id": None, "available": False, "reason": "尚未绑定工作目录。", "pending": []}
         p = event.payload
         row = self.config.get(p.get("workspace_id"))
-        available = bool(row and row["fingerprint"] == p.get("fingerprint"))
+        available = bool(row and _binding_matches(row, p))
         pending = self.pending(root=p.get("root"), effects_only=True) if p.get("root") else []
         return {"revision": event.seq, "workspace_id": p.get("workspace_id"), "title": p.get("title"),
                 "root": p.get("root"), "mode": p.get("mode"), "fingerprint": p.get("fingerprint"),
@@ -259,10 +456,12 @@ class WorkspaceService:
         started = next((e for e in self.pending(task_id=task_id) if e.seq == started_seq), None)
         if started is None:
             raise WorkConflict("该工具调用不在待核对列表中。")
-        with self._owner(started.payload["root"]) as owned:
+        with self._reconcile_team_owner(task_id, started.payload["root"]) as owned:
             if not owned:
                 raise WorkConflict("工作目录仍有执行者，不能将在途调用核对结束。")
             with self.rt.log.atomic():
+                if self._reconcile_root_present(started.payload["root"]) != owned:
+                    raise WorkConflict("工作目录身份已变化；保留待核对状态。")
                 if not any(e.seq == started_seq for e in self.pending(task_id=task_id)):
                     raise WorkConflict("工具状态刚刚已变化。")
                 receipt = self.rt.log.emit(type="workspace.tool_reconciled", task_id=task_id, actor=Actor.human(),
@@ -287,10 +486,12 @@ class WorkspaceService:
         root = self.view(task_id).get("root")
         if claim is None or not root:
             raise WorkConflict("没有对应的工程工作认领。")
-        with self._owner(root) as owned:
+        with self._reconcile_team_owner(task_id, root) as owned:
             if not owned:
                 raise WorkConflict("工程执行者仍在运行，不能释放认领。")
             with self.rt.log.atomic():
+                if self._reconcile_root_present(root) != owned:
+                    raise WorkConflict("工作目录身份已变化；保留待核对状态。")
                 if self.pending(task_id=task_id):
                     raise WorkConflict("仍有工具影响待核对，应先核对每个工具调用。")
                 current = next((i for i in self.rt.work.view(task_id)["items"] if i["id"] == claim.payload["work_item_id"]), None)
@@ -307,10 +508,54 @@ class WorkspaceService:
                 return event
 
     @staticmethod
+    @contextmanager
     def _owner(root):
         # The same root is serialized across tasks and database connections.
+        from .workspace_tools import _legacy_workspace_paths, _visible_path, _workspace_identity
+
         lock_db = str(Path(tempfile.gettempdir()) / "cater-workspace-owners")
-        return activity_owner(lock_db, str(Path(root).resolve()), "workspace")
+        checked = _visible_path(root)
+        identity = _workspace_identity(checked)
+        legacy = _legacy_workspace_paths(checked) if os.name == "nt" else ()
+        with ExitStack() as stack:
+            for key in [*sorted(set(legacy) - {identity}), identity]:
+                if not stack.enter_context(activity_owner(lock_db, key, "workspace")):
+                    yield False
+                    return
+            yield True
+
+    @staticmethod
+    def _reconcile_root_present(root):
+        from .workspace_tools import _inspect, _visible_path, _workspace_identity
+
+        try:
+            identity = _workspace_identity(root)
+            if os.name != "nt":
+                info = _inspect(_visible_path(root), True)
+                if not info.st_dev or not info.st_ino:
+                    raise WorkConflict("无法确认工作目录身份；保留待核对状态。")
+                identity = (info.st_dev, info.st_ino)
+            return identity
+        except FileNotFoundError:
+            raise WorkConflict("工作目录不存在，无法确认执行者已停止；保留待核对状态。") from None
+
+    @contextmanager
+    def _reconcile_team_owner(self, task_id, root):
+        # Team dispatch writes tool_started before taking the workspace owner.
+        # Hold its non-reentrant task owner first, in the same order as team.run.
+        with activity_owner(self.rt.log.path, task_id, "simple-team") as team_owned:
+            if not team_owned:
+                yield False
+                return
+            identity = self._reconcile_root_present(root)
+            with ExitStack() as stack:
+                try:
+                    owned = stack.enter_context(self._owner(root))
+                except FileNotFoundError:
+                    raise WorkConflict("工作目录不存在，无法确认执行者已停止；保留待核对状态。") from None
+                if owned and self._reconcile_root_present(root) != identity:
+                    raise WorkConflict("工作目录身份已变化；保留待核对状态。")
+                yield identity if owned else None
 
     def receipts(self, task_id, *, attempt_id):
         events = self.rt.log.read(task_id=task_id)
@@ -321,28 +566,33 @@ class WorkspaceService:
                 and e.payload.get("call_id") == starts[e.payload["started_seq"]].payload.get("call_id")]
 
     def _check(self, task_id, work_context, role_id, binding):
-        self.rt._check_execution_authorization(task_id)
+        try:
+            self.rt._check_execution_authorization(task_id)
+        except WorkConflict:
+            state = self.rt.execution_control.view(task_id)["state"]
+            raise WorkspaceStopped("paused" if state == "paused" else "cancelled" if state == "cancelled" else "scope_changed") from None
         if self.rt.execution_control.view(task_id)["state"] != "running":
-            raise WorkConflict("任务已暂停或取消，不启动下一次工具或模型调用。")
+            state = self.rt.execution_control.view(task_id)["state"]
+            raise WorkspaceStopped("paused" if state == "paused" else "cancelled")
         if self.rt.execution_control.view(task_id)["seq"] != binding["control_seq"]:
-            raise WorkConflict("执行控制版本已变化，需要从新检查点继续。")
+            raise WorkspaceStopped("control_changed")
         if self.rt.work.scope(task_id) != work_context["scope"] or self.view(task_id)["revision"] != binding["revision"]:
-            raise WorkConflict("任务要求或工作区权限已变化，不启动下一次调用。")
+            raise WorkspaceStopped("scope_changed")
         view = self.rt.work.view(task_id)
         item = next((i for i in view["items"] if i["id"] == work_context["work_item_id"]), None)
         if (not item or item["owner"] != role_id or item["status"] != "running"
                 or item["attempt_id"] != work_context["attempt_id"] or view["plan_seq"] != work_context["plan_seq"]):
-            raise WorkConflict("工作认领已过期或不属于当前角色。")
+            raise WorkspaceStopped("claim_changed")
         policy_timeout = self.config[binding["workspace_id"]]["policy"].timeout
         driver = self.rt.drivers[self.rt._role_by_id(role_id).driver]
-        model_timeout = getattr(driver, "timeout", 0)
+        model_timeout = _driver_attribute(driver, "timeout", 0)
         if type(model_timeout) not in (int, float) or not math.isfinite(model_timeout):
             model_timeout = 0
         needed = min(3600, max(policy_timeout, model_timeout) + 60)
         if item["lease_until"] - time.time() < needed:
             self.rt.work.renew_claim(task_id, item["id"], item["attempt_id"], lease_seconds=max(600, needed))
 
-    def complete(self, *, task_id, role, driver, prompt, work_context):
+    def complete(self, *, task_id, role, driver, prompt, work_context, usage_trace=None):
         from .workspace_tools import WorkspaceExecutor
 
         if self.rt.log.db.in_transaction:
@@ -351,7 +601,7 @@ class WorkspaceService:
         binding["control_seq"] = self.rt.execution_control.view(task_id)["seq"]
         if not binding["available"]:
             raise WorkConflict(binding["reason"])
-        turn_method = getattr(driver, "tool_turn", None)
+        turn_method = _driver_attribute(driver, "tool_turn")
         if not callable(turn_method):
             raise DriverUnavailable("当前模型通道尚不支持原生工程工具调用。")
         row = self.config[binding["workspace_id"]]
@@ -376,21 +626,51 @@ class WorkspaceService:
             call_ids = set()
             for turn_index in range(MAX_TOOL_TURNS):
                 self._check(task_id, work_context, role.id, binding)
-                budget = getattr(driver, "token_budget", None)
+                uncertainty = self.rt._budget_usage_uncertainty(role.driver, driver)
+                if uncertainty:
+                    raise WorkspaceBudgetStopped("usage_uncertain", uncertainty)
+                budget = _driver_attribute(driver, "token_budget")
                 if valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget:
-                    raise DriverUnavailable("工程工具回合已达到配置的累计用量上限。")
+                    raise WorkspaceBudgetStopped("budget_exhausted", "工程工具回合的已报告用量累计达到本地预算；未知和在途用量可能漏计，此预算不是硬上限。")
                 if len(json_utf8(history)) > MAX_HISTORY_BYTES:
                     raise DriverUnavailable("工程执行上下文已达到上限；已有文件与工具回执保留。")
-                turn = turn_method(role=role.role, prompt=prompt, history=history, tools=tools)
+                try:
+                    if usage_trace is not None:
+                        usage_trace['started'] = True
+                    turn = turn_method(role=role.role, prompt=prompt, history=history, tools=tools)
+                except Exception as exc:
+                    self.rt.log.emit(type="workspace.model_called", task_id=task_id, actor=HOST,
+                        payload={"role": role.id, "driver": role.driver, "attempt_id": work_context["attempt_id"],
+                                 "work_item_id": work_context["work_item_id"], "tokens": 0,
+                                 "token_usage": "unavailable", "turn": turn_index, "contained": True,
+                                 "invocation_started": True, "response_status": "failed"})
+                    if isinstance(exc, (WorkConflict, WorkspaceBudgetStopped, WorkspaceEffectsUncertain)):
+                        raise DriverUnavailable("Driver invocation failed") from None
+                    raise
+                try:
+                    turn = _driver_value(turn, tool=True)
+                except DriverUnavailable:
+                    # The call returned but its response is untrusted: preserve
+                    # the billing uncertainty without adopting any response data.
+                    self.rt.log.emit(type="workspace.model_called", task_id=task_id, actor=HOST,
+                        payload={"role": role.id, "driver": role.driver, "attempt_id": work_context["attempt_id"],
+                                 "work_item_id": work_context["work_item_id"], "tokens": 0,
+                                 "token_usage": "unavailable", "turn": turn_index, "contained": True,
+                                 "invocation_started": True, "response_status": "invalid"})
+                    raise
                 count = turn.tokens if valid_token_count(turn.tokens) else 0
                 last_meta = turn.meta or {}
                 source = last_meta.get("token_usage", "unavailable")
                 totals += count
                 usage_known &= source == "reported"
+                usage_diagnostics = usage_conflict_diagnostics(last_meta) if native_openai_usage(driver, tool=True) else {}
                 self.rt.log.emit(type="workspace.model_called", task_id=task_id, actor=HOST,
                     payload={"role": role.id, "driver": role.driver, "attempt_id": work_context["attempt_id"],
                              "work_item_id": work_context["work_item_id"], "tokens": count, "token_usage": source,
-                             "turn": turn_index, "contained": bool(last_meta.get("contained"))})
+                             "turn": turn_index, "contained": bool(last_meta.get("contained")),
+                             **usage_diagnostics})
+                self.rt._record_usage_inconsistency(task_id=task_id, role_id=role.id, driver_name=role.driver,
+                                                    driver=driver, diagnostics=usage_diagnostics)
                 if last_meta.get("contained"):
                     raise DriverUnavailable("模型工具回应未完整返回；已有执行记录保留，未采用部分工具请求。")
                 if not turn.calls:
@@ -399,7 +679,7 @@ class WorkspaceService:
                         text, files = self._capture_files(executor, turn.text)
                     except ValueError as exc:
                         text, files = self._correct_final(task_id, role, driver, executor, turn.text,
-                            work_context, binding, str(exc))
+                            work_context, binding, str(exc), usage_trace=usage_trace)
                     capture = None
                     if files:
                         capture = self.rt.log.emit(type="workspace.files_captured", task_id=task_id, actor=HOST,
@@ -428,7 +708,10 @@ class WorkspaceService:
                                 "root": binding["root"], "workspace_revision": binding["revision"],
                                 "role": role.id, **{k: work_context[k] for k in ("work_item_id", "attempt_id", "plan_seq", "scope")}})
                     # No database write transaction spans filesystem or process execution.
-                    result = executor.execute(call.name, call.arguments)
+                    try:
+                        result = executor.execute(call.name, call.arguments)
+                    except Exception:
+                        raise WorkspaceEffectsUncertain() from None
                     finished = self.rt.log.emit(type="workspace.tool_finished", task_id=task_id, actor=HOST,
                         payload={"started_seq": started.seq, "call_id": call.id, "name": call.name,
                                  "role": role.id, "workspace_revision": binding["revision"],
@@ -437,14 +720,14 @@ class WorkspaceService:
                     history.append({"role": "tool", "tool_call_id": call.id, "is_error": result.get("status") != "ok",
                                     "content": json.dumps({"receipt_seq": finished.seq, **result}, ensure_ascii=False)})
                     if any(e.seq == started.seq for e in self.pending(root=binding["root"], effects_only=True)):
-                        raise DriverUnavailable("工具未完整结束或执行超时，需要核对实际影响，未自动重试。")
+                        raise WorkspaceEffectsUncertain()
             raise DriverUnavailable("本轮工程执行达到回合上限，已有文件与记录保留，需要核对进展后继续。")
 
-    def _correct_final(self, task_id, role, driver, executor, text, context, binding, reason):
+    def _correct_final(self, task_id, role, driver, executor, text, context, binding, reason, *, usage_trace=None):
         from .runtime import _TEXT_ONLY_CALLS
 
         implementation = _TEXT_ONLY_CALLS.get(type(driver))
-        if implementation is None or getattr(driver.complete, "__func__", None) is not implementation:
+        if implementation is None or not trusted_driver_method(driver, "complete", implementation):
             raise ValueError("工程交接回复无效；当前通道不能进行受信任的无工具整理。")
         encoded = text.encode("utf-8")
         recorded = self.rt.log.emit(type="workspace.response_recorded", task_id=task_id, actor=HOST,
@@ -455,9 +738,12 @@ class WorkspaceService:
             raise ValueError("工程交接回复超过整理上限，未截断后重写。")
         receipts = self.receipts(task_id, attempt_id=context["attempt_id"])
         self._check(task_id, context, role.id, binding)
-        budget = getattr(driver, "token_budget", None)
+        budget = _driver_attribute(driver, "token_budget")
+        uncertainty = self.rt._budget_usage_uncertainty(role.driver, driver)
+        if uncertainty:
+            raise WorkspaceBudgetStopped("usage_uncertain", uncertainty)
         if valid_token_count(budget) and self.rt._reported_driver_tokens(role.driver) >= budget:
-            raise DriverUnavailable("交接整理前已达到配置的累计用量上限。")
+            raise WorkspaceBudgetStopped("budget_exhausted", "交接整理前已报告用量累计达到本地预算；未知和在途用量可能漏计，此预算不是硬上限。")
         prompt = ("你刚才在 Cater 完成了工程工具操作，但最后交接的格式无法登记。"
                   "本次仅进行一次无工具输出整理，不执行命令、不读写文件、不改任务或测试结论。"
                   "严格依据下列原回复和宿主实际回执，保留真实失败与未验证范围，不能因格式错误宣称源码错误。"
@@ -472,13 +758,41 @@ class WorkspaceService:
                                 "format_error": reason[:1000], "actual_tool_receipts": receipts}, ensure_ascii=False))
         if len(prompt.encode("utf-8")) > MAX_HISTORY_BYTES:
             raise ValueError("交接整理依据过大，需要拆分工作项。")
-        response = driver.complete(role=role.role, prompt=prompt, context={"phase": "workspace_response_correction", "read_only": True})
+        complete_method = _driver_attribute(driver, "complete")
+        if not callable(complete_method):
+            raise DriverUnavailable("Driver method unavailable")
+        try:
+            if usage_trace is not None:
+                usage_trace['started'] = True
+            response = complete_method(role=role.role, prompt=prompt, context={"phase": "workspace_response_correction", "read_only": True})
+        except Exception as exc:
+            self.rt.log.emit(type="workspace.model_called", task_id=task_id, actor=HOST,
+                payload={"role": role.id, "driver": role.driver, "attempt_id": context["attempt_id"],
+                         "work_item_id": context["work_item_id"], "phase": "response_correction", "response_seq": recorded.seq,
+                         "tokens": 0, "token_usage": "unavailable", "contained": True,
+                         "invocation_started": True, "response_status": "failed"})
+            if isinstance(exc, (WorkConflict, WorkspaceBudgetStopped, WorkspaceEffectsUncertain)):
+                raise DriverUnavailable("Driver invocation failed") from None
+            raise
+        try:
+            response = _driver_value(response, tool=False)
+        except DriverUnavailable:
+            self.rt.log.emit(type="workspace.model_called", task_id=task_id, actor=HOST,
+                payload={"role": role.id, "driver": role.driver, "attempt_id": context["attempt_id"],
+                         "work_item_id": context["work_item_id"], "phase": "response_correction", "response_seq": recorded.seq,
+                         "tokens": 0, "token_usage": "unavailable", "contained": True,
+                         "invocation_started": True, "response_status": "invalid"})
+            raise
         meta = response.meta or {}
+        usage_diagnostics = usage_conflict_diagnostics(meta) if native_openai_usage(driver, tool=False) else {}
         self.rt.log.emit(type="workspace.model_called", task_id=task_id, actor=HOST,
             payload={"role": role.id, "driver": role.driver, "attempt_id": context["attempt_id"],
                      "work_item_id": context["work_item_id"], "phase": "response_correction", "response_seq": recorded.seq,
                      "tokens": response.tokens if valid_token_count(response.tokens) else 0,
-                     "token_usage": meta.get("token_usage", "unavailable"), "contained": bool(meta.get("contained"))})
+                     "token_usage": meta.get("token_usage", "unavailable"), "contained": bool(meta.get("contained")),
+                     **usage_diagnostics})
+        self.rt._record_usage_inconsistency(task_id=task_id, role_id=role.id, driver_name=role.driver,
+                                            driver=driver, diagnostics=usage_diagnostics)
         self._check(task_id, context, role.id, binding)
         if meta.get("contained"):
             raise ValueError("交接整理未完整返回；已有文件与执行回执保留。")

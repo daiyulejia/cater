@@ -244,7 +244,7 @@ class TeamInstructionWireTests(unittest.TestCase):
         f.driver.steps = {
             f.manager: [native.turn("", ("delegate", {"recipient": f.worker, "instruction": "核对现状后回报"})),
                         native.turn("", ("wait_for_reply", {})), native.turn("收到回报。")],
-            f.worker: [native.turn("已核对，没有额外操作。")],
+            f.worker: [native.turn("", ("return_work", {"text": "已核对，没有额外操作。"}))],
         }
         with patch.object(f.driver, "tool_turn", side_effect=capture):
             f.rt.team.receive(f.task, "先请一位伙伴核对")

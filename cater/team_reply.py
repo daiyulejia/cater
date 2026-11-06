@@ -105,8 +105,9 @@ def customer_source(team, task_id, message, role, *, events=None, before_seq=Non
         return None
     if message.actor == Actor.human() and message.payload.get("kind") == "message":
         return message
-    objective = next((e for e in reversed(events) if e.actor == HOST
-                      and e.type in {"team.objective_updated", "team.objective_completed"}), None)
+    from .team_review_direction import effective_objectives
+    effective = effective_objectives(events)
+    objective = next((e for e in reversed(events) if e.seq in effective), None)
     revision = objective.seq if objective is not None else 0
     current = message
     while current is not None and current.actor.kind == "agent":

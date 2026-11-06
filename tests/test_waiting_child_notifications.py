@@ -440,6 +440,7 @@ class WaitingChildProjectionTests(unittest.TestCase):
                           if e.actor.id == self.worker and e.seq > resumed[2].seq
                           and e.payload["recipient"] == self.helper])
         progress = self.assert_upstream(parent, "progress")
+        self.assertIn(question, progress.payload["text"])
         self.assertEqual(self.f.driver.calls[-1]["context"]["active_assignment"]["seq"], parent.seq)
         self.assertNotIn(child.seq, _reported_messages(self.rt.team._messages(self.task)))
         run_wait(self.manager, self.f.native_turn("", ("wait_for_reply", {})), source_seq=progress.seq)

@@ -59,7 +59,12 @@ class TeamReviews:
 
     def view(self, task_id):
         events = self.rt.log.read(task_id=task_id)
-        revision = max((e.seq for e in events if e.actor == HOST and e.type == "team.objective_updated"), default=0)
+        from .team_review_direction import direction_at, effective_objectives
+
+        direction = direction_at(events, events[-1].seq) if events else None
+        effective = effective_objectives(events)
+        updates = [e.seq for e in events if e.seq in effective and e.type == "team.objective_updated"]
+        completions = [e.seq for e in events if e.seq in effective and e.type == "team.objective_completed"]
         latest = self._latest(self._artifacts(task_id))
         rows = {}
         for e in events:
@@ -74,10 +79,16 @@ class TeamReviews:
                 if row and row["request_seq"] == e.payload["review_seq"]:
                     row.update(status=e.payload["verdict"], feedback=e.payload["feedback"], decision_seq=e.seq)
         for row in rows.values():
+            # A later completion does not invalidate the review used to deliver;
+            # a prior completion is nevertheless part of a new request's revision.
+            revision = max(updates + [seq for seq in completions if seq < row["request_seq"]], default=0)
             message = self._request_message(task_id, row)
             if message is not None:
                 row["message_seq"] = message.seq
-            if row["revision"] != revision:
+            if (row["revision"] != revision or direction is None
+                    or type(row.get("request_seq")) is not int or row["request_seq"] < direction):
+                if direction is None or row["request_seq"] < direction:
+                    row["historical_status"] = row["status"]
                 row["status"] = "stale"
             elif any(latest.get(a["filename"]) != a["content_sha256"] for a in row["artifacts"]):
                 row["status"] = "outdated"
@@ -195,6 +206,24 @@ class TeamReviews:
                 for e in self.rt.team._messages(task_id)):
             raise WorkConflict("收到新的顾客消息，请先理解新上下文，再更新复核。")
 
+    def _pending_request_hint(self, task_id, role, row, seqs):
+        if row["status"] != "pending" or set(seqs) != {a["seq"] for a in row["artifacts"]}:
+            return None
+        message = self._request_message(task_id, row)
+        if message is None:
+            return None
+        prefix = f"相同版本已在复核中（review_seq={row['request_seq']}，复核者={row['reviewer']}，原委托序号={message.seq}）。"
+        if role.id != row["author"]:
+            return prefix + f"请联系原送审负责人 {row['author']} 核对原委托状态。"
+        work = next((r for r in self.rt.team.recovery.assignments(task_id) if r["seq"] == message.seq), None)
+        if work is None:
+            return prefix + "请用read_checkpoint核对原委托和复核状态。"
+        if work["status"] in {"queued", "running"}:
+            return prefix + "原委托在途，请等待；如有疑问先用read_checkpoint核对状态。"
+        return (prefix + "请先用read_checkpoint核对状态和未结算操作；如果复核者正在处理其他工作，先等待其结束。需要跟进且复核者没有在途工作时，"
+                f"用continue_work(assignment_seq={message.seq}, instruction=具体下一步)继续原委托，"
+                "由原复核者登记结论，不重复送审或重放未知操作。")
+
     def request(self, task_id, role, arguments, tool_start, assignment):
         with self.rt.log.atomic():
             self._guard(task_id, role, tool_start)
@@ -235,6 +264,10 @@ class TeamReviews:
             overlapping = [r for r in self.view(task_id) if r["status"] != "stale"
                            and {a["filename"] for a in r["artifacts"]} & {a["filename"] for a in selected}]
             if previous is None and overlapping:
+                hint = next((hint for r in overlapping
+                             if (hint := self._pending_request_hint(task_id, role, r, seqs))), None)
+                if hint:
+                    raise WorkConflict(hint)
                 raise WorkConflict("这份成果已有复核记录；请用review_seq承接原修复闭环，不另开一份覆盖它。")
             if previous and previous["reviewer"] != reviewer.id:
                 return {"status": "error", "code": "reviewer_mismatch", "complete": True,
@@ -242,6 +275,9 @@ class TeamReviews:
                         "expected_reviewer": previous["reviewer"],
                         "message": f"修订应交回原复核者 {previous['reviewer']}，请保留该reviewer和当前review_seq。"}
             if previous and not any(a["seq"] > previous.get("decision_seq", previous["request_seq"]) for a in selected):
+                hint = self._pending_request_hint(task_id, role, previous, seqs)
+                if hint:
+                    raise WorkConflict(hint)
                 raise WorkConflict("尚未发布本轮反馈后的新提交；请先发布当前实际成果，再交回复核，不沿用旧提交序号。")
             refs = [{k: a[k] for k in ("seq", "filename", "content_sha256")} for a in selected]
             request = self.rt.log.emit(type="team.review_requested", actor=HOST, task_id=task_id, payload={
@@ -292,9 +328,9 @@ class TeamReviews:
             decision = self.rt.log.emit(type="team.review_recorded", actor=HOST, task_id=task_id, payload={
                 "root_seq": row["root_seq"], "review_seq": row["request_seq"], "reviewer": role.id,
                 "verdict": verdict, "feedback": feedback, "run_id": tool_start.payload["run_id"]})
-            text = ("复核通过。" if verdict == "approved" else "本轮需要修复，尚未验收。") + feedback
-            text += ("\n请收齐这版成果与相关工作回报，再向原委托人交回或由店长整体交付。若继续修改，需将新版再次交回复核。" if verdict == "approved" else
-                     f"\n请协调实际修复并取得新版后，调用request_review，review_seq={row['request_seq']}，仍交给我复核；不把修复自述当成验收。")
+            from .review_report_text import review_report_text
+
+            text = review_report_text(verdict, feedback, row["request_seq"])
             sent = self.rt.team._send(task_id, role, row["author"], text, "report", reply_to=message.seq,
                                       visible=True, review_seq=row["request_seq"])
             return {"status": "ok", "review_seq": row["request_seq"], "decision_seq": decision.seq,

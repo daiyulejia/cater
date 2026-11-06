@@ -3,10 +3,10 @@ import type { ReactNode } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import { AtSign, Cat, RefreshCw, X } from 'lucide-react'
 
-export type TeamAvailability = { checked_at: string; all_available: boolean; members: { role_id: string; status: string; reason: string }[] }
+export type TeamAvailability = { checked_at: string; all_available: boolean; members: { role_id: string; status: string; reason: string }[]; usage_warnings?: { role_id: string; code: string }[] }
 type Member = { id: string; name: string }
 const labels: Record<string, string> = { available: '营业', demo: '演示中', on_leave: '休假', unverified: '待确认' }
-const reasons: Record<string, string> = { local_policy: '本地调度就绪', local_demo: '本地演示，未调用真实模型', budget_exhausted: 'Cater 的已报告用量预算已耗尽', invalid_budget: '预算配置需要修正', missing_key: '尚未提供模型凭据', not_configured: '尚未配置连接', circuit_open: '连接连续失败，已暂停调用', recent_failure: '共用通道最近一次调用失败，当前可用性待确认', recent_success: '近五分钟内调用成功', not_recently_checked: '尚无近期调用证据' }
+const reasons: Record<string, string> = { local_policy: '本地调度就绪', local_demo: '本地演示，未调用真实模型', budget_exhausted: 'Cater 的已报告用量预算已耗尽', invalid_budget: '预算配置需要修正', usage_inconsistent: '用量记录矛盾，预算无法可靠累计；请核对账单并配置新通道的剩余额度', missing_key: '尚未提供模型凭据', not_configured: '尚未配置连接', circuit_open: '连接连续失败，已暂停调用', recent_failure: '共用通道最近一次调用失败，当前可用性待确认', recent_success: '近五分钟内调用成功', not_recently_checked: '尚无近期调用证据' }
 
 function teamSummary(members: Member[], availability?: TeamAvailability): string {
   if (!members.length || !availability?.members.length) return '状态待确认'
@@ -26,6 +26,7 @@ export function TeamDirectory({ members, availability, open, onOpenChange, refre
   const mentionChosen = useRef(false)
   const openingFocus = useRef<HTMLElement | null>(null)
   const states = new Map(availability?.members.map((member) => [member.role_id, member]) ?? [])
+  const warnings = new Set(Array.isArray(availability?.usage_warnings) ? availability.usage_warnings.filter((warning) => warning?.code === 'historical_source_unknown').map((warning) => warning.role_id) : [])
   const unique = [...new Map(members.map((member) => [member.id, member])).values()]
   const summary = teamSummary(unique, availability)
   return <Dialog.Root open={open} onOpenChange={(next) => { onOpenChange(next); if (next) onRefresh() }}>
@@ -42,6 +43,7 @@ export function TeamDirectory({ members, availability, open, onOpenChange, refre
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5 sm:px-8">
           {error && <p role="alert" className="mb-4 text-xs text-rose-700">{error}</p>}
+          {availability && <p className="mb-4 text-[11px] leading-5 text-[#829080]">若设置本地预算，它只累计已报告用量；未知、失败及并发或在途请求可能漏计，不是硬上限。</p>}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             {unique.map((member) => {
               const state = states.get(member.id)
@@ -50,6 +52,7 @@ export function TeamDirectory({ members, availability, open, onOpenChange, refre
                 {portrait(member.id)}<h2 className="mt-3 w-full break-words text-sm font-bold">{member.name}</h2>
                 <span className={`team-state mt-1 text-[11px] font-semibold team-state-${status}`}>{labels[status] ?? '待确认'}</span>
                 <p className="mt-2 min-h-10 text-[11px] leading-5 text-[#829080]">{reasons[state?.reason ?? 'not_recently_checked'] ?? '尚无可确认的状态'}</p>
+                {warnings.has(member.id) && <p className="text-[11px] leading-5 text-[#a36045]">历史用量组成项与总量不一致，来源协议未确认；本地累计可能不完整，请核对账单。</p>}
                 <button type="button" onClick={() => { mentionChosen.current = true; onMention(member.name); onOpenChange(false) }} className="mt-3 inline-flex min-w-0 max-w-full items-center gap-1 text-xs font-semibold text-[#a8624a] hover:text-[#7c4033]" aria-label={`点名 ${member.name}`} title={`点名 ${member.name}`}><AtSign size={14} className="shrink-0" /><span className="min-w-0 truncate">{member.name}</span></button>
               </article>
             })}

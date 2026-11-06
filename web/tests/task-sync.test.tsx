@@ -263,7 +263,7 @@ test('隐藏取消摘要请求，忽略已经取消的迟到响应', async () =>
 test('摘要错误后可恢复，使用相同访问令牌且不读取旧列表接口', async () => {
   handler = (url) => url === '/api/task-summaries' ? new Response('temporary error', { status: 503 }) : undefined
   await mount()
-  expect(screen.getByRole('alert').textContent).toBe('temporary error')
+  expect(screen.getByRole('alert').textContent).toBe('请求未完成（HTTP 503），请核对后重试。')
   handler = () => undefined
   await tick()
   expect(screen.queryByRole('alert')).toBeNull()

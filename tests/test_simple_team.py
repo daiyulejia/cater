@@ -79,7 +79,7 @@ class SimpleTeamTests(unittest.TestCase):
                 turn("说明已准备好；实际转换尚未验证。")],
             self.worker: [turn("我先把使用方式和依赖交代清楚。", ("publish_artifact", {
                 "filename": "guide.md", "content": "# 使用说明\n安装转换引擎后上传文档。\n尚未执行转换。",
-                "summary": "工具使用说明与验证边界", "format": "markdown"})), turn("说明写好了，实际转换仍需验证。")],
+                "summary": "工具使用说明与验证边界", "format": "markdown"})), turn("", ("return_work", {"text": "说明写好了，实际转换仍需验证。"}))],
         }
         self.rt.team.receive(self.task, "先整理工具说明", request_id="initial-message")
         self.run_ok()
@@ -264,19 +264,40 @@ class SimpleTeamTests(unittest.TestCase):
         self.assertEqual(self.rt.task(self.task).deliverables[-1]["filename"], "fix.md")
 
     def test_worker_publishes_then_waits_still_wakes_manager_for_supervision(self):
+        def continue_after_rejection(context, history, tools):
+            finish, = [e.payload["result"] for e in self.events("team.tool_finished") if e.payload["name"] == "finish_work"]
+            self.assertEqual(finish["status"], "error")
+            self.assertIn(finish["code"], {"author_pending", "work_pending"})
+            self.assertEqual(self.rt.team.view(self.task)["status"], "running")
+            self.assertEqual(self.events("team.objective_completed"), [])
+            assignment, = [e for e in self.events("team.message_received") if e.payload["kind"] == "assignment"]
+            return turn("", ("continue_work", {"assignment_seq": assignment.seq,
+                "instruction": "请完成原委托并交回结果。"}), ("wait_for_reply", {}))
+
         self.driver.steps = {
             self.manager: [turn("", ("delegate", {"recipient": self.worker, "instruction": "写一份说明"})),
                 turn("", ("wait_for_reply", {})),
-                turn("我来检查刚发布的说明。", ("finish_work", {"summary": "说明已交付", "verification": "正文检查"})), turn("已准备好。")],
+                turn("我来检查刚发布的说明。", ("finish_work", {"summary": "说明已交付", "verification": "正文检查"})),
+                continue_after_rejection,
+                turn("", ("finish_work", {"summary": "说明已交付", "verification": "正文检查"}))],
             self.worker: [turn("", ("publish_artifact", {"filename": "note.md", "content": "实际说明", "format": "markdown", "summary": "说明"})),
-                turn("", ("wait_for_reply", {}))],
+                turn("", ("wait_for_reply", {})), turn("", ("return_work", {"text": "说明已完成并交回。"}))],
         }
         self.rt.team.receive(self.task, "安排伙伴写说明", request_id="publish-then-wait")
         self.run_ok()
-        self.assertEqual(self.rt.team.view(self.task)["status"], "done")
         updates = [e for e in self.events("team.message_received") if e.payload["kind"] == "progress"]
         self.assertEqual(len(updates), 1)
         self.assertIn("note.md", updates[0].payload["text"])
+        self.assertEqual(self.rt.team.view(self.task)["status"], "done")
+        results = [e for e in self.events("team.tool_finished") if e.payload["name"] in {"finish_work", "continue_work", "return_work"}]
+        self.assertEqual([e.payload["name"] for e in results], ["finish_work", "continue_work", "return_work", "finish_work"])
+        self.assertTrue(all(e.payload["result"]["status"] == "ok" for e in results[1:]))
+        report, = [e for e in self.events("team.message_received") if e.payload["kind"] == "report"]
+        assignment, = [e for e in self.events("team.message_received") if e.payload["kind"] == "assignment"]
+        self.assertEqual(report.payload["reply_to"], assignment.seq)
+        self.assertLess(report.seq, results[-1].seq)
+        artifact, = self.rt.task(self.task).deliverables
+        self.assertEqual((artifact["filename"], artifact["content"]), ("note.md", "实际说明"))
 
 
 if __name__ == "__main__":

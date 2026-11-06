@@ -43,6 +43,7 @@ import type { ChatFilter } from './ChatFilters'
 import { WorkspacePanel, WorkspaceToolProgress } from './WorkspacePanel'
 import type { WorkspaceBinding, WorkspaceOption } from './WorkspacePanel'
 import { controlLabels, executionLabel } from './executionControl'
+import { safeAuditBlocked } from './activityDiagnostics'
 import type { ControlAction, ExecutionControl } from './executionControl'
 import { clearCreationRecovery, CREATION_RECOVERY_TTL, loadCreationRecovery, readAccessToken, saveCreationRecovery } from './creationRecovery'
 import type { CreationAttempt } from './creationRecovery'
@@ -83,7 +84,7 @@ type MemoryItem = { seq: number; task_id?: string; actor?: string; title: string
 type OrgRole = { id: string; name: string; role: string; charter?: string }
 type DriverCoverage = { role_id: string; name: string; driver: string; mode: 'local_demo' | 'external' }
 type Organization = { leader: OrgRole; cabinet: OrgRole[]; workers: OrgRole[]; mode?: 'local_demo' | 'mixed_driver' | 'external_driver'; worker_drivers?: DriverCoverage[]; availability?: TeamAvailability }
-type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed'; active: boolean; revision?: number; instance_id?: string; error?: string; follow_up?: { action?: string } }
+type Activity = { id?: string; action?: string; state: 'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'blocked'; active: boolean; revision?: number; instance_id?: string; error?: string; follow_up?: { action?: string } }
 type TaskSummary = { id: string; goal: string; project_id?: string | null; status: string; status_label: string; conversation_count?: number; latest_seq: number; version: number; evaluated_at?: number; observation_order?: number; activity?: Activity; execution_control?: ExecutionControl; team?: TeamSummary | null }
 type Task = {
   team?: TeamState | null
@@ -797,7 +798,11 @@ function conversationFor(events: Event[], identities: Record<string, OrgRole>, o
       const issues = Array.isArray(payload.issues) ? payload.issues.filter((item): item is string => typeof item === 'string') : []
       return [message('协作提醒', `这条发言需要补充：${disciplineText(issues)}。它不会直接影响团队决策。`, 'system', 'decision')]
     }
-    if (event.type === 'driver.budget_exhausted') return [message('协作预算提醒', `通道 ${String(payload.driver ?? '')} 已使用 ${String(payload.used_tokens ?? 0)} / ${String(payload.budget ?? 0)} 个已报告 token，本轮不再继续调用它。`, 'system', 'decision')]
+    if (event.type === 'driver.budget_exhausted') return [message('协作预算提醒', `通道 ${String(payload.driver ?? '')} 已报告 ${String(payload.used_tokens ?? 0)} / ${String(payload.budget ?? 0)} token，本轮不再继续调用它。未知、失败及并发或在途用量可能漏计；这不是硬上限。`, 'system', 'decision')]
+    if (event.type === 'driver.usage_inconsistent') {
+      if (event.actor.kind !== 'system' || event.actor.id !== 'driver_gateway' || payload.usage_issue !== 'total_below_reported_components') return []
+      return [message('用量记录异常', payload.budget_enforced === true ? '服务商返回的用量总数与组成项矛盾，当时已配置本地预算。预算只累计已报告用量，不是硬上限；请核对账单，当前通道状态以成员状态为准。' : '服务商返回的用量总数与组成项矛盾，当时未配置本地预算；实际用量请核对账单。', 'system', 'decision')]
+    }
     if (event.type === 'driver.failed') return [message('已隔离的驱动异常', String(payload.message ?? ''), 'system')]
     return []
   })
@@ -1259,7 +1264,7 @@ function App() {
   const controlBusy = pending.has(controlKey)
   const executionControl = selectedId ? executionControls[selectedId] : undefined
   const executionState = executionControl?.state ?? 'running'
-  const currentStatusLabel = task ? loading ? '读取对话' : executionLabel(executionState) || taskListStatus(task, currentActivity) : undefined
+  const currentStatusLabel = task ? loading ? '读取对话' : safeAuditBlocked(currentActivity) ? '审计状态受阻，需核对' : executionLabel(executionState) || taskListStatus(task, currentActivity) : undefined
   const clarificationBlocked = controlBusy || executionState !== 'running'
   const clarificationBlockedReason = executionState === 'cancelled' ? '任务已取消，继续执行需新建任务。仍可直接聊天。'
     : executionState === 'paused' ? '任务已暂停，提交澄清前需恢复执行。仍可直接聊天。' : '正在确认执行控制请求，请稍候再提交澄清。仍可直接聊天。'

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from .drivers import OpenAICompatibleDriver, driver_mode
 from .anthropic import AnthropicMessagesDriver
+from .events import Actor
 from .usage import valid_token_count
 
 if TYPE_CHECKING:
@@ -17,12 +18,14 @@ if TYPE_CHECKING:
 def team_availability(rt: Runtime) -> dict[str, Any]:
     totals: dict[str, int] = {}
     budgeted = {name for name, driver in rt.drivers.items() if valid_token_count(getattr(driver, "token_budget", None))}
-    for event in rt.log.iter_events(event_types=("msg.said", "msg.challenge", "question.finished", "conversation.finished", "collaboration.finished", "verification.planned", "workspace.model_called", "team.model_called")) if budgeted else ():
+    evidence = rt._budget_usage_evidence(budgeted)
+    for event in rt.log.iter_events(event_types=("msg.said", "msg.challenge", "question.finished", "conversation.finished", "collaboration.finished", "verification.planned", "workspace.model_called", "team.model_called", "driver.probe_called")) if budgeted else ():
         name = event.payload.get("driver")
-        if isinstance(name, str) and name in budgeted and event.payload.get("token_usage") == "reported" and valid_token_count(event.payload.get("tokens")):
+        if isinstance(name, str) and name in budgeted and event.payload.get("token_usage") == "reported" and valid_token_count(event.payload.get("tokens")) and (event.type != "driver.probe_called" or event.actor == Actor.system("driver_gateway")):
             totals[name] = totals.get(name, 0) + event.payload["tokens"]
     leader = rt.organization.leader
     members = [] if leader.driver else [{"role_id": leader.id, "status": "available", "reason": "local_policy"}]
+    warnings = []
     states = {}
     roles = [*([leader] if leader.driver else []), *rt.cabinet_roles, *rt.worker_roles]
     for role in {role.id: role for role in roles}.values():
@@ -33,6 +36,8 @@ def team_availability(rt: Runtime) -> dict[str, Any]:
                 state = ("on_leave", "not_configured")
             elif budget is not None and not valid_token_count(budget):
                 state = ("on_leave", "invalid_budget")
+            elif evidence.get(role.driver, {}).get("native_conflict"):
+                state = ("on_leave", "usage_inconsistent")
             elif valid_token_count(budget) and totals.get(role.driver, 0) >= budget:
                 state = ("on_leave", "budget_exhausted")
             elif isinstance(driver, (OpenAICompatibleDriver, AnthropicMessagesDriver)) and not os.environ.get(driver.api_key_env):
@@ -47,4 +52,10 @@ def team_availability(rt: Runtime) -> dict[str, Any]:
             states[role.driver] = state
         status, reason = states[role.driver]
         members.append({"role_id": role.id, "status": status, "reason": reason})
-    return {"checked_at": datetime.now(timezone.utc).isoformat(), "members": members, "all_available": all(item["status"] == "available" for item in members)}
+        if evidence.get(role.driver, {}).get("historical_source_unknown"):
+            warnings.append({"role_id": role.id, "code": "historical_source_unknown"})
+    result = {"checked_at": datetime.now(timezone.utc).isoformat(), "members": members,
+              "all_available": all(item["status"] == "available" for item in members)}
+    if warnings:
+        result["usage_warnings"] = warnings
+    return result

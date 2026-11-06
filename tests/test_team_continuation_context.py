@@ -167,7 +167,8 @@ class ContinuationContextTests(unittest.TestCase):
             self.native_turn('', ('finish_work', {'summary': '原委托的说明已交付', 'verification': '只核对文件正文'})),
             self.native_turn('说明已交回，转换执行仍未验证。')], self.worker: [
             self.native_turn('', ('publish_artifact', {'filename': 'guide.md', 'content': '# 接续结果\n未执行转换。',
-                'summary': '实际保存的说明', 'format': 'markdown'})), self.native_turn('原委托已完成，说明已保存。')]}
+                'summary': '实际保存的说明', 'format': 'markdown'})),
+            self.native_turn('', ('return_work', {'text': '原委托已完成，说明已保存。'}))]}
         progress = self.rt.team.receive(self.task, '现在原工作进行到哪里了', request_id='continuation-context-native')
         message, role, started = self.rt.team._claim(self.task)
         self.assertEqual((message.seq, role.id), (progress.seq, self.manager))
@@ -195,8 +196,8 @@ class ContinuationContextTests(unittest.TestCase):
         self.assertEqual(self.rt.team.view(self.task)['status'], 'done')
         artifact, = self.rt.task(self.task).deliverables
         delivery, = self.events('team.objective_completed')
-        self.assertLess(resumed.seq, returned.seq)
-        self.assertLess(returned.seq, delivery.seq)
+        self.assertLess(returned.seq, resumed.seq)
+        self.assertLess(resumed.seq, delivery.seq)
         self.assertEqual(delivery.payload['artifacts'][0]['seq'], artifact['seq'])
         body = Path(artifact['local_path']).read_bytes()
         with zipfile.ZipFile(io.BytesIO(self.rt.team.archive(self.task))) as archive:
@@ -225,8 +226,8 @@ class ContinuationContextTests(unittest.TestCase):
                 return self.native_turn('', ('request_review', arguments))
             if rows and rows[0]['status'] == 'approved':
                 author_returns.append(context['active_assignment']['seq'])
-                return self.native_turn('', ('send_message', {'recipient': self.manager, 'reply_to': source.seq,
-                    'text': '最终说明已通过原复核者核对；尚未执行转换。'}), ('wait_for_reply', {}))
+                return self.native_turn('', ('return_work', {
+                    'text': '最终说明已通过原复核者核对；尚未执行转换。'}))
             index = len(self.rt.task(self.task).deliverables)
             return self.native_turn('', ('publish_artifact', {'filename': 'guide.md', 'content': versions[index],
                 'summary': f'第{index + 1}版说明', 'format': 'markdown'}))
@@ -273,7 +274,7 @@ class ContinuationContextTests(unittest.TestCase):
         self.assertLess(decisions[-1].seq, returns[0].seq)
         self.assertLess(returns[0].seq, delivery.seq)
         attempts = [e.payload['result'] for e in self.events('team.tool_finished') if e.payload['name'] == 'finish_work']
-        self.assertEqual([r.get('code') for r in attempts], ['work_pending', None])
+        self.assertEqual([r.get('code') for r in attempts], ['review_pending', None])
         self.assertEqual(self.rt.team.view(self.task)['status'], 'done')
         self.assertEqual(self.rt.team.recovery.assignments(self.task), [])
         with zipfile.ZipFile(io.BytesIO(self.rt.team.archive(self.task))) as archive:

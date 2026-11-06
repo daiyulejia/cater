@@ -125,10 +125,10 @@ test('HTTP、网络和409错误保留单选、自填和 request_id，切任务�
     if (!url.endsWith('/clarifications')) return
     attempts += 1
     if (attempts === 2) return Promise.reject(new Error('网络中断'))
-    return new Response(attempts === 1 ? '暂时无法保存' : '问题状态需要刷新', { status: attempts === 1 ? 503 : 409 })
+    return new Response(attempts === 1 ? '暂时无法保存' : '这个问题已回答或已随新方向失效，请刷新对话。', { status: attempts === 1 ? 503 : 409 })
   }
   await click('确认补充')
-  expect(screen.getByRole('alert').textContent).toContain('暂时无法保存')
+  expect(screen.getByRole('alert').textContent).not.toContain('暂时无法保存')
   expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   expect(body()).toEqual({ question_seq: 2, kind: 'custom', answer: '优先已有会员', request_id: expect.any(String) })
   await refresh(); await selectTask('a')
@@ -139,7 +139,7 @@ test('HTTP、网络和409错误保留单选、自填和 request_id，切任务�
   await click('确认补充')
   expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   await click('确认补充')
-  expect(screen.getByRole('alert').textContent).toBe('问题状态需要刷新')
+  expect(screen.getByRole('alert').textContent).toBe('这个问题已回答或已随新方向失效，请刷新对话。')
   expect(body(1)).toEqual(body()); expect(body(2)).toEqual(body())
   fireEvent.change(screen.getByRole('textbox', { name: '你的补充' }), { target: { value: '修改过' } })
   fireEvent.change(screen.getByRole('textbox', { name: '你的补充' }), { target: { value: '  优先已有会员  ' } })
@@ -181,7 +181,7 @@ test('切任务后的迟到失败不串错误，返回原任务仍保留选择�
   expect(screen.queryByRole('alert')).toBeNull()
   expect((screen.getByRole('radio', { name: options[0] }) as HTMLInputElement).checked).toBe(false)
   await selectTask('b')
-  expect(screen.getByRole('alert').textContent).toContain('乙的失败')
+  expect(screen.getByRole('alert').textContent).not.toContain('乙的失败')
   expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   expect((screen.getByRole('radio', { name: options[0] }) as HTMLInputElement).checked).toBe(true)
   handler = (url) => url.endsWith('/clarifications') ? new Response('再试', { status: 503 }) : undefined

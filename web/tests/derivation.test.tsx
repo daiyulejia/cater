@@ -120,7 +120,7 @@ test('HTTP 与网络失败后重试保持同一 UUID 和请求体，轮询不影
   }
   begin(); write(derivedInput(), '重试同一目标')
   await send()
-  expect(screen.getByRole('alert').textContent).toContain('暂时不能创建')
+  expect(screen.getByRole('alert').textContent).not.toContain('暂时不能创建')
   expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   expect(derivedInput().value).toBe('重试同一目标')
   await act(async () => { await vi.advanceTimersByTimeAsync(4000) })
@@ -217,7 +217,7 @@ test('迟到错误只属于原提交，不污染另一任务或新编辑', async
   expect(screen.queryByText(/乙创建失败/)).toBeNull()
   expect(originalInput().value).toBe('甲的草稿')
   await select('b'); begin()
-  expect(screen.getByRole('alert').textContent).toContain('乙创建失败')
+  expect(screen.getByRole('alert').textContent).not.toContain('乙创建失败')
   expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   write(derivedInput(), '新的提交')
   expect(screen.queryByRole('alert')).toBeNull()

@@ -8,7 +8,7 @@ import re
 import sqlite3
 
 from .artifacts import safe_filename
-from .events import Actor, GENESIS_HASH
+from .events import Actor, Event, GENESIS_HASH
 from .json_fields import UNAMBIGUOUS_OBJECT_SQL
 from .tool_protocol import json_utf8
 from .team_delivery import saved_handoff_projection, saved_handoff_warning
@@ -97,8 +97,12 @@ class ProjectHistory:
                         actor = Actor(**json.loads(row["actor_json"]))
                         values = {key: row[key].decode("utf-8") if row[key] is not None else None for key in fields}
                     except (ValueError, TypeError, UnicodeError):
+                        if row['type'] == 'task.project_bound' and row['task_id'] in tasks:
+                            tasks[row['task_id']]['binding_unverified'] = True
                         continue
                     if actor != Actor.human():
+                        if row['type'] == 'task.project_bound' and row['task_id'] in tasks:
+                            tasks[row['task_id']]['binding_unverified'] = True
                         continue
                     task_id, kind = row["task_id"], row["type"]
                     if kind == "project.created" and values["id"] and _text(values["name"]):
@@ -107,8 +111,11 @@ class ProjectHistory:
                         project = values["project_id"]
                         tasks[task_id] = {"created_seq": row["seq"], "project_id": project if project in projects else None,
                                           "isolated": bool(row["isolated"])}
-                    elif kind == "task.project_bound" and task_id in tasks and values["project_id"] in projects:
+                    elif kind == "task.project_bound" and task_id in tasks:
+                        if values["project_id"] not in projects:
+                            raise _MetadataUnavailable("项目绑定无法核对，未沿用旧项目范围。")
                         tasks[task_id]["project_id"] = values["project_id"]
+                        tasks[task_id].pop('binding_unverified', None)
             finally:
                 cursor.close()
         except sqlite3.Error:
@@ -129,11 +136,8 @@ class ProjectHistory:
             raise _MetadataUnavailable("项目历史目标查询不可用。") from None
 
     def available(self, task_id):
-        try:
-            current = self._state(self._anchor()["as_of_seq"]).get(task_id)
-        except _MetadataUnavailable:
-            return False
-        return bool(current and current["project_id"] and not current["isolated"])
+        # Match the checks used by the actual catalog, including provenance.
+        return self.index(task_id)["available"]
 
     @staticmethod
     def public_arguments(arguments):
@@ -168,9 +172,55 @@ class ProjectHistory:
             names.add(ref["filename"])
         return value
 
-    def _latest(self, task_id, goal, seq):
-        boundary, objective, started, runs, latest = None, goal, False, {}, None
-        for event in self.rt.log.iter_events(task_id=task_id, event_types=_OUTCOMES, before_seq=seq + 1):
+    def _latest(self, task_id, created_seq, seq):
+        from .team_review_direction import effective_objectives
+        # Metadata projection intentionally never loads another task's raw
+        # customer messages, task creation payload, tool arguments or output.
+        # The selected delivery and its goal are read separately, in scope.
+        sql = """SELECT seq,id,ts,task_id,actor_json,type,category,prev_hash,hash,key_id,signature,
+            CASE type
+              WHEN 'human.commanded' THEN json_patch(json_object('intent',json_extract(payload_json,'$.intent'),
+                    'direction_semantics',json_extract(payload_json,'$.direction_semantics'),
+                    '_goal_type',json_type(payload_json,'$.goal'),
+                    '_goal_nonempty',CASE WHEN json_type(payload_json,'$.goal')='text' AND length(json_extract(payload_json,'$.goal'))>0 THEN 1 ELSE 0 END),
+                    json_patch(CASE WHEN json_type(payload_json,'$.goal') IS NOT NULL THEN '{"goal":"present"}' ELSE '{}' END,
+                               CASE WHEN json_type(payload_json,'$.acceptance') IS NOT NULL THEN '{"acceptance":[]}' ELSE '{}' END))
+              WHEN 'human.decided' THEN json_object('resolution',json_extract(payload_json,'$.resolution'))
+              WHEN 'team.message_received' THEN json_object('recipient',json_extract(payload_json,'$.recipient'),
+                                                            'kind',json_extract(payload_json,'$.kind'))
+              WHEN 'team.run_started' THEN json_object('run_id',json_extract(payload_json,'$.run_id'),
+                    'role',json_extract(payload_json,'$.role'), 'message_seq',json_extract(payload_json,'$.message_seq'),
+                    'work_direction_seq',json_extract(payload_json,'$.work_direction_seq'),
+                    'work_direction_hash',json_extract(payload_json,'$.work_direction_hash'))
+              WHEN 'team.objective_updated' THEN json_object('run_id',json_extract(payload_json,'$.run_id'),'goal','')
+              WHEN 'team.objective_completed' THEN json_object('run_id',json_extract(payload_json,'$.run_id'))
+              ELSE '{}' END AS metadata_payload
+            FROM events WHERE task_id=? AND seq < ? AND type IN
+              ('task.created','human.commanded','human.decided','team.message_received','team.run_started',
+               'team.objective_updated','team.objective_completed') ORDER BY seq"""
+        try:
+            events = []
+            for row in self.rt.log.db.execute(sql, (task_id, seq + 1)):
+                payload = json.loads(row['metadata_payload'])
+                # Older starts had no explicit direction fields.
+                if row['type'] == 'team.run_started' and payload['work_direction_seq'] is None and payload['work_direction_hash'] is None:
+                    payload.pop('work_direction_seq'); payload.pop('work_direction_hash')
+                events.append(Event(seq=row['seq'], id=row['id'], ts=row['ts'], task_id=row['task_id'],
+                    actor=Actor(**json.loads(row['actor_json'])), type=row['type'], category=row['category'],
+                    payload=payload, prev_hash=row['prev_hash'], hash=row['hash'], key_id=row['key_id'], signature=row['signature']))
+        except (sqlite3.Error, ValueError, TypeError):
+            raise _MetadataUnavailable('项目历史来源元数据无法核对。') from None
+        effective = effective_objectives(events)
+        starts = list(self.rt.log.iter_events(task_id=task_id, event_types=('team.started',), before_seq=seq + 1))
+        boundary, objective_seq, started, runs, latest, unverified = None, None, False, {}, None, 0
+        uncertain_objective = False
+        for event in sorted([*events, *starts], key=lambda item: item.seq):
+            if event.actor == Actor.human() and event.type == 'human.commanded':
+                from .team_review_direction import changes_direction
+                if changes_direction(event.payload) and event.payload.get('_goal_nonempty'):
+                    objective_seq, uncertain_objective = event.seq, False
+                elif changes_direction(event.payload) and event.payload.get('_goal_type') not in (None, 'null', 'text'):
+                    uncertain_objective = True
             if event.actor != HOST:
                 continue
             p = event.payload
@@ -178,30 +228,64 @@ class ProjectHistory:
                 started = type(p.get("version")) is int and p["version"] == 1
                 boundary = event.seq
             elif event.type == "team.objective_updated":
-                boundary, objective = event.seq, p.get("goal")
+                if event.seq not in effective:
+                    run = runs.get(p.get('run_id')) if isinstance(p.get('run_id'), str) else None
+                    source = next((e for e in events if run is not None and e.seq == run.payload.get('message_seq')
+                                   and e.type == 'team.message_received'), None)
+                    if source is None or source.actor.kind in {'agent', 'system'}:
+                        uncertain_objective = True
+                        unverified = event.seq
+                    continue
+                boundary, objective_seq = event.seq, event.seq
+                uncertain_objective = False
             elif event.type == "team.run_started" and isinstance(p.get("run_id"), str):
                 runs[p["run_id"]] = event
             elif event.type == "team.objective_completed":
+                if uncertain_objective:
+                    unverified = event.seq
+                    continue
+                if event.seq not in effective:
+                    # This metadata-only view deliberately omits messages and
+                    # tool bodies needed to authenticate an agent/recovery
+                    # source. Do not silently present an incomplete catalog.
+                    run = runs.get(p.get('run_id')) if isinstance(p.get('run_id'), str) else None
+                    source = next((e for e in events if run is not None
+                                   and e.seq == run.payload.get('message_seq')
+                                   and e.type == 'team.message_received'), None)
+                    if source is not None and source.actor.kind in {'agent', 'system'}:
+                        unverified = event.seq
+                    continue
                 run = runs.get(p.get("run_id")) if isinstance(p.get("run_id"), str) else None
-                refs = self._refs(p.get("artifacts"), event.seq)
-                if (not started or run is None or run.seq >= event.seq or refs is None
+                if (not started or run is None or run.seq >= event.seq
                         or not isinstance(run.payload.get("role"), str) or not run.payload["role"]
                         or not _positive(run.payload.get("message_seq")) or run.payload["message_seq"] >= run.seq
-                        or type(p.get("objective_seq")) is not int or p["objective_seq"] != boundary
-                        or not _text(objective) or not _text(p.get("summary")) or not _text(p.get("verification"))):
+                        ):
                     continue
                 source_seq = run.payload["message_seq"]
-                source = next(self.rt.log.iter_events(task_id=task_id, event_types=("team.message_received",),
-                    after_seq=source_seq - 1, before_seq=source_seq + 1), None)
+                source = next((e for e in events if e.seq == source_seq and e.type == 'team.message_received'), None)
                 if source is None or source.payload.get("recipient") != run.payload["role"]:
                     continue
-                latest = {"event": event, "objective": objective, "artifacts": refs}
+                full = next(self.rt.log.iter_events(task_id=task_id, event_types=('team.objective_completed',),
+                            after_seq=event.seq - 1, before_seq=event.seq + 1), None)
+                refs = self._refs(full.payload.get('artifacts'), event.seq) if full else None
+                if (full is None or refs is None or type(full.payload.get('objective_seq')) is not int
+                        or full.payload['objective_seq'] != boundary
+                        or not _text(full.payload.get('summary')) or not _text(full.payload.get('verification'))):
+                    continue
+                objective = self._goal(objective_seq if objective_seq is not None else created_seq)
+                if not _text(objective):
+                    raise _MetadataUnavailable('项目历史目标无法核对，未沿用旧目标。')
+                latest = {"event": full, "objective": objective, "artifacts": refs}
+        if unverified and (latest is None or unverified > latest['event'].seq):
+            raise _MetadataUnavailable('项目历史交付来源需要完整证据，元数据视图未认证。')
         return latest
 
     def _catalog(self, task_id, as_of_seq=None, *, expected_project_id=None):
         head = self._anchor()
         current = self._state(head["as_of_seq"])
         target = current.get(task_id)
+        if target and target.get('binding_unverified'):
+            raise _MetadataUnavailable('项目绑定身份异常，范围无法核对。')
         if not target or not target["project_id"] or target["isolated"]:
             if expected_project_id is not None:
                 raise _ScopeChanged("项目范围已不可用。")
@@ -211,15 +295,22 @@ class ProjectHistory:
         anchor = head if as_of_seq is None else self._anchor(as_of_seq)
         past = current if anchor == head else self._state(anchor["as_of_seq"])
         original = past.get(task_id)
+        if original and original.get('binding_unverified'):
+            raise _MetadataUnavailable('历史项目绑定身份异常，范围无法核对。')
         if not original or original["project_id"] != target["project_id"] or original["isolated"]:
             raise ValueError("本群项目与历史目录版本不一致。")
         rows = []
         for source, state in past.items():
             now = current.get(source)
+            relevant = (source != task_id and not state['isolated'] and
+                        (state['project_id'] == target['project_id'] or
+                         now is not None and not now['isolated'] and now['project_id'] == target['project_id']))
+            if relevant and (state.get('binding_unverified') or now is not None and now.get('binding_unverified')):
+                raise _MetadataUnavailable('同项目历史来源的项目绑定无法核对，目录不完整。')
             if (source == task_id or state["isolated"] or state["project_id"] != target["project_id"]
                     or now is None or now["isolated"] or now["project_id"] != target["project_id"]):
                 continue
-            latest = self._latest(source, self._goal(state["created_seq"]), anchor["as_of_seq"])
+            latest = self._latest(source, state["created_seq"], anchor["as_of_seq"])
             if latest:
                 rows.append(latest)
         return {**anchor, "project_id": target["project_id"], "rows": sorted(rows, key=lambda row: row["event"].seq, reverse=True)}

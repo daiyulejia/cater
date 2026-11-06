@@ -14,11 +14,12 @@ from .tool_protocol import json_utf8, strict_json
 
 
 class NativeResponse(dict):
-    __slots__ = ('cleanup_failed',)
+    __slots__ = ('cleanup_failed', 'cleanup_confirmed')
 
     def __init__(self, value):
         super().__init__(value)
         self.cleanup_failed = False
+        self.cleanup_confirmed = False
 
 
 def cleanup_failed(value):
@@ -189,6 +190,16 @@ def iter_request(*, endpoint, body, headers, name, timeout, byte_limit, check_cu
                     primary.native_cleanup_failed = True
                 else:
                     raise DriverUnavailable('Native API transport cleanup was not confirmed')
+            if (response is not None and not response.cleanup_failed and not cleanup_problem
+                    and scope is not None and process.returncode == 0 and read_done.is_set()
+                    and reader is not None and writer is not None
+                    and not reader.is_alive() and not writer.is_alive()
+                    and process.stdin.closed and process.stdout.closed):
+                response.cleanup_confirmed = True
+
+
+# Identity check for evidence; replacement transports are not attested.
+NATIVE_ITER_REQUEST = iter_request
 
 
 def _error(error):

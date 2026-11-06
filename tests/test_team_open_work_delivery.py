@@ -29,7 +29,7 @@ class OpenWorkDeliveryTests(unittest.TestCase):
             self.worker: [
                 turn('', ('publish_artifact', {'filename': 'guide.md', 'content': '# 使用说明\n需要转换引擎，未执行转换。',
                     'summary': '说明与边界', 'format': 'markdown'})),
-                turn('使用说明已写好，尚未运行转换。'),
+                turn('', ('return_work', {'text': '使用说明已写好，尚未运行转换。'})),
             ],
         }
         self.rt.team.receive(self.task, '请写一份使用说明', request_id='open-work-before-first-file')
@@ -143,24 +143,49 @@ class OpenWorkDeliveryTests(unittest.TestCase):
         self.assertEqual(self.finish(role, tool)['status'], 'ok')
         self.assertEqual(self.driver.calls, [])
 
-    def test_waiting_result_does_not_require_a_purely_formal_report(self):
+    def test_waiting_progress_requires_explicit_return_before_delivery(self):
         _, role, _, tool = self.finish_input()
         assignment = self.rt.team._send(self.task, role, self.worker, '请给出依赖分析', 'assignment')
         _, worker, run = self.rt.team._claim(self.task)
         self.rt.log.emit(type='team.run_finished', task_id=self.task, actor=HOST,
             payload={**run.payload, 'status': 'waiting'})
         self.rt.team._send(self.task, worker, role.id, '分析已给出：需要外部转换引擎，尚未运行。', 'progress', reply_to=assignment.seq)
+        result = self.finish(role, tool)
+        self.assertEqual(result['code'], 'work_pending')
+        self.assertEqual([row['seq'] for row in result['assignments']], [assignment.seq])
+        self.assertEqual(self.events('team.objective_completed'), [])
+        self.rt.team._send(self.task, worker, role.id, '分析结果：需要外部转换引擎，尚未运行。', 'report', reply_to=assignment.seq)
         self.assertEqual(self.finish(role, tool)['status'], 'ok')
 
     def manager_delivers_incoming(self, kind, *, resume=False):
-        source = self.rt.team._send(self.task, self.rt.team._role(self.worker), self.manager,
-                                   '请确认并交付这份无文件结论', kind)
+        worker = self.rt.team._role(self.worker)
+        customer = self.rt.team.receive(self.task, f'@{worker.name} 请委托店长核对结论',
+                                        request_id='open-work-worker-source')
+        claimed = self.rt.team._claim(self.task)
+        self.assertEqual(claimed[0].seq, customer.seq)
+        call = (('delegate', {'recipient': self.manager, 'instruction': '请确认并交付这份无文件结论'})
+                if kind == 'assignment' else
+                ('send_message', {'recipient': self.manager, 'text': '请确认并交付这份无文件结论'}))
+        self.driver.steps = {self.worker: [turn('', call, ('wait_for_reply', {}))]}
+        list(self.rt.team._run_message(self.task, *claimed))
+        receipt, = [e for e in self.events('team.tool_finished') if e.payload.get('name') == call[0]]
+        self.assertEqual(receipt.payload['result']['status'], 'ok')
+        source = next(e for e in self.events('team.message_received')
+                      if e.seq == receipt.payload['result']['message_seq'])
+        self.assertEqual(source.payload['kind'], kind)
         if resume:
             _, _, run = self.rt.team._claim(self.task)
             self.rt.log.emit(type='team.run_finished', task_id=self.task, actor=HOST,
                              payload={**run.payload, 'status': 'failed', 'reason': 'offline interruption'})
-            self.rt.team._send(self.task, self.rt.team._role(self.worker), self.manager,
-                              '核对已有结论后接续交付', 'continuation', continue_assignment_seq=source.seq)
+            message = self.rt.team.receive(self.task, f'@{worker.name} 请跟进原委托',
+                                           request_id='open-work-worker-continue')
+            continued = self.rt.team._claim(self.task)
+            self.assertEqual(continued[0].seq, message.seq)
+            self.driver.steps = {self.worker: [turn('', ('continue_work', {'assignment_seq': source.seq,
+                'instruction': '核对已有结论后接续交付'}), ('wait_for_reply', {}))]}
+            list(self.rt.team._run_message(self.task, *continued))
+            receipt, = [e for e in self.events('team.tool_finished') if e.payload.get('name') == 'continue_work']
+            self.assertEqual(receipt.payload['result']['status'], 'ok')
         self.driver.steps = {self.manager: [
             turn('', ('finish_work', {'summary': '无文件结论已交付', 'verification': '离线记录核对'})),
             turn('结论已交付，验证边界保留。'),
@@ -185,6 +210,18 @@ class OpenWorkDeliveryTests(unittest.TestCase):
 
     def test_resumed_manager_input_can_finish_its_original_failed_request(self):
         self.manager_delivers_incoming('assignment', resume=True)
+
+    def test_unpaired_member_message_cannot_create_delivery(self):
+        source = self.rt.team._send(self.task, self.rt.team._role(self.worker), self.manager,
+                                    '未配对宿主回执的消息', 'message')
+        message, role, run = self.rt.team._claim(self.task)
+        self.assertEqual(message.seq, source.seq)
+        tool = self.rt.log.emit(type='team.tool_started', task_id=self.task, actor=HOST, payload={
+            **run.payload, 'name': 'finish_work', 'call_id': 'unpaired-input', 'arguments': {}})
+        for _ in range(2):
+            result = self.finish(role, tool)
+            self.assertEqual((result['status'], result['code']), ('error', 'delivery_source_unverified'))
+        self.assertEqual(self.events('team.objective_completed'), [])
 
     def test_other_queued_manager_request_is_not_the_current_input(self):
         _, role, _, tool = self.finish_input()

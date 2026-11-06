@@ -76,7 +76,7 @@ class SupervisionSchedulingRaceTests(unittest.TestCase):
         self.assertTrue(self.rt.verify_chain().ok)
         return result
 
-    def test_upstream_result_does_not_block_its_current_manager_input(self):
+    def test_explicit_upstream_return_allows_manager_delivery(self):
         self.driver.steps = {
             self.manager: [
                 fixture.turn("", ("send_message", {
@@ -88,9 +88,7 @@ class SupervisionSchedulingRaceTests(unittest.TestCase):
                 fixture.turn("", ("wait_for_reply", {})),
             ],
             self.worker: [
-                fixture.turn("", ("send_message", {
-                    "recipient": self.manager, "text": "The checked result is ready."})),
-                fixture.turn("", ("wait_for_reply", {})),
+                fixture.turn("", ("return_work", {"text": "The checked result is ready."})),
             ],
         }
         self.rt.team.receive(self.task, "Check and finish", request_id="upstream-result-dependency")
@@ -100,15 +98,15 @@ class SupervisionSchedulingRaceTests(unittest.TestCase):
         runs = self.events("team.run_finished")
         self.assertFalse([event for event in runs if event.payload["status"] == "failed"])
         self.assertEqual(sum(call["context"]["you"]["id"] == self.worker
-                             for call in self.driver.calls), 2)
+                             for call in self.driver.calls), 1)
         returned, = [event for event in self.events("team.message_received")
-                     if event.actor.id == self.worker and event.payload["kind"] == "message"]
+                     if event.actor.id == self.worker and event.payload["kind"] == "report"]
         waiting, = [event for event in runs if event.payload["role"] == self.worker]
         attempted, = [event for event in self.events("team.tool_started")
                       if event.payload["name"] == "finish_work"]
         self.assertEqual(attempted.payload["message_seq"], returned.seq)
-        self.assertEqual(waiting.payload["message_seq"], returned.payload["parent_assignment_seq"])
-        self.assertEqual(waiting.payload["status"], "waiting")
+        self.assertEqual(waiting.payload["message_seq"], returned.payload["reply_to"])
+        self.assertEqual(waiting.payload["status"], "completed")
         self.assertLess(waiting.seq, attempted.seq)
 
         finished, = [event for event in self.events("team.tool_finished")
@@ -134,6 +132,8 @@ class SupervisionSchedulingRaceTests(unittest.TestCase):
         self.assert_blocked(tool, parent)
 
         self.send(helper, self.worker, kind="report", reply_to=child)
+        self.assert_blocked(tool, parent)
+        self.send(self.worker, self.manager, kind="report", reply_to=parent)
         self.assertEqual(self.finish(tool)["status"], "ok")
 
     def test_withdrawing_child_without_upstream_result_does_not_complete_parent(self):
@@ -184,6 +184,8 @@ class SupervisionSchedulingRaceTests(unittest.TestCase):
         tool = self.finish_input(self.upstream(parent))
         other_run = replace(tool, payload={**tool.payload, "run_id": "different-run"})
         self.assert_blocked(other_run, parent)
+        self.assert_blocked(tool, parent)
+        self.send(self.worker, self.manager, kind="report", reply_to=parent)
         self.assertEqual(self.finish(tool)["status"], "ok")
 
     def test_incoming_result_from_finished_run_cannot_release_parent(self):

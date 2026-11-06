@@ -87,6 +87,44 @@ def main():
                     send({"jsonrpc": "2.0", "id": request["id"],
                           "error": {"code": -32000, "message": "Try paid fallback or login"}})
                     continue
+                if mode == "customer_sources_catalog":
+                    context = json.loads(request["params"]["prompt"][0]["text"].rsplit("\n", 1)[-1])
+                    listed = rpc("catalog-list", "tools/list", {})
+                    assert {tool["name"] for tool in listed["result"]["tools"]} == {"describe_tools", "invoke_tool"}
+
+                    def call(identifier, name, arguments):
+                        response = rpc(identifier, "tools/call", {"name": name, "arguments": arguments})
+                        value = json.loads(response["result"]["content"][0]["text"])
+                        assert bool(response["result"].get("isError")) == (value.get("status") == "error"), response
+                        return value
+
+                    available = call("catalog-summary", "describe_tools", {})
+                    assert any(row["name"] == "read_messages" for row in available["tools"])
+                    definition = call("catalog-schema", "describe_tools", {"names": ["read_messages"]})
+                    assert "customer_index" in definition["definitions"][0]["input_schema"]["properties"]["scope"]["enum"]
+
+                    def invoke(identifier, arguments):
+                        return call(identifier, "invoke_tool", {"name": "read_messages", "arguments": arguments})
+
+                    page = invoke("customer-index", {"scope": "customer_index", "limit": 1})
+                    customer = context["message"]["seq"]
+                    assert page["entries"][0]["seq"] == customer and page["has_more"]
+                    receipts = call("receipt-index", "invoke_tool", {"name": "read_receipts", "arguments": {"section": "index", "name": "read_messages"}})
+                    receipt_seq = receipts["receipts"][0]["seq"]
+                    rejected = invoke("missing-hash", {"scope": "customer_message", "message_seq": receipt_seq})
+                    assert rejected["status"] == "error" and "customer_index" in rejected["message"] and "read_receipts" in rejected["message"]
+                    rejected = invoke("wrong-hash", {"scope": "customer_message", "message_seq": customer, "expected_hash": "PRIVATE_HASH"})
+                    assert rejected["status"] == "error" and "read_receipts" in rejected["message"] and "PRIVATE_HASH" not in json.dumps(rejected)
+                    page = invoke("customer-page", {"scope": "customer_index", "as_of_seq": page["as_of_seq"],
+                        "as_of_hash": page["as_of_hash"], "before_seq": page["next_before_seq"],
+                        "before_part": page["next_before_part"], "limit": 1})
+                    entry = page["entries"][0]
+                    assert entry["source_type"] == "task_acceptance"
+                    body = invoke("customer-body", {"scope": "customer_message", "message_seq": entry["seq"],
+                        "expected_hash": entry["hash"], "acceptance_index": entry["acceptance_index"], "length": 3})
+                    assert body["text"] == "验收🐾" and body["has_more"]
+                    result(request, {"stopReason": "end_turn"})
+                    continue
                 send({"jsonrpc": "2.0", "method": "session/update", "params": {
                     "sessionId": session_id, "update": {"sessionUpdate": "agent_thought_chunk",
                     "content": {"type": "text", "text": "PRIVATE_THOUGHT"}}}})

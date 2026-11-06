@@ -219,7 +219,14 @@ class ProjectHistoryTests(unittest.TestCase):
         self.rt.log.emit(type="project.created", actor=Actor.agent("dev", "developer"),
                          payload={"id": forged_project, "name": "Untrusted project"})
         forged = self.task(forged_project, actor=Actor.agent("dev", "developer"))
-        self.deliver(forged)
+        # A task with an untrusted creation event has no verifiable work
+        # direction, so publication must not be treated as a legitimate run.
+        result, = self.exchange(forged, ("publish_artifact", {"filename": "result.txt",
+            "content": "Untrusted source", "summary": "Fixture publication", "format": "text"}))
+        self.assertEqual(result["code"], "publication_binding_unverified")
+        self.assertFalse(self.events(forged, "deliverable.published"))
+        # Even an adversarial completion event must not become project history.
+        self.candidate(forged)
         self.assertEqual(self.history.index(self.target)["entries"], [])
 
     def test_completion_requires_exact_source_message_and_run_recipient(self):

@@ -205,7 +205,7 @@ class WorkLedger:
             raise KeyError(task_id)
         plans = [e.seq for e in events if e.type in {"plan.proposed", "plan.amended", "planning.requested"}]
         scope = {"direction_seq": directions[-1].seq, "planning_seq": plans[-1] if plans else None,
-                 "rules": self.rules.current_snapshot(task_id)["fingerprint"]}
+                 "rules": self.rules.current_snapshot(task_id, privacy_safe=True)["fingerprint"]}
         if self.organization_fingerprint is not None:
             scope["organization"] = self.organization_fingerprint
         revisions = [e.seq for e in self.log.iter_events(task_id=task_id, event_types=("checks.contract_revised",))

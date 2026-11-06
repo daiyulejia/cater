@@ -151,6 +151,7 @@ def review_work_item(runtime, task, item) -> None:
     with reservation:
         context["review_attempt_seq"] = reservation.started.seq
         for attempt in range(2):
+            text_usage_trace = {}
             correction = context.get("response_correction")
             request_prompt = prompt if not correction else prompt + (
                 "\nCorrect only the response-format or citation errors below, using the SAME attached evidence and schema. "
@@ -166,7 +167,8 @@ def review_work_item(runtime, task, item) -> None:
                 return
             try:
                 response = reservation.complete(task_id=task.id, task=task, role=role,
-                    driver=driver, prompt=request_prompt, rule_snapshot=snapshot, work_context=context)
+                    driver=driver, prompt=request_prompt, rule_snapshot=snapshot, work_context=context,
+                    _text_usage_trace=text_usage_trace)
             except WorkConflict:
                 return
             parsed = rt._parse_response(response.text)
@@ -233,11 +235,20 @@ def review_work_item(runtime, task, item) -> None:
                         text += " 当前已暂停；原成果保留，不会自动反复调用。"
             except WorkConflict:
                 text = "要求或成果版本刚刚有变化，这次审查不能沿用，需要重新核对。"
-            rt.log.emit(actor=Actor.agent(role.id, role.role), type="msg.said", task_id=task.id,
-                        payload={"text": text, "claim": text[:240], "work_item_id": item["id"],
+            payload = {"text": text, "claim": text[:240], "work_item_id": item["id"],
+                                 "attempt_id": item["attempt_id"],
                                  "review_seq": review_seq, "speech_source": speech_source,
                                  "phase": "review_response_correction" if retry else "review", "driver": role.driver,
                                  "tokens": response.tokens if valid_token_count(response.tokens) else 0,
-                                 "token_usage": rt._token_usage(response), "rule_fingerprint": snapshot["fingerprint"]})
+                                 "token_usage": rt._token_usage(response), "rule_fingerprint": snapshot["fingerprint"]}
+            if text_usage_trace.get("terminal_failure") and text_usage_trace.get("last_receipt"):
+                payload["usage_recorded_in"] = [text_usage_trace["last_receipt"]]
+            from .runtime import _HOST_INVOCATION_NOT_STARTED
+            if meta.get("_host_invocation_not_started") is _HOST_INVOCATION_NOT_STARTED:
+                skipped = rt.log.emit(type="driver.invocation_skipped", task_id=task.id,
+                    actor=Actor.system("driver_gateway"), payload={"role": role.id, "driver": role.driver,
+                        "attempt_id": item["attempt_id"]})
+                payload["usage_not_started_in"] = skipped.seq
+            rt.log.emit(actor=Actor.agent(role.id, role.role), type="msg.said", task_id=task.id, payload=payload)
             if not retry:
                 break

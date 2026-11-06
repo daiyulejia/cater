@@ -14,6 +14,23 @@ from test_work import WorkDriver, item
 
 
 class AutomaticTextRetryTests(unittest.TestCase):
+    def test_replaced_complete_with_hostile_func_is_not_retried(self):
+        class Callable:
+            @property
+            def __func__(self):
+                raise RuntimeError('private fixture')
+            def __call__(self, **kwargs):
+                raise RuntimeError('private fixture')
+        for cls in (AnthropicMessagesDriver, OpenAICompatibleDriver):
+            with self.subTest(driver=cls.__name__):
+                rt, task, api = self.runtime(cls)
+                api.complete = Callable()
+                rt.collaborate(task)
+                failures = self.events(rt, task, 'driver.failed')
+                self.assertEqual(len(failures), 1)
+                self.assertEqual(self.events(rt, task, 'driver.retry_scheduled'), [])
+                self.assertNotIn('private fixture', json.dumps(failures[0].payload))
+
     def setUp(self):
         self.enterContext(patch.dict(os.environ, {'CATER_RETRY_TEST': 'fixture-key'}))
         self.enterContext(patch('cater.text_retry.RETRY_DELAY', 0.0))
@@ -63,6 +80,10 @@ class AutomaticTextRetryTests(unittest.TestCase):
                     self.assertEqual((finish.payload['request_seq'], finish.payload['status']), (start.seq, 'succeeded'))
                     self.assertEqual(start.payload['failure_seq'], self.events(rt, task, 'driver.failed')[0].seq)
                     self.assertEqual(start.payload['retry_limit'], 1)
+                    failed_call, = self.events(rt, task, 'driver.model_called')
+                    self.assertEqual(failed_call.payload['token_usage'], 'unavailable')
+                    self.assertEqual(failed_call.payload['tokens'], 0)
+                    self.assertEqual(rt.task(task).token_usage.get('unavailable'), 1)
                     self.assertEqual(rt._reported_driver_tokens('dev'), 10)
                     cost = next(l for l in rt.review(task)['lenses'] if l['id'] == 'cost')
                     self.assertEqual(cost['status'], 'watch')
@@ -87,6 +108,9 @@ class AutomaticTextRetryTests(unittest.TestCase):
         with patch(self.opener(AnthropicMessagesDriver), side_effect=TimeoutError('fixture')) as opened:
             rt.collaborate(task)
         self.assertEqual(opened.call_count, 2)
+        failed_calls = self.events(rt, task, 'driver.model_called')
+        self.assertEqual(len(failed_calls), 2)
+        self.assertEqual(rt.task(task).token_usage.get('unavailable'), 2)
         self.assertEqual([i['status'] for i in rt.work.view(task)['items']], ['ready', 'blocked'])
         self.assertFalse(self.events(rt, task, 'work.failed')[-1].payload['uncertain'])
         self.assertEqual(self.events(rt, task, 'driver.retry_finished')[-1].payload['status'], 'failed')

@@ -7,6 +7,7 @@ import { publicReports } from './publicProgress'
 import type { PublicProgressSnapshot } from './publicProgress'
 import { hasReceiptReadMetadata, receiptReadProvenance } from './receiptReadStatus'
 import { consultationSources } from './consultationSource'
+import { safeAuditBlocked } from './activityDiagnostics'
 
 type TimedEvent = TeamEvent & { ts?: string }
 export type ConversationActivityInput = {
@@ -708,11 +709,25 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
       || !update && currentHuman === humans[0]))
   const customerQuestion = recipient ? pendingQuestions.get(recipient) : undefined
   const responded = Boolean(answer || deliveredResponse || customerQuestion)
+  const confirmedWaitingForReply = (run: Run | undefined, role: string | undefined) => Boolean(run?.start && run.end
+    && typeof run.start.payload.run_id === 'string'
+    && run.end.payload.run_id === run.start.payload.run_id
+    && run.end.payload.role === role && hosts.some(toolStart => {
+      if (toolStart.type !== 'team.tool_started' || toolStart.seq <= run.start!.seq
+          || toolStart.seq >= run.end!.seq || toolStart.payload.name !== 'wait_for_reply'
+          || toolStart.payload.role !== role || toolStart.payload.run_id !== run.start!.payload.run_id
+          || toolStart.payload.message_seq !== run.message_seq) return false
+      const receipt = teamToolReceipt(toolStart, hosts)
+      return Boolean(receipt && receipt.seq < run.end!.seq && receipt.payload.role === role
+        && receipt.payload.run_id === run.start!.payload.run_id
+        && (receipt.payload.result as { status?: unknown; waiting?: unknown } | undefined)?.status === 'ok'
+        && (receipt.payload.result as { waiting?: unknown } | undefined)?.waiting === true)
+    }))
   let message = sending ? '消息正在发送，尚未确认收到' : currentHuman
     ? customerQuestion ? `${label(recipient!)}在等你的补充` : deliveredResponse ? `${label(recipient!)}已确认本次交付` : answer ? `${label(recipient!)}已回应最新消息`
       : active(customerRun?.status) ? `${label(recipient!)}正在处理最新消息`
         : failed(customerRun?.status) ? `最新消息答复待确认 · ${label(recipient!)}本轮处理未完成${requestFailure(customerRun) ? `：${requestFailure(customerRun)}` : ''}`
-          : customerRun?.status === 'waiting' ? `最新消息尚待答复 · ${label(recipient!)}等待伙伴回复`
+          : customerRun?.status === 'waiting' ? `最新消息尚待答复 · ${label(recipient!)}${confirmedWaitingForReply(customerRun, recipient) ? '等待伙伴回复' : '本轮处于等待状态'}`
             : successful(customerRun?.status) ? '最新消息本轮处理已结束，尚未确认答复'
               : `最新消息已收到，等待${label(recipient!)}答复` : undefined
   const lines: Line[] = []
@@ -781,7 +796,7 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
     const action = toolBelongs ? tools[string(toolName) ?? ''] ?? '工具调用' : undefined
     const handling = bySeq.get(run?.message_seq ?? -1)?.actor.kind === 'human' ? '正在处理消息' : '正在处理工作'
     let text = awaitingCustomer ? '等待你的补充' : running ? moving ? handling : '暂无新反馈，执行状态待确认'
-      : run?.status === 'waiting' ? '等待伙伴回复'
+      : run?.status === 'waiting' ? confirmedWaitingForReply(run, role) ? '等待伙伴回复' : '本轮处于等待状态'
         : failed(run?.status) ? '本轮处理未完成，需核对过程'
           : successful(run?.status) ? '本轮消息处理已结束' : '执行结果待确认'
     if (!awaitingCustomer && requestFailure(run)) text += `：${requestFailure(run)}`
@@ -811,13 +826,22 @@ export function conversationActivity(input: ConversationActivityInput, now = Dat
   const pending = Math.max(knownPending.filter((event) => event.actor.kind === 'agent' && pendingInScope(event)).length,
     team.pending_count - retiredPending - customerPending, 0)
   const anyRunning = allRuns.some((run) => active(run.status)) || anyOpenTool
+  const activityBlocked = activity?.state === 'blocked'
+  if (activityBlocked) {
+    const detail = safeAuditBlocked(activity) ? activity.error : '请查看过程并核对后再继续。'
+    lines.unshift({ id: 'activity-blocked', text: `后台协作已阻塞：${detail}`, warning: true })
+  }
   const fault = lines.some((line) => line.warning)
   if (pending > 0) lines.push({ id: 'pending', text: `后台有 ${pending} 条消息等待处理` })
   if (activity?.active && !anyRunning && !pending) lines.push({ id: 'activity', text: activity.state === 'queued'
     ? `后台协作已排队，等待执行记录${done ? '' : '；尚未确认交付'}`
     : `后台暂无新反馈，等待执行记录${done ? '' : '；尚未确认交付'}` })
-  if (!anyRunning && !pending && !activity?.active) {
-    if (activity?.state === 'failed' && !done) lines.push({ id: 'failure', text: '后台协作异常，尚未确认交付；需查看过程核对', warning: true })
+  if (!anyRunning && !pending && !activity?.active && !activityBlocked) {
+    if (!done && !pendingQuestions.size && !syncError && !sending && !controlBusy && executionState === 'running'
+      && activity?.active === false && team.pending_count === 0 && Number.isSafeInteger(team.open_work_count)
+      && (team.open_work_count ?? 0) > 0 && !team.runs.some((run) => active(run.status)))
+      lines.push({ id: 'open-work', text: `当前暂无执行，仍有 ${team.open_work_count} 项委托未交回；等待接续或核对过程`, warning: true })
+    else if (activity?.state === 'failed' && !done) lines.push({ id: 'failure', text: '后台协作异常，尚未确认交付；需查看过程核对', warning: true })
     else if (['failed', 'blocked'].includes(team.status) && !done) lines.push({ id: 'failure', text: '后台工作需要跟进，尚未确认交付', warning: true })
     else if (!done && !pendingQuestions.size) lines.push({ id: 'delivery', text: '当前暂无执行，尚未确认交付' })
   }

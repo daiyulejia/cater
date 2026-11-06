@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .directions import changes_direction
-from .drivers import driver_mode
+from .drivers import driver_mode, trusted_driver_method
 from .events import Actor, HeadChanged
 from .fold import fold
 from .usage import valid_token_count
@@ -37,7 +37,7 @@ def _trusted_text_repair(driver) -> bool:
     from .runtime import _TEXT_ONLY_CALLS
 
     implementation = _TEXT_ONLY_CALLS.get(type(driver))
-    return (implementation is not None and getattr(driver.complete, "__func__", None) is implementation
+    return (trusted_driver_method(driver, "complete", implementation)
             and getattr(driver, "review_response_repair", False) is True)
 
 

@@ -132,15 +132,16 @@ class AuditAuthenticationTests(unittest.TestCase):
         self.assertEqual(report.broken_at, gap.seq)
 
     def test_appending_without_key_after_signing_is_rejected_when_verified(self):
+        from cater.events import AuditSigningRequired
         source = self.log(audit_key="fixture-secret")
         self.emit(source)
         unsigned_writer = self.reopen(source)
-        tail = self.emit(unsigned_writer)
+        with self.assertRaises(AuditSigningRequired):
+            self.emit(unsigned_writer)
         log = self.reopen(unsigned_writer, audit_key="fixture-secret")
         report = log.verify_chain()
-        self.assertFalse(report.ok)
-        self.assertEqual(report.reason, "missing signature after signed event")
-        self.assertEqual(report.broken_at, tail.seq)
+        self.assertTrue(report.ok, report.reason)
+        self.assertEqual(log.count(), 1)
 
     def test_rotation_keeps_historical_events_and_keyring_verification(self):
         source = self.log(audit_key="old-secret", key_id="old")

@@ -79,7 +79,7 @@ def artifact_bytes(log, artifact):
 
 
 def publish(team, task_id, role, arguments, workspace, binding, tool_start):
-    from .team import HOST, _publication_rejected, _text
+    from .team import HOST, _publication_rejected, _text, _tool_direction
 
     try:
         filename = _name(arguments["filename"])
@@ -115,8 +115,17 @@ def publish(team, task_id, role, arguments, workspace, binding, tool_start):
     # File access is outside the DB write transaction; blob and event commit together.
     with rt.log.atomic():
         scope()
-        run = next(e for e in rt.log.read(task_id=task_id) if e.type == "team.run_started"
-                   and e.actor == HOST and e.payload.get("run_id") == tool_start.payload["run_id"])
+        events = rt.log.read(task_id=task_id)
+        runs = [e for e in events if e.type == "team.run_started" and e.actor == HOST
+                and all(e.payload.get(k) == tool_start.payload.get(k) for k in ("run_id", "role", "message_seq"))]
+        direction = (_tool_direction(team, task_id, events, runs[0], role, tool_start)
+                     if len(runs) == 1 and tool_start.payload.get('name') == TOOL else 'unverified')
+        if direction == 'changed':
+            return _publication_rejected('publication_scope_changed', '任务方向已变化；未提交这次工程成果发布。')
+        if direction != 'current':
+            return {'status': 'error', 'code': 'publication_binding_unverified', 'complete': False,
+                    'outcome': 'unknown', 'message': '发布记录或工作方向无法核对，未再次发布；请先核对已有成果及回执。'}
+        run = runs[0]
         team._current(task_id, run, role, run.payload["revision"])
         if team.view(task_id)["status"] == "done":
             raise WorkConflict("当前工作已交付，未追加旧工程快照。")

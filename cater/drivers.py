@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import math
 import os
 import queue
@@ -11,6 +12,7 @@ import socket
 import ssl
 import subprocess
 import threading
+import types
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -26,8 +28,8 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 from .processes import ProcessScope, worker_python
 from .tool_loading import validate_mode
 from .tool_protocol import (ToolTurn, json_utf8, openai_history, openai_turn, prepare_tool_turn,
-                            strict_json, safe_tool_usage, _usage)
-from .usage import usage_source, valid_token_count
+                            strict_json, unique_json, safe_tool_usage, _usage)
+from .usage import OPENAI_USAGE_CONFLICT, openai_usage_conflict, usage_conflict_diagnostics, usage_source, valid_token_count
 
 
 MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -124,7 +126,8 @@ class DriverProtocolError(DriverError):
 def _tool_response_error(message: str, data: dict, *, anthropic: bool) -> DriverProtocolError:
     tokens, meta = _usage(data, anthropic=anthropic, driver="")
     error = DriverProtocolError(message)
-    error._tool_response_usage = {"tokens": tokens, "token_usage": meta["token_usage"], "usage": meta["usage"]}
+    error._tool_response_usage = {"tokens": tokens, "token_usage": meta["token_usage"], "usage": meta["usage"],
+                                  **({"usage_issue": meta["usage_issue"]} if "usage_issue" in meta else {})}
     return error
 
 
@@ -136,8 +139,12 @@ def tool_protocol_error_usage(error: BaseException) -> dict | None:
     if not isinstance(value, dict):
         return None
     reported = value.get("token_usage") == "reported" and valid_token_count(value.get("tokens"))
+    counts = safe_tool_usage(value.get("usage"))
+    diagnostics = usage_conflict_diagnostics({"mode": "openai_compatible", "token_usage": value.get("token_usage"),
+                                              "usage_issue": value.get("usage_issue"), "usage": counts})
     return {"tokens": value["tokens"] if reported else 0,
-            "token_usage": "reported" if reported else "unavailable", "usage": safe_tool_usage(value.get("usage"))}
+            "token_usage": "reported" if reported else "unavailable", "usage": counts,
+            **({"usage_issue": diagnostics["usage_issue"]} if diagnostics else {})}
 
 
 class DriverUnavailable(DriverError):
@@ -794,7 +801,7 @@ class OpenAICompatibleDriver:
         turn = self.tool_turn
         # Preserve synchronous billing guards and caller-supplied transports.
         if ("tool_turn" in self.__dict__
-                or getattr(turn, "__func__", None) is not _OPENAI_TOOL_TURN
+                or not trusted_driver_method(self, "tool_turn", _OPENAI_TOOL_TURN)
                 or _open_api_request is not _DEFAULT_API_OPENER):
             if check_current is not None:
                 check_current()
@@ -812,6 +819,9 @@ class OpenAICompatibleDriver:
             raise
         if cleanup_failed(data):
             result = replace(result, meta={**(result.meta or {}), "native_cleanup_failed": True})
+        from .native_transport import NativeResponse
+        if type(data) is NativeResponse and data.cleanup_confirmed is True and not cleanup_failed(data):
+            result = replace(result, meta={**(result.meta or {}), "native_cleanup_confirmed": True})
         return result
 
     def complete(self, *, role: str, prompt: str, context: dict[str, Any]) -> DriverResponse:
@@ -872,19 +882,29 @@ class OpenAICompatibleDriver:
                 f"{self.name} API response exceeds {MAX_API_RESPONSE_BYTES} byte limit"
             )
         try:
-            data = json.loads(raw)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise DriverProtocolError(f"{self.name} API response is not valid JSON") from exc
+            data = unique_json(raw)
+        except (ValueError, TypeError, UnicodeError, RecursionError, OverflowError):
+            error = DriverProtocolError(
+                "模型响应不是无歧义的有效 JSON，未采用；实际用量无法确认，远端可能已计费。"
+            )
+            error._tool_response_usage = {"tokens": 0, "token_usage": "unavailable", "usage": {}}
+            raise error from None
         if not isinstance(data, dict):
             raise DriverProtocolError(f"{self.name} API response must be a JSON object")
         usage = data.get("usage")
         tokens = usage.get("total_tokens") if isinstance(usage, dict) else None
-        reported = valid_token_count(tokens)
+        reported = (valid_token_count(tokens) and isinstance(usage, dict)
+                    and all(k not in usage or valid_token_count(usage[k])
+                            for k in ("prompt_tokens", "completion_tokens")))
+        conflict = openai_usage_conflict(usage)
+        reported = reported and not conflict
         meta = {
             "driver": self.name,
             "mode": "openai_compatible",
             "token_usage": "reported" if reported else "unavailable",
         }
+        if conflict:
+            meta.update(usage_issue=OPENAI_USAGE_CONFLICT, usage=safe_tool_usage(usage))
         choices = data.get("choices")
         if (isinstance(choices, list) and choices and isinstance(choices[0], dict)
                 and choices[0].get("finish_reason") == "length"):
@@ -896,7 +916,13 @@ class OpenAICompatibleDriver:
                 meta={**meta, "contained": True, "incomplete": True, "finish_reason": "length",
                       "reason": "incomplete_stop", "display_reason": notice},
             )
-        text = _openai_response_text(data)
+        try:
+            text = _openai_response_text(data)
+        except DriverProtocolError as error:
+            error._tool_response_usage = {"tokens": tokens if reported else 0,
+                                          "token_usage": meta["token_usage"], "usage": safe_tool_usage(usage),
+                                          **({"usage_issue": meta["usage_issue"]} if conflict else {})}
+            raise
         return DriverResponse(
             text=text,
             tokens=tokens if reported else 0,
@@ -905,6 +931,37 @@ class OpenAICompatibleDriver:
 
 
 _OPENAI_TOOL_TURN = OpenAICompatibleDriver.tool_turn
+_OPENAI_ITER_TOOL_TURN = OpenAICompatibleDriver.iter_tool_turn
+_OPENAI_TOOL_RESULT = OpenAICompatibleDriver._tool_result
+_OPENAI_TOOL_INPUT = OpenAICompatibleDriver._tool_input
+_OPENAI_COMPLETE = OpenAICompatibleDriver.complete
+
+
+def trusted_driver_method(driver: object, name: str, implementation: object) -> bool:
+    """Check identity without evaluating driver descriptors or arbitrary __func__."""
+    if implementation is None:
+        return False
+    try:
+        # A replaced attribute dispatcher could return a different callable
+        # from the statically inspected method. Such a driver is not trusted.
+        if inspect.getattr_static(type(driver), "__getattribute__") is not object.__getattribute__:
+            return False
+        method = inspect.getattr_static(driver, name, None)
+        if method is implementation:
+            return True
+        return (type(method) is types.MethodType and method.__self__ is driver
+                and method.__func__ is implementation)
+    except Exception:
+        return False
+
+
+def native_openai_usage(driver: object, *, tool: bool) -> bool:
+    """Accept this process's unwrapped native adapter, never metadata alone."""
+    if type(driver) is not OpenAICompatibleDriver:
+        return False
+    methods = (("tool_turn", _OPENAI_TOOL_TURN), ("iter_tool_turn", _OPENAI_ITER_TOOL_TURN),
+               ("_tool_result", _OPENAI_TOOL_RESULT), ("_tool_input", _OPENAI_TOOL_INPUT)) if tool else (("complete", _OPENAI_COMPLETE),)
+    return all(trusted_driver_method(driver, name, implementation) for name, implementation in methods)
 
 
 def _openai_response_text(data: dict[str, Any]) -> str:

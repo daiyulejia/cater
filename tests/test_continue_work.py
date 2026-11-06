@@ -427,6 +427,36 @@ class ContinueWorkTests(returns.ReturnWorkFixtures, unittest.TestCase):
                 self.assertEqual(self.rows(f), {})
                 self.assertEqual(f.events("team.objective_completed"), [])
 
+    def test_pending_review_duplicate_guides_original_assignment_recovery(self):
+        for mode in MODES:
+            with self.subTest(mode=mode):
+                f = self.fixture(mode)
+                published, = self.run_calls(f, self.human(f, f.worker), ("publish_artifact", {
+                    "filename": "review.txt", "content": "Candidate", "summary": "Fixture", "format": "text"}))
+                args = {"reviewer": f.reviewer, "artifact_seqs": [published["artifact_seq"]],
+                        "instruction": "Inspect candidate"}
+                requested, = self.run_calls(f, self.human(f, f.worker), ("request_review", args))
+                original = self.message(f, requested["message_seq"])
+                queued, = self.run_calls(f, self.human(f, f.worker), ("request_review", args))
+                self.assertIn("在途", queued["message"])
+                self.assertNotIn("continue_work(", queued["message"])
+                self.settle(f, original)
+                prior = list(f.events("team.review_requested"))
+                rejected, continued = self.reject_then_correct(f, self.human(f, f.worker), [
+                    ("request_review", args),
+                    ("request_review", {**args, "review_seq": requested["review_seq"]}),
+                ], original)
+                for result in rejected:
+                    self.assertIn(f"review_seq={requested['review_seq']}", result["message"])
+                    self.assertIn(f"assignment_seq={original.seq}", result["message"])
+                    self.assertIn("read_checkpoint", result["message"])
+                    self.assertIn("复核者正在处理其他工作", result["message"])
+                self.assertEqual(f.events("team.review_requested"), prior)
+                decided, = self.run_calls(f, continued, ("record_review", {
+                    "review_seq": requested["review_seq"], "verdict": "approved", "feedback": "Checked"}),
+                    statuses=("waiting",))
+                self.assertEqual(decided["status"], "ok")
+
     def test_queued_running_and_inflight_continuations_block_duplicate_delivery(self):
         for mode in MODES:
             for case in ("queued", "running", "continuation_queued", "continuation_running", "other_running"):

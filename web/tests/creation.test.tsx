@@ -96,14 +96,14 @@ test('断网、HTTP错误和409均保留新建 ID；未选择项目时省略 pro
     if (url !== '/api/tasks' || init.method !== 'POST') return
     attempts += 1
     if (attempts === 1) return Promise.reject(new TypeError('Failed to fetch'))
-    return new Response(attempts === 2 ? '暂时不可用' : '同一请求不能更换创建参数', { status: attempts === 2 ? 503 : 409 })
+    return new Response(attempts === 2 ? '暂时不可用' : '同一创建请求不能更换目标或执行选项，请重新发起。', { status: attempts === 2 ? 503 : 409 })
   }
   await send()
   expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   await send()
-  expect(screen.getByRole('alert').textContent).toContain('暂时不可用')
+  expect(screen.getByRole('alert').textContent).not.toContain('暂时不可用')
   expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
-  await send(); expect(screen.getByRole('alert').textContent).toBe('同一请求不能更换创建参数')
+  await send(); expect(screen.getByRole('alert').textContent).toBe('同一创建请求不能更换目标或执行选项，请重新发起。')
   await tick(SUBMIT_TIMEOUT_MS)
   expect(posts()).toHaveLength(3)
   expect(body(0)).toEqual({ goal: '同一任务', request_id: expect.stringMatching(uuid), collaboration: 'team', run: true, background: true })

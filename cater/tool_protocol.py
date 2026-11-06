@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
-from .usage import valid_token_count
+from .usage import OPENAI_USAGE_CONFLICT, openai_usage_conflict, valid_token_count
 
 
 TOOL_CALL_ISSUES = frozenset({
@@ -88,19 +88,26 @@ class ToolTurn:
     message: dict | None = field(default=None, repr=False)
 
 
+def _unique_pairs(items):
+    result = {}
+    for key, item in items:
+        if key in result:
+            raise ValueError("Duplicate JSON key")
+        result[key] = item
+    return result
+
+
+def unique_json(value: str | bytes) -> Any:
+    """Reject duplicate object members without changing the text decoder's number semantics."""
+    return json.loads(value, object_pairs_hook=_unique_pairs)
+
+
 def strict_json(value: str | bytes) -> Any:
-    def pairs(items):
-        result = {}
-        for key, item in items:
-            if key in result:
-                raise ValueError("Duplicate JSON key")
-            result[key] = item
-        return result
 
     def constant(value):
         raise ValueError("Non-finite JSON number")
 
-    result = json.loads(value, object_pairs_hook=pairs, parse_constant=constant)
+    result = json.loads(value, object_pairs_hook=_unique_pairs, parse_constant=constant)
     _json_value(result)
     return result
 
@@ -306,9 +313,14 @@ def _usage(data: dict, *, anthropic: bool, driver: str) -> tuple[int, dict]:
     required = keys[:2] if anthropic else ("total_tokens",)
     reported = (all(k in counts for k in required)
                 and isinstance(usage, dict) and all(k not in usage or k in counts for k in keys))
+    conflict = not anthropic and openai_usage_conflict(usage)
+    reported = reported and not conflict
     tokens = (sum(counts[k] for k in keys if k in counts) if anthropic else counts.get("total_tokens", 0)) if reported else 0
-    return tokens, {"driver": driver, "mode": "anthropic" if anthropic else "openai_compatible",
-                    "token_usage": "reported" if reported else "unavailable", "usage": counts}
+    meta = {"driver": driver, "mode": "anthropic" if anthropic else "openai_compatible",
+            "token_usage": "reported" if reported else "unavailable", "usage": counts}
+    if conflict:
+        meta["usage_issue"] = OPENAI_USAGE_CONFLICT
+    return tokens, meta
 
 
 def _contained(tokens: int, meta: dict, reason: str, *, tool_issue: str | None = None) -> ToolTurn:

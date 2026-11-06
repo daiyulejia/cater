@@ -310,7 +310,7 @@ class WaitingBoundaryTests(unittest.TestCase):
         self.assertGreater(child.seq, claimed[2].seq)
         helper_run = self.rt.team._claim(self.task)
         self.assertEqual(helper_run[0].seq, child.seq)
-        self.execute(helper_run, self.f.native_turn("Checked evidence returned."), status="completed")
+        self.execute(helper_run, self.f.native_turn("", ("return_work", {"text": "Checked evidence returned."})), status="completed")
         report, = [e for e in self.messages() if e.actor.id == self.helper and e.payload["kind"] == "report"]
         self.assertEqual(report.payload["reply_to"], child.seq)
         self.assertEqual(report.payload["recipient"], self.worker)

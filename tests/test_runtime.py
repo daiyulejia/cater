@@ -1446,7 +1446,7 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertEqual(driver.calls, 2)
             self.assertEqual(len(task.driver_failures), 2)
-            self.assertIn("model process exploded", task.driver_failures[0]["message"])
+            self.assertEqual("Driver invocation failed", task.driver_failures[0]["message"])
             self.assertTrue(any("driver failed" in msg["claim"] for msg in task.messages))
             self.assertIn("driver.failed", [event.type for event in rt.log.read(task_id=task_id)])
 
@@ -2927,24 +2927,34 @@ class WebTests(unittest.TestCase):
                 [sys.executable, str(Path(__file__).resolve().parent / "fixtures" / "ndjson_driver.py")],
                 timeout=5,
             )
-            self.addCleanup(driver.close)
-            base = start_test_web(self, db, shared_drivers={"product": driver})
-            request = Request(
-                f"{base}/api/tasks",
-                data=json.dumps({"goal": "Use the shared CLI driver", "run": True, "requested_route": "direct", "assign_to": "product"}).encode("utf-8"),
-                method="POST",
-                headers={"Content-Type": "application/json"},
-            )
-            with urlopen(request, timeout=5) as response:
-                self.assertEqual(response.status, 201)
-            self.assertIsNotNone(driver._proc)
-            assert driver._proc is not None
-            pid = driver._proc.pid
-            with urlopen(f"{base}/api/tasks", timeout=5) as response:
-                self.assertEqual(response.status, 200)
-            self.assertIsNotNone(driver._proc)
-            assert driver._proc is not None
-            self.assertEqual(driver._proc.pid, pid)
+            with ExitStack() as resources:
+                resources.callback(driver.close)
+                server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db, shared_drivers={"product": driver}))
+                resources.callback(server.server_close)
+                # The response can arrive before its request thread closes SQLite.
+                # Keep the temporary directory until server_close joins those threads.
+                server.daemon_threads = False
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                resources.callback(thread.join)
+                resources.callback(server.shutdown)
+                base = f"http://127.0.0.1:{server.server_port}"
+                request = Request(
+                    f"{base}/api/tasks",
+                    data=json.dumps({"goal": "Use the shared CLI driver", "run": True, "requested_route": "direct", "assign_to": "product"}).encode("utf-8"),
+                    method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with urlopen(request, timeout=5) as response:
+                    self.assertEqual(response.status, 201)
+                self.assertIsNotNone(driver._proc)
+                assert driver._proc is not None
+                pid = driver._proc.pid
+                with urlopen(f"{base}/api/tasks", timeout=5) as response:
+                    self.assertEqual(response.status, 200)
+                self.assertIsNotNone(driver._proc)
+                assert driver._proc is not None
+                self.assertEqual(driver._proc.pid, pid)
 
     def test_web_rejects_cross_origin_writes_and_sets_browser_security_headers(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -194,12 +194,12 @@ test('网络和409错误沿用原 ID，改变操作分配新 ID，错误不冒�
   handler = (url) => {
     if (!url.endsWith('/control')) return
     attempts += 1
-    return attempts === 1 ? Promise.reject(new TypeError('Failed to fetch')) : new Response('控制请求冲突', { status: 409 })
+    return attempts === 1 ? Promise.reject(new TypeError('Failed to fetch')) : new Response('同一控制请求不能更换任务或动作。', { status: 409 })
   }
   await control('pause')
   expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   await control('pause', true)
-  expect(screen.getByRole('alert').textContent).toBe('控制请求冲突')
+  expect(screen.getByRole('alert').textContent).toBe('同一控制请求不能更换任务或动作。')
   expect(screen.queryByRole('status', { name: '执行状态' })).toBeNull()
   expect(body(1)).toEqual(body(0))
   await control('cancel')
@@ -220,7 +220,7 @@ test('切任务后控制失败不串错误，返回原任务可重试；控制�
   expect(screen.queryByRole('alert')).toBeNull()
   expect(input().value).toBe('a 草稿')
   await select('b')
-  expect(screen.getByRole('alert').textContent).toContain('b 的控制失败')
+  expect(screen.getByRole('alert').textContent).not.toContain('b 的控制失败')
   expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   expect(input().value).toBe('b 草稿')
   handler = () => undefined

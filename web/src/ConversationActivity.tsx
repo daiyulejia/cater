@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { ChevronDown, CircleAlert, Clock3, ListTree, LoaderCircle, Pause, RefreshCw } from 'lucide-react'
 import { conversationActivity } from './conversationActivityState'
 import type { ConversationActivityInput } from './conversationActivityState'
+import { safeAuditBlocked } from './activityDiagnostics'
 
 export type ConversationActivityProps = ConversationActivityInput & {
   portrait: (id: string) => ReactNode
@@ -22,7 +23,8 @@ export function ConversationActivity(props: ConversationActivityProps) {
     || Number(Boolean(b.moving)) - Number(Boolean(a.moving))).slice(0, 2)
   const publicLine = lines.find(line => line.publicText)
   const publicPreview = publicLine?.publicSegments?.at(-1)?.trim().split('\n').filter(Boolean).at(-1)
-  const compactText = publicPreview ? `${props.names[publicLine!.role!] ?? publicLine!.role} · ${Array.from(publicPreview).slice(-100).join('')}` : view.message ?? lines[0]?.text
+  const blockedText = view.lines.find(line => line.id === 'activity-blocked')?.text
+  const compactText = blockedText ?? (publicPreview ? `${props.names[publicLine!.role!] ?? publicLine!.role} · ${Array.from(publicPreview).slice(-100).join('')}` : view.message ?? lines[0]?.text)
   const warningCount = view.lines.filter(line => line.warning).length
   const deadline = view.visible ? view.nextCheckAt : undefined
   useEffect(() => {
@@ -32,7 +34,7 @@ export function ConversationActivity(props: ConversationActivityProps) {
   }, [deadline])
   const stopped = props.executionState === 'paused' || props.executionState === 'cancelled'
   // Execution control is displayed by App even if this lazy panel cannot load.
-  if (!view.visible || stopped && !props.sending && !props.activity?.active && !props.syncError) return null
+  if (!view.visible || stopped && !props.sending && !props.activity?.active && !props.syncError && !safeAuditBlocked(props.activity)) return null
   const notice = stopped && !props.syncError ? undefined : view.notice
   const canPause = props.activity?.active === true && props.executionState === 'running' && !props.controlBusy
   const buttonClass = 'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[#52766d] hover:bg-[#edf4ef] focus-visible:outline-2 focus-visible:outline-[#d77a6b] disabled:opacity-40'

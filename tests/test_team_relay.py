@@ -25,7 +25,7 @@ class TeamRelayTests(TeamSupervisionTests):
             self.worker: [
                 self.native_turn("", ("delegate", {"recipient": helper, "instruction": "Prepare the evidence"})),
                 self.native_turn("", ("wait_for_reply", {})),
-                self.native_turn("Evidence inspected; the original guide is now ready."),
+                self.native_turn("", ("return_work", {"text": "Evidence inspected; the original guide is now ready."})),
             ],
             helper: [self.native_turn("", ("publish_artifact", {
                 "filename": "evidence.txt", "content": "Evidence body", "summary": "Prepared evidence", "format": "text"}),
@@ -59,7 +59,7 @@ class TeamRelayTests(TeamSupervisionTests):
             self.worker: [
                 self.native_turn("", ("send_message", {"recipient": helper, "text": "Which input format is available?"})),
                 self.native_turn("", ("wait_for_reply", {})),
-                self.native_turn("The advice arrived and the delivery is ready."),
+                self.native_turn("", ("return_work", {"text": "The advice arrived and the delivery is ready."})),
             ],
             helper: [
                 answer,
@@ -114,7 +114,7 @@ class TeamRelayTests(TeamSupervisionTests):
             result = json.loads(history[-1]["content"])
             self.assertIn("FIXED: negative input supported", result["content"])
             self.assertEqual(context["active_assignment"]["sender"], self.worker)
-            return self.native_turn("Recheck complete: the corrected file satisfies the requested behavior.")
+            return self.native_turn("", ("return_work", {"text": "Recheck complete: the corrected file satisfies the requested behavior."}))
 
         def manager(context, history, tools):
             if context["message"]["sender"] == "human":
@@ -131,7 +131,7 @@ class TeamRelayTests(TeamSupervisionTests):
             self.assertEqual(context["active_assignment"]["sender"], self.manager)
             if context["message"]["kind"] == "progress":
                 return self.native_turn("Progress understood.", ("wait_for_reply", {}))
-            return self.native_turn("Implementation corrected and independently rechecked.")
+            return self.native_turn("", ("return_work", {"text": "Implementation corrected and independently rechecked."}))
 
         self.driver.steps = {
             self.manager: [manager] * 12,
@@ -142,7 +142,7 @@ class TeamRelayTests(TeamSupervisionTests):
                 self.native_turn("", ("wait_for_reply", {})),
                 self.native_turn("", ("publish_artifact", {"filename": "result.txt", "content": "FIXED: negative input supported",
                     "summary": "Corrected implementation", "format": "text"})),
-                self.native_turn("The requested correction is ready for recheck."),
+                self.native_turn("", ("return_work", {"text": "The requested correction is ready for recheck."})),
             ] + [author_resumes] * 4,
             reviewer: [review_artifact, inspect_bad, self.native_turn("", ("wait_for_reply", {})),
                        review_artifact, inspect_fixed],
@@ -174,14 +174,14 @@ class TeamRelayTests(TeamSupervisionTests):
                 "recipient": self.worker, "text": "Check this assumption and report your conclusion."})),
                 self.native_turn("", ("wait_for_reply", {})),
                 self.native_turn("Conclusion received; nothing else to do.", ("wait_for_reply", {}))],
-            self.worker: [self.native_turn("I checked the input; the assumption does not hold.")],
+            self.worker: [self.native_turn("", ("return_work", {"text": "I checked the input; the assumption does not hold."}))],
         }
         self.rt.team.receive(self.task, "Check the assumption", request_id="relay-no-echo")
         self.run_team()
         reports = self.reports_to(self.manager)
         self.assertEqual(len(reports), 1)
         self.assertIn("does not hold", reports[0].payload["text"])
-        self.assertNotIn("visible", reports[0].payload)
+        self.assertTrue(reports[0].payload.get("visible"))
         self.assertEqual(self.reports_to(self.worker), [])
         self.assertEqual(len(self.driver.calls), 4)
 
@@ -234,7 +234,7 @@ class TeamRelayTests(TeamSupervisionTests):
         self.assertFalse([e for e in self.events("team.run_started") if e.payload["message_seq"] == message.seq])
         self.assertTrue(all(c["context"]["you"]["id"] == self.manager for c in self.driver.calls))
         self.rt.execution_control.change(self.task, "resume", request_id="relay-resume")
-        self.driver.steps[self.worker] = [self.native_turn("The queued result is ready.")]
+        self.driver.steps[self.worker] = [self.native_turn("", ("return_work", {"text": "The queued result is ready."}))]
         self.driver.steps[self.manager] = [self.native_turn("Result received.", ("wait_for_reply", {}))]
         self.run_team()
         self.assertEqual(len(self.reports_to(self.manager)), 1)
@@ -247,15 +247,14 @@ class TeamRelayTests(TeamSupervisionTests):
                 self.native_turn("", ("wait_for_reply", {})),
                 self.native_turn("", ("finish_work", {"summary": "Delivery confirmed", "verification": "Fixture only"})),
                 self.native_turn("Delivery confirmed.")],
-            self.worker: [self.native_turn("", ("send_message", {
-                "recipient": self.manager, "text": "I checked the result; the fixture is ready."})),
-                self.native_turn("", ("wait_for_reply", {}))],
+            self.worker: [self.native_turn("", ("return_work", {
+                "text": "I checked the result; the fixture is ready."}))],
         }
         self.rt.team.receive(self.task, "Check and finish", request_id="relay-final-no-echo")
         self.run_team()
         self.assertEqual(self.rt.team.view(self.task)["status"], "done")
         self.assertEqual(self.reports_to(self.worker), [])
-        self.assertEqual(sum(c["context"]["you"]["id"] == self.worker for c in self.driver.calls), 2)
+        self.assertEqual(sum(c["context"]["you"]["id"] == self.worker for c in self.driver.calls), 1)
 
     def test_new_peer_message_keeps_unreturned_original_work_in_context(self):
         worker = self.rt._role_by_id(self.worker)
@@ -279,7 +278,7 @@ class TeamRelayTests(TeamSupervisionTests):
         self.driver.steps = {
             self.worker: [self.native_turn("", ("send_message", {
                 "recipient": self.manager, "text": "Work B is already handled with A.", "reply_to": second.seq})),
-                self.native_turn("Work A is complete."), self.native_turn("THIS MUST NOT RUN")],
+                self.native_turn("", ("return_work", {"text": "Work A is complete."})), self.native_turn("THIS MUST NOT RUN")],
             self.manager: [self.native_turn("Received B.", ("wait_for_reply", {})),
                            self.native_turn("Received A.", ("wait_for_reply", {}))],
         }
@@ -292,12 +291,22 @@ class TeamRelayTests(TeamSupervisionTests):
         self.assertNotIn("THIS MUST NOT RUN", json.dumps([e.payload for e in self.rt.log.read(task_id=self.task)]))
 
     def test_manager_finish_and_wait_does_not_send_late_progress(self):
-        self.rt.team._send(self.task, self.rt._role_by_id(self.worker), self.manager, "Confirm the final delivery", "assignment")
+        worker = self.rt._role_by_id(self.worker)
+        source = self.rt.team.receive(self.task, f'@{worker.name} Ask the manager to deliver',
+                                      request_id='relay-manager-finish-source')
+        claimed = self.rt.team._claim(self.task)
+        self.assertEqual(claimed[0].seq, source.seq)
+        self.driver.steps[self.worker] = [self.native_turn('', ('delegate', {'recipient': self.manager,
+            'instruction': 'Confirm the final delivery'}), ('wait_for_reply', {}))]
+        list(self.rt.team._run_message(self.task, *claimed))
+        receipt, = [e for e in self.events('team.tool_finished') if e.payload.get('name') == 'delegate']
+        self.assertEqual(receipt.payload['result']['status'], 'ok')
+        prior_calls = len(self.driver.calls)
         self.driver.steps[self.manager] = [self.native_turn("",
             ("finish_work", {"summary": "Confirmed", "verification": "Fixture only"}), ("wait_for_reply", {}))]
         self.run_team()
         self.assertEqual(self.rt.team.view(self.task)["status"], "done")
-        self.assertEqual(len(self.driver.calls), 1)
+        self.assertEqual(len(self.driver.calls), prior_calls + 1)
         self.assertFalse([e for e in self.events("team.message_received") if e.actor.id == self.manager])
 
 

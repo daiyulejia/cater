@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 import hashlib
-import os
 import re
 import uuid
 
-from .events import Actor
-from .workspace_tools import WorkspacePolicy, _directories
+from .events import Actor, _managed_database_path_state
+from .workspace_tools import WorkspacePolicy, _directories, _io_path
 
 
 MANAGED_ID = "__managed__"
@@ -30,7 +29,11 @@ def database_namespace(log):
             log._managed_workspace_namespace = uuid.uuid4().hex
         identity = "memory:" + log._managed_workspace_namespace
     else:
-        identity = "file:" + os.path.normcase(os.path.realpath(log.path))
+        proof = getattr(log, "_managed_database_path_proof", None)
+        if proof is None or _managed_database_path_state(log.path) != proof:
+            return None
+        dev, ino = proof[1]
+        identity = f"file-id-v2:{dev}:{ino}"
     return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
@@ -42,13 +45,15 @@ def managed_id(task_id):
 
 def task_policy(template, namespace, task_id, *, create=False):
     managed_id(task_id)
+    if not isinstance(namespace, str) or not re.fullmatch(r"[0-9a-f]{64}", namespace):
+        raise ValueError("invalid managed workspace namespace")
     policy = WorkspacePolicy.from_dict(template.as_dict())
     root = policy.root
     for part in (namespace, task_id):
         _directories(root)
         root = root / part
         if create:
-            root.mkdir(mode=0o700, exist_ok=True)
+            _io_path(root).mkdir(mode=0o700, exist_ok=True)
         _directories(root)
     return WorkspacePolicy.from_dict({**policy.as_dict(), "root": str(root)})
 
@@ -74,8 +79,8 @@ class WorkspaceConfiguration(Mapping):
                 except (OSError, ValueError):
                     pass
                 else:
-                    if (row["policy"].as_dict()["root"] == event.payload.get("root")
-                            and row["fingerprint"] == event.payload.get("fingerprint")):
+                    from .workspaces import _binding_matches
+                    if _binding_matches(row, event.payload):
                         return row
         raise KeyError(identity)
 

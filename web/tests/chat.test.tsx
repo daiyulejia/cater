@@ -45,6 +45,21 @@ const input = () => screen.getByRole('textbox', { name: '向团队发送消息' 
 const write = (text: string) => fireEvent.change(input(), { target: { value: text } })
 const ready = (id: string) => screen.findByText(`${id}任务专属消息 #2`)
 
+test.each([400, 500])('聊天 HTTP %i 不回显未知正文且不自动重发', async (status) => {
+  handler = (url, init) => url === '/api/tasks/乙/command' && init.method === 'POST'
+    ? new Response('token=synthetic /private/path', { status }) : undefined
+  render(<App />); await ready('乙'); write('继续处理')
+  fireEvent.click(screen.getByRole('button', { name: '发送消息' }))
+  const alert = await screen.findByRole('alert')
+  expect(alert.textContent).not.toMatch(/synthetic|private|token/)
+  expect(alert.textContent).toContain(`HTTP ${status}`)
+  if (status === 500) {
+    expect(alert.textContent).toContain('提交结果未知')
+    expect(alert.textContent).toContain('没有自动重发')
+  }
+  expect(fetchMock.mock.calls.filter(([url, init]) => url === '/api/tasks/乙/command' && init.method === 'POST')).toHaveLength(1)
+})
+
 test.each(['决策', '成果'])('从%s筛选发送追问回到全部，执行中仍可发送并看见真实消息和失败回执', async (filter) => {
   handler = (url, init) => {
     if (url === '/api/tasks/乙' && init.method !== 'POST') return json({ ...detail('乙'), activity: { active: true, state: 'running' } })
@@ -412,7 +427,7 @@ test('发送错误留在对应任务，切换后的对话不显示另一项任�
   await act(async () => pending.resolve(new Response('乙任务发送失败', { status: 500 })))
   expect(screen.queryByText(/乙任务发送失败/)).toBeNull()
   select('乙'); await ready('乙')
-  expect(screen.getByRole('alert').textContent).toContain('乙任务发送失败')
+  expect(screen.getByRole('alert').textContent).not.toContain('乙任务发送失败')
   expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   expect(input().value).toBe('乙的补充')
 })

@@ -1,7 +1,9 @@
 """Runtime integration for immutable copies, independent of work acceptance."""
 
 from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -23,6 +25,10 @@ class ArtifactPersistenceTests(unittest.TestCase):
         base = Path(__file__).resolve().parents[1] / ".cater"
         base.mkdir(exist_ok=True)
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory(dir=base, prefix="persistence-")))
+        if os.name == "nt":
+            # The fixture can itself create paths beyond MAX_PATH; remove its own
+            # temporary tree through the same Windows namespace after closing SQLite.
+            self.addCleanup(shutil.rmtree, artifact_store._extended_windows_path(self.root))
         self.db = self.root / "work.db"
         self.driver = DocumentWorkDriver()
         self.drivers = {name: self.driver for name in ("product", "dev", "design", "test")}
@@ -60,7 +66,10 @@ class ArtifactPersistenceTests(unittest.TestCase):
         self.assertEqual(receipt.payload["submission_digest"], submission.payload["digest"])
         directory = Path(receipt.payload["directory"])
         self.assertTrue(directory.is_absolute())
-        self.assertTrue(directory.is_relative_to(self.root / "artifacts"))
+        root = self.root / "artifacts"
+        if os.name == "nt" and str(directory).startswith("\\\\?\\"):
+            root = artifact_store._extended_windows_path(root)
+        self.assertTrue(directory.is_relative_to(root))
         self.assertTrue((directory / "manifest.json").is_file())
         for entry in receipt.payload["files"]:
             self.assertEqual(set(entry), {"seq", "content_sha256", "path"})
@@ -72,6 +81,30 @@ class ArtifactPersistenceTests(unittest.TestCase):
         self.assertEqual(self.rt.work.view(self.task), before)
         self.assertFalse(before["stage_accepted"])
         self.assertTrue(self.rt.verify_chain().ok)
+
+    @unittest.skipUnless(os.name == "nt", "Windows MAX_PATH regression")
+    def test_windows_exact_260_lock_has_readable_receipt_and_folded_path(self):
+        import hashlib
+
+        submission = self.submit()
+        task_dir = "task-" + hashlib.sha256(self.task.encode("utf-8")).hexdigest()
+        suffix = Path(task_dir) / ".locks" / (submission.payload["digest"] + ".lock")
+        plain_length = len(str(self.root / suffix).encode("utf-16-le")) // 2
+        padding = 260 - plain_length - 1
+        self.assertGreater(padding, 0, "fixture parent is too long for the exact boundary")
+        self.rt._artifact_root = self.root / ("r" * padding)
+        lock = self.rt._artifact_root / suffix
+        self.assertEqual(len(str(lock).encode("utf-16-le")) // 2, 260)
+        receipt, = self.rt.persist_artifacts(self.task)
+        self.assertEqual(receipt.type, "artifacts.materialized", receipt.payload)
+        path = Path(receipt.payload["files"][0]["path"])
+        self.assertTrue(str(path).startswith("\\\\?\\"))
+        self.assertTrue(path.is_relative_to(Path(receipt.payload["directory"])))
+        self.assertEqual(path.read_bytes(), b"# Exact note\r\n\r\nOriginal bytes.")
+        artifact = next(a for a in self.rt.task(self.task).deliverables if a["seq"] == receipt.payload["files"][0]["seq"])
+        self.assertEqual(artifact["local_path"], str(path))
+        self.assertEqual(Path(artifact["local_path"]).read_bytes(), path.read_bytes())
+        self.assertEqual(self.rt.persist_artifacts(self.task), [receipt])
 
     def test_submission_is_automatically_persisted_before_independent_review(self):
         review = self.rt._review_work_item
@@ -264,7 +297,7 @@ class ArtifactPersistenceTests(unittest.TestCase):
 
         def tamper_after_verification(*args):
             manifest = materialize(*args)
-            path = self.root / "artifacts" / manifest["directory"] / manifest["files"][0]["path"]
+            path = artifact_store._legacy_directory(self.root / "artifacts", manifest) / manifest["files"][0]["path"]
             path.write_bytes(b"tampered after verification")
             with Runtime(self.db, drivers=self.drivers) as concurrent, patch.object(
                     artifact_store, "materialize", materialize):
@@ -275,6 +308,55 @@ class ArtifactPersistenceTests(unittest.TestCase):
             result = self.rt.persist_artifacts(self.task)
         self.assertEqual(len(self.events()), 1)
         self.assertEqual(result[0].type, "artifacts.materialization_failed")
+
+    def test_later_tampering_is_not_hidden_by_concurrent_success(self):
+        self.submit()
+        materialize = artifact_store.materialize
+        triggered = False
+
+        def success_then_tamper(*args):
+            nonlocal triggered
+            if not triggered:
+                triggered = True
+                with Runtime(self.db, drivers=self.drivers) as concurrent, patch.object(
+                        artifact_store, "materialize", materialize):
+                    first, = concurrent.persist_artifacts(self.task)
+                self.assertEqual(first.type, "artifacts.materialized")
+                Path(first.payload["files"][0]["path"]).write_bytes(b"tampered")
+            return materialize(*args)
+
+        with patch.object(artifact_store, "materialize", side_effect=success_then_tamper):
+            result = self.rt.persist_artifacts(self.task)
+        self.assertEqual(result[0].type, "artifacts.materialization_failed")
+        self.assertIn("tampering", result[0].payload["reason"])
+        self.assertEqual([event.type for event in self.events()],
+                         ["artifacts.materialized", "artifacts.materialization_failed"])
+
+    def test_repeated_concurrent_receipts_defer_after_bounded_retries(self):
+        self.submit()
+        submission = self.rt.work.view(self.task)["items"][0]["submission"]
+        binding = {"submission_seq": submission["seq"], "submission_digest": submission["digest"],
+                   "plan_seq": submission["plan_seq"], "work_item_id": submission["work_item_id"],
+                   "attempt_id": submission["attempt_id"], "scope": submission["scope"]}
+        materialize = artifact_store.materialize
+        attempts = 0
+
+        def concurrent_receipt(*args):
+            nonlocal attempts
+            attempts += 1
+            manifest = materialize(*args)
+            with Runtime(self.db, drivers=self.drivers) as concurrent:
+                concurrent.log.emit(actor=Actor.system("artifact_store"), type="artifacts.materialization_failed",
+                    task_id=self.task, payload={**binding, "reason": f"concurrent {attempts}"})
+            return manifest
+
+        with patch.object(artifact_store, "materialize", side_effect=concurrent_receipt), \
+                self.assertLogs("cater.runtime", level="WARNING"):
+            self.assertEqual(self.rt.persist_artifacts(self.task), [])
+        self.assertEqual(attempts, 3)
+        self.assertEqual([event.type for event in self.events()], ["artifacts.materialization_failed"] * 3)
+        self.assertTrue(self.rt.verify_chain().ok)
+        self.assertEqual(self.rt.persist_artifacts(self.task)[0].type, "artifacts.materialized")
 
     def test_crash_after_files_before_receipt_is_recovered_by_verifying_existing_version(self):
         self.submit()
@@ -290,7 +372,10 @@ class ArtifactPersistenceTests(unittest.TestCase):
         self.assertEqual(self.events(), [])
         self.rt.persist_artifacts(self.task)
         self.assertEqual(len(self.events()), 1)
-        self.assertEqual(len(list((self.root / "artifacts").glob("*/*/manifest.json"))), 1)
+        root = self.root / "artifacts"
+        if os.name == "nt":
+            root = artifact_store._extended_windows_path(root)
+        self.assertEqual(len(list(root.glob("*/*/manifest.json"))), 1)
 
     def test_receipt_write_interruption_after_production_does_not_mark_work_uncertain(self):
         emit = self.rt.log.emit

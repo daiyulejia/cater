@@ -125,7 +125,46 @@ def _reference_review_feedback(context):
     return result if json_bytes(result) < json_bytes(context) else context
 
 
-def model_context(context):
+def _reference_checkpoint_objective(context, basis, source_work):
+    """Share only an exact objective from the same host-captured snapshot."""
+    if not isinstance(basis, dict):
+        return context
+    checkpoint, work = context.get("work_checkpoint"), context.get("current_work")
+    window = context.get("context_window")
+    if not all(isinstance(value, dict) for value in (checkpoint, work, window, source_work)):
+        return context
+    scope = checkpoint.get("scope")
+    seq, digest = checkpoint.get("as_of_seq"), checkpoint.get("as_of_hash")
+    revision, status = work.get("revision"), work.get("status")
+    objective = work.get("objective")
+    if (not isinstance(scope, dict) or type(seq) is not int or seq < 1
+            or type(digest) is not str or len(digest) != 64
+            or any(c not in "0123456789abcdef" for c in digest)
+            or type(basis.get("as_of_seq")) is not int or basis["as_of_seq"] != seq
+            or basis.get("as_of_hash") != digest
+            or type(revision) is not int or revision < 0 or revision > seq
+            or type(scope.get("revision")) is not int or scope["revision"] != revision
+            or status not in ("running", "done") or type(scope.get("done")) is not bool
+            or scope["done"] != (status == "done")
+            or type(objective) is not str or not objective
+            or type(checkpoint.get("objective")) is not str or checkpoint["objective"] != objective
+            or any(key in checkpoint or key in work or key in source_work for key in
+                   ("objective_context_ref", "objective_truncated"))
+            or "objective_reference_note" in window):
+        return context
+    candidate = {**context,
+        "work_checkpoint": {**checkpoint, "objective": None,
+                            "objective_context_ref": "current_work.objective"},
+        "context_window": {**window, "objective_reference_note": (
+            "work_checkpoint.objective为null时，objective_context_ref指向本轮"
+            "current_work.objective的完整正文；仅共享文本，不改变目标版本、状态或顾客来源。")}}
+    try:
+        return candidate if len(model_json(candidate).encode("utf-8")) < len(model_json(context).encode("utf-8")) else context
+    except UnicodeEncodeError:
+        return context
+
+
+def model_context(context, *, basis=None):
     """Keep live requirements exact, and make historical excerpts explicit."""
     result = dict(context)
     work = context["current_work"]
@@ -147,15 +186,26 @@ def model_context(context):
         _preview(_preview(row, "instruction", 512), "feedback", 512)
         if row.get("status") == "stale" else row for row in context["reviews"]]
     rows = [row for row in context["conversation"] if _source_key(row, sources) is None]
+    source_index = result.get("customer_input_sources")
+    source_bytes = (json_bytes(source_index) if source_index is not None
+                    and source_index.get("status") != "unavailable" else 0)
+    # Reserve index bytes inside the existing conversation budget. Active
+    # messages, assignments and reviews remain outside this excerpt budget.
+    conversation_budget = max(2, CONVERSATION_BYTES - source_bytes)
     selected, total = [], 2
     for row in reversed(rows):
         preview = _preview(row, "text", 4096)
         cost = json_bytes(preview) + 2
-        if total + cost > CONVERSATION_BYTES:
+        if total + cost > conversation_budget:
             break
         selected.append(preview)
         total += cost
     result["conversation"] = list(reversed(selected))
+    omitted_rows = rows[:len(rows) - len(selected)]
+    earlier = context.get("conversation_earlier_omitted", 0)
+    customer_earlier = context.get("conversation_earlier_customer_omitted", 0)
+    omitted = earlier + len(omitted_rows)
+    customer_omitted = customer_earlier + sum(row.get("sender_kind") == "human" for row in omitted_rows)
     latest, version_counts = {}, {}
     for row in context["artifacts"]:
         filename = row["filename"]
@@ -167,8 +217,13 @@ def model_context(context):
         for row in latest.values()]
     result["context_window"] = {
         "conversation_bytes": json_bytes(result["conversation"]),
-        "conversation_budget_bytes": CONVERSATION_BYTES,
+        "conversation_budget_bytes": conversation_budget,
+        **({"customer_input_sources_bytes": source_bytes,
+            "conversation_and_sources_budget_bytes": CONVERSATION_BYTES} if source_bytes else {}),
         "conversation_excerpt": True,
+        **({"conversation_omitted_count": omitted, "customer_messages_omitted_count": customer_omitted,
+            "omission_note": "部分对话不在本轮上下文，不应声称已完整理解；需要时用read_messages分页核对原文，顾客来源索引也可能有后续页。"}
+           if omitted else {}),
         "conversation_reader": {"name": "read_messages", "scope": "conversation"},
         "work_reader": "read_checkpoint", "receipt_reader": "read_receipts",
         "receipt_index_reader": {"name": "read_receipts", "section": "index"},
@@ -179,7 +234,8 @@ def model_context(context):
            if any(count > 1 for count in version_counts.values()) else {}),
         "note": "聊天和工作索引可能是节选，不是完整要求或验收结论。message、active_assignment、最新顾客消息及当前目标reviews保留原文或同轮引用；旧目标复核节选可按review_reader读回。",
     }
-    return _reference_review_feedback(_reference_inputs(result))
+    result = _reference_review_feedback(_reference_inputs(result))
+    return _reference_checkpoint_objective(result, basis, work)
 
 
 def history_window(history, receipts, *, tools, budget=HISTORY_BYTES):

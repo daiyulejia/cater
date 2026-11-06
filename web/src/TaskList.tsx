@@ -4,13 +4,14 @@ import type { ExecutionControl } from './executionControl'
 import { executionLabel } from './executionControl'
 import type { TeamSummary } from './team'
 import { conversationTitle } from './conversationTitle'
+import { safeAuditBlocked } from './activityDiagnostics'
 import './TaskList.css'
 
 type ListedTask = {
   id: string
   goal: string
   status: string
-  activity?: { active: boolean; state?: string }
+  activity?: { active: boolean; state?: string; error?: string }
   execution_control?: Pick<ExecutionControl, 'state'>
   team?: Pick<TeamSummary, 'enabled' | 'status'> & Partial<TeamSummary> | null
 }
@@ -19,6 +20,7 @@ type Filter = 'all' | 'unfinished' | 'done'
 type ActivityState = 'running' | 'queued' | 'waiting' | 'paused' | 'cancelled' | 'failed' | 'blocked' | 'uncertain' | 'done' | 'idle'
 
 function listActivity(task: ListedTask, control?: ExecutionControl['state']): ActivityState {
+  if (safeAuditBlocked(task.activity)) return 'blocked'
   if (control === 'paused' || control === 'cancelled') return control
   const activity = task.activity
   const team = task.team?.enabled ? task.team : undefined
@@ -102,7 +104,7 @@ export function TaskList<T extends ListedTask>({ tasks, selectedId, drafts, coll
       {matches.map((item) => {
         const control = executionState?.(item) ?? item.execution_control?.state
         const state = listActivity(item, control)
-        const label = executionLabel(control) || statusLabel(item)
+        const label = safeAuditBlocked(item.activity) ? '审计状态受阻，需核对' : executionLabel(control) || statusLabel(item)
         const title = conversationTitle(item.goal)
         return <button key={item.id} onClick={() => onChoose(item.id)} aria-current={item.id === selectedId ? 'page' : undefined} className={`task-item w-56 shrink-0 px-3 py-3 text-left lg:w-full ${item.id === selectedId ? 'is-active' : ''}`}>
           <div className="flex items-start gap-2"><TaskActivity state={state} /><span aria-label={title.excerpt ? `目标节选：${title.label}` : undefined} className="line-clamp-2 min-w-0 [overflow-wrap:anywhere] text-[13px] font-semibold leading-5">{title.label}</span></div>

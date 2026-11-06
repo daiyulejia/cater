@@ -1,3 +1,5 @@
+import { safeAuditBlocked } from './activityDiagnostics'
+
 export type TeamRun = {
   message_seq?: number
   role?: string
@@ -46,6 +48,7 @@ export type TeamState = {
   status: string
   pending_count: number
   effects_pending_count?: number | null
+  open_work_count?: number
   runs: TeamRun[]
   assignments: TeamAssignment[]
   reviews?: TeamReview[]
@@ -54,9 +57,9 @@ export type TeamState = {
   revision: number
 }
 
-export type TeamSummary = Pick<TeamState, 'enabled' | 'status' | 'pending_count' | 'revision' | 'effects_pending_count'> & { runs?: TeamRun[] }
+export type TeamSummary = Pick<TeamState, 'enabled' | 'status' | 'pending_count' | 'revision' | 'effects_pending_count' | 'open_work_count'> & { runs?: TeamRun[] }
 
-export type TeamActivity = { id?: string; state: string; active: boolean; revision?: number; instance_id?: string; follow_up?: { action?: string } }
+export type TeamActivity = { id?: string; state: string; active: boolean; error?: string; revision?: number; instance_id?: string; follow_up?: { action?: string } }
 
 export type TeamSnapshotClock = {
   version: number
@@ -228,6 +231,7 @@ export function teamEffectsPendingCount(team: TeamSummary): number | null | unde
 }
 
 export function teamStatus(team: TeamSummary, activity?: TeamActivity): string {
+  if (safeAuditBlocked(activity)) return '审计状态受阻，需核对'
   const effects = teamEffectsPendingCount(team)
   if (effects === null) return '操作状态待核对'
   if (effects !== undefined && effects > 0) {

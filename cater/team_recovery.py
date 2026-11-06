@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import threading
+import uuid
+from contextlib import contextmanager
 
 from .activity_owner import activity_owner
 from .events import Actor
@@ -21,60 +24,289 @@ def _same_scope(left, right):
             and json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True))
 
 
+def _unsettled_delivery(team, task_id, start, events):
+    """Recognize only a current, host-paired delivery, without replaying tools.
+
+    This trusts the local event snapshot like other recovery projections; it is
+    not authentication against a malicious writer to the event database.
+    """
+    from .team import LOCAL_EVENT_CONTRACT
+    from .team_reply import _recorded_arguments
+
+    p = start.payload
+    role = team.rt.organization.leader
+    by_seq = {e.seq: e for e in events}
+    source = by_seq.get(p['message_seq']) if type(p.get('message_seq')) is int else None
+    if (start.actor != HOST or start.type != 'team.run_started' or p.get('role') != role.id
+            or not isinstance(p.get('run_id'), str) or not p['run_id']
+            or source is None or source.type != 'team.message_received'
+            or source.payload.get('recipient') != role.id or source.seq >= start.seq
+            or len([e for e in events if e.actor == HOST and e.type == 'team.run_started'
+                    and e.payload.get('run_id') == p['run_id']]) != 1):
+        return None
+    from .team_review_direction import effective_objectives
+    effective = effective_objectives(events)
+    objectives = [e for e in events if e.seq in effective]
+    if not objectives or objectives[-1].type != 'team.objective_completed':
+        return None
+    completed = objectives[-1]
+    if (completed.seq <= start.seq or completed.payload.get('run_id') != p['run_id']
+            or not isinstance(completed.payload.get('summary'), str)
+            or not completed.payload['summary'].strip()
+            or any(e.type == 'msg.said' and e.payload.get('delivery_seq') == completed.seq for e in events)):
+        return None
+    matches = []
+    for receipt in events:
+        r = receipt.payload
+        if (receipt.actor != HOST or receipt.type != 'team.tool_finished' or r.get('name') != 'finish_work'
+                or r.get('run_id') != p['run_id'] or r.get('role') != role.id
+                or type(r.get('started_seq')) is not int or type(r.get('result')) is not dict
+                or r['result'].get('status') != 'ok' or 'already_completed' in r['result']):
+            continue
+        tool = by_seq.get(r['started_seq'])
+        from .team_review_direction import direction_at
+        if (tool is None or tool.actor != HOST or tool.type != 'team.tool_started'
+                or not start.seq < tool.seq < completed.seq < receipt.seq
+                or direction_at(events, start.seq) != direction_at(events, tool.seq)
+                or direction_at(events, tool.seq) != direction_at(events, completed.seq)
+                or direction_at(events, tool.seq) is None
+                or any(e.type == 'team.message_received' and e.actor == Actor.human()
+                       and start.seq < e.seq < receipt.seq for e in events)
+                or sum(1 for e in events if e.actor == HOST and e.type == 'team.tool_finished'
+                       and e.payload.get('started_seq') == tool.seq) != 1
+                or any(tool.payload.get(k) != p.get(k) for k in ('run_id', 'role', 'message_seq'))
+                or tool.payload.get('name') != 'finish_work'
+                or tool.payload.get('execution_contract') != LOCAL_EVENT_CONTRACT
+                or type(tool.payload.get('execution_contract', {}).get('version')) is not int):
+            continue
+        previous = [e for e in objectives if e.seq < tool.seq]
+        revision = previous[-1].seq if previous else 0
+        boundary = max((e.seq for e in events if e.seq < tool.seq and e.actor == HOST
+                        and (e.type == 'team.started' or e.type == 'team.objective_updated' and e.seq in effective)), default=0)
+        args = _recorded_arguments(tool.payload.get('arguments'))
+        if (type(tool.payload.get('revision')) is not int or tool.payload['revision'] != revision
+                or type(completed.payload.get('objective_seq')) is not int or completed.payload['objective_seq'] != boundary
+                or type(args) is not dict or type(args.get('summary')) is not str
+                or type(args.get('verification')) is not str
+                or not args['summary'].strip() or len(args['summary']) > 32000
+                or not args['verification'].strip() or len(args['verification']) > 32000
+                or args['summary'].strip() != completed.payload.get('summary')
+                or args['verification'].strip() != completed.payload.get('verification')):
+            continue
+        matches.append(receipt)
+    return completed if len(matches) == 1 else None
+
+
+def recovery_message_valid(event, events, *, leader_id, by_seq=None):
+    if (event.actor != HOST or event.type != "team.message_received"
+            or event.payload.get("kind") != "recovery"
+            or event.payload.get("recipient") != leader_id):
+        return False
+    p = event.payload
+    if p.get("trigger") == "control_resume":
+        return resume_message_valid(event, events, by_seq=by_seq)
+    if type(p.get("recovery_of")) is not int or type(p.get("interrupted_seq")) is not int:
+        return False
+    boundary = p.get("trigger") == "turn_boundary"
+    if "trigger" in p and not boundary:
+        return False
+    by_seq = by_seq if by_seq is not None else {e.seq: e for e in events}
+    start, finish = by_seq.get(p["recovery_of"]), by_seq.get(p["interrupted_seq"])
+    source = by_seq.get(start.payload.get("message_seq")) if start else None
+    scope = (finish.payload.get("recovery_scope") if boundary else start.payload.get("recovery_scope")) if start and finish else None
+    return bool(start and finish and source and source.seq < start.seq < finish.seq < event.seq
+        and start.actor == finish.actor == HOST and start.type == "team.run_started"
+        and finish.type == "team.run_finished" and finish.payload.get("status") == "interrupted"
+        and start.payload.get("recovery_contract") == RECOVERY_CONTRACT
+        and type(start.payload["recovery_contract"].get("version")) is int
+        and source.type == "team.message_received" and source.actor.kind in {"human", "agent"}
+        and source.payload.get("kind") != "recovery"
+        and source.payload.get("recipient") == start.payload.get("role")
+        and start.hash == p.get("recovery_hash") and finish.payload.get("recovery_of") == start.seq
+        and ((finish.payload.get("interruption_kind") == "turn_boundary") == boundary)
+        and all(finish.payload.get(k) == start.payload.get(k) for k in ("message_seq", "role", "run_id"))
+        and isinstance(start.payload.get("run_id"), str) and start.payload["run_id"].strip()
+        and _same_scope(p.get("scope"), scope)
+        and type(p.get("revision")) is int and p["revision"] == scope.get("revision")
+        and not any(e.seq < event.seq and e.actor == HOST and e.type == "team.message_received"
+                    and e.payload.get("kind") == "recovery" and e.payload.get("recovery_of") == start.seq
+                    and e.payload.get("recovery_hash") == start.hash for e in events))
+
+
+def resume_message_valid(message, events, *, by_seq=None):
+    by_seq = by_seq if by_seq is not None else {event.seq: event for event in events}
+    p = message.payload
+    if type(p.get("resume_seq")) is not int or type(p.get("scope")) is not dict:
+        return False
+    control, scope = by_seq.get(p["resume_seq"]), p["scope"]
+    if (control is None or control.actor != Actor.human() or control.type != "task.execution_controlled"
+            or control.payload.get("action") != "resume" or control.payload.get("state") != "running"
+            or not control.seq < message.seq or p.get("resume_hash") != control.hash):
+        return False
+    previous = paused_predecessor(control, events)
+    binding = control.payload.get("scope")
+    if (previous is None or previous.actor != Actor.human() or previous.type != "task.execution_controlled"
+            or previous.payload.get("state") != "paused" or not previous.seq < control.seq
+            or type(binding) is not dict or type(binding.get("workspace", {})) is not dict):
+        return False
+    from .team_review_direction import effective_objectives
+    # Targeted receipt proofs contain only the selected objective boundary,
+    # not complete task history or its goal text. They can conservatively
+    # reject a stale boundary, but cannot reconstruct direction projection.
+    effective = (effective_objectives(events) if any(e.type == 'task.created' for e in events)
+                 else {e.seq for e in events if e.actor == HOST
+                       and e.type in {'team.objective_updated', 'team.objective_completed'}})
+    objectives = [event for event in events if event.seq < message.seq and event.seq in effective]
+    before_resume = [event for event in objectives if event.seq < control.seq]
+    workspace = binding.get("workspace", {})
+    return (type(p.get("revision")) is int and type(scope.get("revision")) is int
+        and p["revision"] == scope["revision"]
+        and scope.get("revision") == (objectives[-1].seq if objectives else 0)
+        and scope["revision"] == (before_resume[-1].seq if before_resume else 0)
+        and not (objectives and objectives[-1].type == "team.objective_completed")
+        and type(scope.get("control_seq")) is int and scope["control_seq"] == control.seq
+        and scope.get("control_state") == "running" and scope.get("done") is False
+        and scope.get("execution_fingerprint") == binding.get("organization")
+        and scope.get("rule_fingerprint") == binding.get("rules")
+        and scope.get("workspace_revision") == workspace.get("revision")
+        and scope.get("workspace_fingerprint") == workspace.get("fingerprint")
+        and not any(event.seq < message.seq and event.actor == HOST and event.type == "team.message_received"
+                    and event.payload.get("kind") == "recovery" and event.payload.get("trigger") == "control_resume"
+                    and event.payload.get("resume_seq") == control.seq for event in events))
+
+
 class TeamRecovery:
     def __init__(self, team):
         self.team, self.rt = team, team.rt
+        self._review_lease = threading.local()
+
+    def authenticate_review_candidate(self, task_id, candidate):
+        """Check candidate history only; this is not claim or reply authority."""
+        from .review_supervision_candidate import authenticate_history
+
+        events = self.rt.log.read(task_id=task_id)
+        return authenticate_history(self.team, task_id, candidate, events=events)
+
+    def claim_review_candidate(self, task_id, *, candidate_seq, candidate_hash):
+        """Explicitly claim once; never invoke a model or enter the normal inbox."""
+        from .review_supervision_candidate import require_verified_log, validate
+        from .supervision_barrier import KIND
+
+        if getattr(self._review_lease, 'task_id', None) != task_id:
+            raise WorkConflict('必须先持有监督领取的团队执行锁。')
+        if getattr(self._review_lease, 'run_seq', None) is not None:
+            raise WorkConflict('当前监督锁已经领取过一次运行。')
+        log = self.rt.log
+        if log.db.in_transaction:
+            raise WorkConflict('监督候选领取必须拥有独立写事务。')
+        if type(candidate_seq) is not int or candidate_seq < 1 or not isinstance(candidate_hash, str) or not candidate_hash:
+            return None
+        with log.atomic():
+            require_verified_log(log)
+            events = log.read(task_id=task_id)
+            candidate = next((e for e in events if e.seq == candidate_seq), None)
+            if candidate is None or candidate.hash != candidate_hash or not validate(self.team, task_id, candidate, events=events):
+                return None
+            if any(e.actor == HOST and e.type == 'team.run_started'
+                   and type(e.payload.get('message_seq')) is int and e.payload['message_seq'] == candidate.seq for e in events):
+                return None
+            scope = self.scope(task_id, events=events)
+            if 'work_direction_seq' in candidate.payload.get('scope', {}):
+                scope = {**scope, 'work_direction_seq': candidate.payload['scope']['work_direction_seq']}
+            authorization = self.rt._execution_control_authorization
+            if authorization is not None and authorization != (task_id, scope['control_seq']):
+                return None
+            role = self.rt.organization.leader
+            started = log.emit(type='team.run_started', task_id=task_id, actor=HOST, payload={
+                'message_seq': candidate.seq, 'role': role.id, 'run_id': uuid.uuid4().hex,
+                'revision': scope['revision'], 'control_seq': scope['control_seq'],
+                'recovery_contract': dict(RECOVERY_CONTRACT), 'recovery_scope': scope,
+                'customer_input_barrier': {'version': 1, 'kind': KIND,
+                                           'source_seq': candidate.seq, 'source_hash': candidate.hash},
+            })
+            return candidate, role, started
+
+    @contextmanager
+    def review_candidate_lease(self, task_id, *, candidate_seq, candidate_hash):
+        """Own recovery lock before claim and until the caller ends execution."""
+        if getattr(self._review_lease, 'task_id', None) is not None:
+            raise WorkConflict('监督领取锁不可重入。')
+        with activity_owner(self.rt.log.path, task_id, 'simple-team') as owned:
+            if not owned:
+                yield None
+                return
+            with self._owned_review_candidate_lease(task_id, candidate_seq=candidate_seq, candidate_hash=candidate_hash) as claimed:
+                yield claimed
+
+    @contextmanager
+    def drain_review_candidate_lease(self, task_id, *, candidate_seq, candidate_hash):
+        """Use only from the active drain, which already owns simple-team."""
+        if not self.team._owns_drain(task_id) or not self.team.external.scheduling(task_id):
+            raise WorkConflict('只有持有团队执行锁的当前调度器能接续监督。')
+        with self._owned_review_candidate_lease(task_id, candidate_seq=candidate_seq, candidate_hash=candidate_hash) as claimed:
+            yield claimed
+
+    @contextmanager
+    def _owned_review_candidate_lease(self, task_id, *, candidate_seq, candidate_hash):
+        if getattr(self._review_lease, 'task_id', None) is not None:
+            raise WorkConflict('监督领取锁不可重入。')
+        self._review_lease.task_id = task_id
+        self._review_lease.run_seq = None
+        try:
+            claimed = self.claim_review_candidate(task_id, candidate_seq=candidate_seq, candidate_hash=candidate_hash)
+            if claimed is not None:
+                self._review_lease.run_seq = claimed[2].seq
+            yield claimed
+        finally:
+            self._review_lease.task_id = None
+            self._review_lease.run_seq = None
+
+    def owns_review_candidate(self, task_id, started):
+        return (getattr(self._review_lease, 'task_id', None) == task_id
+                and getattr(self._review_lease, 'run_seq', None) == started.seq)
+
+    def claimed_review_candidate(self, task_id, message, started, *, events=None):
+        """Authenticate the unique explicitly claimed run, without scheduling it."""
+        from .review_supervision_candidate import TRIGGER, authenticate_history
+        from .supervision_barrier import KIND
+
+        events = events if events is not None else self.rt.log.read(task_id=task_id)
+        if (message.payload.get('trigger') != TRIGGER or not authenticate_history(self.team, task_id, message, events=events)
+                or started.task_id != task_id or started.actor != HOST or started.type != 'team.run_started'
+                or not any(e == started for e in events) or started.payload.get('message_seq') != message.seq
+                or started.payload.get('role') != self.rt.organization.leader.id
+                or started.payload.get('recovery_contract') != RECOVERY_CONTRACT
+                or type(started.payload.get('recovery_contract', {}).get('version')) is not int
+                or not _same_scope(started.payload.get('recovery_scope'), message.payload.get('scope'))
+                or started.payload.get('revision') != message.payload.get('revision')
+                or started.payload.get('control_seq') != message.payload.get('scope', {}).get('control_seq')
+                or started.payload.get('customer_input_barrier') != {
+                    'version': 1, 'kind': KIND, 'source_seq': message.seq, 'source_hash': message.hash}
+                or type(started.payload['customer_input_barrier'].get('version')) is not int
+                or started.seq <= message.seq):
+            return False
+        starts = [e for e in events if e.actor == HOST and e.type == 'team.run_started'
+                  and type(e.payload.get('message_seq')) is int and e.payload['message_seq'] == message.seq]
+        return len(starts) == 1 and starts[0] == started
 
     def scope(self, task_id, *, events=None):
         events = events if events is not None else self.rt.log.read(task_id=task_id)
-        objectives = [e for e in events if e.actor == HOST
-                      and e.type in {"team.objective_updated", "team.objective_completed"}]
+        from .team_review_direction import objective_projection
+        _, revision, done, _ = objective_projection(events, self.rt.task(task_id).goal)
         workspace = self.rt.workspaces.view(task_id)
         control = self.rt.execution_control.view(task_id)
-        return {"revision": objectives[-1].seq if objectives else 0,
+        return {"revision": revision,
                 "control_seq": control["seq"], "control_state": control["state"],
                 "workspace_revision": workspace.get("revision"),
                 "workspace_fingerprint": workspace.get("fingerprint"),
                 "workspace_available": workspace["available"],
                 "execution_fingerprint": self.rt.work.organization_fingerprint,
-                "rule_fingerprint": self.rt.rulebook.current_snapshot(task_id)["fingerprint"],
-                "done": bool(objectives and objectives[-1].type == "team.objective_completed")}
+                "rule_fingerprint": self.rt.rulebook.current_snapshot(task_id, privacy_safe=True)["fingerprint"],
+                "done": done}
 
     def is_message(self, event, events=None, *, by_seq=None):
-        if (event.actor != HOST or event.type != "team.message_received"
-                or event.payload.get("kind") != "recovery"
-                or event.payload.get("recipient") != self.rt.organization.leader.id):
-            return False
-        p = event.payload
-        if p.get("trigger") == "control_resume":
-            return self._resume_message(event, events, by_seq=by_seq)
-        if type(p.get("recovery_of")) is not int or type(p.get("interrupted_seq")) is not int:
-            return False
-        boundary = p.get("trigger") == "turn_boundary"
-        if "trigger" in p and not boundary:
-            return False
         events = events if events is not None else self.rt.log.read(task_id=event.task_id)
-        by_seq = by_seq if by_seq is not None else {e.seq: e for e in events}
-        start, finish = by_seq.get(p["recovery_of"]), by_seq.get(p["interrupted_seq"])
-        source = by_seq.get(start.payload.get("message_seq")) if start else None
-        scope = (finish.payload.get("recovery_scope") if boundary else start.payload.get("recovery_scope")) if start and finish else None
-        return bool(start and finish and source and source.seq < start.seq < finish.seq < event.seq
-            and start.actor == finish.actor == HOST and start.type == "team.run_started"
-            and finish.type == "team.run_finished" and finish.payload.get("status") == "interrupted"
-            and start.payload.get("recovery_contract") == RECOVERY_CONTRACT
-            and type(start.payload["recovery_contract"].get("version")) is int
-            and source.type == "team.message_received" and source.actor.kind in {"human", "agent"}
-            and source.payload.get("kind") != "recovery"
-            and source.payload.get("recipient") == start.payload.get("role")
-            and start.hash == p.get("recovery_hash") and finish.payload.get("recovery_of") == start.seq
-            and ((finish.payload.get("interruption_kind") == "turn_boundary") == boundary)
-            and all(finish.payload.get(k) == start.payload.get(k) for k in ("message_seq", "role", "run_id"))
-            and isinstance(start.payload.get("run_id"), str) and start.payload["run_id"].strip()
-            and _same_scope(p.get("scope"), scope)
-            and type(p.get("revision")) is int and p["revision"] == scope.get("revision")
-            and not any(e.seq < event.seq and e.actor == HOST and e.type == "team.message_received"
-                        and e.payload.get("kind") == "recovery" and e.payload.get("recovery_of") == start.seq
-                        and e.payload.get("recovery_hash") == start.hash for e in events))
+        return recovery_message_valid(event, events, leader_id=self.rt.organization.leader.id, by_seq=by_seq)
 
     def current(self, task_id, message):
         events = self.rt.log.read(task_id=task_id)
@@ -83,6 +315,12 @@ class TeamRecovery:
         if self.budget_boundary(message, events) and self.team._pending_operations(task_id):
             return False
         scope = self.scope(task_id, events=events)
+        from .team_review_direction import direction_at
+        origin = message.payload.get('recovery_of', message.payload.get('resume_seq'))
+        if (type(origin) is not int or not events
+                or direction_at(events, origin) != direction_at(events, events[-1].seq)
+                or direction_at(events, origin) is None):
+            return False
         return (scope["control_state"] == "running" and not scope["done"]
                 and _same_scope(message.payload.get("scope"), scope)
                 and not self.superseded(task_id, message, events=events))
@@ -233,39 +471,7 @@ class TeamRecovery:
 
     def _resume_message(self, message, events=None, *, by_seq=None):
         events = events if events is not None else self.rt.log.read(task_id=message.task_id)
-        by_seq = by_seq if by_seq is not None else {event.seq: event for event in events}
-        p = message.payload
-        if type(p.get("resume_seq")) is not int or type(p.get("scope")) is not dict:
-            return False
-        control, scope = by_seq.get(p["resume_seq"]), p["scope"]
-        if (control is None or control.actor != Actor.human() or control.type != "task.execution_controlled"
-                or control.payload.get("action") != "resume" or control.payload.get("state") != "running"
-                or not control.seq < message.seq or p.get("resume_hash") != control.hash):
-            return False
-        previous = paused_predecessor(control, events)
-        binding = control.payload.get("scope")
-        if (previous is None or previous.actor != Actor.human() or previous.type != "task.execution_controlled"
-                or previous.payload.get("state") != "paused" or not previous.seq < control.seq
-                or type(binding) is not dict or type(binding.get("workspace", {})) is not dict):
-            return False
-        objectives = [event for event in events if event.actor == HOST and event.seq < message.seq
-                      and event.type in {"team.objective_updated", "team.objective_completed"}]
-        before_resume = [event for event in objectives if event.seq < control.seq]
-        workspace = binding.get("workspace", {})
-        return (type(p.get("revision")) is int and type(scope.get("revision")) is int
-            and p["revision"] == scope["revision"]
-            and scope.get("revision") == (objectives[-1].seq if objectives else 0)
-            and scope["revision"] == (before_resume[-1].seq if before_resume else 0)
-            and not (objectives and objectives[-1].type == "team.objective_completed")
-            and type(scope.get("control_seq")) is int and scope["control_seq"] == control.seq
-            and scope.get("control_state") == "running" and scope.get("done") is False
-            and scope.get("execution_fingerprint") == binding.get("organization")
-            and scope.get("rule_fingerprint") == binding.get("rules")
-            and scope.get("workspace_revision") == workspace.get("revision")
-            and scope.get("workspace_fingerprint") == workspace.get("fingerprint")
-            and not any(event.seq < message.seq and event.actor == HOST and event.type == "team.message_received"
-                        and event.payload.get("kind") == "recovery" and event.payload.get("trigger") == "control_resume"
-                        and event.payload.get("resume_seq") == control.seq for event in events))
+        return resume_message_valid(message, events, by_seq=by_seq)
 
     def resume(self, task_id, resume_seq):
         """Translate an explicit resume into fresh supervision when the inbox is empty."""
@@ -290,9 +496,10 @@ class TeamRecovery:
                 if existing is not None:
                     return existing if self.is_message(existing, events) else None
                 scope = self.scope(task_id, events=events)
+                from .team_review_direction import effective_objectives
+                effective = effective_objectives(events)
                 previous_objective = next((event.seq for event in reversed(events)
-                    if event.seq < resume_seq and event.actor == HOST
-                    and event.type in {"team.objective_updated", "team.objective_completed"}), 0)
+                    if event.seq < resume_seq and event.seq in effective), 0)
                 if (scope["control_state"] != "running" or scope["control_seq"] != resume_seq or scope["done"]
                         or scope["revision"] != previous_objective
                         or not any(event.seq < resume_seq and event.actor == HOST
@@ -311,19 +518,27 @@ class TeamRecovery:
 
     def run_scope(self, task_id, start, *, observed=None, events=None):
         events = events if events is not None else self.rt.log.read(task_id=task_id)
+        from .team_review_direction import direction_at, effective_objectives
+        if (not events or direction_at(events, start.seq) is None
+                or direction_at(events, start.seq) != direction_at(events, events[-1].seq)):
+            return None
         expected = observed if observed is not None else start.payload.get("recovery_scope")
         if type(expected) is not dict or type(expected.get("revision")) is not int:
             return None
         expected = dict(expected)
         cutoff = max(start.seq, expected["revision"])
+        effective = effective_objectives(events)
         for event in events:
             if (event.seq <= cutoff or event.actor != HOST
-                    or event.type not in {"team.objective_updated", "team.objective_completed"}):
+                    or event.seq not in effective):
                 continue
             if event.payload.get("run_id") != start.payload.get("run_id"):
                 return None
             expected.update(revision=event.seq, done=event.type == "team.objective_completed")
         scope = self.scope(task_id, events=events)
+        if 'work_direction_seq' in expected:
+            from .team_review_direction import direction_at
+            scope = {**scope, 'work_direction_seq': direction_at(events, events[-1].seq) if events else None}
         return scope if _same_scope(scope, expected) else None
 
     def boundary_scope(self, task_id, source, start, observed):
@@ -352,6 +567,7 @@ class TeamRecovery:
                      "这是新的监督输入，不是重放旧请求、旧操作或宣布工作完成。")})
 
     def retire(self, task_id):
+        from .team_review_direction import direction_at
         """Caller owns simple-team; closing and notification commit together."""
         from .team_reply import committed_reply
 
@@ -369,12 +585,24 @@ class TeamRecovery:
                 p = start.payload
                 source = sources.get(p.get("message_seq"))
                 answer = committed_reply(self.team, start, events)
+                delivery = _unsettled_delivery(self.team, task_id, start, events) if answer is None else None
+                if delivery is not None:
+                    role = self.rt.organization.leader
+                    text = delivery.payload['summary']
+                    if any(row.get('run_id') == p['run_id'] for row in self.team.external_runs.pending(task_id)):
+                        text += "\n\n外部客户端清理尚未确认，需核对进程；本次交付不表示所有执行均已停止。"
+                    answer = self.rt.log.emit(type='msg.said', task_id=task_id, actor=Actor.agent(role.id, role.role),
+                        payload={'text': text, 'claim': text[:180], 'phase': 'team', 'run_id': p['run_id'],
+                                 'reply_to': p['message_seq'], 'response_kind': 'reply', 'audience': 'customer',
+                                 'recipient': 'human', 'delivery_seq': delivery.seq})
                 if answer is not None:
                     self.rt.log.emit(type="team.run_finished", task_id=task_id, actor=HOST,
                         payload={**{key: p.get(key) for key in ("message_seq", "role", "run_id", "revision")},
                                  "status": "completed", "recovery_of": start.seq,
                                  "recovered_customer_reply_seq": answer.seq,
-                                 "reason": "顾客答复及工具回执已原子保存，未重复回答；进程及工具影响仍按各自记录核对。"})
+                                 "reason": ("已依据已保存的交付回执补齐顾客答复，未重放工具；进程及工具影响仍按各自记录核对。"
+                                            if delivery is not None else
+                                            "顾客答复及工具回执已原子保存，未重复回答；进程及工具影响仍按各自记录核对。")})
                     continue
                 eligible = (source is not None and source.seq < start.seq and source.actor.kind in {"human", "agent"}
                     and source.payload.get("kind") != "recovery"
@@ -383,6 +611,8 @@ class TeamRecovery:
                     and p.get("recovery_contract") == RECOVERY_CONTRACT
                     and type(p["recovery_contract"].get("version")) is int
                     and p.get("recovery_scope") == scope and p.get("revision") == scope["revision"]
+                    and direction_at(events, start.seq) is not None
+                    and direction_at(events, start.seq) == direction_at(events, events[-1].seq)
                     and scope["control_state"] == "running" and not scope["done"]
                     and not any(e.actor == Actor.human() and e.seq > start.seq for e in sources.values()))
                 terminal = self.rt.log.emit(type="team.run_finished", task_id=task_id, actor=HOST,
@@ -407,13 +637,13 @@ class TeamRecovery:
 
     def assignments(self, task_id, *, events=None):
         from .team import _reported_messages
+        from .team_review_direction import effective_objectives
 
         events = events if events is not None else self.rt.log.read(task_id=task_id)
         messages = self.team._messages(task_id, events=events)
         reported = _reported_messages(messages)
         superseded = self.team._inactive_messages(task_id, events=events)
-        revision = max((e.seq for e in events if e.actor == HOST
-                        and e.type in {"team.objective_updated", "team.objective_completed"}), default=0)
+        revision = max(effective_objectives(events), default=0)
         runs, continuations, interrupted_roots = {}, {}, set()
         for e in events:
             if e.actor == HOST and e.type == "team.run_started":
@@ -449,7 +679,7 @@ class TeamRecovery:
             run = runs.get(latest.seq, {})
             rows.append({"seq": source.seq, "sender": source.actor.id, "recipient": source.payload["recipient"],
                          "text": source.payload["text"], "latest_message_seq": latest.seq,
-                         "requires_return": source.seq in interrupted_roots,
+                         "requires_return": source.seq in interrupted_roots or run.get("status") == "completed",
                          "has_delegated_work": source.seq in delegated,
                          "status": run.get("status", "queued"), "reason": run.get("reason", ""),
                          "run_id": run.get("run_id")})
@@ -471,8 +701,8 @@ class TeamRecovery:
             from .team_context import _preview
 
             withdrawals = self.team.work_control.view(task_id, events=events)
-            objectives = [e for e in events if e.actor == HOST and e.type == "team.objective_updated"]
-            objective = objectives[-1].payload["goal"] if objectives else self.rt.task(task_id).goal
+            from .team_review_direction import objective_projection
+            objective, _, _, _ = objective_projection(events, self.rt.task(task_id).goal)
             pending = (display_pending(self.team, task_id, tool_start=tool_start, role_id=role_id)
                        if pending_view is None else pending_view)
             checkpoint = {"as_of_seq": events[-1].seq if events else 0,

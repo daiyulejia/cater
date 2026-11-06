@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import io
+from pathlib import Path
+import zipfile
 import json
 import unittest
 from unittest.mock import patch
@@ -11,7 +15,8 @@ from cater.events import Actor
 from cater.team import HOST
 from cater.team_context import CONVERSATION_BYTES, history_window, json_bytes, model_context
 from cater.tool_protocol import prepare_tool_turn
-from test_simple_team import SimpleTeamTests, turn
+import test_simple_team as simple_team
+from test_simple_team import turn
 
 
 class HistoryWindowTests(unittest.TestCase):
@@ -121,7 +126,62 @@ class WindowedReviewCycleTests(unittest.TestCase):
             self.assertEqual(archive.read("result.txt"), artifact["content"].encode("utf-8"))
 
 
-class TeamContextCostTests(SimpleTeamTests):
+class TeamContextCostTests(simple_team.SimpleTeamTests):
+    # Migrate inherited scenarios to explicit delegation returns.
+    def test_manager_delegates_worker_executes_and_reports_without_legacy_planner(self):
+        self.driver.steps = {
+            self.manager: [turn("我来整理这个工具的交付。", ("delegate", {
+                "recipient": self.worker, "instruction": "目标：写一份转换工具使用说明。输入：顾客需求。交付：guide.md，注明依赖与验证范围。"})),
+                turn("已经交给伙伴，做好会回报。"),
+                turn("我已读到回报，说明文档可以交付。", ("finish_work", {
+                    "summary": "使用说明已保存，可打开下载。", "verification": "检查了说明正文，未实际转换办公文件。"})),
+                turn("说明已准备好；实际转换尚未验证。")],
+            self.worker: [turn("我先把使用方式和依赖交代清楚。", ("publish_artifact", {
+                "filename": "guide.md", "content": "# 使用说明\n安装转换引擎后上传文档。\n尚未执行转换。",
+                "summary": "工具使用说明与验证边界", "format": "markdown"})), turn("", ("return_work", {"text": "说明写好了，实际转换仍需验证。"}))],
+        }
+        self.rt.team.receive(self.task, "先整理工具说明", request_id="initial-message")
+        self.run_ok()
+        self.assertEqual(self.events("planning.started"), [])
+        self.assertEqual(self.events("work.plan_created"), [])
+        self.assertEqual(len(self.events("team.message_received")), 3)
+        artifact, = self.rt.task(self.task).deliverables
+        self.assertEqual(Path(artifact["local_path"]).read_text(encoding="utf-8"), artifact["content"])
+        self.assertEqual(self.rt.task(self.task).status, "done")
+        lenses = {lens["id"]: lens for lens in self.rt.review(self.task)["lenses"]}
+        self.assertEqual(lenses["distribution"]["status"], "ok")
+        self.assertEqual(lenses["logic"]["status"], "ok")
+        self.assertEqual(self.rt.task(self.task).tokens, 35)
+        self.assertEqual(self.rt._reported_driver_tokens("team_test"), 35)
+        with zipfile.ZipFile(io.BytesIO(self.rt.team.archive(self.task))) as archive:
+            self.assertEqual(archive.read("guide.md"), artifact["content"].encode())
+            manifest = json.loads(archive.read("__cater__/manifest.json"))
+            self.assertEqual(manifest["files"][0]["sha256"], hashlib.sha256(archive.read("guide.md")).hexdigest())
+
+
+    def test_worker_publishes_then_waits_still_wakes_manager_for_supervision(self):
+        def resume(context, history, tools):
+            self.assertEqual(context["message"]["kind"], "progress")
+            return turn("", ("continue_work", {"assignment_seq": context["message"]["reply_to"],
+                "instruction": "请正式交回已发布的说明。"}), ("wait_for_reply", {}))
+
+        self.driver.steps = {
+            self.manager: [turn("", ("delegate", {"recipient": self.worker, "instruction": "写一份说明"})),
+                turn("", ("wait_for_reply", {})),
+                resume,
+                turn("我来检查刚发布的说明。", ("finish_work", {"summary": "说明已交付", "verification": "正文检查"})), turn("已准备好。")],
+            self.worker: [turn("", ("publish_artifact", {"filename": "note.md", "content": "实际说明", "format": "markdown", "summary": "说明"})),
+                turn("", ("wait_for_reply", {})),
+                turn("", ("return_work", {"text": "说明已发布，正文已检查。"}))],
+        }
+        self.rt.team.receive(self.task, "安排伙伴写说明", request_id="publish-then-wait")
+        self.run_ok()
+        self.assertEqual(self.rt.team.view(self.task)["status"], "done")
+        updates = [e for e in self.events("team.message_received") if e.payload["kind"] == "progress"]
+        self.assertEqual(len(updates), 1)
+        self.assertIn("note.md", updates[0].payload["text"])
+
+
     def context(self, message, role_id=None):
         return self.rt.team._context(self.task, message, self.rt.team._role(role_id or self.manager))
 

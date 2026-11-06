@@ -68,6 +68,61 @@ class ProjectMetadataTests(unittest.TestCase):
         self.assertNotIn(TOOL, {tool["name"] for tool in self.driver.calls[-1]["tools"]})
         self.assertEqual(self.events("team.run_finished")[-1].payload["status"], "completed")
 
+    def test_json_unavailable_with_existing_artifact_still_allows_chat(self):
+        self.publication(self.task)
+        def deny_json(action, first, second, database, trigger):
+            if action == sqlite3.SQLITE_FUNCTION and str(second).startswith('json_'):
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+        self.rt.log.db.set_authorizer(deny_json)
+        self.addCleanup(self.rt.log.db.set_authorizer, None)
+        self.exchange()
+        self.assertEqual(self.driver.calls[-1]['context']['project_history']['reason'], 'metadata_query_unavailable')
+        self.assertEqual(self.events('team.run_finished')[-1].payload['status'], 'completed')
+
+    def test_selected_history_never_decodes_source_customer_message(self):
+        self.publication(self.source)
+        self.complete(self.source)
+        self.rt.team.receive(self.source, 'PRIVATE_SOURCE_MESSAGE', request_id='private-history-message')
+        original = self.rt.log._row_to_event
+        def selected(row):
+            if row['task_id'] == self.source:
+                self.assertNotIn(row['type'], {'task.created', 'team.message_received', 'deliverable.published'})
+            return original(row)
+        with patch.object(self.rt.log, '_row_to_event', side_effect=selected):
+            result = self.rt.team.project_history.index(self.task)
+        self.assertTrue(result['available'])
+        self.assertNotIn('PRIVATE_SOURCE_MESSAGE', json.dumps(result))
+
+    def test_unfinished_same_project_goal_is_not_read(self):
+        unfinished = self.rt.create_task('PRIVATE_UNFINISHED_GOAL', project_id=self.project)
+        self.rt.team.enable(unfinished)
+        self.publication(self.source)
+        self.complete(self.source)
+        created = next(e.seq for e in self.rt.log.read(task_id=unfinished) if e.type == 'task.created')
+        original = self.rt.team.project_history._goal
+        def guarded(seq):
+            self.assertNotEqual(seq, created)
+            return original(seq)
+        with patch.object(self.rt.team.project_history, '_goal', side_effect=guarded):
+            result = self.rt.team.project_history.index(self.task)
+        self.assertTrue(result['available'])
+        self.assertNotIn('PRIVATE_UNFINISHED_GOAL', json.dumps(result))
+
+    def test_unverifiable_recovery_delivery_is_not_silently_omitted(self):
+        from cater.drivers import OpenAICompatibleDriver
+        import test_native_review_supervision_auto as fixture
+        helper = fixture.NativeAutomaticReviewSupervisionTests(methodName='runTest')
+        self.addCleanup(helper.doCleanups)
+        f, _ = helper.run_case(OpenAICompatibleDriver, 'finish')
+        self.assertEqual(f.rt.team.view(f.task)['status'], 'done')
+        project = f.rt.rulebook.create_project('Offline fixture')['id']
+        f.rt.rulebook.bind_project(f.task, project)
+        target = f.rt.create_task('Other offline fixture', project_id=project)
+        result = f.rt.team.project_history.index(target)
+        self.assertFalse(result['available'])
+        self.assertEqual(result['reason'], 'metadata_query_unavailable')
+
     def test_model_context_project_is_checked_before_reading_another_scope(self):
         other = self.rt.rulebook.create_project("另一个项目")["id"]
         foreign = self.rt.create_task("另一个项目的来源", project_id=other)

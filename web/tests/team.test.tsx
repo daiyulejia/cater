@@ -8,6 +8,19 @@ import App from '../src/App'
 const members = [{ id: 'product', name: '月亮' }, { id: 'design', name: '罐头' }]
 const available: TeamAvailability = { checked_at: '2026-10-14T03:00:00Z', all_available: true, members: members.map((member) => ({ role_id: member.id, status: 'available', reason: 'recent_success' })) }
 
+test('历史来源待核对提示不会伪称当前通道暂停', () => {
+  const state: TeamAvailability = { ...available, usage_warnings: [{ role_id: 'product', code: 'historical_source_unknown' }] }
+  render(<TeamDirectory members={members} availability={state} open onOpenChange={vi.fn()} refreshing={false} error="" onRefresh={vi.fn()} onMention={vi.fn()} portrait={() => null} />)
+  expect(screen.getByText(/来源协议未确认/)).toBeTruthy()
+  expect(screen.queryByText(/用量记录矛盾，预算无法可靠累计/)).toBeNull()
+})
+
+test('旧版伙伴状态结构也明确本地预算可能漏计', () => {
+  render(<TeamDirectory members={members} availability={available} open onOpenChange={vi.fn()} refreshing={false} error="" onRefresh={vi.fn()} onMention={vi.fn()} portrait={() => null} />)
+  expect(screen.getByText(/若设置本地预算/)).toBeTruthy()
+  expect(screen.getByText(/未知、失败及并发或在途请求可能漏计，不是硬上限/)).toBeTruthy()
+})
+
 test('空伙伴页区分正在读取、读取失败和已读空名单', () => {
   const props = { members: [], open: true, onOpenChange: vi.fn(), onRefresh: vi.fn(), onMention: vi.fn(), portrait: () => null }
   const view = render(<TeamDirectory {...props} refreshing={false} error="暂时无法读取伙伴状态，请稍后重试。" />)

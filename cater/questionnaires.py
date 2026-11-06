@@ -88,8 +88,10 @@ class QuestionnaireService:
         self.rt = runtime
 
     def view(self, task_id):
+        from .team_review_direction import effective_objectives, projection_events
+        effective = effective_objectives(projection_events(self.rt.log, task_id))
         events = list(self.rt.log.iter_events(task_id=task_id, event_types=(
-            "team.questions_requested", "team.message_received", "team.objective_updated", "team.objective_completed")))
+            'team.questions_requested', 'team.message_received', 'team.objective_updated', 'team.objective_completed')))
         requests = [e for e in events if e.type == "team.questions_requested" and e.actor == HOST]
         responses = {}
         for e in events:
@@ -105,7 +107,7 @@ class QuestionnaireService:
                 other.type == "team.message_received" and other.actor == Actor.human()
                 and (not isinstance(other.payload.get("questionnaire"), dict)
                      or other.payload["questionnaire"].get("question_seq") == e.seq)
-                or other.type in {"team.objective_updated", "team.objective_completed"} and other.actor == HOST
+                or other.seq in effective
             ) for other in events)
             replaced = any(other.seq > e.seq and other.payload["role_id"] == p["role_id"] for other in requests)
             row = {"seq": e.seq, "role_id": p["role_id"], "title": p["title"], "questions": p["questions"],

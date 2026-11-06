@@ -222,12 +222,14 @@ class TeamResponseCorrectionTests(unittest.TestCase):
                 committed = []
                 def pending_then_new_input(task_id):
                     result = original(task_id)
-                    caller = sys._getframe(1)
-                    while caller is not None and caller.f_code.co_name != '_run_message':
-                        caller = caller.f_back
-                    if (caller is not None
-                            and caller.f_locals.get('failure_stage') == 'model_request'
-                            and caller.f_locals.get('correction') is not None and not committed):
+                    # Match the actual owned execution body, not its wrapper's
+                    # name; the generator is running during this callback.
+                    frame = sys._getframe(1)
+                    while frame is not None and frame.f_code is not f.rt.team._run_message_owned.__func__.__code__:
+                        frame = frame.f_back
+                    if (frame is not None
+                            and frame.f_locals.get('failure_stage') == 'model_request'
+                            and frame.f_locals.get('correction') is not None and not committed):
                         with Runtime(f.root / 'test.db', roles_path=f.roles, drivers={'team_test': driver},
                                      close_drivers_on_close=False) as other:
                             event = other.team.receive(f.task, 'Use the new direction instead', request_id='new-input-during-correction')
@@ -240,6 +242,7 @@ class TeamResponseCorrectionTests(unittest.TestCase):
                 self.assertEqual(f.rt._reported_driver_tokens('team_test'), 14)
                 self.assertEqual(f.events('team.tool_started'), [])
                 self.assertEqual(f.events('team.run_finished')[-1].payload['status'], 'interrupted')
+                self.assertIn('收到顾客的新消息', f.events('team.run_finished')[-1].payload['reason'])
                 self.assertTrue(f.rt.verify_chain().ok)
 
     def test_turn_limit_does_not_schedule_correction_or_fresh_supervision(self):

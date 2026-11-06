@@ -25,7 +25,7 @@ from .assignments import latest_assignments_by_owner
 from .activity_owner import activity_owner
 from .availability import team_availability
 from .drivers import driver_mode
-from .events import Actor as EventActor, Event
+from .events import Actor as EventActor, AuditSigningRequired, Event
 from .fold import TaskSnapshot
 from .ladder import decision_ladder
 from .messages import message_relation
@@ -242,6 +242,24 @@ class ActivityRunner:
                         pending[key] = event
                     else:
                         pending.pop(key, None)
+                try:
+                    with runtime.log.atomic():
+                        runtime.log.require_signing_for_append()
+                        from .review_supervision_candidate import require_verified_log
+                        require_verified_log(runtime.log)
+                except (AuditSigningRequired, WorkConflict) as exc:
+                    for (task_id, activity_id), queued in pending.items():
+                        if task_id not in self._activities:
+                            self._activities[task_id] = {'id': activity_id, 'action': queued.payload.get('action', 'run'),
+                                'state': 'blocked', 'error': str(exc), 'queued_seq': queued.seq}
+                        elif (queued.payload.get('after_activity_id') == self._activities[task_id].get('id')
+                              and 'follow_up' not in self._activities[task_id]):
+                            self._activities[task_id]['follow_up'] = {
+                                'id': activity_id, 'action': queued.payload.get('action', 'run'),
+                                'state': 'blocked', 'error': str(exc), 'queued_seq': queued.seq}
+                    self._revision += 1
+                    _LOGGER.warning('Recovery stopped: %s', exc)
+                    return 0
             # Recovery may be invoked again while this process owns live workers.
             for task_id, activity in self._activities.items():
                 if activity["state"] in {"queued", "running"}:
@@ -581,7 +599,8 @@ class ActivityRunner:
                        and event.payload.get("conversation_seq") == seq for event in events):
                     return self.status(task_id)
                 expected_scope = dict(payload["scope_before"])
-                if intent == "direction":
+                from .directions import changes_direction
+                if changes_direction(command.payload):
                     expected_scope["direction_seq"] = command.seq
                 binding = {"conversation_seq": seq, "expected_scope": expected_scope, "finished_seq": finished.seq}
             try:
@@ -969,6 +988,8 @@ class ActivityRunner:
         try:
             with self._runtime_factory() as runtime, self.public_progress.capture(task_id, activity_id) as observer:
                 runtime.team.external.progress = observer
+                with runtime.log.atomic():
+                    runtime.log.require_signing_for_append()
                 if any(event.actor == EventActor.system("orchestrator")
                        and event.payload.get("activity_id") == activity_id
                        for event in runtime.log.iter_events(task_id=task_id,
@@ -1169,7 +1190,12 @@ class ActivityRunner:
 
     def _fail_activity(self, task_id: str, activity_id: str, action: str, exc: Exception,
                        *, control: dict[str, Any] | None = None) -> None:
+        from .review_supervision_candidate import SupervisionLogIntegrityError
+
         recorded = False
+        if isinstance(exc, (AuditSigningRequired, SupervisionLogIntegrityError)):
+            self._block_unwritable_activity(task_id, activity_id, str(exc))
+            return
         try:
             if control is None:
                 with self._runtime_factory() as runtime:
@@ -1179,10 +1205,24 @@ class ActivityRunner:
             terminal, _ = self._record_failure(task_id, activity_id, action,
                 **details)
             recorded = terminal.type == "activity.failed" and terminal.payload.get("error_type") == "ExecutionScopeChanged"
+        except AuditSigningRequired as failure:
+            self._block_unwritable_activity(task_id, activity_id, str(failure))
+            return
         except Exception:
             _LOGGER.exception("Cannot record activity failure for %s at %s", task_id, activity_id)
         self._finish(task_id, activity_id, "failed", error=str(exc),
                      follow_after_failure=recorded and isinstance(exc, ExecutionScopeChanged))
+
+    def _block_unwritable_activity(self, task_id: str, activity_id: str, message: str) -> None:
+        """Do not append or start queued work when the signing key is unavailable."""
+        _LOGGER.warning('Activity could not be settled: %s', message)
+        with self._lock:
+            activity = self._activities.get(task_id)
+            if activity and activity.get('id') == activity_id:
+                activity.update(state='blocked', error=message, finished_at=_now_iso())
+                if isinstance(activity.get('follow_up'), dict):
+                    activity['follow_up'].update(state='blocked', error=message)
+                self._revision += 1
 
     def _close_follow_up(self, task_id: str, activity: dict[str, Any], failure: dict[str, Any]) -> bool:
         queued = activity["follow_up"]
@@ -1485,6 +1525,7 @@ def make_handler(
                         state = rt.rulebook.view(
                             task_id=query.get("task_id", [None])[0],
                             project_id=query.get("project_id", [None])[0],
+                            privacy_safe=bool(query.get("task_id", [None])[0]),
                         )
                     except ValueError as exc:
                         return self._bad_request(str(exc))
@@ -1659,6 +1700,12 @@ def make_handler(
             return self._not_found()
 
         def do_POST(self) -> None:
+            try:
+                self._do_POST()
+            except AuditSigningRequired as exc:
+                self._conflict(str(exc))
+
+        def _do_POST(self) -> None:
             self._request_body_handled = False
             if not self._has_valid_request_host():
                 return self._forbidden("untrusted Host header")
@@ -2800,6 +2847,12 @@ def _team_enabled(rt: Runtime, task_id: str) -> bool:
 
 
 def _team_view(rt: Runtime, task_id: str) -> dict[str, Any] | None:
+    # Both the message and open-work projections must describe the same event snapshot.
+    with _read_snapshot(rt):
+        return _team_view_snapshot(rt, task_id)
+
+
+def _team_view_snapshot(rt: Runtime, task_id: str) -> dict[str, Any] | None:
     team = getattr(rt, "team", None)
     view = team.view(task_id) if team is not None else None
     if not view or not view.get("enabled"):
@@ -2816,7 +2869,8 @@ def _team_view(rt: Runtime, task_id: str) -> dict[str, Any] | None:
     except Exception:
         _LOGGER.warning("Cannot project unresolved operation state.")
         count = None
-    return {**view, "effects_pending_count": count}
+    return {**view, "effects_pending_count": count,
+            "open_work_count": len(team.recovery.assignments(task_id))}
 
 
 def _effects_attention_label(team, activity=None):
@@ -2849,7 +2903,7 @@ _CHAT_TYPES = {
     "delivery.review_finished", "task.interpreted", "cabinet.convened",
     "task.decomposed", "plan.amended", "msg.said", "msg.challenge", "diagnosis.recorded",
     "deliverable.published", "handoff.published", "verification.completed", "cabinet.voted",
-    "agent.decided", "supreme.decided", "agent.discipline_flagged", "driver.budget_exhausted", "driver.failed",
+    "agent.decided", "supreme.decided", "agent.discipline_flagged", "driver.budget_exhausted", "driver.failed", "driver.usage_inconsistent",
 }
 
 
@@ -2900,7 +2954,7 @@ def _task_summary(task: TaskSnapshot, *, version: int, latest_seq: int, conversa
         active = next((i for i in range(len(runs) - 1, -1, -1)
                        if runs[i].get("revision", team.get("revision")) == team.get("revision")
                        and runs[i].get("status") in {"running", "started"}), None)
-        team_summary = {key: team[key] for key in ("enabled", "status", "pending_count", "revision", "effects_pending_count")
+        team_summary = {key: team[key] for key in ("enabled", "status", "pending_count", "revision", "effects_pending_count", "open_work_count")
                         if key in team}
         team_summary["runs"] = [
             {key: runs[i][key] for key in ("message_seq", "role", "status", "revision") if key in runs[i]}

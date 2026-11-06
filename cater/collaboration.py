@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING
 
 from .anthropic import AnthropicMessagesDriver
-from .drivers import OpenAICompatibleDriver
+from .drivers import OpenAICompatibleDriver, trusted_driver_method
 from .events import Actor
 from .usage import valid_token_count
 from .work import WorkConflict
@@ -21,7 +21,7 @@ _TEXT_CALLS = {AnthropicMessagesDriver: AnthropicMessagesDriver.complete,
 
 def text_advice_available(driver) -> bool:
     method = _TEXT_CALLS.get(type(driver))
-    return method is not None and getattr(driver.complete, "__func__", None) is method
+    return trusted_driver_method(driver, "complete", method)
 
 
 def normalize_request(raw: object, requester: str, members: set[str]) -> dict:

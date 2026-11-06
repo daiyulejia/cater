@@ -267,7 +267,7 @@ class TeamReviewFollowupTests(unittest.TestCase):
         source = f.rt.team._send(f.task, f.rt.team._role(f.worker), f.reviewer,
                                  'Ordinary chat about approved / review', 'message')
         before = len(f.driver.calls)
-        running, started = self.start(f, source, f.native_turn(PUBLIC_REPLY))
+        running, started = self.start(f, source, f.native_turn('', ('return_work', {'text': PUBLIC_REPLY})))
         list(running)
         self.assertEqual(len(f.driver.calls) - before, 1)
         self.assertEqual(self.finish(f, started).payload['status'], 'completed')
@@ -589,7 +589,7 @@ class TeamReviewFollowupTests(unittest.TestCase):
                 def pending_then_customer(task_id):
                     result = original(task_id)
                     caller = sys._getframe(1)
-                    while caller is not None and caller.f_code.co_name != '_run_message':
+                    while caller is not None and caller.f_code.co_name != '_run_message_owned':
                         caller = caller.f_back
                     if (caller is not None and caller.f_locals.get('failure_stage') == 'model_request'
                             and caller.f_locals.get('review_followup') is not None and not committed):

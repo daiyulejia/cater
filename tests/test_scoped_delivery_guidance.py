@@ -142,6 +142,23 @@ class ScopedDeliveryGuidanceTests(unittest.TestCase):
                     for clause in clauses:
                         self.assertIn(clause, prompt)
 
+    def test_delivery_entry_and_read_timing_guidance_reaches_both_drivers(self):
+        for mode in (False, True):
+            with self.subTest(external=mode):
+                prompt, _, _ = self.first_input(mode)
+                for clause in ("复查入口据实", "包内", "包外", "摘录",
+                               "发布前回读", "非发布版回读"):
+                    self.assertIn(clause, prompt)
+
+    def test_review_and_customer_reply_guidance_preserves_conditions(self):
+        for mode in (False, True):
+            for worker in (False, True):
+                with self.subTest(external=mode, worker=worker):
+                    prompt, _, _ = self.first_input(mode, worker=worker)
+                    self.assertIn("检查本次交付文件可用delegate的review.workspace_file", prompt)
+                    self.assertIn("不为无需复核的工作增设检查", prompt)
+                    self.assertIn("提供reply_to_customer时用它发送完整普通问答", prompt)
+
     def test_brevity_guidance_retains_requested_full_answers(self):
         for mode in (False, True):
             row = self.first_input(mode)
@@ -287,6 +304,10 @@ class ScopedDeliveryGuidanceTests(unittest.TestCase):
                                "索引没有原输出时按需要读回", "不是整机软件清单",
                                "不能推断宿主未安装", "既有文件不变与新增文件分别说明",
                                "不用部分文件哈希概括整个工程没有变化"):
+                    self.assertIn(clause, result["content"])
+                for clause in ("下载包内可打开的文件", "需要另有授权和可访问的原材料",
+                               "不要为补齐入口自动加入未经授权的材料", "发布前回读",
+                               "不要称为已回读发布版", "无需为使用该措辞而强制增加读取或复核"):
                     self.assertIn(clause, result["content"])
                 self.assertEqual(f.events("team.objective_completed"), [])
 

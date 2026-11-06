@@ -73,12 +73,22 @@ class RuleBook:
             raise
         return True
 
-    def _task_fields(self, field, event_types, *, default=None):
+    def _task_fields(self, field, event_types, *, default=None, safe_task_id=None):
         """Project task fields and keep rule changes in the same ordered read."""
         if field not in {"project_id", "inherited_rules"}:
             raise ValueError("unknown task metadata field")
         if not self._json_projection_available():
-            for event in self.log.iter_events(event_types=event_types):
+            # Without SQL JSON projection, never deserialize another task's
+            # creation body just to build the current task's guidance.
+            types = tuple(t for t in event_types if t in RULE_EVENTS)
+            events = list(self.log.iter_events(event_types=types)) if types else []
+            if safe_task_id is None:
+                events += list(self.log.iter_events(event_types=tuple(t for t in event_types if t not in RULE_EVENTS)))
+            else:
+                local_types = tuple(t for t in event_types if t not in RULE_EVENTS)
+                if local_types:
+                    events += list(self.log.iter_events(task_id=safe_task_id, event_types=local_types))
+            for event in sorted(events, key=lambda item: item.seq):
                 applicable = (bool(event.task_id) if field == "project_id"
                               else event.type != "task.created" or event.actor == Actor.human())
                 yield {"seq": event.seq, "ts": event.ts, "task_id": event.task_id, "type": event.type,
@@ -92,8 +102,12 @@ class RuleBook:
         projected = f"type NOT IN ('rule.recorded', 'rule.updated') AND ({UNAMBIGUOUS_OBJECT_SQL})"
         sql = ("SELECT seq, ts, task_id, type, actor_json, "
                f"CASE WHEN {projected} THEN payload_json -> '$.{field}' END AS field_json, "
-               f"CASE WHEN NOT ({projected}) THEN payload_json END AS legacy_json "
+               f"CASE WHEN NOT ({projected}) AND (type IN ('rule.recorded', 'rule.updated') "
+               + ("OR task_id = ?" if safe_task_id is not None else "OR 1")
+               + ") THEN payload_json END AS legacy_json "
                "FROM events WHERE " + " AND ".join(clauses) + " ORDER BY seq")
+        if safe_task_id is not None:
+            parameters.insert(0, safe_task_id)
         with closing(self.log.db.execute(sql, parameters)) as cursor:
             for row in cursor:
                 actor = Actor(**json.loads(row["actor_json"]))
@@ -121,6 +135,15 @@ class RuleBook:
             raise ValueError("unknown task")
         return projects[task_id]
 
+    def _safe_task_project(self, task_id: object) -> str | None:
+        if not isinstance(task_id, str):
+            raise ValueError("unknown task")
+        rows = [row for row in self._task_fields("project_id", ("task.created", "task.project_bound"),
+                                                  safe_task_id=task_id) if row['task_id'] == task_id]
+        if not rows:
+            raise ValueError("unknown task")
+        return rows[-1]['value']
+
     def bind_project(self, task_id: str, project_id: str) -> Event:
         def build():
             self.require_project(project_id)
@@ -132,8 +155,11 @@ class RuleBook:
         return self._append(build)
 
     def all_rules(self) -> list[dict[str, Any]]:
+        return self._all_rules()
+
+    def _all_rules(self, *, safe_task_id=None) -> list[dict[str, Any]]:
         current = {}
-        for row in self._task_fields("inherited_rules", (*RULE_EVENTS, "task.created"), default=[]):
+        for row in self._task_fields("inherited_rules", (*RULE_EVENTS, "task.created"), default=[], safe_task_id=safe_task_id):
             if row["type"] == "task.created":
                 if row["actor"] != Actor.human():
                     continue
@@ -144,20 +170,30 @@ class RuleBook:
                 current[rule["id"]] = {**rule, "seq": row["seq"], "updated_at": row["ts"]}
         return list(current.values())
 
-    def view(self, *, task_id: str | None = None, project_id: str | None = None) -> dict[str, Any]:
+    def view(self, *, task_id: str | None = None, project_id: str | None = None, privacy_safe=False) -> dict[str, Any]:
         if task_id is not None:
-            bound = self.task_project(task_id)
+            bound = self._safe_task_project(task_id) if privacy_safe else self.task_project(task_id)
             if project_id is not None and bound != project_id:
                 raise ValueError("project does not match task")
             project_id = bound
         elif project_id is not None:
             self.require_project(project_id)
-        rules = [item for item in self.all_rules() if (
+        source = self._all_rules(safe_task_id=task_id) if privacy_safe and task_id is not None else self.all_rules()
+        rules = [item for item in source if (
             item["scope"] == "workspace"
             or item["scope"] == "project" and project_id is not None and item["target_id"] == project_id
             or item["scope"] == "task" and task_id is not None and item["target_id"] == task_id
         )]
-        return {"project_id": project_id, "rules": rules, "enforcement": "guidance_only"}
+        result = {"project_id": project_id, "rules": rules, "enforcement": "guidance_only"}
+        if privacy_safe and task_id is not None:
+            if not self._json_projection_available():
+                result["metadata_incomplete"] = True
+            else:
+                with closing(self.log.db.execute("SELECT 1 FROM events WHERE type = 'task.created' AND task_id != ? "
+                        f"AND NOT ({UNAMBIGUOUS_OBJECT_SQL}) LIMIT 1", (task_id,))) as cursor:
+                    if cursor.fetchone():
+                        result["metadata_incomplete"] = True
+        return result
 
     def _target(self, scope: str, task_id: str | None, project_id: str | None) -> str | None:
         if task_id is not None:
@@ -242,11 +278,13 @@ class RuleBook:
         event = self._append(build)
         return {**event.payload, "seq": event.seq, "updated_at": event.ts}
 
-    def current_snapshot(self, task_id: str) -> dict[str, Any]:
-        view = self.view(task_id=task_id)
+    def current_snapshot(self, task_id: str, *, privacy_safe=False) -> dict[str, Any]:
+        view = self.view(task_id=task_id, privacy_safe=privacy_safe)
         active = [{key: item[key] for key in ("id", "revision", "scope", "text", "seq")}
                   for item in view["rules"] if item["status"] == "active"]
         payload = {"project_id": view["project_id"], "rules": active, "enforcement": "guidance_only"}
+        if view.get("metadata_incomplete"):
+            payload["metadata_incomplete"] = True
         fingerprint = hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
         return {**payload, "fingerprint": fingerprint}
 
@@ -275,7 +313,7 @@ class RuleBook:
         # Python equality aliases bool/int/float; a receipt must preserve JSON types.
         if prior and json.dumps(prior[-1].payload, sort_keys=True) == json.dumps(payload, sort_keys=True):
             return {**prior[-1].payload, "seq": prior[-1].seq}
-        if not prior and not payload["rules"]:
+        if not prior and not payload["rules"] and not payload.get("metadata_incomplete"):
             return {**payload, "seq": None}
 
     def _record_snapshot(self, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:

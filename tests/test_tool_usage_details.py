@@ -159,6 +159,16 @@ class ToolUsageDetailsTests(unittest.TestCase):
                 self.assertEqual((turn.tokens, turn.meta["token_usage"]), (0, "unavailable"))
                 self.assertEqual(turn.meta["usage"], safe_tool_usage(usage))
 
+    def test_conflicting_openai_components_do_not_become_reported_usage(self):
+        for usage in ({"prompt_tokens": 80001, "total_tokens": 1},
+                      {"prompt_tokens": 4, "completion_tokens": 4, "total_tokens": 7}):
+            for stop in (None, "length"):
+                with self.subTest(usage=usage, stop=stop):
+                    turn = self.adapt(usage, anthropic=False, **({"stop": stop} if stop else {}))
+                    self.assertEqual((turn.tokens, turn.meta["token_usage"]), (0, "unavailable"))
+                    self.assertEqual(turn.meta["usage_issue"], "total_below_reported_components")
+                    self.assertEqual(turn.meta["usage"], usage)
+
     def test_contained_responses_preserve_safe_usage_details(self):
         for anthropic in (False, True):
             usage = {"input_tokens": 3, "output_tokens": 4} if anthropic else {"total_tokens": 7}

@@ -1,7 +1,7 @@
 import { nativeProjectHistoryReceiptStatus, projectHistoryArchiveReadEvent } from './conversationActivityState'
 import { NativeArtifactReceipt } from './NativeArtifactReceipt'
 import type { TeamEvent } from './team'
-import { isOutputUtf8Validity, knownHistoryHandoffWarning, partialHandoff } from './nativeHandoff'
+import { isOutputUtf8Validity, knownHistoryHandoffWarning, nativeHandoff, nativeHandoffWarning } from './nativeHandoff'
 import { outputEncodingHint } from './outputPreview'
 
 const record = (value: unknown): Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
@@ -25,24 +25,26 @@ function HistoryReferences({ value }: { value: unknown }) {
 
 function DeliveryContent({ content, pageState }: { content: string; pageState?: { status: unknown; warning: unknown } }) {
   const pageWarning = pageState && knownHistoryHandoffWarning(pageState.status, pageState.warning)
-  const incomplete = pageState && <>
+  const incomplete = <>
     <p>历史交付说明状态不一致，请核对原记录。</p>
-    {pageWarning && <p className="whitespace-pre-wrap">当时交付说明：{text(pageState.warning, 1000)}</p>}
+    {pageWarning && <p className="whitespace-pre-wrap">当时交付说明：{text(pageState?.warning, 1000)}</p>}
   </>
   let parsed: unknown
   try { parsed = JSON.parse(content) } catch {
     return pageState ? incomplete : <pre className={bodyClass}>{text(content, 8000) || '（空正文）'}</pre>
   }
   const data = record(parsed)
-  const mismatch = pageState !== undefined && (!pageWarning || data.handoff_status !== pageState.status || data.handoff_warning !== pageState.warning)
-  const hasWarning = knownHistoryHandoffWarning(data.handoff_status, data.handoff_warning)
-  const partial = !mismatch && data.handoff_status === 'omitted_invalid' ? partialHandoff(data.handoff_partial, data.handoff_warning) : undefined
-  const originalHandoff = record(data.handoff)
-  const handoff = record(mismatch ? undefined : partial ?? (data.handoff_status === 'omitted_invalid' ? undefined
-    : data.handoff_status === 'references_omitted_invalid' ? { ...originalHandoff, evidence: [] } : originalHandoff))
+  const hasBodyState = ['handoff_status', 'handoff_warning', 'handoff_partial'].some(key => Object.hasOwn(data, key))
+  // Reuse the host-shaped projection checks for stateful bodies; this synthetic
+  // event only supplies the validator's envelope, not evidence of provenance.
+  const bodyEvent: TeamEvent = { seq: 1, type: 'team.objective_completed', actor: { id: 'team', kind: 'system', role: 'team' }, payload: data }
+  const bodyWarning = hasBodyState ? nativeHandoffWarning(bodyEvent) : undefined
+  const mismatch = (hasBodyState && !bodyWarning) || (pageState !== undefined
+    && (!pageWarning || data.handoff_status !== pageState.status || data.handoff_warning !== pageState.warning))
+  const handoff = record(mismatch ? undefined : hasBodyState ? nativeHandoff(bodyEvent) : data.handoff)
   const fields = [['历史摘要', data.summary], ['当时目标', data.objective], ['店长当时验证说明', data.verification]]
   const recognized = fields.some(([, value]) => typeof value === 'string')
-  if (!recognized && pageState) return incomplete
+  if (!recognized && (pageState || hasBodyState)) return incomplete
   if (!recognized) return <details>
     <summary className="cursor-pointer">其他历史数据 · 纯文本</summary>
     <pre className={`mt-1 ${bodyClass}`}>{text(content, 8000)}</pre>
@@ -52,7 +54,7 @@ function DeliveryContent({ content, pageState }: { content: string; pageState?: 
       <dt className="font-semibold">{label as string}</dt><dd className="max-h-48 overflow-auto whitespace-pre-wrap">{text(value, 2000)}</dd>
     </div>)}</dl>
     {mismatch && <p>历史交付说明状态不一致，请核对原记录。</p>}
-    {(mismatch ? pageWarning : hasWarning) && <p className="whitespace-pre-wrap">当时交付说明：{text(mismatch ? pageState?.warning : data.handoff_warning, 1000)}</p>}
+    {(mismatch ? pageWarning : bodyWarning) && <p className="whitespace-pre-wrap">当时交付说明：{text(mismatch ? pageState?.warning : bodyWarning, 1000)}</p>}
     {Object.keys(handoff).length > 0 && <details>
       <summary className="cursor-pointer">当时交接说明</summary>
       {text(handoff.why, 2000) && <p className="mt-1 whitespace-pre-wrap">原因：{text(handoff.why, 2000)}</p>}

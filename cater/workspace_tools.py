@@ -11,7 +11,7 @@ recheck. Results are observations, never task acceptance.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import errno
 import hashlib
@@ -77,8 +77,51 @@ def _protected(part: str) -> bool:
             or ".env." in name)
 
 
+def _visible_path(path: str | Path) -> Path:
+    """Keep Windows namespace prefixes out of policy, receipts, and lock names."""
+    value = os.fspath(path)
+    if os.name == "nt":
+        lower = value.lower()
+        if lower.startswith("\\\\?\\") and ("/" in value or any(
+                part in {".", ".."} for part in value[4:].split("\\"))):
+            raise ValueError("ambiguous Windows namespace path")
+        if lower.startswith("\\\\?\\unc\\"):
+            value = "\\\\" + value[8:]
+        elif lower.startswith("\\\\?\\"):
+            if len(value) < 7 or value[5:7] != ":\\" or not value[4].isascii() or not value[4].isalpha():
+                raise ValueError("unsupported Windows namespace")
+            value = value[4:]
+        elif lower.startswith("\\\\.\\"):
+            raise ValueError("unsupported Windows namespace")
+    return Path(value)
+
+
+def _io_path(path: str | Path, *, force: bool = False) -> Path:
+    """Use extended Win32 I/O only; callers retain the checked readable path."""
+    path = _visible_path(path)
+    if os.name != "nt":
+        return path
+    value = os.path.abspath(path)
+    if not force and len(value.encode("utf-16-le", errors="surrogatepass")) // 2 < 248:
+        return Path(value)
+    return Path("\\\\?\\UNC\\" + value[2:] if value.startswith("\\\\") else "\\\\?\\" + value)
+
+
+def _validate_windows_root(root: Path) -> None:
+    """Reject names whose extended-namespace meaning differs from normal Win32."""
+    if os.name != "nt":
+        return
+    for part in root.parts[1:]:
+        base = part.split(".")[0].rstrip(" ").upper()
+        if (part in {".", ".."} or part.endswith((".", " ")) or re.search(r'[\\/:*?"<>|]', part)
+                or any(ord(c) < 32 or unicodedata.category(c) == "Cs" for c in part)
+                or base in {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
+                or re.fullmatch(r"(?:COM|LPT)[1-9¹²³]", base)):
+            raise ValueError("unsafe Windows workspace root")
+
+
 def _inspect(path: Path, directory: bool | None = None) -> os.stat_result:
-    info = path.lstat()
+    info = _io_path(path).lstat()
     if (stat.S_ISLNK(info.st_mode)
             or getattr(info, "st_file_attributes", 0) & 0x400):
         _deny("unsafe_path", "Links and reparse points are forbidden.")
@@ -116,9 +159,10 @@ class WorkspacePolicy:
         root_value = data.get("root")
         if not isinstance(root_value, str) or not root_value or "\0" in root_value:
             raise ValueError("root must name an absolute existing directory")
-        root = Path(root_value)
+        root = _visible_path(root_value)
         if not root.is_absolute() or ".." in root.parts:
             raise ValueError("root must name an absolute existing directory")
+        _validate_windows_root(root)
         if any(_protected(part) for part in root.parts):
             raise ValueError("protected workspace root")
         try:
@@ -126,7 +170,8 @@ class WorkspacePolicy:
         except (OSError, ValueError):
             raise ValueError("root must be an existing directory without links") from None
         # Canonicalize only after checking links, including Windows short names.
-        root = Path(os.path.realpath(root))
+        root = _visible_path(os.path.realpath(_io_path(root)))
+        _validate_windows_root(root)
         if any(_protected(part) for part in root.parts):
             raise ValueError("protected workspace root")
         _directories(root)
@@ -203,7 +248,7 @@ def _signature(info: os.stat_result) -> tuple:
 def _open_file(path: Path, flags: int, *, create: bool = False) -> int:
     _directories(path.parent)
     before = None if create else _inspect(path, False)
-    fd = os.open(path, flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0), 0o600)
+    fd = os.open(_io_path(path), flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0), 0o600)
     try:
         after, opened = _inspect(path, False), os.fstat(fd)
         _directories(path.parent)
@@ -289,40 +334,67 @@ def _argument_valid(value: object, field: dict) -> bool:
 def _write_lock(root: Path) -> Iterator[None]:
     # Never unlink: all contenders must keep locking the same inode.
     lock_root = Path(tempfile.gettempdir()) / "cater-workspace-locks"
-    lock_root.mkdir(mode=0o700, exist_ok=True)
+    _io_path(lock_root).mkdir(mode=0o700, exist_ok=True)
     _directories(lock_root)
-    key = hashlib.sha256(os.path.normcase(str(root)).encode("utf-8")).hexdigest()
-    path = lock_root / key
-    try:
-        fd = _open_file(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, create=True)
-    except FileExistsError:
-        fd = _open_file(path, os.O_RDWR)
-    try:
-        if os.name == "nt":
-            import msvcrt
-            lock = lambda: msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            unlock = lambda: msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            lock = lambda: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            unlock = lambda: fcntl.flock(fd, fcntl.LOCK_UN)
+    identity = _workspace_identity(root) if os.name == "nt" else os.path.normcase(str(root))
+    # Legacy aliases reduce upgrade races, but cannot cover arbitrary UNC or
+    # mapped-drive aliases or different temporary directories. Drain old workers.
+    legacy = _legacy_workspace_paths(root) if os.name == "nt" else ()
+    keys = sorted({hashlib.sha256(os.path.normcase(p).encode("utf-8")).hexdigest() for p in legacy})
+    physical = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    keys = [key for key in keys if key != physical] + [physical]
+    with ExitStack() as stack:
         deadline = time.monotonic() + 5
-        while True:
+        for key in keys:
+            path = lock_root / key
             try:
-                lock()
-                break
-            except OSError as exc:
-                if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
-                    raise
-                if time.monotonic() >= deadline:
-                    _deny("busy", "Workspace write lock is busy.")
-                time.sleep(0.01)
-        try:
-            yield
-        finally:
-            unlock()
-    finally:
-        os.close(fd)
+                fd = _open_file(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, create=True)
+            except FileExistsError:
+                fd = _open_file(path, os.O_RDWR)
+            stack.callback(os.close, fd)
+            if os.name == "nt":
+                import msvcrt
+                lock = lambda: msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                unlock = lambda fd=fd: msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+                lock = lambda: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                unlock = lambda fd=fd: fcntl.flock(fd, fcntl.LOCK_UN)
+            while True:
+                try:
+                    lock()
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                        raise
+                    if time.monotonic() >= deadline:
+                        _deny("busy", "Workspace write lock is busy.")
+                    time.sleep(0.01)
+            stack.callback(unlock)
+        yield
+
+
+def _legacy_workspace_paths(root: str | Path) -> tuple[str, ...]:
+    # Root is checked before resolving, so alias conversion cannot grant access.
+    root = _visible_path(root)
+    _workspace_identity(root)
+    canonical = _visible_path(os.path.realpath(_io_path(root)))
+    return tuple(sorted({str(canonical), str(_io_path(canonical, force=True))}))
+
+
+def _workspace_identity(root: str | Path) -> str:
+    """Identity for a checked directory, shared across Windows path aliases."""
+    root = _visible_path(root)
+    if not root.is_absolute() or ".." in root.parts:
+        raise ValueError("workspace root must be an absolute directory")
+    _validate_windows_root(root)
+    _directories(root)
+    info = _inspect(root, True)
+    if os.name == "nt":
+        if not info.st_dev or not info.st_ino:
+            raise ValueError("workspace identity unavailable")
+        return f"workspace-file-id:{info.st_dev}:{info.st_ino}"
+    return str(root.resolve())
 
 
 class WorkspaceExecutor:
@@ -441,7 +513,7 @@ class WorkspaceExecutor:
             current = current / part
             if create_parents:
                 try:
-                    current.mkdir(mode=0o700)
+                    _io_path(current).mkdir(mode=0o700)
                 except FileExistsError:
                     pass
             _inspect(current, True)
@@ -454,7 +526,7 @@ class WorkspaceExecutor:
         target = self._path(path)
         _inspect(target, True)
         entries, visited, used, truncated = [], 0, 0, False
-        with os.scandir(target) as iterator:
+        with os.scandir(_io_path(target)) as iterator:
             for entry in iterator:
                 visited += 1
                 if visited > MAX_VISITED or len(entries) >= MAX_ENTRIES:
@@ -463,7 +535,12 @@ class WorkspaceExecutor:
                 try:
                     child = self._path(self._relative(target / entry.name))
                     info = _inspect(child)
-                except (_Denied, OSError, UnicodeError):
+                except _Denied as exc:
+                    if exc.code not in {"protected_path", "unsafe_path", "invalid_path"}:
+                        truncated = True
+                    continue
+                except (OSError, UnicodeError):
+                    truncated = True
                     continue
                 item = {"path": self._relative(child), "type": "directory" if stat.S_ISDIR(info.st_mode) else "file",
                         "bytes": info.st_size if stat.S_ISREG(info.st_mode) else None}
@@ -513,7 +590,7 @@ class WorkspaceExecutor:
                 current = self._path(self._relative(current))
                 info = _inspect(current)
                 if stat.S_ISDIR(info.st_mode):
-                    with os.scandir(current) as iterator:
+                    with os.scandir(_io_path(current)) as iterator:
                         for entry in iterator:
                             visited += 1
                             if len(pending) + visited >= MAX_VISITED:
@@ -531,7 +608,12 @@ class WorkspaceExecutor:
                 body, _ = _read_file(current)
                 scanned += len(body)
                 content = _text(body)
-            except (_Denied, OSError, UnicodeError):
+            except _Denied as exc:
+                if exc.code not in {"protected_path", "unsafe_path", "invalid_path", "binary_file", "search_excluded"}:
+                    truncated = True
+                continue
+            except (OSError, UnicodeError):
+                truncated = True
                 continue
             sha = hashlib.sha256(body).hexdigest()
             for number, line in enumerate(content.splitlines(), 1):
@@ -612,7 +694,7 @@ class WorkspaceExecutor:
                 if expected_sha256 is not None:
                     _deny("conflict", "Expected file or parent no longer exists. Read the correct workspace path before editing.")
                 raise
-            fd, temporary = tempfile.mkstemp(prefix=".workspace-tmp-", dir=target.parent)
+            fd, temporary = tempfile.mkstemp(prefix=".workspace-tmp-", dir=_io_path(target.parent, force=True))
             staging = Path(temporary)
             try:
                 with os.fdopen(fd, "wb") as stream:
@@ -620,20 +702,20 @@ class WorkspaceExecutor:
                     stream.flush()
                     os.fsync(stream.fileno())
                 if original is not None:
-                    os.chmod(staging, stat.S_IMODE(_inspect(target, False).st_mode) & 0o777)
+                    os.chmod(_io_path(staging), stat.S_IMODE(_inspect(target, False).st_mode) & 0o777)
                 self._path(path)
                 current = self._check_expected(target, expected_sha256)
                 if current != original:
                     _deny("conflict", "File changed before publication.")
                 if original is None:
                     # link is atomic create-if-absent, unlike replace/rename on POSIX.
-                    os.link(staging, target, follow_symlinks=False)
-                    staging.unlink()
+                    os.link(_io_path(staging), _io_path(target), follow_symlinks=False)
+                    _io_path(staging).unlink()
                 else:
-                    os.replace(staging, target)
+                    os.replace(_io_path(staging), _io_path(target))
             finally:
-                if os.path.lexists(staging):
-                    staging.unlink()
+                if os.path.lexists(_io_path(staging)):
+                    _io_path(staging).unlink()
         return {"path": self._relative(target), "sha256": hashlib.sha256(body).hexdigest(),
                 "bytes": len(body), "created": original is None, "truncated": False,
                 **({"replacements": len(fragments), "before_sha256": expected_sha256} if fragments else {})}
@@ -679,7 +761,7 @@ class WorkspaceExecutor:
                     if current != signature or actual.st_mode != original.st_mode:
                         _deny("conflict", "File changed before installation verification.")
                 else:
-                    fd, temporary = tempfile.mkstemp(prefix=".workspace-tmp-", dir=target.parent)
+                    fd, temporary = tempfile.mkstemp(prefix=".workspace-tmp-", dir=_io_path(target.parent, force=True))
                     staging = Path(temporary)
                     try:
                         with os.fdopen(fd, "wb") as stream:
@@ -708,18 +790,18 @@ class WorkspaceExecutor:
                         # proves that our create-if-absent did not publish.
                         publication_attempted = True
                         try:
-                            os.link(staging, target, follow_symlinks=False)
+                            os.link(_io_path(staging), _io_path(target), follow_symlinks=False)
                         except FileExistsError:
                             publication_attempted = False
                             _deny("conflict", "File appeared before publication.")
-                        staging.unlink()
+                        _io_path(staging).unlink()
                         self._path(path)
                         actual, _ = observe(target)
                         if not os.path.samestat(staged, actual):
                             _deny("conflict", "Installed file changed after publication.")
                     finally:
-                        if os.path.lexists(staging):
-                            staging.unlink()
+                        if os.path.lexists(_io_path(staging)):
+                            _io_path(staging).unlink()
                 result = {"path": self._relative(target), "sha256": hashlib.sha256(body).hexdigest(),
                           "bytes": len(body), "created": original is None,
                           "already_present": original is not None,
@@ -808,7 +890,7 @@ class WorkspaceExecutor:
             try:
                 process = subprocess.Popen(
                     [worker_python(), "-I", str(Path(__file__).with_name("_verification_worker.py")), str(result_path)],
-                    cwd=directory, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    cwd=_io_path(directory), env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     shell=False, start_new_session=os.name != "nt",
                 )
                 outcome = "effects_unknown"

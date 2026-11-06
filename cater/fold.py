@@ -144,11 +144,21 @@ def _apply_materialization(event: Event, task: TaskSnapshot, submissions: dict[i
 
 
 def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
+    from .team_review_direction import objective_projection
+
+    by_task = {}
+    for event in events:
+        if event.task_id:
+            by_task.setdefault(event.task_id, []).append(event)
+    effective_objectives = set()
+    for task_events in by_task.values():
+        objective_projection(task_events, "", effective_events=effective_objectives)
     tasks: dict[str, TaskSnapshot] = {}
     submissions: dict[int, Event] = {}
     # Reuse shares artifact seqs; only valid receipts advance this private version guard.
     materialization_versions: dict[tuple[str, int], int] = {}
     workspace_usage: dict[int, Event] = {}
+    skipped_invocations: dict[int, Event] = {}
     for event in events:
         if not event.task_id:
             continue
@@ -173,10 +183,12 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
             task.status = "running"
         elif event.type == "team.started":
             task.status = "running"
-        elif event.type == "team.objective_updated" and event.actor == Actor.system("team"):
+        elif (event.type == "team.objective_updated" and event.actor == Actor.system("team")
+              and event.seq in effective_objectives):
             task.goal = payload["goal"]
             task.status = "running"
-        elif event.type == "team.objective_completed" and event.actor == Actor.system("team"):
+        elif (event.type == "team.objective_completed" and event.actor == Actor.system("team")
+              and event.seq in effective_objectives):
             task.status = "done"
         elif event.type == "team.artifact_saved" and event.actor == Actor.system("team"):
             artifact = next((a for a in task.deliverables if a["seq"] == payload.get("artifact_seq")), None)
@@ -216,6 +228,8 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
             if event.type == "work.submitted" and _bound_artifacts(event, task, submissions):
                 submissions[event.seq] = event
             task.status = "running"
+        elif event.type == "driver.invocation_skipped" and event.actor == Actor.system("driver_gateway"):
+            skipped_invocations[event.seq] = event
         elif event.type in {"msg.said", "msg.challenge"}:
             task.messages.append(
                 {
@@ -233,7 +247,14 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
                 and workspace_usage[seq].payload.get("attempt_id") == payload.get("attempt_id")
                 and workspace_usage[seq].payload.get("role") == event.actor.id
                 and workspace_usage[seq].payload.get("driver") == payload.get("driver") for seq in calls))
-            if not accounted and payload.get("phase") != "team":
+            skipped_seq = payload.get("usage_not_started_in")
+            skipped = skipped_invocations.get(skipped_seq) if type(skipped_seq) is int else None
+            not_started = (skipped is not None and skipped.task_id == event.task_id and skipped.seq < event.seq
+                           and skipped.payload.get("role") == event.actor.id
+                           and skipped.payload.get("driver") == payload.get("driver")
+                           and skipped.payload.get("attempt_id") == payload.get("attempt_id")
+                           and payload.get("tokens") == 0)
+            if not accounted and not not_started and payload.get("phase") != "team":
                 task.tokens += tokens if valid_token_count(tokens) else 0
                 source = usage_source(tokens, payload.get("token_usage"))
                 task.token_usage[source] = task.token_usage.get(source, 0) + 1
@@ -243,8 +264,9 @@ def fold(events: list[Event]) -> dict[str, TaskSnapshot]:
               or (event.type == "conversation.finished" and event.actor.id == "conversation")
               or (event.type == "collaboration.finished" and event.actor.id == "collaboration")
               or (event.type == "verification.planned" and event.actor.id == "local_verifier")
+              or (event.type == "driver.model_called" and event.actor.id == "driver_gateway")
               or (event.type == "workspace.model_called" and event.actor.id == "workspace_gateway")) and event.actor.kind == "system" and "driver" in payload:
-            if event.type == "workspace.model_called":
+            if event.type in {"workspace.model_called", "driver.model_called"}:
                 workspace_usage[event.seq] = event
             tokens = payload.get("tokens")
             task.tokens += tokens if valid_token_count(tokens) else 0

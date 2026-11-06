@@ -56,13 +56,14 @@ class TextRetryGuard:
 
     def current(self):
         from .runtime import _TEXT_ONLY_CALLS
+        from .drivers import trusted_driver_method
 
         rt, task_id, ctx = self.rt, self.task_id, self.context
         rt._check_execution_authorization(task_id)
         if (not rt.text_retry or rt.execution_control.view(task_id)["seq"] != self.control_seq
                 or rt.work.scope(task_id) != ctx["scope"]
                 or rt.drivers.get(self.role.driver) is not self.driver
-                or getattr(self.driver.complete, "__func__", None) is not _TEXT_ONLY_CALLS.get(type(self.driver))
+                or not trusted_driver_method(self.driver, "complete", _TEXT_ONLY_CALLS.get(type(self.driver)))
                 or self._configuration() != self.configuration
                 or not hmac.compare_digest(self._key_digest(), self.key_digest)):
             raise WorkConflict("执行授权、要求或模型配置已变化，已取消旧请求续试。")

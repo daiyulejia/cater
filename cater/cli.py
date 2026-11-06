@@ -12,11 +12,13 @@ from typing import Any
 
 from . import __version__
 from .events import Actor
+from .drivers import native_openai_usage, tool_protocol_error_usage
 from .ladder import decision_ladder
 from .messages import message_relation
 from .path import organization_path
 from .runtime import Runtime
 from .verification import run_check
+from .usage import usage_conflict_diagnostics, usage_source, valid_token_count
 from .web import event_to_dict, serve, task_to_dict
 
 DEFAULT_DB = Path.cwd() / ".cater" / "cater.db"
@@ -603,13 +605,65 @@ def _doctor_report(rt: Runtime, args: argparse.Namespace, *, probe: bool) -> dic
 def cmd_probe_driver(args: argparse.Namespace) -> int:
     with open_runtime(args) as rt:
         driver = rt.drivers[args.name]
+        budget = getattr(driver, "token_budget", None)
+        if budget is not None and not valid_token_count(budget):
+            print("本地预算配置无效，未启动探测。")
+            return 1
+        uncertainty = rt._budget_usage_uncertainty(args.name, driver)
+        if uncertainty:
+            print(uncertainty)
+            return 1
+        if valid_token_count(budget) and rt._reported_driver_tokens(args.name) >= budget:
+            print("本地已报告用量累计达到预算，未启动探测；未知和在途用量未被完整计入。")
+            return 1
         probe = getattr(driver, "probe", None)
         if callable(probe):
-            ok = bool(probe())
+            try:
+                ok = bool(probe())
+            except Exception:
+                rt.log.emit(type="driver.probe_called", actor=Actor.system("driver_gateway"),
+                            payload={"driver": args.name, "status": "failed", "tokens": 0, "token_usage": "unavailable"})
+                if valid_token_count(budget):
+                    print("探测结果和消耗未核实；本地预算只累计已报告用量，不是硬上限。")
+                raise
+            rt.log.emit(type="driver.probe_called", actor=Actor.system("driver_gateway"),
+                        payload={"driver": args.name, "status": "returned" if ok else "failed",
+                                 "tokens": 0, "token_usage": "unavailable"})
             print(f"{args.name}: {'alive' if ok else 'unavailable'}")
+            if valid_token_count(budget):
+                print("该探测未提供可核对的用量；本地预算只累计已报告用量，不是硬上限。")
             return 0 if ok else 1
-        response = driver.complete(role="probe", prompt="ping", context={"probe": True})
-        print(f"{args.name}: complete ok, tokens={response.tokens}, text={response.text[:60]}")
+        try:
+            response = driver.complete(role="probe", prompt="ping", context={"probe": True})
+        except Exception as error:
+            counts = (tool_protocol_error_usage(error) or {}) if native_openai_usage(driver, tool=False) else {}
+            diagnostic = usage_conflict_diagnostics({"mode": "openai_compatible", **counts}) if native_openai_usage(driver, tool=False) else {}
+            rt.log.emit(type="driver.probe_called", actor=Actor.system("driver_gateway"),
+                        payload={"driver": args.name, "status": "failed", "tokens": counts.get("tokens", 0),
+                                 "token_usage": counts.get("token_usage", "unavailable"), **diagnostic})
+            if valid_token_count(budget):
+                print("探测未正常完成，实际消耗可能已发生；本地预算只累计已报告用量，不是硬上限。")
+            raise
+        diagnostic = usage_conflict_diagnostics(response.meta) if native_openai_usage(driver, tool=False) else {}
+        meta = response.meta if isinstance(response.meta, dict) else {}
+        source = usage_source(response.tokens, meta.get("token_usage"))
+        rt.log.emit(type="driver.probe_called", actor=Actor.system("driver_gateway"),
+                    payload={"driver": args.name, "status": "returned",
+                             "tokens": response.tokens if valid_token_count(response.tokens) else 0,
+                             "token_usage": source, **diagnostic})
+        if diagnostic:
+            print(f"{args.name}: complete ok, 用量记录矛盾，实际用量不可用；请核对账单。")
+            uncertainty = rt._budget_usage_uncertainty(args.name, driver)
+            if uncertainty:
+                print(uncertainty)
+                return 1
+            return 0
+        if source == "reported":
+            print(f"{args.name}: complete ok, 已报告 tokens={response.tokens}, text={response.text[:60]}")
+        else:
+            print(f"{args.name}: complete ok, 用量{('为估算' if source == 'estimated' else '未报告')}，实际消耗请核对账单。")
+        if valid_token_count(budget):
+            print("本地预算只累计已报告用量；未知、失败及并发或在途请求可能漏计，不是硬上限。")
     return 0
 
 
@@ -780,6 +834,14 @@ def cmd_external_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_review_supervision_status(args: argparse.Namespace) -> int:
+    from .review_supervision_status import inspect_task
+
+    result = inspect_task(args.db or DEFAULT_DB, args.task_id)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cater")
     parser.add_argument("--version", action="version", version=f"cater {__version__}")
@@ -880,6 +942,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_external.add_argument("--retire-host-run", action="store_true",
                             help="with full reconciliation attestation, mark only the bound orphan host run interrupted; no execution or notifications")
     p_external.set_defaults(func=cmd_external_run)
+
+    p_supervision = sub.add_parser('review-supervision-status',
+        help='read-only inspection of one task’s recorded review supervision intents; never resumes work',
+        description='Inspect recorded review supervision for one task without starting, resuming, or changing work.')
+    p_supervision.add_argument('task_id')
+    p_supervision.set_defaults(func=cmd_review_supervision_status)
 
     p_export = sub.add_parser("export", help="export replay data as JSON or JSONL")
     p_export.add_argument("task_id", nargs="?")

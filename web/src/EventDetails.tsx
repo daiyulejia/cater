@@ -79,7 +79,7 @@ const titles: Record<string, string> = {
   'collaboration.requested': '成员发起咨询', 'collaboration.finished': '定向咨询结果',
   'clarification.requested': '等待补充信息', 'activity.queued': '协作已排队',
   'activity.completed': '本轮协作已结束', 'activity.failed': '本轮协作失败',
-  'driver.failed': '模型调用异常', 'driver.budget_exhausted': '模型预算已用尽',
+  'driver.failed': '模型调用异常', 'driver.budget_exhausted': '模型预算已用尽', 'driver.usage_inconsistent': '用量记录矛盾',
   'driver.retry_scheduled': '模型自动续试安排', 'driver.retry_finished': '模型自动续试结果',
   'cabinet.convened': '联合讨论', 'cabinet.voted': '讨论建议', 'decision.proposed': '决策建议',
   'agent.decided': '协作决定', 'supreme.decided': '最终协作决定', 'brief.generated': '本轮总结',
@@ -557,6 +557,12 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       break
     }
     case 'driver.budget_exhausted': status = '调用受阻'; number('预算', p.budget); number('已使用', p.used_tokens); break
+    case 'driver.usage_inconsistent':
+      if (event.actor.kind !== 'system' || event.actor.id !== 'driver_gateway' || p.usage_issue !== 'total_below_reported_components') {
+        status = '用量来源待核对'
+        break
+      }
+      status = '用量不可用'; note = '服务商报告的总量小于组成项；实际消耗请核对账单。'; break
     case 'brief.generated': add('本轮分歧', record(p.brief).dispute); break
     case 'cabinet.voted': add('建议原因', record(p.tally).reason); break
     case 'rule.recorded': case 'rule.updated': add('规则内容', p.text); break

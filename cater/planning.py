@@ -36,10 +36,11 @@ _RECONCILIATION_EVIDENCE = {"human.commanded", "human.decided", "driver.failed",
 
 def _execution_contract(driver) -> dict[str, Any]:
     from .runtime import _TEXT_ONLY_CALLS
+    from .drivers import trusted_driver_method
 
     original = _TEXT_ONLY_CALLS.get(type(driver))
     if (original is not None and text_advice_available(driver)
-            and getattr(driver.complete, "__func__", None) is original):
+            and trusted_driver_method(driver, "complete", original)):
         return dict(_TEXT_CONTRACTS[type(driver).__name__])
     return {"version": 1, "kind": "unknown"}
 

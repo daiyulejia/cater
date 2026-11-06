@@ -187,10 +187,10 @@ test('HTTP、网络及409失败保留草稿与 UUID，取消、切换和轮询�
     attempts += 1
     if (attempts === 1) return new Response('暂时不能提问', { status: 503 })
     if (attempts === 2) return Promise.reject(new Error('网络中断'))
-    return new Response('同一请求不能更换问题', { status: 409 })
+    return new Response('同一提问请求不能更换问题或对象。', { status: 409 })
   }
   toggle(); write(questionInput(), question); await send()
-  expect(screen.getByRole('alert').textContent).toContain('暂时不能提问')
+  expect(screen.getByRole('alert').textContent).not.toContain('暂时不能提问')
   expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   toggle(); toggle(); await send()
   expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
@@ -198,7 +198,7 @@ test('HTTP、网络及409失败保留草稿与 UUID，取消、切换和轮询�
   await select('b'); toggle()
   await act(async () => { await vi.advanceTimersByTimeAsync(4000) })
   await send(); await send()
-  expect(screen.getByRole('alert').textContent).toBe('同一请求不能更换问题')
+  expect(screen.getByRole('alert').textContent).toBe('同一提问请求不能更换问题或对象。')
   expect(questionInput().value).toBe(question)
   expect(bodies()).toHaveLength(4)
   expect(bodies()[0].request_id).toMatch(uuid)
@@ -261,7 +261,7 @@ test('迟到失败不覆盖新问题的错误状态，其他模式不显示提�
   expect(questionInput().value).toBe('全新的提问草稿')
   handler = (url) => url.endsWith('/questions') ? new Response('旧问题失败', { status: 500 }) : undefined
   await send()
-  expect(screen.getByRole('alert').textContent).toContain('旧问题失败')
+  expect(screen.getByRole('alert').textContent).not.toContain('旧问题失败')
   expect(screen.getByRole('alert').textContent).toContain('提交结果未知')
   toggle(); expect(screen.queryByRole('alert')).toBeNull()
   beginDerivation(); expect(screen.queryByRole('alert')).toBeNull()

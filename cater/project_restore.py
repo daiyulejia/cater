@@ -87,10 +87,11 @@ def restore(team, task_id, role, arguments, workspace, binding, tool_start):
         return _rejected("restore_scope_changed", "无法核对当前运行范围，未恢复文件。")
 
     def guard():
+        from .workspace_tools import _visible_path
         current = rt.workspaces.view(task_id)
         if (not current["available"] or any(current.get(key) != binding.get(key)
                 for key in ("revision", "fingerprint", "workspace_id", "root", "mode"))
-                or str(workspace.policy.root) != binding.get("root")
+                or str(workspace.policy.root) != str(_visible_path(binding.get("root")))
                 or workspace.policy.fingerprint != rt.workspaces.config[current["workspace_id"]]["policy"].fingerprint):
             raise WorkConflict("workspace changed")
         objective = team.view(task_id)

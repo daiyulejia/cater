@@ -111,7 +111,7 @@ class TeamInteractionTests(TeamSupervisionTests):
                 ('send_message', {'recipient': self.manager, 'text': 'invalid', 'notify_only': 'true'}))
 
         self.rt.team._send(self.task, self.rt.organization.leader, self.worker, '检查并回复', 'assignment')
-        self.driver.steps[self.worker] = [invalid, self.native_turn('已核对，正式交回。')]
+        self.driver.steps[self.worker] = [invalid, self.native_turn('', ('return_work', {'text': '已核对，正式交回。'}))]
         self.driver.steps[self.manager] = [self.native_turn('', ('wait_for_reply', {}))]
         self.run_team()
         self.assertEqual([r['status'] for r in self.results('send_message')], ['error', 'error'])
@@ -131,7 +131,8 @@ class TeamInteractionTests(TeamSupervisionTests):
 
         self.driver.steps = {
             self.manager: [self.native_turn('', ('delegate', {'recipient': self.worker, 'instruction': '整理原说明'})),
-                           self.native_turn('', ('wait_for_reply', {}))],
+                           self.native_turn('', ('wait_for_reply', {})),
+                           self.native_turn('已收到中断通知，原委托仍需跟进。')],
             self.worker: [interrupted, answer]}
         self.rt.team.receive(self.task, '整理说明', request_id='work-before-question')
         self.run_team()
@@ -139,6 +140,8 @@ class TeamInteractionTests(TeamSupervisionTests):
         self.assertNotIn(original.seq, _reported_messages(self.rt.team._messages(self.task)))
         self.assertFalse(self.rt.task(self.task).deliverables)
         self.assertFalse([e for e in self.events('team.message_received') if e.payload['kind'] == 'report'])
+        notice, = [e for e in self.events('team.message_received') if e.payload['kind'] == 'progress']
+        self.assertEqual(notice.payload['reply_to'], original.seq)
 
 
 def load_tests(loader, tests, pattern):
