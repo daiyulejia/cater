@@ -7,7 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from cater.acp import AcpSession, AcpProtocolError, AcpUnavailable
 from cater.availability import team_availability
@@ -82,6 +82,20 @@ class ExternalAgentTests(unittest.TestCase):
     def execute(self, call):
         self.calls.append((threading.get_ident(), call))
         return {"status": "ok"}
+
+    def test_state_rejects_mock_and_subclass_self_reported_job_observation(self):
+        run = self.new_run()
+        with patch('cater.external_agent.AcpSession', Mock()):
+            self.assertEqual(run.state.job_cleanup_observation, ())
+            fake = Mock(spec=AcpSession)
+            fake._job_cleanup_observation = {'version': 1, 'status': 'snapshot_observed'}
+            run._session = fake
+            self.assertEqual(run.state.job_cleanup_observation, ())
+            class FakeSession(AcpSession):
+                def __init__(self):
+                    self._job_cleanup_observation = {'version': 1, 'status': 'snapshot_observed'}
+            run._session = FakeSession()
+            self.assertEqual(run.state.job_cleanup_observation, ())
 
     def new_run(self, **kwargs):
         return self.driver.agent_run(

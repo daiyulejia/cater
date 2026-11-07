@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Callable
 
 from .processes import ProcessScope, worker_python
+from .processes import ProcessScope as _HostProcessScope
+from ._windows_job import WindowsJob as _HostWindowsJob
 from .tool_protocol import json_utf8, strict_json
 
 
@@ -180,6 +182,8 @@ class AcpSession:
         self._close_lock = threading.Lock()
         self._closed = False
         self._cleanup_done = False
+        # Windows Job observations are local diagnostics, never tree-wide proof.
+        self._job_cleanup_observation = None
         self._prompt_active = False
         # Local pipe completion only; neither peer receipt nor model execution.
         self._prompt_send_attempted = False
@@ -814,13 +818,28 @@ class AcpSession:
         cleanup_failed = False
         try:
             if scope is not None:
-                scope.close()
+                if (os.name == "nt" and type(scope) is _HostProcessScope
+                        and vars(scope).get("process") is proc
+                        and type(vars(scope).get("job")) is _HostWindowsJob):
+                    if self._job_cleanup_observation is None:
+                        self._job_cleanup_observation = _HostWindowsJob.close_observed(scope.job)
+                    if self._job_cleanup_observation.get("status") != "snapshot_observed":
+                        cleanup_failed = True
+                else:
+                    scope.close()
+                    if os.name == "nt":
+                        # An unknown wrapper cannot attest Job cleanup. Still
+                        # invoke its cleanup, but do not report confirmed.
+                        cleanup_failed = True
             elif proc.poll() is None:
                 proc.kill()
-        except OSError:
+        except Exception:
             cleanup_failed = True
             if proc.poll() is None:
-                proc.kill()
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
         try:
             proc.wait(timeout=2)
         except subprocess.TimeoutExpired:

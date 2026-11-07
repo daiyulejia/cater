@@ -48,6 +48,20 @@ class PortableEvidenceTests(unittest.TestCase):
         kwargs = {'task_id': task, 'leader_actor': leader, 'reviewer_actor': reviewer,
                   'run_seq': 9, 'run_hash': 'hash-9'}
         self.assertEqual(authenticate(events, **kwargs)['report']['seq'], 7)
+        observation = {'version': 1, 'termination_requested': True, 'snapshot': 'captured',
+                       'observed_members': 3, 'wait': 'observed_exited', 'job_closed': True,
+                       'status': 'snapshot_observed'}
+        with_observation = list(events)
+        with_observation[10] = replace(events[10], payload={**events[10].payload,
+            'job_cleanup_observation': observation})
+        self.assertIsNotNone(authenticate(with_observation, **kwargs))
+        for invalid in ({**observation, 'status': 'unconfirmed'}, {'version': 2}, None):
+            with_observation[10] = replace(events[10], payload={**events[10].payload,
+                'job_cleanup_observation': invalid})
+            self.assertIsNone(authenticate(with_observation, **kwargs))
+        with_observation[10] = replace(events[10], payload={**events[10].payload,
+            'cleanup_complete': False, 'job_cleanup_observation': observation})
+        self.assertIsNone(authenticate(with_observation, **kwargs))
         for verdict in ('approved', 'changes_requested'):
             for version in (1, 2):
                 from cater.review_report_text import review_report_text

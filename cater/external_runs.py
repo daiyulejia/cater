@@ -38,6 +38,21 @@ def _outcome(prompt_attempted, result):
             "unknown" if result == "failed" else result)
 
 
+def _job_cleanup_observation(value):
+    """Validate diagnostic facts only; never use them as replay authorization."""
+    return (type(value) is dict and set(value) == {"version", "termination_requested", "snapshot",
+            "observed_members", "wait", "job_closed", "status"}
+            and type(value["version"]) is int and value["version"] == 1
+            and type(value["termination_requested"]) is bool and type(value["job_closed"]) is bool
+            and type(value["observed_members"]) is int and 0 <= value["observed_members"] <= 4096
+            and value["snapshot"] in ("captured", "unconfirmed")
+            and value["wait"] in ("observed_exited", "unconfirmed")
+            and value["status"] in ("snapshot_observed", "unconfirmed")
+            and (value["status"] != "snapshot_observed" or
+                 (value["termination_requested"] and value["job_closed"]
+                  and value["snapshot"] == "captured" and value["wait"] == "observed_exited")))
+
+
 class ExternalRuns:
     def __init__(self, team):
         self.team, self.rt = team, team.rt
@@ -87,7 +102,10 @@ class ExternalRuns:
                 and self._bound(event, start) and type(p.get("cleanup_complete")) is bool
                 and type(p.get("prompt_attempted")) is bool and _text(p.get("phase"))
                 and p.get("result") in ("returned", "yielded", "failed")
-                and p.get("outcome") == _outcome(p["prompt_attempted"], p["result"]))
+                and p.get("outcome") == _outcome(p["prompt_attempted"], p["result"])
+                and ("job_cleanup_observation" not in p or
+                     (_job_cleanup_observation(p["job_cleanup_observation"])
+                      and (not p["cleanup_complete"] or p["job_cleanup_observation"]["status"] != "unconfirmed"))))
 
     def _ended(self, start, events, *, before=None):
         return any(e.type == "team.run_finished" and e.actor == HOST
@@ -145,11 +163,14 @@ class ExternalRuns:
                          "run_started_seq": run.seq, "run_started_hash": run.hash})
 
     def finish(self, start, *, phase, prompt_attempted, cleanup_complete,
-               stop_reason=None, session_id=None, result="returned") -> Event:
+               stop_reason=None, session_id=None, result="returned", job_cleanup_observation=None) -> Event:
         self._durable()
         if (not _text(phase) or type(prompt_attempted) is not bool
                 or type(cleanup_complete) is not bool or result not in ("returned", "yielded", "failed")
-                or any(v is not None and not isinstance(v, str) for v in (stop_reason, session_id))):
+                or any(v is not None and not isinstance(v, str) for v in (stop_reason, session_id))
+                or (job_cleanup_observation is not None and
+                    (not _job_cleanup_observation(job_cleanup_observation) or
+                     (cleanup_complete and job_cleanup_observation["status"] == "unconfirmed")))):
             raise ValueError("Invalid external invocation result.")
         with self.rt.log.atomic():
             events = self.rt.log.read(task_id=start.task_id)
@@ -160,6 +181,8 @@ class ExternalRuns:
                        "cleanup_complete": cleanup_complete, "stop_reason": stop_reason,
                        "session_id": session_id, "result": result,
                        "outcome": _outcome(prompt_attempted, result)}
+            if job_cleanup_observation is not None:
+                payload["job_cleanup_observation"] = dict(job_cleanup_observation)
             previous = next((e for e in events if self._finished(e, start)), None)
             if previous:
                 if not _same(previous.payload, payload):

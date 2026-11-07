@@ -396,11 +396,17 @@ class TeamExternal:
                     # settle. Missing settlement remains discoverable on restart.
                     state = run.state
                     cleanup_ok = state.cleanup_complete is True and revoke_error is None
+                    # Host-owned ACP diagnostics only. These do not authorize
+                    # replay, remove unknown effects, or prove all descendants stopped.
+                    from .external_agent import ExternalAgentRun
+                    job_observation = (dict(state.job_cleanup_observation)
+                                       if type(run) is ExternalAgentRun and state.job_cleanup_observation else None)
                     try:
                         self.team.external_runs.finish(attempt, phase=state.phase,
                             prompt_attempted=state.prompt_attempted,
                             cleanup_complete=cleanup_ok,
-                            stop_reason=state.stop_reason, session_id=state.session_id, result=terminal)
+                            stop_reason=state.stop_reason, session_id=state.session_id, result=terminal,
+                            job_cleanup_observation=job_observation)
                     except BaseException as exc:
                         if primary is None:
                             raise

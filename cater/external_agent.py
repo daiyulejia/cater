@@ -16,6 +16,7 @@ import threading
 import time
 
 from .acp import AcpPromptResult, AcpProtocolError, AcpSession, AcpTimeout
+from .acp import AcpSession as _HostAcpSession
 from .mcp_host import McpToolBridge
 from .tool_protocol import json_utf8
 from .external_catalog import ExternalToolCatalog, GUIDANCE, validate_surface
@@ -134,6 +135,7 @@ class ExternalAgentState:
     cancel_failures: tuple[BaseException, ...] = ()
     observations: tuple[tuple[str, int], ...] = ()
     failure_phase: str | None = None
+    job_cleanup_observation: tuple[tuple[str, object], ...] = ()
 
 
 class QoderAcpDriver:
@@ -246,11 +248,14 @@ class ExternalAgentRun:
 
     @property
     def state(self):
+        job_observation = (vars(self._session).get("_job_cleanup_observation")
+                           if type(self._session) is _HostAcpSession else None)
         return ExternalAgentState(
             self._phase, self._prompt_attempted, self._cleanup_complete,
             self._session_id, self._stop_reason, self._text, tuple(self._cleanup_failures),
             bool(self._cancel_failures), tuple(self._cancel_failures),
             tuple(self._observations.items()), self._failure_phase,
+            tuple(job_observation.items()) if type(job_observation) is dict else (),
         )
 
     def _mark(self, name, *, latest=False):

@@ -1,6 +1,7 @@
 """Local Python peers and original-handle ownership for worker interpreter tests."""
 
 import ctypes
+from contextlib import ExitStack
 from ctypes import wintypes as W
 import json
 import os
@@ -200,16 +201,32 @@ def run_case(entry, folder, package_root):
     owner = None
     scopes = []
 
+    def before_assign(process):
+        handle, row = handles.capture_popen(process)
+        report["bootstrap_image"] = row["image"]
+        assert Path(row["image"]) == Path(worker_python())
+        time.sleep(0.5)
+        report["before_assign_descendants"] = [
+            pid for pid in handles.pids(safety) if pid not in {os.getpid(), process.pid}]
+        assert not report["before_assign_descendants"], report
+        assert not (folder / "target.json").exists(), "Configured target started before attachment"
+
+    def before_close(scope):
+        target = wait_file(folder / "target.json")
+        leaf = wait_file(folder / "leaf.json")
+        handles.capture_job(safety, exclude=(os.getpid(),))
+        for peer_identity in (target, leaf):
+            handle, row = handles.capture(peer_identity["pid"])
+            assert all(row[key] == peer_identity[key] for key in ("creation_filetime", "image"))
+            assert handles.member(handle, scope.job), row
+        report.update(target_argv=target["argv"], target_python=target["python"], target_prefix=target["prefix"])
+        report["all_target_job_members"] = all(
+            handles.member(handle, scope.job) for handle, row in handles.held.values())
+        assert report["all_target_job_members"], report
+
     class ObservedScope:
         def __init__(self, process):
-            handle, row = handles.capture_popen(process)
-            report["bootstrap_image"] = row["image"]
-            assert Path(row["image"]) == Path(worker_python())
-            time.sleep(0.5)
-            report["before_assign_descendants"] = [
-                pid for pid in handles.pids(safety) if pid not in {os.getpid(), process.pid}]
-            assert not report["before_assign_descendants"], report
-            assert not (folder / "target.json").exists(), "Configured target started before attachment"
+            before_assign(process)
             self.scope = ProcessScope(process)
             self.kind = self.scope.kind
             self.closed = False
@@ -218,17 +235,7 @@ def run_case(entry, folder, package_root):
         def close(self):
             if self.closed:
                 return
-            target = wait_file(folder / "target.json")
-            leaf = wait_file(folder / "leaf.json")
-            handles.capture_job(safety, exclude=(os.getpid(),))
-            for peer_identity in (target, leaf):
-                handle, row = handles.capture(peer_identity["pid"])
-                assert all(row[key] == peer_identity[key] for key in ("creation_filetime", "image"))
-                assert handles.member(handle, self.scope.job), row
-            report.update(target_argv=target["argv"], target_python=target["python"], target_prefix=target["prefix"])
-            report["all_target_job_members"] = all(
-                handles.member(handle, self.scope.job) for handle, row in handles.held.values())
-            assert report["all_target_job_members"], report
+            before_close(self.scope)
             self.scope.close()
             handles.wait_all()
             self.closed = True
@@ -237,7 +244,29 @@ def run_case(entry, folder, package_root):
              "workspace": "cater.workspace_tools.ProcessScope", "verification": "cater.verification._ProcessScope"}
     try:
         assert sys.prefix != sys.base_prefix, "Case must run under the newly-created real venv"
-        with patch(names[entry], ObservedScope):
+        with ExitStack() as stack:
+            if entry == "acp":
+                # Preserve the real scope and Job; instrument their existing
+                # startup and close operations without forging an observation.
+                original_init = ProcessScope.__init__
+                original_close = WindowsJob.close_observed
+                def observed_init(scope, process):
+                    before_assign(process)
+                    original_init(scope, process)
+                    scope.closed = False
+                    scopes.append(scope)
+                def observed_close(job, *args, **kwargs):
+                    scope, = scopes
+                    assert scope.job is job
+                    before_close(scope)
+                    result = original_close(job, *args, **kwargs)
+                    handles.wait_all()
+                    scope.closed = True
+                    return result
+                stack.enter_context(patch.object(ProcessScope, '__init__', observed_init))
+                stack.enter_context(patch.object(WindowsJob, 'close_observed', observed_close))
+            else:
+                stack.enter_context(patch(names[entry], ObservedScope))
             if entry == "acp":
                 owner = AcpSession(command, cwd=folder, timeout=15)
                 owner.open()

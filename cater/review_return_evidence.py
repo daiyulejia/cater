@@ -244,6 +244,13 @@ def _authenticate(events, *, task_id, leader_actor, reviewer_actor, run_seq, run
     if (len(exits) != 1 or len(finishes) != 1):
         return None
     end, finish = exits[0], finishes[0]
+    # Versioned Job observations are diagnostics, never additional proof of
+    # tree-wide cleanup; malformed or explicitly unconfirmed facts cannot pass.
+    if 'job_cleanup_observation' in end.payload:
+        from .external_runs import _job_cleanup_observation
+        observation = end.payload['job_cleanup_observation']
+        if not _job_cleanup_observation(observation) or observation['status'] == 'unconfirmed':
+            return None
     if (not external.seq < end.seq < finish.seq or end.payload.get('prompt_attempted') is not True
             or end.payload.get('cleanup_complete') is not True or end.payload.get('outcome') != 'returned'
             or end.payload.get('stop_reason') != 'end_turn' or finish.payload.get('status') != 'completed'):
