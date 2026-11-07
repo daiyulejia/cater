@@ -59,7 +59,7 @@ const titles: Record<string, string> = {
   'team.model_called': '团队模型用量', 'team.tool_started': '团队工具已发起', 'team.tool_finished': '团队工具回执',
   'team.response_correction_requested': '工具响应纠正安排',
   'team.review_followup_requested': '复核结论补登记提醒',
-  'team.tool_reconciled': '发布影响已核对',
+  'team.tool_reconciled': '操作核对记录',
   'task.created': '任务已创建', 'task.started': '任务已启动', 'task.interpreted': '任务理解',
   'task.routed': '协作安排', 'mission.created': '工作目标', 'task.decomposed': '任务分工',
   'subtask.assigned': '工作指派', 'plan.proposed': '协作计划', 'plan.amended': '计划调整',
@@ -159,6 +159,19 @@ function correctionRequest(event: DetailEvent) {
 
 const correctionReferenceNote = '纠正关联仅为原模型调用的引用，不代表纠正成功、工具执行或任务完成，也不代表免除计费。'
 
+function reconciliationReason(event: DetailEvent): string | undefined {
+  const p = event.payload, start = own(p, 'started_seq'), hash = own(p, 'started_hash'), reason = own(p, 'reason')
+  const identity = ['name', 'role', 'run_id', 'call_id'].map(key => own(p, key))
+  const human = ['id', 'role', 'kind'].every(key => Object.hasOwn(event.actor, key))
+    && event.actor.id === 'human' && event.actor.role === 'human' && event.actor.kind === 'human'
+  return human && positiveSeq(event.seq) && positiveSeq(start) && start < event.seq
+    && typeof hash === 'string' && /^[a-f0-9]{64}$/.test(hash)
+    && identity.every(value => typeof value === 'string' && Boolean(value.trim()))
+    && own(p, 'invocation_stopped') === true && own(p, 'outcome') === 'effects_reviewed_no_replay'
+    && typeof reason === 'string' && Boolean(reason.trim()) && Array.from(reason).length <= 4000
+    ? reason : undefined
+}
+
 function describe(event: DetailEvent, actorName?: (id: string) => string) {
   const p = event.payload
   const fields: Field[] = []
@@ -201,7 +214,7 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
 
   // Only known event contracts select fields; unrecognized payloads stay in developer details.
   if (!Object.hasOwn(titles, event.type)) return { fields, status, note: '已保存这条事件记录，暂无对应的中文摘要。' }
-  if (event.type !== 'team.response_correction_requested' && !hasCorrectionReference(event)) add('工作项', p.work_item_id)
+  if (!['team.response_correction_requested', 'team.tool_reconciled'].includes(event.type) && !hasCorrectionReference(event)) add('工作项', p.work_item_id)
   switch (event.type) {
     case 'team.review_followup_requested': {
       const review = own(p, 'review_seq'), message = own(p, 'message_seq'), original = own(p, 'model_call_seq')
@@ -281,10 +294,12 @@ function describe(event: DetailEvent, actorName?: (id: string) => string) {
       }
       break
     }
-    case 'team.tool_reconciled':
-      status = '实际影响已核对'; number('原操作', p.started_seq); add('核对依据', p.reason)
-      note = '原始操作结果不改写，后续不重放原请求。'
+    case 'team.tool_reconciled': {
+      const reason = reconciliationReason(event)
+      status = reason !== undefined ? '核对声明，需结合原始记录确认' : '记录来源待核对'
+      if (reason !== undefined) number('原操作', own(p, 'started_seq'))
       break
+    }
     case 'team.objective_updated': add('当前目标', p.goal); break
     case 'team.objective_completed':
       status = '店长确认可交付'; add('交付摘要', p.summary); add('验证范围', p.verification)
@@ -578,7 +593,7 @@ export function EventDetails({ event: original, actorName, contextEvents = [] }:
   const displaySeq = positiveSeq(event.seq) ? event.seq : '待核对'
   const developerBase = hasCorrectionReference(event) ? { seq: positiveSeq(event.seq) ? event.seq : null, type: event.type } : event
   // Model and run diagnostics never expose provider metadata or raw exceptions, even in developer details.
-  const developerEvent = ['team.response_correction_requested', 'team.review_followup_requested'].includes(event.type)
+  const developerEvent = ['team.response_correction_requested', 'team.review_followup_requested', 'team.tool_reconciled'].includes(event.type)
     ? { seq: positiveSeq(event.seq) ? event.seq : null, type: event.type, payload: { fields, status, note } }
     : event.type === 'team.model_called' ? { ...developerBase, payload: { ...usageSummary([event]).calls[0], ...correctionReference(event) } }
     : event.type === 'team.run_finished' ? { ...developerBase, payload: isTeamHost(event) ? { ...responseDiagnostics(event.payload, true), requestFailure: requestFailureFields(event.payload), ...correctionReference(event) } : {} } : event
@@ -602,6 +617,10 @@ export function EventDetails({ event: original, actorName, contextEvents = [] }:
     {fields.length > 0 && <dl className="space-y-2">{fields.map((field, index) => <div key={index} className="min-w-0 sm:grid sm:grid-cols-[7rem_minmax(0,1fr)] sm:gap-3">
       <dt className="font-semibold">{field.label}</dt><dd className="min-w-0 whitespace-pre-wrap">{field.value}</dd>
     </div>)}</dl>}
+    {event.type === 'team.tool_reconciled' && reconciliationReason(event) !== undefined && <details>
+      <summary className="cursor-pointer font-semibold">操作者说明，未经独立验证</summary>
+      <p className="mt-2 whitespace-pre-wrap break-words">{reconciliationReason(event)}</p>
+    </details>}
     {event.type === 'verification.completed' && browser && <BrowserReport report={event.payload.browser_report} />}
     {outputs && <CommandOutputs stdout={browser ? undefined : outputs.stdout} stderr={nativeBrowser ? undefined : outputs.stderr} />}
     <NativeArtifactVersionsReceipt key={event.seq} event={event} />

@@ -1,4 +1,6 @@
+import { lazy } from 'react'
 import type { Artifact } from './Artifact'
+import { AsyncPanel } from './AsyncPanel'
 import { isTeamHost, teamEffectsPendingCount, teamRunStatus, teamStatus } from './team'
 import type { ReviewDeliveryStats, TeamActivity, TeamEvent, TeamReview, TeamState } from './team'
 import { NativeBrowserReceipt } from './browserReport'
@@ -15,6 +17,7 @@ import { NativeArtifactVersionsReceipt } from './NativeArtifactVersionsReceipt'
 import { nativeArtifactReceiptStatus } from './conversationActivityState'
 import { isFrozenArchiveReceipt, nativeFrozenArchiveReceiptStatus, teamToolReceipt } from './conversationActivityState'
 import { NativeFrozenArchiveReceipt } from './NativeFrozenArchiveReceipt'
+const ReconciliationDetails = lazy(() => import('./EventDetails').then(module => ({ default: module.EventDetailsList })))
 import { NativeReceiptRead } from './NativeReceiptRead'
 import { hasReceiptReadMetadata, receiptReadProvenance } from './receiptReadStatus'
 import { receiptReadArguments } from './conversationActivityState'
@@ -222,6 +225,11 @@ export function TeamWorkboard({ team, taskId, artifacts, events, names, accessTo
   return <div className="space-y-5">
     <TeamProgressPanel team={team} events={events} names={names} executionState={executionState} activity={activity} />
     <TeamArtifacts team={team} taskId={taskId} artifacts={artifacts} events={events} names={names} accessToken={accessToken} reviewDeliveryStats={reviewDeliveryStats} />
-    <details className="border-t border-[#eaded1] pt-4 text-xs text-[#52766d]"><summary className="cursor-pointer font-semibold">过程证据 · {events.length} 条记录</summary><a className="mt-2 inline-block underline" href={`/tasks/${encodeURIComponent(taskId)}`}>打开完整审计回放</a></details>
+    <details className="border-t border-[#eaded1] pt-4 text-xs text-[#52766d]"><summary className="cursor-pointer font-semibold">过程证据 · {events.length} 条记录</summary>
+      {events.some(event => event.type === 'team.tool_reconciled') && <details className="mt-2"><summary className="cursor-pointer font-semibold">操作核对记录</summary>
+        <AsyncPanel fallback={<p>正在读取核对记录…</p>}><ReconciliationDetails events={events.filter(event => event.type === 'team.tool_reconciled').map(event => ({ ...event, actor: {
+          id: event.actor.id, kind: event.actor.kind ?? '', role: event.actor.role ?? '' } }))} /></AsyncPanel>
+      </details>}
+      <a className="mt-2 inline-block underline" href={`/tasks/${encodeURIComponent(taskId)}`}>打开完整审计回放</a></details>
   </div>
 }

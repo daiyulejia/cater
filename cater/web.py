@@ -3332,6 +3332,20 @@ def _option_card(item: dict[str, Any]) -> str:
 
 
 def _event_row(event: Event) -> str:
+    if event.type == "team.tool_reconciled":
+        p = event.payload
+        seq, start, digest, reason = event.seq, p.get("started_seq"), p.get("started_hash"), p.get("reason")
+        recognizable = (event.actor == EventActor.human() and type(seq) is int and seq > 0
+            and type(start) is int and 0 < start < seq and type(digest) is str
+            and len(digest) == 64 and all(c in "0123456789abcdef" for c in digest)
+            and all(type(p.get(key)) is str and p[key].strip() for key in ("name", "role", "run_id", "call_id"))
+            and p.get("invocation_stopped") is True and p.get("outcome") == "effects_reviewed_no_replay"
+            and type(reason) is str and bool(reason.strip()) and len(reason) <= 4000)
+        status = "核对声明，需结合原始记录确认" if recognizable else "记录来源待核对"
+        explanation = (f'<details><summary>操作者说明，未经独立验证</summary><pre>{escape(reason)}</pre></details>'
+                       if recognizable else "")
+        reference = f'<p>原操作 #{start}</p>' if recognizable else ""
+        return f'<li><span>#{escape(seq)}</span><strong>操作核对记录</strong><div><p>{escape(status)}</p>{reference}{explanation}</div></li>'
     text = (
         event.payload.get("claim")
         or event.payload.get("reason")

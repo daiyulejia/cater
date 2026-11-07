@@ -26,6 +26,26 @@ const stream = () => within(screen.getByLabelText('聊天记录'))
 const board = () => within(screen.getByRole('complementary', { name: '成果与过程' }))
 beforeEach(() => window.sessionStorage.clear())
 
+test('过程证据入口展示核对声明而不新增聊天消息', async () => {
+  const reason = '核查说明' + '字'.repeat(3990) + '末'
+  const receipt = event(12, 'team.tool_reconciled', { started_seq: 10, started_hash: 'a'.repeat(64),
+    name: 'call_mcp_tool', role: 'dev', run_id: 'run', call_id: 'call', invocation_stopped: true,
+    outcome: 'effects_reviewed_no_replay', reason, work_item_id: 'PRIVATE_WORK',
+    arguments: { token: 'PRIVATE_ARGUMENT' }, extra: 'PRIVATE_EXTRA' }, 'human', 'human')
+  await mount(detail([receipt]))
+  expect(stream().queryByText('操作核对记录')).toBeNull()
+  fireEvent.click(board().getByText(/过程证据 ·/))
+  const group = board().getByText('操作核对记录', { selector: 'summary' }).closest('details')!
+  fireEvent.click(within(group).getByText('操作核对记录', { selector: 'summary' }))
+  await waitFor(() => expect(within(group).getByText('操作者说明，未经独立验证')).toBeTruthy())
+  const explanation = within(group).getByText('操作者说明，未经独立验证').closest('details')!
+  fireEvent.click(within(explanation).getByText('操作者说明，未经独立验证'))
+  expect(explanation.open).toBe(true)
+  expect(explanation.querySelector('p')?.textContent).toBe(reason)
+  expect(group.textContent).not.toMatch(/PRIVATE_WORK|PRIVATE_ARGUMENT|PRIVATE_EXTRA/)
+  expect(stream().queryByText('操作核对记录')).toBeNull()
+})
+
 test.each(['paused', 'cancelled'] as const)('App将%s执行控制传到有待处理消息的团队工作板', async (state) => {
   const current = detail([event(2, 'task.execution_controlled', { action: state === 'paused' ? 'pause' : 'cancel' }, 'human', 'human')],
     teamState({ pending_count: 2 }))
