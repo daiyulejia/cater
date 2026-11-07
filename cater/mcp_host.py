@@ -44,6 +44,7 @@ class _PendingResponse:
     data: bytes
     deadline: float
     offset: int = 0
+    tool_response_started: float | None = None
 
 
 class McpToolBridge:
@@ -97,6 +98,13 @@ class McpToolBridge:
         self._active = False
         self._revoked = False
         self._pending_output = None
+        self._on_tool_response_sent = None
+
+    def observe_tool_responses(self, callback):
+        """Observe local socket writes only, not relay or client consumption."""
+        if callback is not None and not callable(callback):
+            raise ValueError("MCP response observer must be callable")
+        self._on_tool_response_sent = callback
 
     def activate(self):
         """Enable business calls only after the owner has persisted its run."""
@@ -199,6 +207,11 @@ class McpToolBridge:
             pending.offset += sent
             if pending.offset == len(pending.data):
                 self._pending_output = None
+                if pending.tool_response_started is not None and self._on_tool_response_sent is not None:
+                    try:
+                        self._on_tool_response_sent(max(0, int((time.monotonic() - pending.tool_response_started) * 1000)))
+                    except BaseException:
+                        pass
             if cooperative:
                 return
 
@@ -279,12 +292,16 @@ class McpToolBridge:
                 self._authenticated = True
                 self._listener.close()
                 response = {"authenticated": True}
+                tool_response_started = None
             else:
                 response = {"response": self._dispatch(value)}
+                tool_response_started = (time.monotonic() if isinstance(value, dict)
+                    and value.get("method") == "tools/call" and "id" in value else None)
             if self._closed:
                 raise ToolBridgeError("MCP bridge closed during execution")
             data = self._encode(response)
-            self._pending_output = _PendingResponse(data, time.monotonic() + self._timeout)
+            self._pending_output = _PendingResponse(data, time.monotonic() + self._timeout,
+                                                    tool_response_started=tool_response_started)
             self._flush_output(cooperative=cooperative)
             return True
         except _ExecutorAbort as failure:

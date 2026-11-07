@@ -1,6 +1,6 @@
 import json
-import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -10,7 +10,7 @@ from cater.anthropic import AnthropicMessagesDriver
 from cater.drivers import DriverProtocolError, DriverResponse, OpenAICompatibleDriver
 from cater.runtime import Runtime
 from cater.work import WorkConflict
-from test_runtime import start_test_web
+from test_runtime import WebExitStack, preserving_temporary_directory, start_test_web
 
 
 class ExternalFailurePrivacyTests(unittest.TestCase):
@@ -240,7 +240,7 @@ class ExternalFailurePrivacyTests(unittest.TestCase):
                 self.calls += 1
                 raise RuntimeError(secret)
         driver = Driver()
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / 'events.db')
             with Runtime(db, drivers={'product': driver}, circuit_breaker_threshold=1) as rt:
                 task = rt.create_task('Privacy regression')
@@ -255,7 +255,7 @@ class ExternalFailurePrivacyTests(unittest.TestCase):
                 rt._complete_with_containment(task_id=task, task=rt.task(task), role=role, driver=driver, prompt='again')
                 self.assertEqual(driver.calls, 1)
                 self.assertEqual([e.payload['attempt'] for e in rt.log.iter_events(task_id=task, event_types=('driver.failed',))], [1, 0])
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
             with urlopen(f'{base}/api/tasks/{task}', timeout=5) as response:
                 body = response.read().decode('utf-8')
             self.assertNotIn(secret, body)

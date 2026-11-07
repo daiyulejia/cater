@@ -2,22 +2,23 @@ from __future__ import annotations
 
 import http.client
 import json
-import tempfile
+from contextlib import ExitStack
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
-from test_runtime import start_test_web
+from test_runtime import WebExitStack, preserving_temporary_directory, start_test_web
 
 
 class WebHostSecurityTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.db = str(Path(temporary.name) / "host.db")
+        self.resources = WebExitStack()
+        self.addCleanup(self.resources.close)
+        temporary = self.resources.enter_context(preserving_temporary_directory())
+        self.db = str(Path(temporary) / "host.db")
 
     def test_unauthenticated_server_rejects_foreign_host_for_reads_and_same_origin_writes(self):
-        base = start_test_web(self, self.db)
+        base = start_test_web(self, self.db, resources=self.resources)
         foreign_host = "cater.attacker.example:8766"
         for method in ("GET", "POST"):
             with self.subTest(method=method):
@@ -32,13 +33,13 @@ class WebHostSecurityTests(unittest.TestCase):
             self.assertEqual(json.load(response), [])
 
     def test_localhost_and_ipv6_loopback_hostnames_remain_usable(self):
-        base = start_test_web(self, self.db)
+        base = start_test_web(self, self.db, resources=self.resources)
         for host in ("localhost", "LOCALHOST", "127.0.0.1", "[::1]"):
             with self.subTest(host=host), urlopen(Request(base + "/api/tasks", headers={"Host": host}), timeout=3) as response:
                 self.assertEqual(response.status, 200)
 
     def test_malformed_and_duplicate_host_headers_are_rejected(self):
-        base, server, _ = start_test_web(self, self.db, return_server=True)
+        base, server, _ = start_test_web(self, self.db, resources=self.resources, return_server=True)
         for host in ("localhost.attacker.example", "localhost@attacker.example", "localhost/path",
                      "localhost?query", "localhost#fragment", "localhost:invalid", "localhost:99999"):
             with self.subTest(host=host):
@@ -59,7 +60,7 @@ class WebHostSecurityTests(unittest.TestCase):
                 connection.close()
 
     def test_authenticated_remote_host_still_requires_token(self):
-        base = start_test_web(self, self.db, access_token="fixture-access-token")
+        base = start_test_web(self, self.db, resources=self.resources, access_token="fixture-access-token")
         headers = {"Host": "cater.example", "Origin": "https://cater.example", "Content-Type": "application/json"}
         with self.assertRaises(HTTPError) as raised:
             urlopen(Request(base + "/api/tasks", headers=headers), timeout=3)

@@ -19,7 +19,7 @@ from cater.profiles import agent_profiles
 from cater.runtime import Runtime
 from cater.work import WorkConflict
 from test_planning import PlanningDriver
-from test_runtime import start_test_web
+from test_runtime import WebExitStack, preserving_temporary_directory, start_test_web
 from test_work import WorkDriver, item
 from test_delivery import DeliveryDriver, DocumentWorkDriver
 
@@ -499,15 +499,17 @@ class ConversationSnapshotTests(unittest.TestCase):
 
 class ConversationSnapshotApiTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.db = Path(self.tmp.name) / "web.db"
+        from contextlib import ExitStack
+        self.resources = WebExitStack()
+        self.addCleanup(self.resources.close)
+        tmp = self.resources.enter_context(preserving_temporary_directory())
+        self.db = Path(tmp) / "web.db"
         self.driver = WorkDriver()
         with Runtime(self.db) as rt:
             self.source = rt.create_task("HTTP_SOURCE", ["HTTP_PARENT_ACCEPTANCE"])
             self.other = rt.create_task("HTTP_OTHER_SOURCE")
             rt.rulebook.record("HTTP_PARENT_RULE", scope="task", task_id=self.source)
-        self.base = start_test_web(self, str(self.db),
+        self.base = start_test_web(self, str(self.db), resources=self.resources,
                                    shared_drivers={name: self.driver for name in ("product", "design", "dev", "test")})
 
     def request(self, path, data=None):

@@ -44,7 +44,7 @@ class TeamDriver:
 
 class SimpleTeamTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
+        temporary = getattr(self, "_team_temporary_directory", tempfile.TemporaryDirectory)()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         config = json.loads((Path(__file__).resolve().parents[1] / "cater/packs/default_roles.json").read_text(encoding="utf-8"))

@@ -19,6 +19,7 @@ from cater.workspace_archive import ArchiveError
 import test_archive_members as member_fixtures
 from test_runtime import start_test_web
 import test_team_review_cycle as reviews
+import support.nested_team_web as nested_web
 
 
 LIMIT = 65536
@@ -131,9 +132,10 @@ class ArchiveMemberPreviewTests(unittest.TestCase):
 
 class ArchiveMemberPreviewWebTests(unittest.TestCase):
     def setUp(self):
-        self.f = reviews.TeamReviewCycleTests()
+        self.resources = nested_web.NestedTeamWebResources()
+        self.addCleanup(self.resources.close)
+        self.f = nested_web.NestedTeamFixture(self.resources)
         self.f.setUp()
-        self.addCleanup(self.f.doCleanups)
         self.project = self.f.bind_workspace()
         self.files = {UNICODE_PATH: TEXT.encode(), "empty.txt": b"", "binary.bin": b"\xff\x00",
                       "page.html": b'<script>alert("PUBLISHED_ONLY")</script>',
@@ -151,7 +153,7 @@ class ArchiveMemberPreviewWebTests(unittest.TestCase):
         self.seq = published["artifact_seq"]
         self.blob = team_archive.artifact_bytes(self.f.rt.log, self.artifact)
         self.other = self.f.rt.create_task("Other fixture task")
-        self.base = start_test_web(self, str(self.f.root / "test.db"),
+        self.base = start_test_web(self, str(self.f.root / "test.db"), resources=self.resources,
             access_token="fixture-only-access", runtime_factory=lambda: Runtime(self.f.root / "test.db",
                 roles_path=self.f.roles, drivers={"team_test": self.f.driver}, close_drivers_on_close=False))
 
@@ -209,7 +211,7 @@ class ArchiveMemberPreviewWebTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(self.blob).hexdigest(), self.artifact["content_sha256"])
 
     def test_unauthenticated_loopback_server_rejects_foreign_host(self):
-        self.base = start_test_web(self, str(self.f.root / "test.db"))
+        self.base = start_test_web(self, str(self.f.root / "test.db"), resources=self.resources)
         self.get(token=None, host="cater.attacker.example", status=403)
 
     def test_missing_or_duplicate_host_is_rejected_even_with_token(self):
@@ -267,7 +269,7 @@ class ArchiveMemberPreviewWebTests(unittest.TestCase):
             self.f.rt.log.db.execute("CREATE TABLE preview_send_probe (commits INTEGER NOT NULL)")
             self.f.rt.log.db.execute("INSERT INTO preview_send_probe VALUES (0)")
         missing_blob = self.fault_publication(content_sha256="0" * 64)
-        self.base, server, _ = start_test_web(self, str(db_path), return_server=True,
+        self.base, server, _ = start_test_web(self, str(db_path), return_server=True, resources=self.resources,
             access_token="fixture-only-access", recover_on_startup=False,
             runtime_factory=lambda: Runtime(db_path, roles_path=self.f.roles,
                 drivers={"team_test": self.f.driver}, close_drivers_on_close=False))

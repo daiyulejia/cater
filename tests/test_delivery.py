@@ -5,7 +5,7 @@ import io
 import json
 import sys
 import subprocess
-import tempfile
+from contextlib import ExitStack
 import threading
 import time
 import unittest
@@ -21,7 +21,7 @@ from cater.events import Actor
 from cater.runtime import Runtime
 from cater.work import WorkConflict
 from test_work import WorkDriver, item
-from test_runtime import start_test_web
+from test_runtime import WebExitStack, preserving_temporary_directory, start_test_web
 
 
 class DeliveryDriver:
@@ -78,17 +78,18 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(schema["$defs"]["requirements"]["properties"]["id"]["enum"], ["1:goal:0", "4:instruction:0"])
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.db = Path(self.tmp.name) / "delivery.db"
-        self.roles = Path(self.tmp.name) / "roles.json"
+        self.resources = WebExitStack()
+        self.addCleanup(self.resources.close)
+        tmp = self.resources.enter_context(preserving_temporary_directory())
+        self.db = Path(tmp) / "delivery.db"
+        self.roles = Path(tmp) / "roles.json"
         config = json.loads(Path("cater/packs/default_roles.json").read_text(encoding="utf-8"))
         config["organization"]["leader"]["driver"] = "final"
         self.roles.write_text(json.dumps(config), encoding="utf-8")
         self.worker, self.final = DocumentWorkDriver(), DeliveryDriver()
         self.drivers = {**{name: self.worker for name in ("product", "design", "dev", "test")}, "final": self.final}
         self.rt = Runtime(self.db, roles_path=self.roles, drivers=self.drivers)
-        self.addCleanup(self.rt.close)
+        self.resources.callback(self.rt.close)
         self.task = self.rt.create_task("整理当前任务成果", ["可复查且不冒充真实模型评测"])
 
     def prepare(self, *, local=False, two=False):
@@ -635,7 +636,7 @@ class DeliveryTests(unittest.TestCase):
 
     def test_export_api_is_authenticated_and_rejects_stale_bundle(self):
         self.prepare()
-        base = start_test_web(self, self.db, roles_path=self.roles, shared_drivers=self.drivers, access_token="fixture-token")
+        base = start_test_web(self, self.db, resources=self.resources, roles_path=self.roles, shared_drivers=self.drivers, access_token="fixture-token")
         endpoint = f"{base}/api/tasks/{self.task}/delivery"
         with self.assertRaises(HTTPError) as error:
             urlopen(endpoint)

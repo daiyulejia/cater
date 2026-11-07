@@ -1,5 +1,5 @@
 import json
-import tempfile
+from contextlib import ExitStack
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
@@ -8,18 +8,19 @@ from unittest.mock import patch
 
 from cater.runtime import Runtime
 from cater.web import ActivityRunner
-from test_runtime import start_test_web
+from test_runtime import WebExitStack, preserving_temporary_directory, start_test_web
 
 
 class ExecutionControlWebTests(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.db = Path(tmp.name) / "control.db"
+        self.resources = WebExitStack()
+        self.addCleanup(self.resources.close)
+        tmp = self.resources.enter_context(preserving_temporary_directory())
+        self.db = Path(tmp) / "control.db"
         with Runtime(self.db) as rt:
             self.task = rt.create_task("Keep the same task while pausing")
             self.scope = rt.work.scope(self.task)
-        self.base = start_test_web(self, self.db)
+        self.base = start_test_web(self, self.db, resources=self.resources)
 
     def post(self, payload):
         req = Request(self.base + f"/api/tasks/{self.task}/control",

@@ -20,7 +20,7 @@ class WebBackgroundCleanupTests(unittest.TestCase):
         fixture = runtime_tests.WebTests(METHOD)
         real_driver = runtime_tests.BlockingDriver
         real_runtime = runtime_tests.Runtime
-        real_server = runtime_tests.ThreadingHTTPServer
+        real_server = runtime_tests.TrackedTestServer
         real_temporary_directory = runtime_tests.tempfile.TemporaryDirectory
         real_make_handler = runtime_tests.make_handler
         real_urlopen = runtime_tests.urlopen
@@ -71,24 +71,23 @@ class WebBackgroundCleanupTests(unittest.TestCase):
                 return super().handle_error(*args, **kwargs)
 
         class ObservedDirectory(real_temporary_directory):
-            def __enter__(self):
-                path = super().__enter__()
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
                 temporary_directories.append(self)
-                directories.append(Path(path))
-                return path
+                directories.append(Path(self.name))
 
-            def __exit__(self, *exc):
+            def cleanup(self):
                 owned = set(server_threads + requests + [owner for _, owner in opened])
                 owned.discard(threading.current_thread())
                 deletion_checks.append({
-                    "exception": exc[1],
+                    "exception": sys.exception(),
                     "released": drivers[0].release.is_set(),
                     "live": [thread.name for thread in owned if thread.is_alive()],
                     "listening": [server.server_address for server in servers if server.fileno() != -1],
                     "opened": len(opened),
                     "closed": len(closed),
                 })
-                return super().__exit__(*exc)
+                return super().cleanup()
 
         def make_handler(*args, **kwargs):
             handler = real_make_handler(*args, **kwargs)
@@ -130,7 +129,7 @@ class WebBackgroundCleanupTests(unittest.TestCase):
                 patches.enter_context(redirect_stderr(stderr))
                 for name, value in (
                     ("BlockingDriver", ObservedDriver), ("Runtime", ObservedRuntime),
-                    ("ThreadingHTTPServer", ObservedServer), ("make_handler", make_handler),
+                    ("TrackedTestServer", ObservedServer), ("make_handler", make_handler),
                     ("urlopen", first_request),
                 ):
                     patches.enter_context(patch.object(runtime_tests, name, value))
@@ -148,7 +147,11 @@ class WebBackgroundCleanupTests(unittest.TestCase):
                 self.assertTrue(deletion["released"])
                 self.assertEqual(deletion["live"], [])
                 self.assertEqual(deletion["listening"], [])
-                self.assertTrue(all(not server.daemon_threads for server in servers))
+                # The tracked daemon handlers must actually have exited.
+                self.assertTrue(servers)
+                self.assertTrue(any(server._requests for server in servers))
+                self.assertTrue(all(not thread.is_alive() for server in servers for thread, _ in server._requests))
+                self.assertTrue(all(not thread.is_alive() for thread in server_threads))
                 self.assertGreater(deletion["opened"], 0)
                 self.assertEqual(deletion["opened"], deletion["closed"])
                 self.assertTrue(all(not path.exists() for path in directories))

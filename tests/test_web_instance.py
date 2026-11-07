@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import chdir, redirect_stdout
+from contextlib import ExitStack, chdir, redirect_stdout
 import hashlib
 import http.client
 from http.server import ThreadingHTTPServer
@@ -10,7 +10,6 @@ import io
 import json
 import os
 from pathlib import Path
-import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
@@ -19,26 +18,26 @@ import uuid
 
 from cater import __version__, web
 from cater.web_assets import capture_web_assets
-from test_runtime import start_test_web
+from test_runtime import WebExitStack, TrackedTestServer, preserving_temporary_directory, start_test_web
 from test_web_assets import write_bundle
 
 
 class WebInstanceTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(temporary.cleanup)
-        self.root = Path(temporary.name)
+        self.resources = WebExitStack()
+        self.addCleanup(self.resources.close)
+        self.root = Path(self.resources.enter_context(preserving_temporary_directory()))
         self.db = self.root / "private-history-name.db"
         self.token = "instance-fixture-access-secret"
         self.guards = []
-        self.addCleanup(self.assert_no_execution)
+        self.resources.callback(self.assert_no_execution)
         for target in (
             "cater.web.Runtime", "sqlite3.connect", "cater.runtime.load_drivers",
             "cater.drivers.load_drivers", "cater.runtime.load_runtime_config",
             "cater.web.ActivityRunner.recover_interrupted",
             "subprocess.Popen", "urllib.request.OpenerDirector.open",
         ):
-            self.guards.append(self.enterContext(patch(
+            self.guards.append(self.resources.enter_context(patch(
                 target, side_effect=AssertionError("identity attempted " + target))))
         self.driver = Mock(spec=["complete", "tool_turn", "token_budget"])
         self.driver.token_budget = None
@@ -52,30 +51,24 @@ class WebInstanceTests(unittest.TestCase):
             guard.assert_not_called()
 
     def guard_handler(self, handler):
-        self.guards.append(self.enterContext(patch.object(
+        self.guards.append(self.resources.enter_context(patch.object(
             handler, "_runtime", side_effect=AssertionError("identity opened runtime"))))
 
     def start(self, db=None, **options):
         options.setdefault("recover_on_startup", False)
         _, server, _ = start_test_web(
-            self, self.db if db is None else db, return_server=True, **options)
+            self, self.db if db is None else db, resources=self.resources, return_server=True, **options)
         self.guard_handler(server.RequestHandlerClass)
         return server
 
     def listen(self, handler):
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        self.addCleanup(server.server_close)
+        server = TrackedTestServer(("127.0.0.1", 0), handler)
+        self.resources.callback(server.server_close)
         self.guard_handler(handler)
-        thread = threading.Thread(target=server.serve_forever,
-                                  kwargs={"poll_interval": 0.01}, daemon=True)
+        thread = threading.Thread(target=server.run_loop, daemon=True)
         thread.start()
-
-        def stop():
-            server.shutdown()
-            thread.join(3)
-            self.assertFalse(thread.is_alive(), "identity HTTP loop did not stop")
-
-        self.addCleanup(stop)
+        self.resources.callback(server.close_bounded, thread)
+        self.assertTrue(server._ready.wait(3), "identity HTTP loop did not start")
         return server
 
     def request(self, server, path="/api/instance", headers=None, *, hosts=None):

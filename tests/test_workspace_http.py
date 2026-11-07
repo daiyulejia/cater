@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-import tempfile
+from contextlib import ExitStack
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -10,19 +10,19 @@ from urllib.request import Request, urlopen
 
 from cater.runtime import Runtime
 from cater.web import ActivityRunner
-from test_runtime import start_test_web
+from test_runtime import WebExitStack, preserving_temporary_directory, start_test_web
 
 
 class WorkspaceHTTPTests(unittest.TestCase):
     def setUp(self):
-        temp = tempfile.TemporaryDirectory()
-        self.addCleanup(temp.cleanup)
-        self.base = Path(temp.name)
+        self.resources = WebExitStack()
+        self.addCleanup(self.resources.close)
+        self.base = Path(self.resources.enter_context(preserving_temporary_directory()))
         (self.base / "project").mkdir()
         self.db = self.base / "tasks.db"
         self.config = self.base / "workspaces.json"
         self.config.write_text(json.dumps({"workspaces": [{"id": "source", "title": "Source", "root": str(self.base / 'project'), "mode": "edit"}]}), encoding="utf-8")
-        self.url = start_test_web(self, self.db, workspaces_path=self.config)
+        self.url = start_test_web(self, self.db, resources=self.resources, workspaces_path=self.config)
 
     def post(self, path, body):
         with urlopen(Request(self.url + path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"}), timeout=5) as response:

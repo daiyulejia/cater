@@ -4,6 +4,7 @@ from contextlib import ExitStack, redirect_stderr
 import io
 from pathlib import Path
 import sqlite3
+import sys
 import threading
 import unittest
 from unittest.mock import patch
@@ -20,7 +21,7 @@ class ClarificationCleanupTests(unittest.TestCase):
         fixture = clarification_tests.ClarificationFlowTests(METHOD)
         real_driver = clarification_tests.BlockingDriver
         real_runtime = clarification_tests.Runtime
-        real_server = runtime_tests.ThreadingHTTPServer
+        real_server = runtime_tests.TrackedTestServer
         real_directory = clarification_tests.tempfile.TemporaryDirectory
         real_handler = runtime_tests.make_handler
         real_urlopen = clarification_tests.urlopen
@@ -67,22 +68,22 @@ class ClarificationCleanupTests(unittest.TestCase):
                 return super().process_request_thread(*args, **kwargs)
 
         class ObservedDirectory(real_directory):
-            def __enter__(self):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
                 directories.append(self)
-                return super().__enter__()
 
-            def __exit__(self, *exc):
+            def cleanup(self):
                 owners = set(threads + [owner for _, owner in opened])
                 owners.discard(threading.current_thread())
                 deletions.append({
-                    "exception": exc[1],
+                    "exception": sys.exception(),
                     "live": [owner.name for owner in owners if owner.is_alive()],
                     "listening": [server.fileno() for server in servers if server.fileno() != -1],
                     "opened": {runtime for runtime, _ in opened},
                     "closed": set(closed),
                     "released": drivers[0].release.is_set(),
                 })
-                return super().__exit__(*exc)
+                return super().cleanup()
 
         def make_handler(*args, **kwargs):
             handler = real_handler(*args, **kwargs)
@@ -125,7 +126,7 @@ class ClarificationCleanupTests(unittest.TestCase):
                     (clarification_tests, "BlockingDriver", ObservedDriver),
                     (clarification_tests, "Runtime", ObservedRuntime),
                     (clarification_tests, "urlopen", first_request),
-                    (runtime_tests, "ThreadingHTTPServer", ObservedServer),
+                    (runtime_tests, "TrackedTestServer", ObservedServer),
                     (runtime_tests, "make_handler", make_handler),
                     (clarification_tests.tempfile, "TemporaryDirectory", ObservedDirectory),
                 ):

@@ -2,6 +2,7 @@ import json
 import tempfile
 import threading
 import unittest
+from contextlib import ExitStack
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -12,7 +13,7 @@ from cater.runtime import Runtime
 from cater.task_requests import create
 from cater.web import ActivityRunner
 from cater.work import WorkConflict
-from test_runtime import start_test_web
+from test_runtime import WebExitStack, preserving_temporary_directory, start_test_web
 
 
 class TaskCreationRequestsTests(unittest.TestCase):
@@ -52,10 +53,11 @@ class TaskCreationRequestsTests(unittest.TestCase):
                 self.assertTrue(rt.verify_chain().ok)
 
     def test_http_lost_response_replay_does_not_repeat_intake_or_run(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        db = Path(tmp.name) / "http.db"
-        base = start_test_web(self, db)
+        resources = WebExitStack()
+        self.addCleanup(resources.close)
+        tmp = resources.enter_context(preserving_temporary_directory())
+        db = Path(tmp) / "http.db"
+        base = start_test_web(self, db, resources=resources)
         payload = {"goal": "Write a note", "request_id": "http-creation-replay", "run": True,
                    "background": True}
 

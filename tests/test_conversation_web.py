@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import tempfile
+from contextlib import ExitStack
 import threading
 import time
 import unittest
@@ -15,7 +15,7 @@ from cater.conversation import ConversationService, SYSTEM
 from cater.events import Actor
 from cater.runtime import Runtime
 from cater.web import ActivityRunner
-from test_runtime import start_test_web
+from test_runtime import WebExitStack, preserving_temporary_directory, start_test_web
 
 
 class NoModelCalls:
@@ -32,10 +32,11 @@ class NoRedirect(HTTPRedirectHandler):
 
 class ConversationWebTests(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.db = Path(tmp.name) / "conversation-web.db"
-        self.roles = Path(tmp.name) / "roles.json"
+        self.resources = WebExitStack()
+        self.addCleanup(self.resources.close)
+        tmp = self.resources.enter_context(preserving_temporary_directory())
+        self.db = Path(tmp) / "conversation-web.db"
+        self.roles = Path(tmp) / "roles.json"
         config = json.loads(Path("cater/packs/default_roles.json").read_text(encoding="utf-8"))
         config["organization"]["leader"]["driver"] = "semantic"
         self.roles.write_text(json.dumps(config), encoding="utf-8")
@@ -77,15 +78,15 @@ class ConversationWebTests(unittest.TestCase):
                          **({"command_seq": command.seq} if command else {})})
             return {**finished.payload, "finish_seq": finished.seq}
 
-        self.enterContext(patch.object(ActivityRunner, "__init__", runner_init))
-        self.enterContext(patch.object(ConversationService, "resolve_next", resolve))
-        self.collaborate = self.enterContext(patch.object(Runtime, "collaborate", side_effect=AssertionError("direct run")))
-        self.battle = self.enterContext(patch.object(Runtime, "battle", side_effect=AssertionError("direct battle")))
-        self.schedule = self.enterContext(patch.object(ActivityRunner, "continue_after_current"))
-        self.start = self.enterContext(patch.object(ActivityRunner, "_start"))
-        self.explain = self.enterContext(patch.object(ActivityRunner, "answer_questions"))
-        self.base = start_test_web(self, str(self.db), runtime_factory=self.factory)
-        self.addCleanup(self.finish_queue)
+        self.resources.enter_context(patch.object(ActivityRunner, "__init__", runner_init))
+        self.resources.enter_context(patch.object(ConversationService, "resolve_next", resolve))
+        self.collaborate = self.resources.enter_context(patch.object(Runtime, "collaborate", side_effect=AssertionError("direct run")))
+        self.battle = self.resources.enter_context(patch.object(Runtime, "battle", side_effect=AssertionError("direct battle")))
+        self.schedule = self.resources.enter_context(patch.object(ActivityRunner, "continue_after_current"))
+        self.start = self.resources.enter_context(patch.object(ActivityRunner, "_start"))
+        self.explain = self.resources.enter_context(patch.object(ActivityRunner, "answer_questions"))
+        self.base = start_test_web(self, str(self.db), resources=self.resources, runtime_factory=self.factory)
+        self.resources.callback(self.finish_queue)
 
     def factory(self):
         return Runtime(self.db, roles_path=self.roles, drivers={"semantic": self.driver}, close_drivers_on_close=False)

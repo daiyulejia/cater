@@ -181,6 +181,11 @@ class AcpSession:
         self._closed = False
         self._cleanup_done = False
         self._prompt_active = False
+        # Local pipe completion only; neither peer receipt nor model execution.
+        self._prompt_send_attempted = False
+        self._prompt_writer_dispatched = False
+        self._prompt_pipe_write_attempted = False
+        self._prompt_send_completed = False
         self._next_id = 0
         self._pending_updates: list[dict] = []
         self._pending_session_id: str | None = None
@@ -191,6 +196,18 @@ class AcpSession:
         with self._state_lock:
             return (self._write_owner == threading.get_ident() and self._write_done is not None
                     and not self._write_done.is_set())
+
+    @property
+    def prompt_send_observation(self):
+        """Flow entered, pipe write attempted, flush observed; None means unknown.
+
+        A dispatched writer may start after a timeout snapshot. None avoids
+        claiming no pipe write while that thread could still execute.
+        """
+        with self._state_lock:
+            attempted = (True if self._prompt_pipe_write_attempted else
+                         None if self._prompt_writer_dispatched else False)
+            return self._prompt_send_attempted, attempted, self._prompt_send_completed
 
     @contextmanager
     def _operation(self):
@@ -295,6 +312,9 @@ class AcpSession:
         with self._operation():
             if self.session_id is None:
                 raise AcpUnavailable("ACP session is not open")
+            with self._state_lock:
+                self._prompt_send_attempted = self._prompt_writer_dispatched = False
+                self._prompt_pipe_write_attempted = self._prompt_send_completed = False
             params = {"sessionId": self.session_id, "prompt": [{"type": "text", "text": text}]}
             self._encode(params)
             chunks: list[str] = []
@@ -473,6 +493,7 @@ class AcpSession:
 
     def _iter_send(self, value, deadline, *, service=None, cooperative):
         data = self._encode(value)
+        is_prompt = isinstance(value, dict) and value.get("method") == "session/prompt"
         if not self._write_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
             with self._state_lock:
                 self._input_failed = True
@@ -489,6 +510,9 @@ class AcpSession:
 
                 def write():
                     try:
+                        if is_prompt:
+                            with self._state_lock:
+                                self._prompt_pipe_write_attempted = True
                         proc.stdin.write(data)
                         proc.stdin.flush()
                         done.set()
@@ -501,6 +525,8 @@ class AcpSession:
 
                 writer = threading.Thread(target=write, daemon=True)
                 self._writers.append(writer)
+                if is_prompt:
+                    self._prompt_writer_dispatched = True
                 writer.start()
             while True:
                 if self._closed:
@@ -722,10 +748,14 @@ class AcpSession:
                     self._turn += 1
                     self._cancelled = False
                     self._prompt_active = True
+                    self._prompt_send_attempted = True
+                    self._prompt_send_completed = False
             send_deadline = min(deadline, time.monotonic() + self.timeout)
             yield from self._advance(cooperative, 'send',
                 {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params},
                 send_deadline, service=lambda: during_send(send_deadline))
+            if method == "session/prompt":
+                self._prompt_send_completed = True
         while True:
             if deferred:
                 if self._closed:

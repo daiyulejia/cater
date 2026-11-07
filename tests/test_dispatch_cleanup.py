@@ -4,6 +4,7 @@ from contextlib import ExitStack, redirect_stderr
 import io
 from pathlib import Path
 import sqlite3
+import sys
 import threading
 import unittest
 from unittest.mock import patch
@@ -18,7 +19,7 @@ class DispatchCleanupTests(unittest.TestCase):
     def check_failure(self, *, pending_response=False, error=None):
         fixture = fixtures.WebTests(METHOD)
         runtime_type = fixtures.web_module.Runtime
-        server_type = fixtures.ThreadingHTTPServer
+        server_type = fixtures.TrackedTestServer
         directory_type = fixtures.tempfile.TemporaryDirectory
         real_urlopen = fixtures.urlopen
         release, started = threading.Event(), threading.Event()
@@ -63,15 +64,15 @@ class DispatchCleanupTests(unittest.TestCase):
                 return super().shutdown()
 
         class ObservedDirectory(directory_type):
-            def __enter__(self):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
                 directories.append(self)
-                return super().__enter__()
 
-            def __exit__(self, *exc):
+            def cleanup(self):
                 owners = set(threads + [owner for _, owner in opened])
                 owners.discard(threading.current_thread())
                 deletions.append({
-                    "exception": exc[1],
+                    "exception": sys.exception(),
                     "live": [owner.name for owner in owners if owner.is_alive()],
                     "listening": [server.fileno() for server in servers if server.fileno() != -1],
                     "opened": {runtime for runtime, _ in opened}, "closed": set(closed),
@@ -85,7 +86,7 @@ class DispatchCleanupTests(unittest.TestCase):
                 for owner in owners:
                     owner.join(timeout=5)
                     check.assertFalse(owner.is_alive(), owner.name)
-                return super().__exit__(*exc)
+                return super().cleanup()
 
         def observe_request(request, **kwargs):
             timeouts.append(kwargs.get("timeout"))
@@ -109,7 +110,7 @@ class DispatchCleanupTests(unittest.TestCase):
                 patches.enter_context(redirect_stderr(stderr))
                 for module, name, value in (
                     (fixtures.web_module, "Runtime", ObservedRuntime),
-                    (fixtures, "ThreadingHTTPServer", ObservedServer),
+                    (fixtures, "TrackedTestServer", ObservedServer),
                     (fixtures.tempfile, "TemporaryDirectory", ObservedDirectory),
                     (fixtures, "urlopen", observe_request),
                 ):
@@ -128,7 +129,11 @@ class DispatchCleanupTests(unittest.TestCase):
             self.assertTrue(deletion["opened"])
             self.assertEqual(deletion["opened"], deletion["closed"])
             self.assertTrue(all(not Path(directory.name).exists() for directory in directories))
-            self.assertTrue(all(not server.daemon_threads for server in servers))
+            # TrackedTestServer explicitly joins daemon handlers.
+            self.assertTrue(servers)
+            self.assertTrue(any(server._requests for server in servers))
+            self.assertTrue(all(not thread.is_alive() for server in servers for thread, _ in server._requests))
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
             self.assertNotIn("PermissionError", stderr.getvalue())
         finally:
             release.set()
@@ -147,6 +152,89 @@ class DispatchCleanupTests(unittest.TestCase):
 
     def test_real_battle_timeout_closes_request_before_directory_delete(self):
         self.check_failure(pending_response=True)
+
+    def test_real_timeout_without_release_retains_directory_and_original_error(self):
+        fixture = fixtures.WebTests(METHOD)
+        runtime_type = fixtures.web_module.Runtime
+        server_type = fixtures.TrackedTestServer
+        directory_type = fixtures.tempfile.TemporaryDirectory
+        real_urlopen = fixtures.urlopen
+        started, release = threading.Event(), threading.Event()
+        servers, directories, cleanup_calls, http_errors, request_errors = [], [], [], [], []
+
+        class BlockedRuntime(runtime_type):
+            def battle(self, *args, **kwargs):
+                started.set()
+                if not release.wait(30):
+                    raise AssertionError('test did not release the blocked battle')
+                return super().battle(*args, **kwargs)
+
+        class CapturedServer(server_type):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                servers.append(self)
+            def handle_error(self, *args):
+                request_errors.append(sys.exception())
+
+        class CapturedDirectory(directory_type):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                directories.append(self)
+            def cleanup(self):
+                cleanup_calls.append(self)
+                return super().cleanup()
+
+        def observe_request(request, **kwargs):
+            try:
+                return real_urlopen(request, **kwargs)
+            except TimeoutError as error:
+                if str(getattr(request, 'full_url', request)).endswith('/battle'):
+                    http_errors.append(error)
+                raise
+
+        def chain(error):
+            pending, seen, found = [error], set(), []
+            while pending:
+                current = pending.pop()
+                if current is None or id(current) in seen:
+                    continue
+                seen.add(id(current))
+                found.append(current)
+                if isinstance(current, BaseExceptionGroup):
+                    pending.extend(current.exceptions)
+                pending.extend((current.__cause__, current.__context__))
+            return found
+
+        try:
+            with patch.object(fixtures.web_module, 'Runtime', BlockedRuntime), \
+                 patch.object(fixtures, 'TrackedTestServer', CapturedServer), \
+                 patch.object(fixtures.tempfile, 'TemporaryDirectory', CapturedDirectory), \
+                 patch.object(fixtures, 'urlopen', observe_request), \
+                 redirect_stderr(io.StringIO()):
+                with self.assertRaises(fixtures.LiveTestThreadTimeout) as raised:
+                    getattr(fixture, METHOD)()
+            self.assertTrue(started.is_set())
+            self.assertEqual(len(http_errors), 1)
+            self.assertTrue(any(error is http_errors[0] for error in chain(raised.exception)))
+            self.assertEqual(len(servers), 1)
+            self.assertEqual(len(directories), 1)
+            self.assertTrue(any(owner.is_alive() for owner, _ in servers[0]._requests))
+            self.assertTrue(Path(directories[0].name).is_dir())
+            self.assertEqual(cleanup_calls, [])
+        finally:
+            release.set()
+            stopped = True
+            for server in servers:
+                for owner, _ in server._requests:
+                    owner.join(timeout=10)
+                    stopped = stopped and not owner.is_alive()
+            fixture.doCleanups()
+            if stopped:
+                for directory in directories:
+                    directory.cleanup()
+            self.assertTrue(stopped, 'blocked request still alive; temporary directory retained')
+            self.assertTrue(all(isinstance(error, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError))
+                                for error in request_errors))
 
 
 if __name__ == "__main__":

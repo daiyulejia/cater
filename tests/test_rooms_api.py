@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import tempfile
+from contextlib import ExitStack
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -13,16 +13,17 @@ from cater.rooms import RoomService
 from cater.runtime import Runtime
 from cater.web import ActivityRunner, MAX_REQUEST_BYTES, event_to_dict, make_handler
 from cater.work import WorkConflict
-from test_runtime import start_test_web
+from test_runtime import WebExitStack, preserving_temporary_directory, start_test_web
 
 
 class RoomsApiTests(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.db = str(Path(tmp.name) / "rooms-api.db")
+        self.resources = WebExitStack()
+        self.addCleanup(self.resources.close)
+        tmp = self.resources.enter_context(preserving_temporary_directory())
+        self.db = str(Path(tmp) / "rooms-api.db")
         self.rt = Runtime(self.db)
-        self.addCleanup(self.rt.close)
+        self.resources.callback(self.rt.close)
         self.request_number = 0
         # A regression must fail before reaching a model or scheduling work.
         for owner, names in (
@@ -31,9 +32,9 @@ class RoomsApiTests(unittest.TestCase):
             (ActivityRunner, ("submit", "continue_after_current", "answer_questions", "_start")),
         ):
             for name in names:
-                mock = self.enterContext(patch.object(owner, name, side_effect=AssertionError(name)))
-                self.addCleanup(mock.assert_not_called)
-        self.base = start_test_web(self, self.db, runtime_factory=lambda: Runtime(self.db))
+                mock = self.resources.enter_context(patch.object(owner, name, side_effect=AssertionError(name)))
+                self.resources.callback(mock.assert_not_called)
+        self.base = start_test_web(self, self.db, resources=self.resources, runtime_factory=lambda: Runtime(self.db))
 
     def request(self, path, data=None, *, expected=200, raw=None, headers=None, base=None):
         body = json.dumps(data).encode("utf-8") if data is not None else raw
@@ -360,7 +361,7 @@ class RoomsApiTests(unittest.TestCase):
         room_id = self.room()
         source = self.message(room_id)
         task_id = self.rt.create_task("Existing task")
-        protected = start_test_web(self, self.db, access_token="room-access-token")
+        protected = start_test_web(self, self.db, resources=self.resources, access_token="room-access-token")
         reads = ("/api/rooms", f"/api/rooms/{room_id}", f"/api/rooms/{room_id}/events")
         writes = (
             ("/api/rooms", {"title": "Protected", "request_id": self.request_id()}),

@@ -1,13 +1,12 @@
 """Host opt-in task directories; temporary data only, no model or process calls."""
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 import io
 import json
 from pathlib import Path
 import stat
 import sys
-import tempfile
 import threading
 from types import SimpleNamespace
 import unittest
@@ -24,12 +23,14 @@ from cater.work import WorkConflict
 from cater.workspace_tools import WorkspaceExecutor
 from cater.workspaces import load_workspaces
 from cater.web import ActivityRunner
-from test_runtime import start_test_web
+from test_runtime import WebExitStack, preserving_temporary_directory, start_test_web
 
 
 class ManagedWorkspaceTests(unittest.TestCase):
     def setUp(self):
-        self.base = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.resources = WebExitStack()
+        self.addCleanup(self.resources.close)
+        self.base = Path(self.resources.enter_context(preserving_temporary_directory())).resolve()
         self.root = self.base / "managed"
         self.root.mkdir()
         self.old_root = self.base / "old-project"
@@ -42,8 +43,8 @@ class ManagedWorkspaceTests(unittest.TestCase):
                          "mode": "execute", "commands": {"old-check": ["unused-program"]}}
         self.write_config()
         for target in ("subprocess.Popen", "cater.team.TeamService.run", "cater.runtime.Runtime.collaborate"):
-            call = self.enterContext(patch(target, side_effect=AssertionError("No external execution")))
-            self.addCleanup(call.assert_not_called)
+            call = self.resources.enter_context(patch(target, side_effect=AssertionError("No external execution")))
+            self.resources.callback(call.assert_not_called)
 
     def write_config(self, *, template=True, entries=None):
         body = {"workspaces": [self.explicit] if entries is None else entries}
@@ -422,7 +423,7 @@ class ManagedWorkspaceTests(unittest.TestCase):
                 build_parser().parse_args(["new", "Task", "--workspace", "old", "--no-workspace"])
 
     def test_http_creation_contract_and_replay_without_execution(self):
-        url = start_test_web(self, self.db, workspaces_path=self.config)
+        url = start_test_web(self, self.db, resources=self.resources, workspaces_path=self.config)
         with urlopen(url + "/api/workspaces", timeout=5) as response:
             options = json.load(response)
         self.assertTrue(next(row for row in options if row["id"] == MANAGED_ID)["managed"])
@@ -449,7 +450,7 @@ class ManagedWorkspaceTests(unittest.TestCase):
     def test_http_bind_existing_unbound_task_and_preserve_revision_check(self):
         with self.runtime() as rt:
             task = rt.create_task("Existing unbound task")
-        url = start_test_web(self, self.db, workspaces_path=self.config)
+        url = start_test_web(self, self.db, resources=self.resources, workspaces_path=self.config)
         def bind(revision):
             request = Request(url + "/api/tasks/" + task + "/workspace",
                 data=json.dumps({"workspace_id": MANAGED_ID, "expected_revision": revision}).encode(),

@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -14,10 +15,10 @@ import threading
 import time
 import tomllib
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from urllib.parse import urlencode
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -151,19 +152,164 @@ class BlockingDriver:
         )
 
 
+class LiveTestThreadTimeout(TimeoutError):
+    """A test-owned thread may still be using fixture resources."""
+
+
+class WebExitStack(ExitStack):
+    """Keep callback exception context even when close starts without an exception."""
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None or sys.exception() is not None:
+            return super().__exit__(exc_type, exc, tb)
+        try:
+            raise RuntimeError("test cleanup context marker")
+        except RuntimeError:
+            return super().__exit__(exc_type, exc, tb)
+
+
+class TrackedTestServer(ThreadingHTTPServer):
+    """Test server with bounded, observable request-thread cleanup."""
+
+    def __init__(self, address, handler):
+        super().__init__(address, handler)
+        self._request_lock = threading.Lock()
+        self._requests = []
+        self._ready = threading.Event()
+        self._serve_errors = []
+        self._before_request_join = None
+
+    def service_actions(self):
+        self._ready.set()
+
+    def run_loop(self):
+        try:
+            self.serve_forever(poll_interval=0.01)
+        except BaseException as error:
+            self._serve_errors.append(error)
+
+    def process_request(self, request, client_address):
+        thread = threading.Thread(target=self.process_request_thread,
+                                  args=(request, client_address), daemon=True)
+        with self._request_lock:
+            self._requests.append((thread, request))
+        try:
+            thread.start()
+        except BaseException:
+            with self._request_lock:
+                self._requests.remove((thread, request))
+            raise
+
+    def close_bounded(self, serving, timeout=3):
+        """Stop the loop, close the listener and account for every handler."""
+        errors = []
+        stopped = threading.Event()
+
+        def shutdown():
+            try:
+                self.shutdown()
+            except BaseException as error:
+                errors.append(error)
+            finally:
+                stopped.set()
+
+        stopper = threading.Thread(target=shutdown, daemon=True)
+        stopper.start()
+        deadline = time.monotonic() + timeout
+        stopped.wait(max(0, deadline - time.monotonic()))
+        if not stopped.is_set():
+            errors.append(LiveTestThreadTimeout("test server shutdown did not finish"))
+        serving.join(timeout=max(0, deadline - time.monotonic()))
+        if serving.is_alive():
+            errors.append(LiveTestThreadTimeout("test server loop is still running"))
+        errors.extend(self._serve_errors)
+        try:
+            HTTPServer.server_close(self)
+        except BaseException as error:
+            errors.append(error)
+        with self._request_lock:
+            requests = list(self._requests)
+        if self._before_request_join is not None:
+            self._before_request_join()
+        for thread, _ in requests:
+            thread.join(timeout=max(0, deadline - time.monotonic()))
+        unfinished = [(thread, connection) for thread, connection in requests if thread.is_alive()]
+        if unfinished:
+            # Interrupt partial HTTP reads without asserting that a handler stopped.
+            for _, connection in unfinished:
+                try:
+                    connection.shutdown(socket.SHUT_RDWR)
+                except OSError as error:
+                    if error.errno not in (9, 57, 107, 10038, 10057):
+                        errors.append(error)
+            deadline = time.monotonic() + 1
+            for thread, _ in unfinished:
+                thread.join(timeout=max(0, deadline - time.monotonic()))
+            if any(thread.is_alive() for thread, _ in unfinished):
+                errors.append(LiveTestThreadTimeout("test server request thread is still running"))
+        stopper.join(timeout=0)
+        if errors:
+            if len(errors) == 1:
+                raise errors[0]
+            raise BaseExceptionGroup("test server cleanup failed", errors)
+
+
+@contextmanager
+def preserving_temporary_directory():
+    """Keep both the scope failure and a failed temporary-directory cleanup."""
+    def live_thread(error):
+        pending, seen = [error], set()
+        while pending:
+            current = pending.pop()
+            if current is None or id(current) in seen:
+                continue
+            seen.add(id(current))
+            if isinstance(current, LiveTestThreadTimeout):
+                return True
+            if isinstance(current, BaseExceptionGroup):
+                pending.extend(current.exceptions)
+            pending.extend((current.__cause__, current.__context__))
+        return False
+
+    directory = tempfile.TemporaryDirectory()
+    try:
+        yield directory.name
+    except BaseException as original:
+        if live_thread(original):
+            # Do not partially delete a directory still in use. Detach the
+            # finalizer as well; an owner must release the thread before cleanup.
+            directory._finalizer.detach()
+            original.add_note(f"Test temporary directory retained while a thread may be alive: {directory.name}")
+            raise
+        try:
+            directory.cleanup()
+        except BaseException as cleanup:
+            raise BaseExceptionGroup("test scope and temporary directory cleanup failed",
+                                     [original, cleanup]) from None
+        raise
+    else:
+        directory.cleanup()
+
+
 def start_test_web(
     testcase: unittest.TestCase,
     db: str,
     *,
     return_server: bool = False,
+    resources: ExitStack | None = None,
     **handler_options: object,
 ) -> str | tuple[str, ThreadingHTTPServer, threading.Thread]:
-    server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db, **handler_options))
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    testcase.addCleanup(server.server_close)
-    testcase.addCleanup(thread.join, 1)
-    testcase.addCleanup(server.shutdown)
+    server = TrackedTestServer(("127.0.0.1", 0), make_handler(db, **handler_options))
+    register = resources.callback if resources is not None else testcase.addCleanup
+    thread = threading.Thread(target=server.run_loop, daemon=True)
+    try:
+        thread.start()
+    except BaseException:
+        HTTPServer.server_close(server)
+        raise
+    register(server.close_bounded, thread)
+    if not server._ready.wait(3):
+        raise TimeoutError("test server did not enter its loop")
     base = f"http://127.0.0.1:{server.server_port}"
     return (base, server, thread) if return_server else base
 
@@ -209,17 +355,24 @@ def background_test_web(testcase, db, *, driver, runtime_factory):
     with patch.object(threading.Thread, "start", track_start):
         with patch.object(web_module, "ActivityRunner", side_effect=capture_runner):
             handler = make_handler(db, runtime_factory=tracked_runtime)
-        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        server.daemon_threads = False
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server = TrackedTestServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.run_loop, daemon=True)
         thread.start()
         try:
+            if not server._ready.wait(3):
+                raise TimeoutError("test server did not enter its loop")
             yield f"http://127.0.0.1:{server.server_port}"
         finally:
-            driver.release.set()
-            server.shutdown()
-            thread.join()
-            server.server_close()
+            cleanup_errors = []
+            active_error = sys.exception()
+            try:
+                driver.release.set()
+            except BaseException as error:
+                cleanup_errors.append(error)
+            try:
+                server.close_bounded(thread)
+            except BaseException as error:
+                cleanup_errors.append(error)
             joined = set()
             deadline = time.monotonic() + 5
             while True:
@@ -232,13 +385,25 @@ def background_test_web(testcase, db, *, driver, runtime_factory):
                 for consumer in pending:
                     # A failed Thread.start has no native thread to join.
                     if consumer.ident is not None:
-                        consumer.join(timeout=max(0, deadline - time.monotonic()))
-                        testcase.assertFalse(consumer.is_alive(), f"test thread still alive: {consumer.name}")
+                        try:
+                            consumer.join(timeout=max(0, deadline - time.monotonic()))
+                            if consumer.is_alive():
+                                cleanup_errors.append(LiveTestThreadTimeout(f"test thread still alive: {consumer.name}"))
+                        except BaseException as error:
+                            cleanup_errors.append(error)
+                            if consumer.is_alive():
+                                cleanup_errors.append(LiveTestThreadTimeout(f"test thread still alive: {consumer.name}"))
                     joined.add(consumer)
                 # Joining a parent can start another queued activity; collect again.
             with owners_lock:
-                testcase.assertTrue(all(not state["constructed"] or state["closed"] for state in owners),
-                                    "Runtime connection left open")
+                if any(state["constructed"] and not state["closed"] for state in owners):
+                    cleanup_errors.append(AssertionError("Runtime connection left open or unverified"))
+            if cleanup_errors:
+                if active_error is not None:
+                    cleanup_errors.insert(0, active_error)
+                if len(cleanup_errors) == 1:
+                    raise cleanup_errors[0]
+                raise BaseExceptionGroup("background test cleanup failed", cleanup_errors) from None
 
 
 class RuntimeTests(unittest.TestCase):
@@ -2088,9 +2253,9 @@ class DriverTests(unittest.TestCase):
         self.assertEqual(command, [str(executable)])
 
     def test_example_api_client_drives_web_api(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "api-client.db")
-            base = start_test_web(self, db, access_token="api-client-token")
+            base = start_test_web(self, db, resources=resources, access_token="api-client-token")
 
             script = Path(__file__).resolve().parents[1] / "examples" / "api_client.py"
             result = subprocess.run(
@@ -2761,10 +2926,197 @@ class CliTests(unittest.TestCase):
 
 class WebTests(unittest.TestCase):
 
+    def test_web_helper_preserves_shutdown_exception(self):
+        server = TrackedTestServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+        serving = threading.Thread(target=server.run_loop, daemon=True)
+        serving.start()
+        original_shutdown = server.shutdown
+        original_error = RuntimeError("synthetic shutdown failure")
+        try:
+            self.assertTrue(server._ready.wait(3))
+            with patch.object(server, "shutdown", side_effect=original_error):
+                with self.assertRaises(BaseExceptionGroup) as raised:
+                    server.close_bounded(serving, timeout=0.2)
+            self.assertIn(original_error, raised.exception.exceptions)
+            self.assertTrue(any(isinstance(error, TimeoutError) for error in raised.exception.exceptions))
+        finally:
+            if serving.is_alive():
+                original_shutdown()
+            serving.join(3)
+            HTTPServer.server_close(server)
+        self.assertFalse(serving.is_alive())
+
+    def test_web_helper_reports_stalled_shutdown(self):
+        server = TrackedTestServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+        serving = threading.Thread(target=server.run_loop, daemon=True)
+        serving.start()
+        release = threading.Event()
+        original_shutdown = server.shutdown
+
+        def delayed_shutdown():
+            if not release.wait(5):
+                raise TimeoutError("test did not release shutdown")
+            original_shutdown()
+
+        try:
+            self.assertTrue(server._ready.wait(3))
+            with patch.object(server, "shutdown", delayed_shutdown):
+                started = time.monotonic()
+                with self.assertRaises(BaseExceptionGroup) as raised:
+                    server.close_bounded(serving, timeout=0.2)
+                self.assertLess(time.monotonic() - started, 2)
+                messages = [str(error) for error in raised.exception.exceptions]
+                self.assertIn("test server shutdown did not finish", messages)
+                self.assertIn("test server loop is still running", messages)
+        finally:
+            release.set()
+            serving.join(3)
+            HTTPServer.server_close(server)
+        self.assertFalse(serving.is_alive())
+
+    def test_web_helper_bounds_partial_request_cleanup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server = TrackedTestServer(("127.0.0.1", 0), make_handler(
+                str(Path(tmp) / "partial.db"), recover_on_startup=False))
+            serving = threading.Thread(target=server.run_loop, daemon=True)
+            serving.start()
+            client = None
+            try:
+                self.assertTrue(server._ready.wait(3))
+                client = socket.create_connection(server.server_address, timeout=2)
+                client.sendall(b"GET /api/tasks HTTP/1.1\r\nHost: localhost\r\nX-Partial:")
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    with server._request_lock:
+                        if server._requests:
+                            break
+                    time.sleep(0.01)
+                else:
+                    self.fail("partial request was not accepted")
+                started = time.monotonic()
+                try:
+                    server.close_bounded(serving, timeout=0.2)
+                except TimeoutError as error:
+                    self.assertIn("request thread is still running", str(error))
+                    self.assertTrue(any(thread.is_alive() for thread, _ in server._requests))
+                else:
+                    self.assertTrue(all(not thread.is_alive() for thread, _ in server._requests))
+                self.assertLess(time.monotonic() - started, 5)
+                self.assertFalse(serving.is_alive())
+            finally:
+                if client is not None:
+                    client.close()
+                for thread, _ in server._requests:
+                    thread.join(3)
+                if serving.is_alive():
+                    server.shutdown()
+                    serving.join(3)
+                HTTPServer.server_close(server)
+            self.assertFalse(any(thread.is_alive() for thread, _ in server._requests))
+
+    def test_web_helper_reports_request_that_ignores_socket_shutdown(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                entered.set()
+                release.wait(10)
+
+            def log_message(self, *args):
+                pass
+
+        server = TrackedTestServer(("127.0.0.1", 0), Handler)
+        serving = threading.Thread(target=server.run_loop, daemon=True)
+        serving.start()
+        client = None
+        try:
+            self.assertTrue(server._ready.wait(3))
+            client = socket.create_connection(server.server_address, timeout=2)
+            client.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            self.assertTrue(entered.wait(3))
+            started = time.monotonic()
+            with self.assertRaisesRegex(TimeoutError, "request thread is still running"):
+                server.close_bounded(serving, timeout=0.2)
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertTrue(any(thread.is_alive() for thread, _ in server._requests))
+        finally:
+            release.set()
+            if client is not None:
+                client.close()
+            for thread, _ in server._requests:
+                thread.join(3)
+            if serving.is_alive():
+                server.shutdown()
+                serving.join(3)
+            HTTPServer.server_close(server)
+        self.assertFalse(any(thread.is_alive() for thread, _ in server._requests))
+
+    def test_web_helper_waits_for_request_cleanup_before_temporary_directory(self):
+        waiting = threading.Event()
+        release = threading.Event()
+        exiting = threading.Event()
+        joining_requests = threading.Event()
+        finished = threading.Event()
+        outcomes = []
+        directories = []
+
+        def scenario():
+            try:
+                with preserving_temporary_directory() as tmp, WebExitStack() as resources:
+                    directories.append(tmp)
+                    db = str(Path(tmp) / "pending-request.db")
+
+                    @contextmanager
+                    def runtime_factory():
+                        with Runtime(db) as runtime:
+                            try:
+                                yield runtime
+                            finally:
+                                waiting.set()
+                                if not release.wait(5):
+                                    raise TimeoutError("test did not release request")
+
+                    base, server, serving = start_test_web(
+                        self, db, resources=resources, return_server=True,
+                        runtime_factory=runtime_factory, recover_on_startup=False)
+                    with urlopen(f"{base}/api/tasks", timeout=5) as response:
+                        response.read()
+                    if not waiting.wait(5):
+                        raise TimeoutError("request did not reach runtime cleanup")
+                    def observe_join():
+                        if serving.is_alive():
+                            raise AssertionError("server loop still running during request join")
+                        joining_requests.set()
+                    server._before_request_join = observe_join
+                    exiting.set()
+                    raise RuntimeError("synthetic test failure")
+            except Exception as error:
+                outcomes.append(error)
+            finally:
+                finished.set()
+
+        thread = threading.Thread(target=scenario, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(exiting.wait(5), "test did not reach scope cleanup")
+            self.assertTrue(joining_requests.wait(5), "cleanup did not reach request-thread join")
+            self.assertFalse(finished.wait(0.2), "scope closed before request cleanup")
+            self.assertTrue(Path(directories[0]).is_dir())
+        finally:
+            release.set()
+            thread.join(10)
+        self.assertFalse(thread.is_alive(), "test cleanup did not finish")
+        self.assertEqual(len(outcomes), 1)
+        self.assertIsInstance(outcomes[0], RuntimeError)
+        self.assertEqual(str(outcomes[0]), "synthetic test failure")
+        self.assertFalse(Path(directories[0]).exists())
+
     def test_status_query_during_active_work_does_not_queue_or_revise_plan(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        db = str(Path(tmp.name) / "status-active.db")
+        resources = WebExitStack()
+        self.addCleanup(resources.close)
+        tmp = resources.enter_context(preserving_temporary_directory())
+        db = str(Path(tmp) / "status-active.db")
         driver = BlockingDriver()
 
         def runtime_factory():
@@ -2773,7 +3125,7 @@ class WebTests(unittest.TestCase):
         with runtime_factory() as rt:
             task_id = rt.create_task("整理页面说明")
             rt.intake(task_id, requested_route="direct", preferred_owner="product")
-        base = start_test_web(self, db, runtime_factory=runtime_factory)
+        base = start_test_web(self, db, resources=resources, runtime_factory=runtime_factory)
         self.addCleanup(driver.release.set)
 
         def post(action, payload):
@@ -2808,9 +3160,10 @@ class WebTests(unittest.TestCase):
         self.assertEqual(driver.calls, 1)
 
     def test_html_status_query_does_not_execute_even_with_run_checkbox(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        db = str(Path(tmp.name) / "status-form.db")
+        resources = WebExitStack()
+        self.addCleanup(resources.close)
+        tmp = resources.enter_context(preserving_temporary_directory())
+        db = str(Path(tmp) / "status-form.db")
         driver = AlwaysFailDriver()
 
         def runtime_factory():
@@ -2819,7 +3172,7 @@ class WebTests(unittest.TestCase):
         with runtime_factory() as rt:
             task_id = rt.create_task("只查询记录")
             before_status = rt.task(task_id).status
-        base = start_test_web(self, db, runtime_factory=runtime_factory)
+        base = start_test_web(self, db, resources=resources, runtime_factory=runtime_factory)
         request = Request(f"{base}/tasks/{task_id}/command", method="POST",
                           data=urlencode({"instruction": "查看进度", "run_now": "on"}).encode())
         with urlopen(request, timeout=3) as response:
@@ -2830,12 +3183,14 @@ class WebTests(unittest.TestCase):
             self.assertEqual(rt.log.read(task_id=task_id)[-1].type, "task.progress_reported")
 
     def test_artifact_body_is_available_in_detail_but_not_copied_into_task_list(self):
-        tmp = self.enterContext(tempfile.TemporaryDirectory())
+        resources = WebExitStack()
+        self.addCleanup(resources.close)
+        tmp = resources.enter_context(preserving_temporary_directory())
         db = str(Path(tmp) / "artifact-body.db")
         with Runtime(db) as rt:
             task_id = rt.create_task("发布一份可读成果")
             rt.collaborate(task_id)
-        base, server, _ = start_test_web(self, db, return_server=True)
+        base, server, _ = start_test_web(self, db, resources=resources, return_server=True)
         # Join request handlers before the earlier-registered directory cleanup.
         server.daemon_threads = False
         with urlopen(f"{base}/api/tasks", timeout=5) as response:
@@ -2864,10 +3219,10 @@ class WebTests(unittest.TestCase):
         self.assertFalse(web_module._is_loopback_host("192.168.1.15"))
 
     def test_web_access_token_protects_task_data_and_mutations(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "token-protected.db")
             static_dir = Path(__file__).resolve().parents[1] / "cater" / "static" / "workroom"
-            base = start_test_web(self, db, access_token="test-access-token", static_dir=static_dir)
+            base = start_test_web(self, db, resources=resources, access_token="test-access-token", static_dir=static_dir)
 
             with self.assertRaises(HTTPError) as raised:
                 urlopen(f"{base}/api/tasks", timeout=5)
@@ -2891,7 +3246,7 @@ class WebTests(unittest.TestCase):
             with urlopen(f"{base}/", timeout=5) as response:
                 self.assertEqual(response.status, 200)
 
-            legacy_base = start_test_web(self, db, access_token="test-access-token", static_dir=None)
+            legacy_base = start_test_web(self, db, resources=resources, access_token="test-access-token", static_dir=None)
             with self.assertRaises(HTTPError) as raised:
                 urlopen(f"{legacy_base}/", timeout=5)
             self.assertEqual(raised.exception.code, 401)
@@ -2904,9 +3259,9 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(response.status, 200)
 
     def test_web_api_rejects_an_oversized_request_body(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "large-body.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
             body = b"x" * (web_module.MAX_REQUEST_BYTES + 1)
             request = Request(
                 f"{base}/api/tasks",
@@ -2920,25 +3275,16 @@ class WebTests(unittest.TestCase):
             self.assertIn("request body exceeds", raised.exception.read().decode("utf-8"))
 
     def test_web_reuses_a_shared_cli_driver_across_requests(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp:
             db = str(Path(tmp) / "shared-driver.db")
             driver = CliDriver(
                 "product",
                 [sys.executable, str(Path(__file__).resolve().parent / "fixtures" / "ndjson_driver.py")],
                 timeout=5,
             )
-            with ExitStack() as resources:
+            with WebExitStack() as resources:
                 resources.callback(driver.close)
-                server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db, shared_drivers={"product": driver}))
-                resources.callback(server.server_close)
-                # The response can arrive before its request thread closes SQLite.
-                # Keep the temporary directory until server_close joins those threads.
-                server.daemon_threads = False
-                thread = threading.Thread(target=server.serve_forever, daemon=True)
-                thread.start()
-                resources.callback(thread.join)
-                resources.callback(server.shutdown)
-                base = f"http://127.0.0.1:{server.server_port}"
+                base = start_test_web(self, db, resources=resources, shared_drivers={"product": driver})
                 request = Request(
                     f"{base}/api/tasks",
                     data=json.dumps({"goal": "Use the shared CLI driver", "run": True, "requested_route": "direct", "assign_to": "product"}).encode("utf-8"),
@@ -2957,9 +3303,9 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(driver._proc.pid, pid)
 
     def test_web_rejects_cross_origin_writes_and_sets_browser_security_headers(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "origin.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
             request = Request(
                 f"{base}/api/tasks",
                 data=json.dumps({"goal": "cross-origin task"}).encode("utf-8"),
@@ -2985,7 +3331,7 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(response.headers["Cache-Control"], "no-store")
                 self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
     def test_web_marks_interrupted_background_activity_after_restart(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-recovery.db")
             with Runtime(db) as rt:
                 task_id = rt.create_task("Recover an interrupted activity")
@@ -2996,7 +3342,7 @@ class WebTests(unittest.TestCase):
                     payload={"activity_id": "activity_old", "action": "run"},
                 )
 
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
             with urlopen(f"{base}/api/tasks/{task_id}", timeout=2) as response:
                 payload = json.loads(response.read().decode("utf-8"))
 
@@ -3007,7 +3353,7 @@ class WebTests(unittest.TestCase):
 
     def test_web_can_run_collaboration_in_background_without_duplicate_rounds(self):
         driver = BlockingDriver()
-        with tempfile.TemporaryDirectory() as tmp, ExitStack() as resources:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-background.db")
             roles = Path(tmp) / "roles.json"
             roles.write_text(
@@ -3088,7 +3434,7 @@ class WebTests(unittest.TestCase):
     def test_web_queues_a_follow_up_round_after_a_human_direction(self):
         driver = BlockingDriver()
         self.addCleanup(driver.release.set)
-        with tempfile.TemporaryDirectory() as tmp, ExitStack() as resources:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-follow-up.db")
             roles = Path(tmp) / "roles.json"
             roles.write_text(
@@ -3148,7 +3494,7 @@ class WebTests(unittest.TestCase):
     def test_web_uses_the_latest_queued_strategy_after_multiple_directions(self):
         driver = BlockingDriver()
         self.addCleanup(driver.release.set)
-        with tempfile.TemporaryDirectory() as tmp, ExitStack() as resources:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-latest-direction.db")
             roles = Path(tmp) / "roles.json"
             roles.write_text(
@@ -3233,20 +3579,14 @@ class WebTests(unittest.TestCase):
         self.assertNotIn("向猫咖下单", bundle_text)
 
     def test_web_serves_optional_built_workroom_from_same_origin(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             root = Path(tmp) / "dist"
             assets = root / "assets"
             assets.mkdir(parents=True)
             (root / "index.html").write_text("<main>workroom</main>", encoding="utf-8")
             (assets / "workroom.js").write_text("console.log('workroom')", encoding="utf-8")
             db = str(Path(tmp) / "web-static.db")
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db, static_dir=root))
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            self.addCleanup(server.server_close)
-            self.addCleanup(thread.join, 1)
-            self.addCleanup(server.shutdown)
-            base = f"http://127.0.0.1:{server.server_port}"
+            base = start_test_web(self, db, resources=resources, static_dir=root)
 
             with urlopen(f"{base}/", timeout=5) as response:
                 self.assertEqual(response.read().decode("utf-8"), "<main>workroom</main>")
@@ -3345,13 +3685,13 @@ class WebTests(unittest.TestCase):
         self.assertNotIn("ship one path</li>", html)
 
     def test_web_api_and_decision_post(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web.db")
             with Runtime(db) as rt:
                 task_id = rt.create_task("Serve me")
                 rt.battle(task_id)
 
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
 
             with urlopen(f"{base}/api/tasks/{task_id}", timeout=5) as response:
                 data = response.read().decode("utf-8")
@@ -3407,12 +3747,12 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(rt.task(task_id).status, "done")
 
     def test_web_api_chain_reports_audit_status(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-chain.db")
             with Runtime(db) as rt:
                 rt.create_task("Expose chain status")
 
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
 
             with urlopen(f"{base}/api/chain", timeout=5) as response:
                 data = json.loads(response.read().decode("utf-8"))
@@ -3423,9 +3763,9 @@ class WebTests(unittest.TestCase):
             self.assertIn("head_hash", data)
 
     def test_web_exposes_configured_cat_cafe_identity_profile(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-organization.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
             with urlopen(f"{base}/api/organization/profile", timeout=5) as response:
                 profile = json.loads(response.read().decode("utf-8"))
 
@@ -3440,17 +3780,10 @@ class WebTests(unittest.TestCase):
         self.assertEqual(sum(item["status"] == "demo" for item in profile["availability"]["members"]), 7)
 
     def test_web_supports_compact_members_and_leader_dispatch(self):
-        with tempfile.TemporaryDirectory() as tmp, ExitStack() as resources:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "compact-web.db")
             roles = Path(__file__).resolve().parents[1] / "examples" / "compact_roles.json"
-            server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(db, roles_path=roles))
-            server.daemon_threads = False
-            resources.callback(server.server_close)
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            resources.callback(thread.join)
-            resources.callback(server.shutdown)
-            base = f"http://127.0.0.1:{server.server_port}"
+            base = start_test_web(self, db, resources=resources, roles_path=roles)
             with urlopen(f"{base}/api/organization/profile", timeout=5) as response:
                 profile = json.loads(response.read().decode("utf-8"))
             self.assertEqual(profile["cabinet"], [])
@@ -3482,7 +3815,7 @@ class WebTests(unittest.TestCase):
             self.assertFalse(any(event["type"].startswith("cabinet.") for event in review["events"]))
 
     def test_web_marks_a_partially_connected_team_as_mixed(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-mixed-drivers.db")
             drivers = Path(tmp) / "drivers.json"
             drivers.write_text(
@@ -3495,7 +3828,7 @@ class WebTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            base = start_test_web(self, db, drivers_path=drivers)
+            base = start_test_web(self, db, resources=resources, drivers_path=drivers)
             with urlopen(f"{base}/api/organization/profile", timeout=5) as response:
                 profile = json.loads(response.read().decode("utf-8"))
 
@@ -3505,9 +3838,9 @@ class WebTests(unittest.TestCase):
         self.assertEqual(by_role["design"], "local_demo")
 
     def test_web_api_can_create_and_run_task(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-api-create.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
 
             body = json.dumps(
                 {
@@ -3536,9 +3869,9 @@ class WebTests(unittest.TestCase):
             self.assertEqual(data["organization_path"][0]["status"], "cabinet_dispatch")
 
     def test_web_api_uses_a_single_display_name_mention_as_a_lightweight_preference(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-mention.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
             request = Request(
                 f"{base}/api/tasks",
                 data=json.dumps({"goal": "@月亮 帮我整理首页文案"}).encode("utf-8"),
@@ -3552,9 +3885,9 @@ class WebTests(unittest.TestCase):
         self.assertEqual(data["task"]["assignments"][0]["owner"], "product")
 
     def test_web_api_direct_preference_preserves_custom_assignment_text(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-direct-preference.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
             request = Request(
                 f"{base}/api/tasks",
                 data=json.dumps(
@@ -3577,9 +3910,9 @@ class WebTests(unittest.TestCase):
         self.assertEqual(assignment["acceptance"], "接口返回正常状态")
 
     def test_web_api_runs_every_new_conversation_through_leader_intake(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-default-intake.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
             request = Request(
                 f"{base}/api/tasks",
                 data=json.dumps({"goal": "帮我整理一页活动说明"}).encode("utf-8"),
@@ -3594,9 +3927,9 @@ class WebTests(unittest.TestCase):
         self.assertTrue(data["task"]["assignments"])
 
     def test_web_api_intake_exposes_interpretation_and_can_upgrade_route(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-api-intake.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
             body = json.dumps(
                 {
                     "goal": "重构多 Agent 协作系统并接入外部 CLI",
@@ -3619,9 +3952,9 @@ class WebTests(unittest.TestCase):
         self.assertIn("cabinet.convened", [event["type"] for event in data["events"]])
 
     def test_web_api_rejects_run_and_battle_conflict(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-api-conflict.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
 
             body = json.dumps({"goal": "Bad API task", "run": True, "battle": True}).encode("utf-8")
             request = Request(
@@ -3637,9 +3970,9 @@ class WebTests(unittest.TestCase):
             self.assertIn("choose either run", raised.exception.read().decode("utf-8"))
 
     def test_web_api_rejects_bad_json_without_creating_task(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-api-bad-json.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
 
             request = Request(
                 f"{base}/api/tasks",
@@ -3656,9 +3989,9 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(rt.tasks(), [])
 
     def test_web_api_rejects_oversized_task_text_before_creating_a_task(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-api-long-goal.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
 
             body = json.dumps({"goal": "x" * 12_001}).encode("utf-8")
             request = Request(
@@ -3676,9 +4009,9 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(rt.tasks(), [])
 
     def test_web_api_rejects_unknown_assignee_without_creating_task(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-api-bad-assignee.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
 
             body = json.dumps({"goal": "Bad assignee", "assign_to": "ghost"}).encode("utf-8")
             request = Request(
@@ -3696,12 +4029,12 @@ class WebTests(unittest.TestCase):
                 self.assertEqual(rt.tasks(), [])
 
     def test_web_api_task_actions_share_runtime_semantics(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-api-actions.db")
             with Runtime(db) as rt:
                 task_id = rt.create_task("Drive API actions")
 
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
 
             assign = Request(
                 f"{base}/api/tasks/{task_id}/assign",
@@ -3736,12 +4069,12 @@ class WebTests(unittest.TestCase):
             self.assertEqual(data["task"]["decision"]["reason"], "API accepted")
 
     def test_web_direct_assign_reports_unknown_role(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-bad-assign.db")
             with Runtime(db) as rt:
                 task_id = rt.create_task("Serve bad assign")
 
-            base, server, thread = start_test_web(self, db, return_server=True)
+            base, server, thread = start_test_web(self, db, resources=resources, return_server=True)
             server.daemon_threads = False
             try:
                 body = urlencode({"owner": "ghost"}).encode("utf-8")
@@ -3765,12 +4098,12 @@ class WebTests(unittest.TestCase):
                 thread.join(1)
 
     def test_web_decide_reports_invalid_resolution(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-bad-decision.db")
             with Runtime(db) as rt:
                 task_id = rt.create_task("Serve bad decision")
 
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
 
             body = urlencode({"resolution": "maybe", "reason": "invalid"}).encode("utf-8")
             request = Request(
@@ -3786,9 +4119,9 @@ class WebTests(unittest.TestCase):
             self.assertIn("resolution must be done or rework", raised.exception.read().decode("utf-8"))
 
     def test_web_can_create_task_and_run_battle(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-create.db")
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
 
             body = urlencode(
                 {
@@ -3828,12 +4161,12 @@ class WebTests(unittest.TestCase):
             self.assertNotIn('name="battle" checked', index)
 
     def test_web_command_can_request_the_next_collaboration_round(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = str(Path(tmp) / "web-command-round.db")
             with Runtime(db) as rt:
                 task_id = rt.create_task("Continue this conversation")
 
-            base = start_test_web(self, db)
+            base = start_test_web(self, db, resources=resources)
             body = urlencode({"instruction": "@dev propose the smallest next step", "run_now": "on"}).encode("utf-8")
             request = Request(
                 f"{base}/tasks/{task_id}/command",

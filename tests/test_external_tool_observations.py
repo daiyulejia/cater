@@ -292,7 +292,8 @@ class ExternalToolObservationTests(unittest.TestCase):
                 facts = dict(run.state.observations)
                 self.assertEqual(facts["client_tool_failed_calls"], 1)
                 self.assertEqual(set(facts), set(ZERO_FACTS) | FAILURE_TIMES | {
-                    "public_updates", "first_public_update_ms", "last_public_update_ms"})
+                    "public_updates", "public_tool_call_update_count",
+                    "first_public_update_ms", "last_public_update_ms"})
                 self.assertEqual(run._client_tool_failures, {
                     hashlib.sha256(PRIVATE_ID.encode("utf-8")).digest(): True})
                 self.assert_safe(run)

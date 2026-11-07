@@ -9,14 +9,15 @@ from urllib.request import Request, urlopen
 from cater.runtime import Runtime
 from cater.team_archive import artifact_bytes
 from test_runtime import start_test_web
-import test_team_review_cycle as reviews
+import support.nested_team_web as nested_web
 
 
 class TeamArchiveWebTests(unittest.TestCase):
     def setUp(self):
-        self.f = reviews.TeamReviewCycleTests()
+        self.resources = nested_web.NestedTeamWebResources()
+        self.addCleanup(self.resources.close)
+        self.f = nested_web.NestedTeamFixture(self.resources)
         self.f.setUp()
-        self.addCleanup(self.f.doCleanups)
         project = self.f.bind_workspace()
         (project / "result.txt").write_bytes(b"archive HTTP fixture")
         result, = self.f.exchange(self.f.worker, ("publish_workspace_archive", {
@@ -26,7 +27,7 @@ class TeamArchiveWebTests(unittest.TestCase):
         self.artifact, = self.f.rt.task(self.f.task).deliverables
         self.expected = artifact_bytes(self.f.rt.log, self.artifact)
         self.other = self.f.rt.create_task("Other task must not see the archive")
-        self.base = start_test_web(self, str(self.f.root / "test.db"),
+        self.base = start_test_web(self, str(self.f.root / "test.db"), resources=self.resources,
             access_token="fixture-only-access", runtime_factory=lambda: Runtime(self.f.root / "test.db",
                 roles_path=self.f.roles, drivers={"team_test": self.f.driver}, close_drivers_on_close=False))
 

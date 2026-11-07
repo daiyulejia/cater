@@ -140,8 +140,10 @@ class QoderAcpDriver:
     execution_profile = "qoder-managed-v1"
 
     def __init__(self, name, executable, model, timeout=120, token_budget=None, max_run_seconds=None,
-                 tool_surface="all"):
+                 tool_surface="all", thinking=None):
         self.tool_surface = validate_surface(tool_surface)
+        if thinking is not None and (type(thinking) is not str or thinking != "disabled"):
+            raise ValueError("Qoder thinking must be omitted, null, or disabled")
         try:
             executable = os.fspath(executable)
         except TypeError:
@@ -160,16 +162,23 @@ class QoderAcpDriver:
         self.name, self.model = name, model
         self.token_budget, self.timeout = token_budget, timeout
         self.max_run_seconds = max_run_seconds
+        self._thinking = thinking
         self._command = (
             executable, "--acp", "--model", model,
             "--max-model-request-retries", "0", "--tools", "", "--strict-mcp-config",
             "--setting-sources", "local", "--permission-mode", "default",
         )
+        if thinking == "disabled":
+            self._command += ("--thinking", "disabled")
         self._closed = False
 
     @property
     def command(self):
         return list(self._command)
+
+    @property
+    def thinking(self):
+        return self._thinking
 
     @property
     def closed(self) -> bool:
@@ -261,6 +270,14 @@ class ExternalAgentRun:
     def _bridge_rejection(self, reason):
         if isinstance(reason, str) and reason in _BRIDGE_REJECTIONS:
             self._count_observation("host_bridge_rejected_" + reason)
+
+    def _tool_response_sent(self, elapsed_ms):
+        # Full local socket write, measured after dispatch, not peer consumption.
+        if self._phase == "prompting" and type(elapsed_ms) is int and elapsed_ms >= 0:
+            self._count_observation("bridge_tool_responses_written")
+            self._observations["bridge_tool_response_write_ms"] = min(
+                _DIAGNOSTIC_COUNT_LIMIT,
+                self._observations.get("bridge_tool_response_write_ms", 0) + elapsed_ms)
 
     def _observe_tool_update(self, update):
         if (self._phase != "prompting" or not isinstance(update, dict)
@@ -421,6 +438,8 @@ class ExternalAgentRun:
                 self._mark("first_public_update_ms")
                 self._mark("last_public_update_ms", latest=True)
                 self._observations["public_updates"] = self._observations.get("public_updates", 0) + 1
+                kind = update["sessionUpdate"]
+                self._count_observation("public_" + kind + "_count")
                 if self._budget is not None and self._budget.observed(update):
                     self._mark("last_activity_ms", latest=True)
             if self._phase == "prompting" and update.get("sessionUpdate") == "agent_message_chunk":
@@ -437,6 +456,8 @@ class ExternalAgentRun:
     def _activity(self):
         try:
             self._current(allow_pending=self._cooperative)
+            if self._phase == "prompting":
+                self._count_observation("private_thought_activity_count")
             if self._phase == "prompting" and self._budget is not None and self._budget.activity():
                 self._mark("last_activity_ms", latest=True)
         except BaseException as exc:
@@ -520,6 +541,12 @@ class ExternalAgentRun:
             self._current()
             self._bridge = McpToolBridge(self._wire_tools, self._catalog_call if self._catalog is not None else self._call, timeout=self._timeout,
                                          on_rejection=self._bridge_rejection)
+            observe_responses = getattr(self._bridge, "observe_tool_responses", None)
+            if callable(observe_responses):
+                try:
+                    observe_responses(self._tool_response_sent)
+                except Exception:
+                    pass  # Diagnostics do not decide whether a run can start.
             self._session = AcpSession(
                 self._command, cwd=self._cwd, timeout=self._timeout, on_request=self._request,
                 on_activity=self._activity,
@@ -555,6 +582,14 @@ class ExternalAgentRun:
                 self._bridge.activate()
             self._phase = "prompting"
             self._start_tool_diagnostics()
+            try:
+                prompt_bytes = len(prompt.encode("utf-8"))
+            except UnicodeError:
+                pass  # The existing transport validation decides the outcome.
+            else:
+                self._observations["acp_prompt_chars"] = len(prompt)
+                self._observations["acp_prompt_utf8_bytes"] = prompt_bytes
+                self._observations["acp_diagnostics_version"] = 2
             self._prompt_attempted = True
             self._mark("prompt_attempt_ms")
             if self._max_run_seconds is None:
@@ -578,6 +613,18 @@ class ExternalAgentRun:
             self._phase = "yielded" if isinstance(self._failure, ExternalYield) else "failed"
             raise self._failure
         finally:
+            if self._session is not None and self._prompt_attempted:
+                try:
+                    send = getattr(self._session, "prompt_send_observation", None)
+                except Exception:
+                    send = None
+                if (type(send) is tuple and len(send) == 3
+                        and type(send[0]) is bool and (type(send[1]) is bool or send[1] is None)
+                        and type(send[2]) is bool):
+                    self._observations["acp_prompt_send_attempted"] = int(send[0])
+                    if send[1] is not None:
+                        self._observations["acp_prompt_pipe_write_attempted"] = int(send[1])
+                    self._observations["acp_prompt_send_completed"] = int(send[2])
             if self._session is not None:
                 self._session_id = self._session.session_id
             if self._bridge is not None:

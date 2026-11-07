@@ -92,6 +92,13 @@ class TeamInstructionSelectionTests(unittest.TestCase):
                          "核验中途失败时说明哪些已观察、哪些未到达，不补称成功"):
             self.assertIn(boundary, text)
 
+    def test_delivery_attribution_guidance_is_conditional_and_evidence_bound(self):
+        manager = self.base()
+        for clause in ("归因复核轮次按需查该轮反馈", "旧版行为查对应保存版", "已核对不重复",
+                       "来源不可读、缺失或冲突只说可证事实及不确定处", "不猜旧行为或合并轮次"):
+            self.assertIn(clause, manager)
+            self.assertNotIn(clause, self.base(leader=False))
+
     def test_successful_review_ends_turn_without_settling_other_assignments(self):
         terminal = "return_work、request_review或record_review成功即结束本轮，不安排其后再调用工具"
         context = {"active_assignment": {"seq": 9}, "open_assignments": [{"seq": 10}]}
@@ -183,8 +190,8 @@ class TeamInstructionSelectionTests(unittest.TestCase):
         # Measure actual encoded text, independent of the runtime's telemetry.
         base = self.base()
         self.assertNotEqual(len(base), len(base.encode("utf-8")))
-        self.assertLess(len(base.encode("utf-8")), OLD_NATIVE_BYTES * 0.4)
-        self.assertLess(len((base + EXTERNAL).encode("utf-8")), OLD_EXTERNAL_BYTES * 0.4)
+        self.assertLess(len(base.encode("utf-8")), OLD_NATIVE_BYTES * 0.42)
+        self.assertLess(len((base + EXTERNAL).encode("utf-8")), OLD_EXTERNAL_BYTES * 0.42)
         rich = {"background": {"source": "old"}, "active_assignment": {"seq": 1},
                 "open_assignments": [{"seq": 1}], "outgoing_work": [{"seq": 2}],
                 "notifications": [{"seq": 3}], "work_checkpoint": {"open_work_count": 2},
@@ -314,6 +321,8 @@ class TeamInstructionWireTests(unittest.TestCase):
         self.assertIn("按需放handoff", prefixes[0])
         for prefix in prefixes:
             for clause in ("核对已有复核的对应版本结论与原回执", "按真实缺口补证",
+                           "归因复核轮次按需查该轮反馈", "旧版行为查对应保存版",
+                           "来源不可读、缺失或冲突只说可证事实及不确定处",
                            "不重跑已覆盖当前版本的检查", "无缺口就finish_work",
                            "return_work、request_review或record_review成功即结束本轮，不安排其后再调用工具",
                            "复核不代其他原委托结单", "旧结论不覆盖新版"):

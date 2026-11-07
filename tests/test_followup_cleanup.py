@@ -4,6 +4,7 @@ from contextlib import ExitStack, redirect_stderr
 import io
 from pathlib import Path
 import sqlite3
+import sys
 import threading
 import time
 import unittest
@@ -23,7 +24,7 @@ class FollowupCleanupTests(unittest.TestCase):
     def check_cleanup(self, method, mode):
         fixture = fixtures.WebTests(method)
         runtime_type = fixtures.Runtime
-        server_type = fixtures.ThreadingHTTPServer
+        server_type = fixtures.TrackedTestServer
         directory_type = fixtures.tempfile.TemporaryDirectory
         real_urlopen = fixtures.urlopen
         real_run = fixtures.web_module.ActivityRunner._run
@@ -111,16 +112,16 @@ class FollowupCleanupTests(unittest.TestCase):
                     check.assertFalse(owner.is_alive(), owner.name)
 
         class ObservedDirectory(directory_type):
-            def __enter__(self):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
                 directories.append(self)
-                return super().__enter__()
 
-            def __exit__(self, *exc):
+            def cleanup(self):
                 owners = set(threads + [owner for _, owner in opened])
                 owners.discard(threading.current_thread())
                 # These facts precede rescue; successful rescue cannot repair the verdict.
                 deletions.append({
-                    "exception": exc[1],
+                    "exception": sys.exception(),
                     "live": [owner.name for owner in owners if owner.is_alive()],
                     "listening": [server.fileno() for server in servers if server.fileno() != -1],
                     "opened": {runtime for runtime, _ in opened},
@@ -135,7 +136,7 @@ class FollowupCleanupTests(unittest.TestCase):
                     probe.set()
                     check.assertTrue(acknowledged.wait(timeout=2), "owner SQL probe did not respond")
                 rescue()
-                return super().__exit__(*exc)
+                return super().cleanup()
 
         def observe_run(runner, *args, **kwargs):
             threads.append(threading.current_thread())
@@ -202,7 +203,7 @@ class FollowupCleanupTests(unittest.TestCase):
                 for target, name, value in (
                     (fixtures, "Runtime", ObservedRuntime),
                     (runtime_module, "load_drivers", lambda *args, **kwargs: {}),
-                    (fixtures, "ThreadingHTTPServer", ObservedServer),
+                    (fixtures, "TrackedTestServer", ObservedServer),
                     (fixtures.tempfile, "TemporaryDirectory", ObservedDirectory),
                     (fixtures.web_module.ActivityRunner, "_run", observe_run),
                     (fixtures, "urlopen", observe_request),
@@ -261,7 +262,11 @@ class FollowupCleanupTests(unittest.TestCase):
                 self.assertTrue(any(owner.name.startswith("cater-run-") for _, owner in opened))
                 self.assertTrue(any(thread.name.startswith("cater-run-") for thread in threads))
                 self.assertTrue(servers)
-                self.assertTrue(all(not server.daemon_threads for server in servers))
+                # TrackedTestServer explicitly joins daemon handlers.
+                self.assertTrue(servers)
+                self.assertTrue(any(server._requests for server in servers))
+                self.assertTrue(all(not thread.is_alive() for server in servers for thread, _ in server._requests))
+                self.assertTrue(all(not thread.is_alive() for thread in threads))
                 self.assertTrue(all(timeout == 2 for _, timeout in requests))
                 self.assertTrue(all(not Path(directory.name).exists() for directory in directories))
                 self.assertNotIn("PermissionError", stderr.getvalue())

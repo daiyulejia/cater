@@ -472,10 +472,15 @@ def cmd_chain(args: argparse.Namespace) -> int:
 
 
 def cmd_drivers(args: argparse.Namespace) -> int:
+    from .external_agent import QoderAcpDriver
+
     with open_runtime(args) as rt:
         for role in rt.roles:
             driver = rt.drivers[role.driver]
-            print(f"{role.id:<12} role={role.role:<12} driver={role.driver:<12} {type(driver).__name__}")
+            detail = ""
+            if type(driver) is QoderAcpDriver:
+                detail = " thinking=" + ("requested-disabled" if driver.thinking == "disabled" else "unspecified")
+            print(f"{role.id:<12} role={role.role:<12} driver={role.driver:<12} {type(driver).__name__}{detail}")
     return 0
 
 

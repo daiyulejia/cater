@@ -15,7 +15,7 @@ from cater.drivers import DriverResponse
 from cater.runtime import Runtime
 from cater.web import task_api_payload
 from cater.work import WorkConflict
-from test_runtime import BlockingDriver, background_test_web, start_test_web
+from test_runtime import WebExitStack, BlockingDriver, background_test_web, preserving_temporary_directory, start_test_web
 from test_work import WorkDriver, item
 
 
@@ -217,7 +217,7 @@ class ClarificationFlowTests(unittest.TestCase):
 
     def test_api_persists_answer_and_does_not_queue_it_twice(self):
         driver = BlockingDriver()
-        with tempfile.TemporaryDirectory() as tmp, ExitStack() as resources:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = Path(tmp) / "api.db"
 
             def runtime_factory():
@@ -251,13 +251,13 @@ class ClarificationFlowTests(unittest.TestCase):
             self.assertEqual(error.exception.code, 400)
 
     def test_api_authentication_and_origin_checks_precede_answer_write(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with preserving_temporary_directory() as tmp, WebExitStack() as resources:
             db = Path(tmp) / "secure.db"
             with Runtime(db) as rt:
                 task = rt.create_task("说明")
                 question = rt.clarifications.request(task, "store_manager", QUESTION, scope=rt.work.scope(task))
                 count = rt.log.count()
-            base = start_test_web(self, str(db), access_token="test-only-token")
+            base = start_test_web(self, str(db), resources=resources, access_token="test-only-token")
             body = json.dumps({"question_seq": question.seq, "kind": "skip", "request_id": "auth"}).encode()
             for headers in ({}, {"X-Cater-Access-Token": "test-only-token", "Origin": "https://untrusted.example"}):
                 with self.subTest(headers=headers), self.assertRaises(HTTPError) as error:

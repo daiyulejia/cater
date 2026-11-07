@@ -100,8 +100,23 @@ class TeamResponseCorrectionTests(unittest.TestCase):
     def test_second_invalid_response_is_terminal_not_recursive(self):
         for cls in (protocol.OpenAICompatibleDriver, protocol.AnthropicMessagesDriver):
             with self.subTest(cls=cls.__name__), protocol.ProtocolUsageTests().session(
-                    cls, [(200, bad(cls)), (200, bad(cls))], tool_response_corrections=1) as (f, _, requests):
+                    cls, [(200, bad(cls)), (200, bad(cls))], tool_response_corrections=1, timeout=10) as (f, _, requests):
                 protocol.ProtocolUsageTests().run_message(f)
+                if len(requests) != 2:
+                    # Keep diagnostics structural: never print response/request bodies or exceptions.
+                    allowed = {
+                        'status': {'failed', 'completed', 'interrupted'},
+                        'error_type': {'DriverUnavailable', 'DriverProtocolError'},
+                        'failure_kind': {'timeout', 'network_error', 'http_error', 'invalid_request', 'missing_credentials'},
+                        'failure_stage': {'model_request', 'model_response'},
+                    }
+                    finishes = [{key: value if value in choices else 'other'
+                                 for key, choices in allowed.items()
+                                 if isinstance((value := event.payload.get(key)), str)}
+                                for event in f.events('team.run_finished')]
+                    self.fail(f'Expected exactly 2 loopback requests; got {len(requests)}; '
+                              f'run finishes={finishes}; model calls={len(f.events("team.model_called"))}; '
+                              f'corrections={len(f.events("team.response_correction_requested"))}')
                 self.assertEqual(len(requests), 2)
                 self.assertEqual(len(f.events('team.response_correction_requested')), 1)
                 self.assertEqual(f.events('team.tool_started'), [])

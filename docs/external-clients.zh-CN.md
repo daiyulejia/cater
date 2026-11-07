@@ -33,6 +33,14 @@ Windows PowerShell 中，带引号的可执行文件路径前需要 `&`：
 }
 ```
 
+可选地，在该通道中添加 `"thinking": "disabled"`，向 Qoder CLI 请求关闭思考。
+仅接受 `"disabled"`、`null` 或省略；省略或 `null` 时不传递思考参数，沿用
+客户端及服务端原有行为，不能认定思考已开启或关闭。`cater drivers` 对正式
+Qoder 通道显示 `thinking=unspecified` 或 `thinking=requested-disabled`，后者只表示
+已配置该请求，并不证明模型实际关闭了思考。模型和 CLI 版本是否支持由供应商决定；
+如客户端拒绝参数，Cater 不会自动去掉参数重新发送。此选项不改变现有费用、
+超时和未知用量的边界。仅需在个人本地配置中设置，不要提交该配置。
+
 可选：需要按有效宿主工具回执延长单轮等待时，可在该通道中显式添加
 `"max_run_seconds": 600`，并保留示例的 `"timeout": 180`。
 该值只接受有限的整数或浮点数（不接受布尔值），且须满足

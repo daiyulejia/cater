@@ -7,7 +7,7 @@ import io
 import json
 import subprocess
 import sys
-import tempfile
+from contextlib import ExitStack
 import threading
 import time
 import unittest
@@ -21,7 +21,7 @@ from cater.planning import PLAN_SCHEMA, Planner, planning_schema, validate_plan
 from cater.runtime import Runtime
 from cater.work import WorkConflict
 from test_work import WorkDriver, item
-from test_runtime import start_test_web
+from test_runtime import WebExitStack, preserving_temporary_directory, start_test_web
 
 
 class PlanningDriver:
@@ -81,17 +81,18 @@ class PlanningTests(unittest.TestCase):
         self.assertNotIn("enum", PLAN_SCHEMA["properties"]["items"]["items"]["properties"]["owner"])
 
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        self.db = Path(self.temp.name) / "planning.db"
+        self.resources = WebExitStack()
+        self.addCleanup(self.resources.close)
+        tmp = self.resources.enter_context(preserving_temporary_directory())
+        self.db = Path(tmp) / "planning.db"
         config = json.loads(Path("cater/packs/default_roles.json").read_text(encoding="utf-8"))
         config["organization"]["leader"]["driver"] = "planner"
-        self.roles = Path(self.temp.name) / "roles.json"
+        self.roles = Path(tmp) / "roles.json"
         self.roles.write_text(json.dumps(config), encoding="utf-8")
         self.planner, self.worker = PlanningDriver(), WorkDriver()
         self.drivers = {**{name: self.worker for name in ("product", "dev", "test", "design")}, "planner": self.planner}
         self.rt = Runtime(self.db, roles_path=self.roles, drivers=self.drivers)
-        self.addCleanup(self.rt.close)
+        self.resources.callback(self.rt.close)
         self.task = self.rt.create_task("交付可验证的实现", ["保留现有接口"])
         self.rt.intake(self.task, preferred_owner="dev", requested_route="direct")
 
@@ -415,7 +416,7 @@ class PlanningTests(unittest.TestCase):
         def runtime_factory():
             return Runtime(self.db, roles_path=self.roles, drivers=self.drivers, close_drivers_on_close=False)
 
-        base = start_test_web(self, str(self.db), runtime_factory=runtime_factory)
+        base = start_test_web(self, str(self.db), resources=self.resources, runtime_factory=runtime_factory)
         self.addCleanup(release.set)
 
         def block_once(work):

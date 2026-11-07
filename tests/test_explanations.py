@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import sys
-import tempfile
+from contextlib import ExitStack
 import threading
 import time
 import unittest
@@ -18,7 +18,7 @@ from cater.runtime import Runtime
 from cater.web import ActivityRunner
 from cater.work import WorkConflict
 from test_delivery import DeliveryDriver, DocumentWorkDriver
-from test_runtime import start_test_web
+from test_runtime import WebExitStack, preserving_temporary_directory, start_test_web
 from test_work import item
 
 
@@ -49,17 +49,18 @@ class ExplainerDriver:
 
 class ExplanationTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.db = Path(self.tmp.name) / "questions.db"
-        self.roles = Path(self.tmp.name) / "roles.json"
+        self.resources = WebExitStack()
+        self.addCleanup(self.resources.close)
+        tmp = self.resources.enter_context(preserving_temporary_directory())
+        self.db = Path(tmp) / "questions.db"
+        self.roles = Path(tmp) / "roles.json"
         config = json.loads(Path("cater/packs/default_roles.json").read_text(encoding="utf-8"))
         config["organization"]["leader"]["driver"] = "explain"
         self.roles.write_text(json.dumps(config), encoding="utf-8")
         self.driver, self.worker = ExplainerDriver(), DocumentWorkDriver()
         self.drivers = {**{name: self.worker for name in ("dev", "test", "design", "product")}, "explain": self.driver}
         self.rt = Runtime(self.db, roles_path=self.roles, drivers=self.drivers)
-        self.addCleanup(self.rt.close)
+        self.resources.callback(self.rt.close)
         self.task = self.rt.create_task("整理一份可复查的说明", ["能说明结论依据"])
         self.rt.plan_work(self.task, [item("document")])
         self.rt.collaborate(self.task)
@@ -325,7 +326,7 @@ class ExplanationTests(unittest.TestCase):
         self.assertEqual(runner.status(self.task)["follow_up"]["action"], "battle")
 
     def test_http_question_endpoint_is_authenticated_idempotent_and_preserves_acceptance(self):
-        base = start_test_web(self, self.db, roles_path=self.roles, shared_drivers=self.drivers, access_token="fixture-token")
+        base = start_test_web(self, self.db, resources=self.resources, roles_path=self.roles, shared_drivers=self.drivers, access_token="fixture-token")
         url = f"{base}/api/tasks/{self.task}/questions"
         data = json.dumps({"question": "如何独立核对这个选择？", "request_id": "http-question-request"}).encode()
         with self.assertRaises(HTTPError) as denied:
@@ -348,7 +349,7 @@ class ExplanationTests(unittest.TestCase):
             self.assertEqual(body["task"]["status"], "done")
 
     def test_http_rejects_client_basis_bad_target_and_conflicting_request(self):
-        base = start_test_web(self, self.db, roles_path=self.roles, shared_drivers=self.drivers)
+        base = start_test_web(self, self.db, resources=self.resources, roles_path=self.roles, shared_drivers=self.drivers)
         url = f"{base}/api/tasks/{self.task}/questions"
         headers = {"Content-Type": "application/json"}
         for payload in ({"question": "test", "request_id": "valid-question-id", "basis": {}},
